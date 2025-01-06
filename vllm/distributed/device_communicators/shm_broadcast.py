@@ -1,9 +1,11 @@
+import os
 import pickle
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 from unittest.mock import patch
 
 import torch
@@ -13,18 +15,27 @@ from zmq import IPV6  # type: ignore
 from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context  # type: ignore
 
 import vllm.envs as envs
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import get_ip, get_open_port, is_valid_ipv6_address
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
-# time to wait if the queue is full or empty
-# if we sleep for too short, it will consume too much CPU
-# if we sleep for too long, it will slow down the writer/reader
-# 0.1 us is a good balance
-RINGBUFFER_SLEEP_INTERVAL = 1e-7
-
 logger = init_logger(__name__)
+
+# We prefer to use os.sched_yield as it results in tighter polling loops,
+# measured to be around 3e-7 seconds. However on earlier versions of Python
+# os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
+USE_SCHED_YIELD = ((sys.version_info[:3] >= (3, 11, 1))
+                   or (sys.version_info[:2] == (3, 10)
+                       and sys.version_info[2] >= 8))
+
+
+def sched_yield():
+    if USE_SCHED_YIELD:
+        os.sched_yield()
+    else:
+        time.sleep(0)
 
 
 class ShmRingBuffer:
@@ -119,11 +130,14 @@ class ShmRingBuffer:
                     # and we should suppress the error
                     pass
 
+    def handle(self):
+        return (self.n_reader, self.max_chunk_bytes, self.max_chunks,
+                self.shared_memory.name)
+
     def __reduce__(self):
         return (
             self.__class__,
-            (self.n_reader, self.max_chunk_bytes, self.max_chunks,
-             self.shared_memory.name),
+            self.handle(),
         )
 
     def __del__(self):
@@ -152,7 +166,7 @@ class Handle:
     connect_ip: str
     local_reader_ranks: List[int] = field(default_factory=list)
 
-    buffer: Optional[ShmRingBuffer] = None
+    buffer_handle: Optional[Tuple[int, int, int, str]] = None
     local_subscribe_port: Optional[int] = None
     remote_subscribe_port: Optional[int] = None
 
@@ -233,7 +247,7 @@ class MessageQueue:
         self.handle = Handle(
             connect_ip=connect_ip,
             local_reader_ranks=local_reader_ranks,
-            buffer=self.buffer,
+            buffer_handle=self.buffer.handle(),
             local_subscribe_port=local_subscribe_port,
             remote_subscribe_port=remote_subscribe_port,
         )
@@ -252,8 +266,8 @@ class MessageQueue:
         context = Context()
 
         if rank in handle.local_reader_ranks:
-            assert handle.buffer is not None
-            self.buffer = handle.buffer
+            assert handle.buffer_handle is not None
+            self.buffer = ShmRingBuffer(*handle.buffer_handle)
             self.current_idx = 0
             self.local_reader_rank = handle.local_reader_ranks.index(rank)
             self._is_local_reader = True
@@ -319,7 +333,7 @@ class MessageQueue:
             assert recv == b"READY"
 
     @contextmanager
-    def acquire_write(self):
+    def acquire_write(self, timeout: Optional[float] = None):
         assert self._is_writer, "Only writers can acquire write"
         start_time = time.monotonic()
         n_warning = 1
@@ -333,16 +347,20 @@ class MessageQueue:
                     # if this block is not ready to write,
                     # we need to wait until it is read by all readers
 
-                    # wait for a while
-                    time.sleep(RINGBUFFER_SLEEP_INTERVAL)
+                    # Release the processor to other threads
+                    sched_yield()
 
-                    # if we wait for a long time, we should warn the user
+                    # if we wait for a long time, log a message
                     if (time.monotonic() - start_time >
                             VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.warning(
-                            "No available block found in %s second. ",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL)
+                        logger.debug("No available block found in %s second. ",
+                                     VLLM_RINGBUFFER_WARNING_INTERVAL)
                         n_warning += 1
+
+                    # if we time out, raise an exception
+                    if (timeout is not None
+                            and time.monotonic() - start_time > timeout):
+                        raise TimeoutError
 
                     continue
                 # found a block that is either
@@ -370,7 +388,7 @@ class MessageQueue:
                 break
 
     @contextmanager
-    def acquire_read(self):
+    def acquire_read(self, timeout: Optional[float] = None):
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
         n_warning = 1
@@ -387,16 +405,20 @@ class MessageQueue:
                     # if this block is not ready,
                     # we need to wait until it is written
 
-                    # wait for a while
-                    time.sleep(RINGBUFFER_SLEEP_INTERVAL)
+                    # Release the processor to other threads
+                    sched_yield()
 
-                    # if we wait for a long time, we should warn the user
+                    # if we wait for a long time, log a message
                     if (time.monotonic() - start_time >
                             VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.warning(
-                            "No available block found in %s second. ",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL)
+                        logger.debug("No available block found in %s second. ",
+                                     VLLM_RINGBUFFER_WARNING_INTERVAL)
                         n_warning += 1
+
+                    # if we time out, raise an exception
+                    if (timeout is not None
+                            and time.monotonic() - start_time > timeout):
+                        raise TimeoutError
 
                     continue
                 # found a block that is not read by this reader
@@ -411,24 +433,26 @@ class MessageQueue:
                                     1) % self.buffer.max_chunks
                 break
 
-    def enqueue(self, obj):
+    def enqueue(self, obj, timeout: Optional[float] = None):
+        """ Write to message queue with optional timeout (in seconds) """
         assert self._is_writer, "Only writers can enqueue"
         serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
         if self.n_local_reader > 0:
             if len(serialized_obj) >= self.buffer.max_chunk_bytes:
-                with self.acquire_write() as buf:
+                with self.acquire_write(timeout) as buf:
                     buf[0] = 1  # overflow
                 self.local_socket.send(serialized_obj)
             else:
-                with self.acquire_write() as buf:
+                with self.acquire_write(timeout) as buf:
                     buf[0] = 0  # not overflow
                     buf[1:len(serialized_obj) + 1] = serialized_obj
         if self.n_remote_reader > 0:
             self.remote_socket.send(serialized_obj)
 
-    def dequeue(self):
+    def dequeue(self, timeout: Optional[float] = None):
+        """ Read from message queue with optional timeout (in seconds) """
         if self._is_local_reader:
-            with self.acquire_read() as buf:
+            with self.acquire_read(timeout) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
                     # no need to know the size of serialized object
@@ -453,13 +477,19 @@ class MessageQueue:
             return self.dequeue()
 
     @staticmethod
-    def create_from_process_group(pg: ProcessGroup,
+    def create_from_process_group(pg: Union[ProcessGroup,
+                                            StatelessProcessGroup],
                                   max_chunk_bytes,
                                   max_chunks,
                                   writer_rank=0) -> "MessageQueue":
-        group_rank = dist.get_rank(pg)
-        group_world_size = dist.get_world_size(pg)
-        global_ranks = dist.get_process_group_ranks(pg)
+        if isinstance(pg, ProcessGroup):
+            group_rank = dist.get_rank(pg)
+            group_world_size = dist.get_world_size(pg)
+            global_ranks = dist.get_process_group_ranks(pg)
+        else:
+            group_rank = pg.rank
+            group_world_size = pg.world_size
+            global_ranks = list(range(pg.world_size))
 
         from vllm.distributed.parallel_state import in_the_same_node_as
         status = in_the_same_node_as(pg, source_rank=writer_rank)
@@ -477,15 +507,21 @@ class MessageQueue:
                 max_chunks=max_chunks,
             )
             handle = buffer_io.export_handle()
-            dist.broadcast_object_list([handle],
-                                       src=global_ranks[writer_rank],
-                                       group=pg)
+            if isinstance(pg, ProcessGroup):
+                dist.broadcast_object_list([handle],
+                                           src=global_ranks[writer_rank],
+                                           group=pg)
+            else:
+                pg.broadcast_obj(handle, writer_rank)
         else:
-            recv = [None]
-            dist.broadcast_object_list(recv,
-                                       src=global_ranks[writer_rank],
-                                       group=pg)
-            handle = recv[0]  # type: ignore
+            if isinstance(pg, ProcessGroup):
+                recv = [None]
+                dist.broadcast_object_list(recv,
+                                           src=global_ranks[writer_rank],
+                                           group=pg)
+                handle = recv[0]  # type: ignore
+            else:
+                handle = pg.broadcast_obj(None, writer_rank)
             buffer_io = MessageQueue.create_from_handle(handle, group_rank)
         buffer_io.wait_until_ready()
         return buffer_io

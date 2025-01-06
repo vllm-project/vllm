@@ -1,15 +1,16 @@
 import asyncio
 import os
 import socket
-from functools import partial
 from typing import AsyncIterator, Tuple
 
 import pytest
+import torch
 
-from vllm.utils import (FlexibleArgumentParser, deprecate_kwargs,
-                        get_open_port, merge_async_iterators, supports_kw)
+from vllm.utils import (FlexibleArgumentParser, StoreBoolean, deprecate_kwargs,
+                        get_open_port, memory_profiling, merge_async_iterators,
+                        supports_kw)
 
-from .utils import error_on_warning
+from .utils import error_on_warning, fork_new_process_for_each_test
 
 
 @pytest.mark.asyncio
@@ -24,10 +25,7 @@ async def test_merge_async_iterators():
             print(f"iterator {idx} cancelled")
 
     iterators = [mock_async_iterator(i) for i in range(3)]
-    merged_iterator = merge_async_iterators(*iterators,
-                                            is_cancelled=partial(asyncio.sleep,
-                                                                 0,
-                                                                 result=False))
+    merged_iterator = merge_async_iterators(*iterators)
 
     async def stream_output(generator: AsyncIterator[Tuple[int, str]]):
         async for idx, output in generator:
@@ -141,6 +139,8 @@ def parser_with_config():
     parser.add_argument('--config', type=str)
     parser.add_argument('--port', type=int)
     parser.add_argument('--tensor-parallel-size', type=int)
+    parser.add_argument('--trust-remote-code', action='store_true')
+    parser.add_argument('--multi-step-stream-outputs', action=StoreBoolean)
     return parser
 
 
@@ -214,6 +214,8 @@ def test_config_args(parser_with_config):
     args = parser_with_config.parse_args(
         ['serve', 'mymodel', '--config', './data/test_config.yaml'])
     assert args.tensor_parallel_size == 2
+    assert args.trust_remote_code
+    assert not args.multi_step_stream_outputs
 
 
 def test_config_file(parser_with_config):
@@ -266,3 +268,41 @@ def test_supports_kw(callable,kw_name,requires_kw_only,
         requires_kw_only=requires_kw_only,
         allow_var_kwargs=allow_var_kwargs
     ) == is_supported
+
+
+@fork_new_process_for_each_test
+def test_memory_profiling():
+    # Fake out some model loading + inference memory usage to test profiling
+    # Memory used by other processes will show up as cuda usage outside of torch
+    from vllm.distributed.device_communicators.cuda_wrapper import (
+        CudaRTLibrary)
+    lib = CudaRTLibrary()
+    # 512 MiB allocation outside of this instance
+    handle1 = lib.cudaMalloc(512 * 1024 * 1024)
+
+    baseline_memory_in_bytes = \
+        torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]
+
+    # load weights
+
+    weights = torch.randn(128, 1024, 1024, device='cuda', dtype=torch.float32)
+
+    weights_memory_in_bytes = 128 * 1024 * 1024 * 4 # 512 MiB
+
+    with memory_profiling(baseline_memory_in_bytes=baseline_memory_in_bytes,
+    weights_memory_in_bytes=weights_memory_in_bytes) as result:
+        # make a memory spike, 1 GiB
+        spike = torch.randn(256, 1024, 1024, device='cuda', dtype=torch.float32)
+        del spike
+
+        # Add some extra non-torch memory 256 MiB (simulate NCCL)
+        handle2 = lib.cudaMalloc(256 * 1024 * 1024)
+
+    # Check that the memory usage is within 5% of the expected values
+    non_torch_ratio = result.non_torch_increase_in_bytes / (256 * 1024 * 1024) # noqa
+    torch_peak_ratio = result.torch_peak_increase_in_bytes / (1024 * 1024 * 1024) # noqa
+    assert abs(non_torch_ratio - 1) <= 0.05
+    assert abs(torch_peak_ratio - 1) <= 0.05
+    del weights
+    lib.cudaFree(handle1)
+    lib.cudaFree(handle2)

@@ -2,15 +2,15 @@
 within a vision language model."""
 
 import math
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
 from PIL import Image
 from torch import nn
 from transformers import SiglipVisionConfig
-from transformers.models.siglip.modeling_siglip import SiglipSdpaAttention
 
+from vllm.attention.layer import MultiHeadAttention
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import DecoderOnlyInputs, token_inputs
@@ -23,14 +23,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   repeat_and_pad_placeholder_tokens)
+                                   consecutive_placeholder_ranges,
+                                   repeat_and_pad_placeholder_tokens,
+                                   resolve_visual_encoder_outputs)
 from vllm.sequence import SequenceData
 
-try:
-    from xformers import ops as xops
-    USE_XFORMERS_OPS = True
-except ImportError:
-    USE_XFORMERS_OPS = False
+from .vision import VisionEncoderInfo
 
 
 def get_siglip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -61,6 +59,7 @@ def dummy_seq_data_for_siglip(
     *,
     image_token_id: int,
     image_feature_size_override: Optional[int] = None,
+    mm_key: str = "image",
 ):
     if image_feature_size_override is None:
         image_feature_size = get_siglip_image_feature_size(hf_config)
@@ -70,7 +69,11 @@ def dummy_seq_data_for_siglip(
     return SequenceData.from_prompt_token_counts(
         (image_token_id, image_feature_size * num_images),
         (0, seq_len - image_feature_size * num_images),
-    )
+    ), {
+        mm_key:
+        consecutive_placeholder_ranges(num_items=num_images,
+                                       item_size=image_feature_size)
+    }
 
 
 def dummy_image_for_siglip(
@@ -93,6 +96,7 @@ def dummy_image_for_siglip(
 def dummy_video_for_siglip(
     hf_config: SiglipVisionConfig,
     num_frames: int,
+    num_videos: int = 1,
     *,
     image_width_override: Optional[int] = None,
     image_height_override: Optional[int] = None,
@@ -104,7 +108,8 @@ def dummy_video_for_siglip(
         image_height_override=image_height_override)
     np_frame = np.array(pil_frame["image"])
     mm_data_per_video = np.repeat([np_frame], num_frames, axis=0)
-    mm_data = {"video": mm_data_per_video}
+    video_data = [mm_data_per_video] * num_videos
+    mm_data = {"video": video_data}
     return mm_data
 
 
@@ -120,6 +125,11 @@ def input_processor_for_siglip(
     if multi_modal_data is None or "image" not in multi_modal_data:
         return inputs
 
+    if "multi_modal_placeholders" in inputs and "image" in inputs[
+            "multi_modal_placeholders"]:
+        # The inputs already have placeholders.
+        return inputs
+
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
     if image_feature_size_override is None:
@@ -133,7 +143,7 @@ def input_processor_for_siglip(
     else:
         image_feature_size = image_feature_size_override
 
-    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
         tokenizer,
         inputs.get("prompt"),
         inputs["prompt_token_ids"],
@@ -142,11 +152,36 @@ def input_processor_for_siglip(
     )
 
     # NOTE: Create a defensive copy of the original inputs
-    return token_inputs(
-        prompt_token_ids=new_token_ids,
-        prompt=new_prompt,
-        multi_modal_data=multi_modal_data,
-    )
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": ranges})
+
+
+class SiglipEncoderInfo(VisionEncoderInfo[SiglipVisionConfig]):
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        return get_siglip_image_feature_size(self.vision_config)
+
+    def get_max_image_tokens(self) -> int:
+        return get_max_siglip_image_tokens(self.vision_config)
+
+    def get_image_size(self) -> int:
+        return self.vision_config.image_size
+
+    def get_patch_size(self) -> int:
+        return self.vision_config.patch_size
+
+    def get_patch_grid_length(self) -> int:
+        return get_siglip_patch_grid_length(
+            image_size=self.vision_config.image_size,
+            patch_size=self.vision_config.patch_size,
+        )
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.43.3/src/transformers/models/siglip/modeling_siglip.py#L249 # noqa
@@ -242,14 +277,16 @@ class SiglipVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class SiglipParallelAttention(nn.Module):
+class SiglipAttention(nn.Module):
 
     def __init__(
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.config = config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -266,43 +303,31 @@ class SiglipParallelAttention(nn.Module):
             head_size=self.head_dim,
             total_num_heads=self.num_heads,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
 
         self.out_proj = RowParallelLinear(
             input_size=self.embed_dim,
             output_size=self.embed_dim,
             quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
         )
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
+
+        self.attn = MultiHeadAttention(self.num_heads_per_partition,
+                                       self.head_dim, self.scale)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
-        batch_size, q_len, _ = hidden_states.size()
-
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
 
-        query_states = query_states.view(batch_size, q_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-        key_states = key_states.view(batch_size, q_len,
-                                     self.num_heads_per_partition,
-                                     self.head_dim)
-        value_states = value_states.view(batch_size, q_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-
-        out = xops.memory_efficient_attention_forward(query_states,
-                                                      key_states,
-                                                      value_states,
-                                                      p=self.dropout,
-                                                      scale=self.scale)
-        out = out.view(batch_size, q_len, -1)
+        out = self.attn(query_states, key_states, value_states)
         attn_output, _ = self.out_proj(out)
 
         return attn_output, None
@@ -314,8 +339,10 @@ class SiglipMLP(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
 
@@ -326,11 +353,13 @@ class SiglipMLP(nn.Module):
             config.hidden_size,
             config.intermediate_size,
             quant_config=quant_config if quantizable else None,
+            prefix=f"{prefix}.fc1",
         )
         self.fc2 = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             quant_config=quant_config if quantizable else None,
+            prefix=f"{prefix}.fc2",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -346,23 +375,23 @@ class SiglipEncoderLayer(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.embed_dim = config.hidden_size
 
-        num_heads = config.num_attention_heads
-        tp_size = get_tensor_model_parallel_world_size()
-        if USE_XFORMERS_OPS and num_heads % tp_size == 0:
-            self.self_attn = SiglipParallelAttention(config,
-                                                     quant_config=quant_config)
-        else:
-            self.self_attn = SiglipSdpaAttention(config)
-
+        self.self_attn = SiglipAttention(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+        )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
@@ -392,8 +421,10 @@ class SiglipEncoder(nn.Module):
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
         num_hidden_layers_override: Optional[int] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.config = config
 
         if num_hidden_layers_override is None:
@@ -402,18 +433,28 @@ class SiglipEncoder(nn.Module):
             num_hidden_layers = num_hidden_layers_override
 
         self.layers = nn.ModuleList([
-            SiglipEncoderLayer(config, quant_config=quant_config)
-            for _ in range(num_hidden_layers)
+            SiglipEncoderLayer(config,
+                               quant_config=quant_config,
+                               prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(
         self,
         inputs_embeds: torch.Tensor,
-    ) -> torch.Tensor:
+        return_all_hidden_states: bool,
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+        hidden_states_pool = []
         hidden_states = inputs_embeds
+
         for encoder_layer in self.layers:
             hidden_states, _ = encoder_layer(hidden_states)
-
+            if return_all_hidden_states:
+                hidden_states_pool.append(hidden_states)
+        # If we have multiple feature sample layers, we return all hidden
+        # states in order and grab the ones we need by index.
+        if return_all_hidden_states:
+            return hidden_states_pool
         return hidden_states
 
 
@@ -424,7 +465,8 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         self.probe = nn.Parameter(torch.randn(1, 1, config.hidden_size))
@@ -433,7 +475,9 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
             config.hidden_size, config.num_attention_heads, batch_first=True)
         self.layernorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.mlp = SiglipMLP(config=config, quant_config=quant_config)
+        self.mlp = SiglipMLP(config=config,
+                             quant_config=quant_config,
+                             prefix=f"{prefix}.mlp")
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         batch_size = hidden_state.shape[0]
@@ -454,59 +498,82 @@ class SiglipVisionTransformer(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        *,
         num_hidden_layers_override: Optional[int] = None,
-    ):
+        require_post_norm: Optional[bool] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.config = config
         embed_dim = config.hidden_size
 
         self.embeddings = SiglipVisionEmbeddings(config)
+
         self.encoder = SiglipEncoder(
             config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
+            prefix=f"{prefix}.encoder",
         )
 
+        num_hidden_layers = config.num_hidden_layers
         if len(self.encoder.layers) > config.num_hidden_layers:
             raise ValueError(
-                f"The original encoder only has {config.num_hidden_layers} "
+                f"The original encoder only has {num_hidden_layers} "
                 f"layers, but you requested {len(self.encoder.layers)} layers."
             )
-        elif len(self.encoder.layers) == config.num_hidden_layers:
+
+        # If possible, skip post_layernorm to conserve memory
+        if require_post_norm is None:
+            require_post_norm = len(self.encoder.layers) == num_hidden_layers
+
+        if require_post_norm:
             self.post_layernorm = nn.LayerNorm(embed_dim,
                                                eps=config.layer_norm_eps)
         else:
-            # post_layernorm is unused when we extract intermediate features
-            # In this case, we can skip it to conserve memory
             self.post_layernorm = None
 
         self.use_head = (True if not hasattr(config, "vision_use_head") else
                          config.vision_use_head)
         if self.use_head:
             self.head = SiglipMultiheadAttentionPoolingHead(
-                config=config, quant_config=quant_config)
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.head",
+            )
 
     def forward(
         self,
         pixel_values: torch.Tensor,
         interpolate_pos_encoding: bool = True,
+        feature_sample_layers: Optional[list[int]] = None,
     ) -> torch.Tensor:
+
         hidden_states = self.embeddings(
             pixel_values,
             interpolate_pos_encoding=interpolate_pos_encoding,
         )
 
-        encoder_outputs = self.encoder(inputs_embeds=hidden_states)
+        return_all_hidden_states = feature_sample_layers is not None
 
-        if self.post_layernorm is None:
-            return encoder_outputs
+        # Produces either the last layer output or all of the hidden states,
+        # depending on if we have feature_sample_layers or not
+        encoder_outputs = self.encoder(
+            inputs_embeds=hidden_states,
+            return_all_hidden_states=return_all_hidden_states,
+        )
 
-        last_hidden_state = self.post_layernorm(encoder_outputs)
-        # TODO: add this back when pooled_output is used in inference
+        # Handle post-norm (if applicable) and stacks feature layers if needed
+        encoder_outputs = resolve_visual_encoder_outputs(
+            encoder_outputs, feature_sample_layers, self.post_layernorm,
+            self.config.num_hidden_layers)
+
+        # TODO: add this back when pooled_output is used in inference.
         # if self.use_head:
-        # pooled_output = self.head(last_hidden_state)
+        # pooled_output = self.head(encoder_outputs)
 
-        return last_hidden_state
+        return encoder_outputs
 
 
 class SiglipVisionModel(nn.Module):
@@ -517,18 +584,19 @@ class SiglipVisionModel(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        *,
         num_hidden_layers_override: Optional[int] = None,
-    ):
+        require_post_norm: Optional[bool] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
-
-        num_heads = config.num_attention_heads
-        tp_size = get_tensor_model_parallel_world_size()
-        self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
 
         self.vision_model = SiglipVisionTransformer(
             config,
             quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
+            require_post_norm=require_post_norm,
+            prefix=f"{prefix}.vision_model",
         )
 
     def get_input_embeddings(self) -> nn.Module:
@@ -538,20 +606,24 @@ class SiglipVisionModel(nn.Module):
         self,
         pixel_values: torch.Tensor,
         interpolate_pos_encoding: bool = False,
+        feature_sample_layers: Optional[list[int]] = None,
     ) -> torch.Tensor:
         return self.vision_model(
             pixel_values=pixel_values,
             interpolate_pos_encoding=interpolate_pos_encoding,
+            feature_sample_layers=feature_sample_layers,
         )
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
-        ] if self.shard_weight else []
+        ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         layer_count = len(self.vision_model.encoder.layers)
 
         for name, loaded_weight in weights:
@@ -569,8 +641,9 @@ class SiglipVisionModel(nn.Module):
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
+                name = name.replace(weight_name, param_name)
 
-                param = params_dict[name.replace(weight_name, param_name)]
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
@@ -579,3 +652,5 @@ class SiglipVisionModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

@@ -85,6 +85,45 @@ def test_metric_counter_generation_tokens(
 
 
 @pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("max_tokens", [128, 129])
+@pytest.mark.parametrize("disable_async_output_proc", [True, False])
+def test_metric_counter_generation_tokens_multi_step(
+    vllm_runner,
+    example_prompts,
+    model: str,
+    max_tokens: int,
+    disable_async_output_proc: bool,
+) -> None:
+    num_scheduler_steps = 8
+    with vllm_runner(
+            model,
+            disable_log_stats=False,
+            gpu_memory_utilization=0.4,
+            num_scheduler_steps=num_scheduler_steps,
+            disable_async_output_proc=disable_async_output_proc,
+    ) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+        tokenizer = vllm_model.model.get_tokenizer()
+        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
+        metric_count = stat_logger.metrics.counter_generation_tokens.labels(
+            **stat_logger.labels)._value.get()
+        vllm_generation_count = 0
+        for i in range(len(example_prompts)):
+            vllm_output_ids, vllm_output_str = vllm_outputs[i]
+            prompt_ids = tokenizer.encode(example_prompts[i])
+            # vllm_output_ids contains both prompt tokens and generation tokens.
+            # We're interested only in the count of the generation tokens.
+            vllm_generation_count += len(vllm_output_ids) - len(prompt_ids)
+
+    # The multi-step scheduling will continue to execute forward even when
+    # encountering EOS, leading to slightly imprecise metrics.
+    assert abs(vllm_generation_count - metric_count) <\
+        len(example_prompts) * num_scheduler_steps, \
+        (f"generation token count: {vllm_generation_count!r}\n"
+         f"metric: {metric_count!r}")
+
+
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize(
     "served_model_name",
@@ -326,6 +365,7 @@ def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
             "vllm:request_prompt_tokens",
             "vllm:request_generation_tokens",
             "vllm:request_params_n",
+            "vllm:request_params_max_tokens",
         ]
         for metric_name in request_histogram_metrics:
             metric_value = REGISTRY.get_sample_value(f"{metric_name}_count",
@@ -371,7 +411,7 @@ def test_engine_log_metrics_ray(
         logger = _RayPrometheusStatLogger(
             local_interval=0.5,
             labels=dict(model_name=engine.model_config.served_model_name),
-            max_model_len=engine.model_config.max_model_len)
+            vllm_config=engine.vllm_config)
         engine.add_logger("ray", logger)
         for i, prompt in enumerate(example_prompts):
             engine.add_request(

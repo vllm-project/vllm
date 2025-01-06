@@ -1,42 +1,53 @@
+from typing import List, Type
+
 import pytest
 import torch.nn.functional as F
 
-from ....conftest import IMAGE_ASSETS
+from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
+from ....utils import large_gpu_test
 from ..utils import check_embeddings_close
 
+HF_TEXT_PROMPTS = [
+    # T -> X
+    "Find me an everyday image that matches the given caption: The label of the object is stop sign",  # noqa: E501
+    # T -> X
+    "Retrieve an image of this caption: cherry blossom",
+]
+
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
+    # T + I -> X
     "stop_sign":
     "<|image_1|> Select the portion of the image that isolates the object of the given label: The label of the object is stop sign",  # noqa: E501
+    # I -> X
     "cherry_blossom":
-    "<|image_1|> Represent the given image with the following question: What is in the image",  # noqa: E501
+    "<|image_1|> Represent the given image for classification",  # noqa: E501
 })
 
 MODELS = ["TIGER-Lab/VLM2Vec-Full"]
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
-def test_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
+def _run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    input_texts: List[str],
+    input_images: PromptImageInput,
     model: str,
+    *,
     dtype: str,
 ) -> None:
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    with vllm_runner(model,
-                     task="embedding",
-                     max_model_len=4096,
-                     max_num_seqs=2,
-                     dtype=dtype,
+    with vllm_runner(model, task="embed", dtype=dtype,
                      enforce_eager=True) as vllm_model:
-        vllm_outputs = vllm_model.encode(example_prompts)
+        vllm_outputs = vllm_model.encode(input_texts, images=input_images)
 
-    with hf_runner(model, dtype=dtype) as hf_model:
-        all_inputs = hf_model.get_inputs(example_prompts)
+    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
+    hf_model_kwargs = {"_attn_implementation": "eager"}
+    with hf_runner(model, dtype=dtype,
+                   model_kwargs=hf_model_kwargs) as hf_model:
+        all_inputs = hf_model.get_inputs(input_texts, images=input_images)
 
         all_outputs = []
         for inputs in all_inputs:
@@ -60,4 +71,56 @@ def test_models(
         embeddings_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
+    )
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+def test_models_text(
+    hf_runner,
+    vllm_runner,
+    image_assets,
+    model: str,
+    dtype: str,
+) -> None:
+    input_texts_images = [(text, None) for text in HF_TEXT_PROMPTS]
+    input_texts = [text for text, _ in input_texts_images]
+    input_images = [image for _, image in input_texts_images]
+
+    _run_test(
+        hf_runner,
+        vllm_runner,
+        input_texts,
+        input_images,  # type: ignore
+        model,
+        dtype=dtype,
+    )
+
+
+@large_gpu_test(min_gb=48)
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+def test_models_image(
+    hf_runner,
+    vllm_runner,
+    image_assets,
+    model: str,
+    dtype: str,
+) -> None:
+    input_texts_images = [
+        (text, asset.pil_image)
+        for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
+    ]
+    input_texts = [text for text, _ in input_texts_images]
+    input_images = [image for _, image in input_texts_images]
+
+    _run_test(
+        hf_runner,
+        vllm_runner,
+        input_texts,
+        input_images,
+        model,
+        dtype=dtype,
     )

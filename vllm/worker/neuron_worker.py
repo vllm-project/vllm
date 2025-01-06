@@ -4,15 +4,15 @@ from typing import List, Optional, Tuple
 import torch
 import torch.distributed
 
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
-                                     LoraNotSupportedWorkerBase, WorkerInput)
+                                     LoraNotSupportedWorkerBase, WorkerBase,
+                                     WorkerInput)
 
 
 class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
@@ -21,20 +21,12 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
+        vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
     ) -> None:
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
+        WorkerBase.__init__(self, vllm_config=vllm_config)
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -44,7 +36,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             init_cached_hf_modules()
 
         self.model_runner: NeuronModelRunner = NeuronModelRunner(
-            model_config, parallel_config, scheduler_config, device_config)
+            vllm_config=vllm_config)
         self.is_driver_worker = True
 
     def init_device(self) -> None:

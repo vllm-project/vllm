@@ -5,7 +5,7 @@ Run `pytest tests/models/test_phimoe.py`.
 import pytest
 import torch
 
-from vllm.utils import is_cpu
+from vllm.platforms import current_platform
 
 from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
@@ -70,7 +70,7 @@ def test_phimoe_routing_function():
         assert torch.equal(topk_ids, ground_truth[test_id]["topk_ids"])
 
 
-@pytest.mark.skipif(condition=is_cpu(),
+@pytest.mark.skipif(condition=current_platform.is_cpu(),
                     reason="This test takes a lot time to run on CPU, "
                     "and vllm CI's disk space is not enough for this model.")
 @large_gpu_test(min_gb=80)

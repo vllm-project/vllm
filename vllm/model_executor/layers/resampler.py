@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # https://huggingface.co/Qwen/Qwen-7B/blob/main/modeling_qwen.py
@@ -28,7 +27,7 @@
 Shared resampler perceiver network used in multimodal models and
 related helpers for sincos positional embeddings.
 
-Example models: Qwen (Qwen-VL), Minicpmv2.0
+Example models: Qwen (Qwen-VL), MiniCPM-V 2.0
 """
 import math
 from functools import partial
@@ -38,9 +37,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.nn.init import trunc_normal_
 
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization import QuantizationConfig
 
 DEFAULT_LN = partial(nn.LayerNorm, eps=1e-6)
 
@@ -154,25 +153,29 @@ class BaseResampler(nn.Module):
         A tensor with the shape of (grid_size**2, embed_dim)
     """
 
-    def __init__(
-        self,
-        num_queries: int,
-        embed_dim: int,
-        num_heads: int,
-        kv_dim: Optional[int] = None,
-        norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
-        do_post_projection: bool = True,
-    ) -> None:
+    def __init__(self,
+                 num_queries: int,
+                 embed_dim: int,
+                 num_heads: int,
+                 kv_dim: Optional[int] = None,
+                 norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
+                 do_post_projection: bool = True,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
 
         self.num_queries = num_queries
         self.embed_dim = embed_dim
         self.num_heads = num_heads
 
-        self.query = nn.Parameter(torch.zeros(self.num_queries, embed_dim))
-        trunc_normal_(self.query, std=0.02)
+        self.query = nn.Parameter(torch.empty(self.num_queries, embed_dim))
+
         if kv_dim is not None and kv_dim != embed_dim:
-            self.kv_proj = ReplicatedLinear(kv_dim, embed_dim, bias=False)
+            self.kv_proj = ReplicatedLinear(kv_dim,
+                                            embed_dim,
+                                            bias=False,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.kv_proj")
         else:
             # Maintain the same return value with ReplicatedLinear.forward
             self.kv_proj = lambda *args, **kwargs: (  # type: ignore # noqa 
@@ -186,16 +189,7 @@ class BaseResampler(nn.Module):
         self.ln_post = norm_layer(embed_dim) if do_post_projection else None
         self.proj = nn.Parameter(
             (embed_dim**-0.5) *
-            torch.randn(embed_dim, embed_dim)) if do_post_projection else None
-
-    def _init_weights(self, m: nn.Module) -> None:
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=0.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
+            torch.empty(embed_dim, embed_dim)) if do_post_projection else None
 
     def _repeat(self, query, N: int):
         return query.unsqueeze(1).repeat(1, N, 1)
@@ -209,22 +203,24 @@ class Resampler2(BaseResampler):
     present in minicpmv2.0, but not qwen-vl.
     """
 
-    def __init__(
-        self,
-        grid_size: int,
-        embed_dim: int,
-        num_heads: int,
-        kv_dim: Optional[int] = None,
-        norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
-        adaptive: bool = False,
-        do_post_projection: bool = True,
-    ) -> None:
+    def __init__(self,
+                 grid_size: int,
+                 embed_dim: int,
+                 num_heads: int,
+                 kv_dim: Optional[int] = None,
+                 norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
+                 adaptive: bool = False,
+                 do_post_projection: bool = True,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__(grid_size**2,
                          embed_dim,
                          num_heads,
                          kv_dim,
                          norm_layer,
-                         do_post_projection=do_post_projection)
+                         do_post_projection=do_post_projection,
+                         quant_config=quant_config,
+                         prefix=prefix)
 
         self.adaptive = adaptive
         pos_embed_arr = get_2d_sincos_pos_embed(embed_dim,
@@ -233,8 +229,6 @@ class Resampler2(BaseResampler):
 
         self.pos_embed = nn.Parameter(
             torch.from_numpy(pos_embed_arr).requires_grad_(False))
-
-        self.apply(self._init_weights)
 
     def forward(
         self,

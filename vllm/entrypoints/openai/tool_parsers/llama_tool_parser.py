@@ -1,6 +1,6 @@
 import json
 import re
-from json import JSONDecodeError, JSONDecoder
+from json import JSONDecoder
 from typing import Dict, List, Sequence, Union
 
 import partial_json_parser
@@ -14,32 +14,13 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
-from vllm.entrypoints.openai.tool_parsers.utils import find_common_prefix
+from vllm.entrypoints.openai.tool_parsers.utils import (find_common_prefix,
+                                                        is_complete_json,
+                                                        partial_json_loads)
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
-
-
-# partial_json_parser doesn't support extra data and
-# JSONDecorder.raw_decode doesn't support partial JSON
-def partial_json_loads(input_str, flags):
-    try:
-        return (partial_json_parser.loads(input_str, flags), len(input_str))
-    except JSONDecodeError as e:
-        if "Extra data" in e.msg:
-            dec = JSONDecoder()
-            return dec.raw_decode(input_str)
-        else:
-            raise
-
-
-def is_complete_json(input_str):
-    try:
-        json.loads(input_str)
-        return True
-    except JSONDecodeError:
-        return False
 
 
 @ToolParserManager.register_module("llama3_json")
@@ -48,7 +29,8 @@ class Llama3JsonToolParser(ToolParser):
     Tool call parser for Llama 3.1 models intended for use with the
     examples/tool_chat_template_llama.jinja template.
 
-    Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
+    Used when --enable-auto-tool-choice --tool-call-parser llama3_json 
+    are all set
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):

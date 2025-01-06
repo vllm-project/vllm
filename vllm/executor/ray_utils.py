@@ -8,9 +8,8 @@ import msgspec
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
-from vllm.utils import get_ip, is_hip, is_xpu
+from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -229,12 +228,20 @@ def initialize_ray_cluster(
             the default Ray cluster address.
     """
     assert_ray_available()
+    from vllm.platforms import current_platform
 
     # Connect to a ray cluster.
-    if is_hip() or is_xpu():
-        ray.init(address=ray_address,
-                 ignore_reinit_error=True,
-                 num_gpus=parallel_config.world_size)
+    if current_platform.is_rocm() or current_platform.is_xpu():
+        # Try to connect existing ray instance and create a new one if not found
+        try:
+            ray.init("auto", ignore_reinit_error=True)
+        except ConnectionError:
+            logger.warning(
+                "No existing RAY instance detected. "
+                "A new instance will be launched with current node resources.")
+            ray.init(address=ray_address,
+                     ignore_reinit_error=True,
+                     num_gpus=parallel_config.world_size)
     else:
         ray.init(address=ray_address, ignore_reinit_error=True)
 
@@ -242,7 +249,11 @@ def initialize_ray_cluster(
         # Placement group is already set.
         return
 
-    device_str = "GPU" if not current_platform.is_tpu() else "TPU"
+    device_str = "GPU"
+    if current_platform.is_tpu():
+        device_str = "TPU"
+    elif current_platform.is_hpu():
+        device_str = 'HPU'
     # Create placement group for worker processes
     current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:
@@ -266,10 +277,14 @@ def initialize_ray_cluster(
                 f"Total number of devices: {device_bundles}.")
     else:
         num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
+        # Log a warning message and delay resource allocation failure response.
+        # Avoid immediate rejection to allow user-initiated placement group
+        # created and wait cluster to be ready
         if parallel_config.world_size > num_devices_in_cluster:
-            raise ValueError(
-                f"The number of required {device_str}s exceeds the total "
-                f"number of available {device_str}s in the placement group.")
+            logger.warning(
+                "The number of required %ss exceeds the total "
+                "number of available %ss in the placement group.", device_str,
+                device_str)
         # Create a new placement group
         placement_group_specs: List[Dict[str, float]] = ([{
             device_str: 1.0

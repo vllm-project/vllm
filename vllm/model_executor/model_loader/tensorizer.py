@@ -13,17 +13,13 @@ from torch import nn
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, ParallelConfig
+from vllm.config import ModelConfig, ParallelConfig, set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.utils import FlexibleArgumentParser
-
-tensorizer_error_msg = None
+from vllm.utils import FlexibleArgumentParser, PlaceholderModule
 
 try:
     from tensorizer import (DecryptionParams, EncryptionParams,
@@ -36,8 +32,19 @@ try:
         open_stream,
         mode=mode,
     ) for mode in ("rb", "wb+"))
-except ImportError as e:
-    tensorizer_error_msg = str(e)
+except ImportError:
+    tensorizer = PlaceholderModule("tensorizer")
+    DecryptionParams = tensorizer.placeholder_attr("DecryptionParams")
+    EncryptionParams = tensorizer.placeholder_attr("EncryptionParams")
+    TensorDeserializer = tensorizer.placeholder_attr("TensorDeserializer")
+    TensorSerializer = tensorizer.placeholder_attr("TensorSerializer")
+    open_stream = tensorizer.placeholder_attr("stream_io.open_stream")
+    convert_bytes = tensorizer.placeholder_attr("utils.convert_bytes")
+    get_mem_usage = tensorizer.placeholder_attr("utils.get_mem_usage")
+    no_init_or_tensor = tensorizer.placeholder_attr("utils.no_init_or_tensor")
+
+    _read_stream = tensorizer.placeholder_attr("_read_stream")
+    _write_stream = tensorizer.placeholder_attr("_write_stream")
 
 __all__ = [
     'EncryptionParams', 'DecryptionParams', 'TensorDeserializer',
@@ -268,22 +275,11 @@ class TensorizerAgent:
     in vllm/model_executor/model_loader/weight_utils.py
     """
 
-    def __init__(self, tensorizer_config: TensorizerConfig,
-                 quant_config: QuantizationConfig, **extra_kwargs):
-        if tensorizer_error_msg is not None:
-            raise ImportError(
-                "Tensorizer is not installed. Please install tensorizer "
-                "to use this feature with `pip install vllm[tensorizer]`. "
-                "Error message: {}".format(tensorizer_error_msg))
-
+    def __init__(self, tensorizer_config: TensorizerConfig, vllm_config):
         self.tensorizer_config = tensorizer_config
         self.tensorizer_args = (
             self.tensorizer_config._construct_tensorizer_args())
-        self.extra_kwargs = extra_kwargs
-        if extra_kwargs.get("quant_config", None) is not None:
-            self.quant_config = extra_kwargs["quant_config"]
-        else:
-            self.quant_config = quant_config
+        self.vllm_config = vllm_config
         self.model = self._init_model()
 
     def _init_model(self):
@@ -291,11 +287,10 @@ class TensorizerAgent:
         model_args = self.tensorizer_config.hf_config
         model_args.torch_dtype = self.tensorizer_config.dtype
         assert self.tensorizer_config.model_class is not None
-        with no_init_or_tensor():
+        # TODO: Do we need to consider old-style model class?
+        with no_init_or_tensor(), set_current_vllm_config(self.vllm_config):
             return self.tensorizer_config.model_class(
-                config=model_args,
-                quant_config=self.quant_config,
-                **self.extra_kwargs)
+                vllm_config=self.vllm_config, )
 
     def _resize_lora_embeddings(self):
         """Modify LoRA embedding layers to use bigger tensors
@@ -380,8 +375,7 @@ def tensorizer_weights_iterator(
     stream = open_stream(tensorizer_args.tensorizer_uri, **stream_params)
     with TensorDeserializer(stream, **deserializer_args,
                             device="cpu") as state:
-        for name, param in state.items():
-            yield name, param
+        yield from state.items()
     del state
 
 

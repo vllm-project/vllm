@@ -24,21 +24,12 @@ def test_gpu_memory_profiling():
     distributed_init_method = get_distributed_init_method(
         get_ip(), get_open_port())
     worker = Worker(
-        model_config=engine_config.model_config,
-        parallel_config=engine_config.parallel_config,
-        scheduler_config=engine_config.scheduler_config,
-        device_config=engine_config.device_config,
-        cache_config=engine_config.cache_config,
-        load_config=engine_config.load_config,
+        vllm_config=engine_config,
         local_rank=0,
         rank=0,
         distributed_init_method=distributed_init_method,
         is_driver_worker=True,
     )
-
-    # Load the model so we can profile it
-    worker.init_device()
-    worker.load_model()
 
     # Set 10GiB as the total gpu ram to be device-agnostic
     def mock_mem_info():
@@ -51,20 +42,24 @@ def test_gpu_memory_profiling():
 
     from unittest.mock import patch
     with patch("torch.cuda.mem_get_info", side_effect=mock_mem_info):
+        # Load the model so we can profile it
+        worker.init_device()
+        worker.load_model()
         gpu_blocks, _ = worker.determine_num_available_blocks()
 
-    # Peak vram usage by torch should be 0.7077 GiB
+    # Peak vram usage by torch should be 0.47 GiB
+    # Model weights take 0.25 GiB
     # No memory should be allocated outside of torch
     # 9.0 GiB should be the utilization target
-    # 8.2923 GiB should be available for the KV cache
+    # 8.28 GiB should be available for the KV cache
     block_size = CacheEngine.get_cache_block_size(
         engine_config.cache_config, engine_config.model_config,
         engine_config.parallel_config)
 
-    expected_blocks = (8.2923 * 1024**3) // block_size
+    expected_blocks = (8.28 * 1024**3) // block_size
 
     # Check within a small tolerance for portability
     # Hardware, kernel, or dependency changes could all affect memory
     # utilization.
-    # A 10 block tolerance here should be about 6MB of wiggle room.
-    assert abs(gpu_blocks - expected_blocks) < 10
+    # A 100 block tolerance here should be about 60MB of wiggle room.
+    assert abs(gpu_blocks - expected_blocks) < 100

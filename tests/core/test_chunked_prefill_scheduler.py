@@ -4,7 +4,6 @@ from unittest.mock import MagicMock
 import pytest  # noqa
 
 from vllm.config import CacheConfig, SchedulerConfig
-from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler
 from vllm.sequence import Logprob, SequenceGroup
 
@@ -347,158 +346,6 @@ def test_prompt_limit_exceed():
     assert out.ignored_seq_groups[0] == seq_group
 
 
-def test_swap():
-    """Verify swapping works with chunked prefill requests"""
-    block_size = 4
-    max_seqs = 30
-    max_model_len = 200
-    max_num_batched_tokens = 30
-    scheduler_config = SchedulerConfig(
-        "generate",
-        max_num_batched_tokens,
-        max_seqs,
-        max_model_len,
-        enable_chunked_prefill=True,
-    )
-    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 16
-    cache_config.num_gpu_blocks = 16
-    scheduler = Scheduler(scheduler_config, cache_config, None)
-
-    _, seq_group = create_dummy_prompt("1",
-                                       prompt_length=60,
-                                       best_of=2,
-                                       block_size=block_size)
-    scheduler.add_seq_group(seq_group)
-    _, out = schedule_and_update_computed_tokens(scheduler)
-    # The request is chunked.
-    # prefill scheduled now.
-    assert len(out.scheduled_seq_groups) == 1
-    assert out.num_prefill_groups == 1
-    assert seq_group.is_prefill()
-    assert out.num_batched_tokens == max_num_batched_tokens
-
-    # The last request should be swapped out.
-    scheduler.block_manager.can_append_slots = MagicMock()
-
-    def cannot_append_second_group(seq_group, num_lookahead_slots):
-        return seq_group.request_id != "1"
-
-    scheduler.block_manager.can_append_slots.side_effect = (
-        cannot_append_second_group)
-
-    # The running prefill is now swapped.
-    _, out = schedule_and_update_computed_tokens(scheduler)
-    assert len(out.scheduled_seq_groups) == 0
-    assert out.num_batched_tokens == 0
-    assert out.blocks_to_swap_out != []
-    assert out.blocks_to_swap_in == []
-
-    # Add 1 more task. Swap should be prioritized over new prefill.
-    _, seq_group = create_dummy_prompt("2", prompt_length=60)
-    scheduler.add_seq_group(seq_group)
-    _, out = schedule_and_update_computed_tokens(scheduler)
-    assert len(out.scheduled_seq_groups) == 1
-    # 3 decodes. It is swapped in.
-    assert out.num_batched_tokens == 30
-    assert out.blocks_to_swap_in != []
-    assert out.blocks_to_swap_out == []
-
-
-def test_running_prefill_prioritized_over_swap():
-    block_size = 4
-    max_seqs = 30
-    max_model_len = 200
-    max_num_batched_tokens = 30
-    scheduler_config = SchedulerConfig(
-        "generate",
-        max_num_batched_tokens,
-        max_seqs,
-        max_model_len,
-        enable_chunked_prefill=True,
-    )
-    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 32
-    cache_config.num_gpu_blocks = 32
-    scheduler = Scheduler(scheduler_config, cache_config, None)
-
-    _, seq_group = create_dummy_prompt("1",
-                                       prompt_length=60,
-                                       best_of=2,
-                                       block_size=block_size)
-    scheduler.add_seq_group(seq_group)
-    _, out = schedule_and_update_computed_tokens(scheduler)
-    # The request is chunked.
-    # prefill scheduled now.
-    assert len(out.scheduled_seq_groups) == 1
-    assert out.num_prefill_groups == 1
-    assert seq_group.is_prefill()
-    assert out.num_batched_tokens == max_num_batched_tokens
-
-    # The request should be swapped out.
-    scheduler.block_manager.can_append_slots = MagicMock()
-
-    def cannot_append_second_group(seq_group, num_lookahead_slots):
-        return seq_group.request_id != "1"
-
-    scheduler.block_manager.can_append_slots.side_effect = (
-        cannot_append_second_group)
-
-    # The running prefill is now swapped.
-    _, out = schedule_and_update_computed_tokens(scheduler)
-    assert len(out.scheduled_seq_groups) == 0
-    assert out.num_batched_tokens == 0
-    assert out.blocks_to_swap_out != []
-    assert out.blocks_to_swap_in == []
-
-    # Add 1 more task. Swap is not possible, so prefill is running.
-    scheduler.block_manager.can_swap_in = MagicMock()
-    scheduler.block_manager.can_swap_in.return_value = AllocStatus.LATER
-
-    _, seq_group2 = create_dummy_prompt("2",
-                                        prompt_length=60,
-                                        block_size=block_size)
-    scheduler.add_seq_group(seq_group2)
-    _, out = schedule_and_update_computed_tokens(scheduler)
-    assert len(out.scheduled_seq_groups) == 1
-    # 3 decodes. It is swapped in.
-    assert out.num_batched_tokens == 30
-    assert out.blocks_to_swap_in == []
-    assert out.blocks_to_swap_out == []
-    assert out.scheduled_seq_groups[0].seq_group == seq_group2
-
-    # Now although swap is possible, running prefill is prioritized.
-    scheduler.block_manager.can_swap_in.return_value = AllocStatus.OK
-    _, out = schedule_and_update_computed_tokens(scheduler)
-    assert len(out.scheduled_seq_groups) == 1
-    # 3 decodes. It is swapped in.
-    assert out.num_batched_tokens == 30
-    assert out.blocks_to_swap_in == []
-    assert out.blocks_to_swap_out == []
-    assert not seq_group2.is_prefill()
-    assert out.scheduled_seq_groups[0].seq_group == seq_group2
-    append_new_token(seq_group2, 1)
-
-    # Decoding is prioritized.
-    _, out = schedule_and_update_computed_tokens(scheduler)
-    assert len(out.scheduled_seq_groups) == 1
-    # 3 decodes. It is swapped in.
-    assert out.num_batched_tokens == 1
-    assert out.blocks_to_swap_in == []
-    assert out.blocks_to_swap_out == []
-    assert not seq_group2.is_prefill()
-    assert out.scheduled_seq_groups[0].seq_group == seq_group2
-    append_new_token(seq_group2, 1)
-
-    # Since we abort the sequence group, we can finally swap.
-    scheduler.abort_seq_group(seq_group2.request_id)
-    _, out = schedule_and_update_computed_tokens(scheduler)
-    assert len(out.scheduled_seq_groups) == 1
-    assert out.num_batched_tokens == 30
-    assert out.blocks_to_swap_in != []
-    assert out.blocks_to_swap_out == []
-
-
 def test_chunked_prefill_preempt():
     """Verify preempt works with chunked prefill requests"""
     block_size = 4
@@ -564,6 +411,45 @@ def test_chunked_prefill_preempt():
     assert out.num_prefill_groups == 1
     assert not seq_group.is_prefill()
     assert out.num_batched_tokens == max_num_batched_tokens
+
+
+@pytest.mark.parametrize("num_scheduler_steps", [1, 5])
+def test_chunked_prefill_spec_prefill(num_scheduler_steps):
+    """Verify that the num_lookahead_slots is set appropriately for an all"""
+    """prefill batch depending on whether multi-step scheduling is enabled"""
+    """or not"""
+    block_size = 4
+    max_seqs = 30
+    max_model_len = 200
+    max_num_batched_tokens = 30
+    num_lookahead_slots = 4
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens,
+        max_seqs,
+        max_model_len,
+        enable_chunked_prefill=True,
+        num_lookahead_slots=num_lookahead_slots,
+        num_scheduler_steps=num_scheduler_steps,
+    )
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 16
+    cache_config.num_gpu_blocks = 16
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+
+    _, seq_group = create_dummy_prompt("1",
+                                       prompt_length=30,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
+    _, out = schedule_and_update_computed_tokens(scheduler)
+    # The request is chunked.
+    # prefill scheduled now.
+    assert len(out.scheduled_seq_groups) == 1
+    assert out.num_prefill_groups == 1
+    assert out.num_batched_tokens == max_num_batched_tokens
+    print(out.num_lookahead_slots)
+    assert out.num_lookahead_slots == (0 if (num_scheduler_steps == 1) else
+                                       num_lookahead_slots)
 
 
 def test_chunked_prefill_max_seqs():

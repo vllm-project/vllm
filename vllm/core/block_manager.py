@@ -101,7 +101,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self.cross_block_tables: Dict[EncoderSeqId, BlockTable] = {}
 
         self._computed_blocks_tracker = ComputedBlocksTracker(
-            self.block_allocator)
+            self.block_allocator, self.block_size, self.enable_caching)
         self._last_access_blocks_tracker = LastAccessBlocksTracker(
             self.block_allocator)
 
@@ -151,8 +151,13 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             max_block_sliding_window=self.max_block_sliding_window,
         )
         if seq.get_token_ids():
+            # NOTE: If there are any factors affecting the block besides
+            # token_ids, they should be added as input to extra_hash.
+            extra_hash = seq.extra_hash()
+
             # Add blocks to the block table only if the sequence is non empty.
-            block_table.allocate(seq.get_token_ids())
+            block_table.allocate(token_ids=seq.get_token_ids(),
+                                 extra_hash=extra_hash)
 
         return block_table
 
@@ -170,7 +175,6 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self.block_tables[seq.seq_id] = block_table
 
         # Track seq
-        self._computed_blocks_tracker.add_seq(seq.seq_id)
         self._last_access_blocks_tracker.add_seq(seq.seq_id)
 
         # Assign the block table for each sequence.
@@ -178,7 +182,6 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             self.block_tables[seq.seq_id] = block_table.fork()
 
             # Track seq
-            self._computed_blocks_tracker.add_seq(seq.seq_id)
             self._last_access_blocks_tracker.add_seq(seq.seq_id)
 
         # Allocate cross-attention block table for encoder sequence
@@ -240,6 +243,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
             num_computed_slots=seq.data.get_num_computed_tokens(),
+            extra_hash=seq.extra_hash(),
         )
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
@@ -314,11 +318,13 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         """
         computed_seq_block_ids = []
         for seq in seqs:
-            computed_seq_block_ids.append(
-                self._computed_blocks_tracker.
-                get_cached_computed_blocks_and_update(
-                    seq.seq_id,
-                    self.block_tables[seq.seq_id].physical_block_ids))
+            all_blocks = self.block_tables[seq.seq_id].physical_block_ids
+            num_cached_tokens = (
+                self._computed_blocks_tracker.get_num_cached_tokens(seq))
+            assert num_cached_tokens % self.block_size == 0
+            num_cached_blocks = num_cached_tokens // self.block_size
+            computed_block_ids = all_blocks[:num_cached_blocks]
+            computed_seq_block_ids.append(computed_block_ids)
 
         # NOTE(sang): This assumes seq_block_ids doesn't contain any None.
         return self.block_allocator.get_common_computed_block_ids(
@@ -332,7 +338,6 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self.block_tables[child_seq.seq_id] = src_block_table.fork()
 
         # Track child seq
-        self._computed_blocks_tracker.add_seq(child_seq.seq_id)
         self._last_access_blocks_tracker.add_seq(child_seq.seq_id)
 
     def can_swap_in(self, seq_group: SequenceGroup,
@@ -393,7 +398,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         with num_lookahead_slots.
 
         Args:
-            seq_group (SequenceGroup): The sequence group to swap in.
+            seq_group (SequenceGroup): The sequence group to swap out.
             num_lookahead_slots (int): Number of lookahead slots used in 
                 speculative decoding, default to 0.
 
@@ -409,7 +414,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         swapping out the given sequence_group with num_lookahead_slots.
 
         Args:
-            sequence_group (SequenceGroup): The sequence group to swap in.
+            sequence_group (SequenceGroup): The sequence group to swap out.
 
         Returns:
             List[Tuple[int, int]]: The mapping of swapping block from 
@@ -459,7 +464,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         on to the 'device'.
 
         Args:
-            sequence_group (SequenceGroup): The sequence group to swap in.
+            sequence_group (SequenceGroup): The sequence group to swap in/out.
             device (Device): device to swap the 'seq_group' on.
             status (SequenceStatus): The status of sequence which is needed
                 for action. RUNNING for swap out and SWAPPED for swap in
@@ -503,3 +508,9 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             return AllocStatus.OK
         else:
             return AllocStatus.LATER
+
+    def get_num_cached_tokens(self, seq: Sequence) -> int:
+        """Get the number of tokens in blocks that are already computed and
+        cached in the block manager for the sequence.
+        """
+        return self._computed_blocks_tracker.get_num_cached_tokens(seq)

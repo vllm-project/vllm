@@ -9,6 +9,7 @@ import uvloop
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
+import vllm.version
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
@@ -143,6 +144,11 @@ def main():
     env_setup()
 
     parser = FlexibleArgumentParser(description="vLLM CLI")
+    parser.add_argument('-v',
+                        '--version',
+                        action='version',
+                        version=vllm.version.__version__)
+
     subparsers = parser.add_subparsers(required=True, dest="subparser")
 
     serve_parser = subparsers.add_parser(
@@ -159,7 +165,7 @@ def main():
         required=False,
         help="Read CLI options from a config file."
         "Must be a YAML with the following options:"
-        "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#command-line-arguments-for-the-server"
+        "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#cli-reference"
     )
     serve_parser = make_arg_parser(serve_parser)
     serve_parser.set_defaults(dispatch_function=serve)

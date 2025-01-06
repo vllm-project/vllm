@@ -23,7 +23,7 @@ class BlockTable:
             blocks to initialize the BlockTable with. If not provided, an empty
             BlockTable is created.
         max_block_sliding_window (Optional[int], optional): The number of
-            blocks to keep around for each sequance. If None, all blocks
+            blocks to keep around for each sequence. If None, all blocks
             are kept (eg., when sliding window is not used).
             It should at least fit the sliding window size of the model.
 
@@ -80,7 +80,8 @@ class BlockTable:
 
     def allocate(self,
                  token_ids: List[int],
-                 device: Device = Device.GPU) -> None:
+                 device: Device = Device.GPU,
+                 extra_hash: Optional[int] = None) -> None:
         """Allocates memory blocks for storing the given sequence of token IDs.
 
         This method allocates the required number of blocks to store the given
@@ -90,12 +91,16 @@ class BlockTable:
             token_ids (List[int]): The sequence of token IDs to be stored.
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
+            extra_hash (Optional[int]): The hash value of additional
+                factors, such as adapters, that influence the block hash
+                in the prefixcaching block.
         """
         assert not self._is_allocated
         assert token_ids
         blocks = self._allocate_blocks_for_token_ids(prev_block=None,
                                                      token_ids=token_ids,
-                                                     device=device)
+                                                     device=device,
+                                                     extra_hash=extra_hash)
         self.update(blocks)
         self._num_full_slots = len(token_ids)
 
@@ -108,7 +113,8 @@ class BlockTable:
     def append_token_ids(self,
                          token_ids: List[int],
                          num_lookahead_slots: int = 0,
-                         num_computed_slots: Optional[int] = None) -> None:
+                         num_computed_slots: Optional[int] = None,
+                         extra_hash: Optional[int] = None) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -130,6 +136,9 @@ class BlockTable:
                 Without sliding window, None can be passed.
                 Without chunked prefill, it should be the same as
                 _num_full_slots.
+            extra_hash (Optional[int]): The hash value of additional
+                factors such as adapters that influence the block, apart
+                from the token_ids.
         """
         assert self._is_allocated, "no blocks have been allocated"
         assert len(self._blocks) > 0
@@ -149,7 +158,8 @@ class BlockTable:
         # Ensure there are enough empty slots for the new tokens plus
         # lookahead slots
         self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
-                                    num_lookahead_slots)
+                                    num_lookahead_slots,
+                                    extra_hash=extra_hash)
 
         # Update the blocks with the new tokens
         first_block_idx = self._num_full_slots // self._block_size
@@ -160,7 +170,9 @@ class BlockTable:
 
         self._num_full_slots += len(token_ids)
 
-    def ensure_num_empty_slots(self, num_empty_slots: int) -> None:
+    def ensure_num_empty_slots(self,
+                               num_empty_slots: int,
+                               extra_hash: Optional[int] = None) -> None:
         """Ensures that the BlockTable has at least the specified number of
         empty slots available.
 
@@ -171,6 +183,9 @@ class BlockTable:
 
         Args:
             num_empty_slots (int): The minimum number of empty slots required.
+            extra_hash (Optional[int]): The hash value of additional
+                factors such as adapters that influence the block, apart
+                from the token_ids.
         """
         # Currently the block table only supports
         # appending tokens to GPU blocks.
@@ -187,7 +202,9 @@ class BlockTable:
             assert len(self._blocks) > 0
             self._blocks.append(
                 self._allocator.allocate_mutable_block(
-                    prev_block=self._blocks[-1], device=device))
+                    prev_block=self._blocks[-1],
+                    device=device,
+                    extra_hash=extra_hash))
 
     def fork(self) -> "BlockTable":
         """Creates a new BlockTable instance with a copy of the blocks from the
@@ -259,9 +276,12 @@ class BlockTable:
         # ones after the appended ones.
         return sequence_token_ids[self.num_full_slots:]
 
-    def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block],
-                                       token_ids: List[int],
-                                       device: Device) -> List[Block]:
+    def _allocate_blocks_for_token_ids(
+            self,
+            prev_block: Optional[Block],
+            token_ids: List[int],
+            device: Device,
+            extra_hash: Optional[int] = None) -> List[Block]:
         blocks: List[Block] = []
 
         block_token_ids = []
@@ -275,8 +295,10 @@ class BlockTable:
         if block_token_ids:
             blocks.extend(
                 self._allocator.allocate_immutable_blocks(
-                    prev_block, block_token_ids=block_token_ids,
-                    device=device))
+                    prev_block,
+                    block_token_ids=block_token_ids,
+                    device=device,
+                    extra_hash=extra_hash))
             prev_block = blocks[-1]
 
         if tail_token_ids:
@@ -284,7 +306,7 @@ class BlockTable:
             cur_token_ids = tail_token_ids[0]
 
             block = self._allocator.allocate_mutable_block(
-                prev_block=prev_block, device=device)
+                prev_block=prev_block, device=device, extra_hash=extra_hash)
             block.append_token_ids(cur_token_ids)
 
             blocks.append(block)

@@ -6,7 +6,7 @@ from tests.kernels.quant_utils import (FP8_DTYPE,
                                        ref_dynamic_per_tensor_fp8_quant,
                                        ref_dynamic_per_token_quant)
 from tests.kernels.utils import opcheck
-from vllm.utils import seed_everything
+from vllm.platforms import current_platform
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 HIDDEN_SIZES = [1, 2, 3, 4, 16, 67, 768, 2048, 5120, 5137, 8192,
@@ -46,7 +46,7 @@ def opcheck_fp8_quant(output,
 def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
                                      dtype: torch.dtype, scale_ub: bool,
                                      seed: int) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype,
                    device="cuda") + 1e-6  # avoid nans
@@ -76,7 +76,7 @@ def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
 @torch.inference_mode()
 def test_dynamic_per_tensor_fp8_quant(num_tokens: int, hidden_size: int,
                                       dtype: torch.dtype, seed: int) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
 
@@ -95,7 +95,7 @@ def test_dynamic_per_tensor_fp8_quant(num_tokens: int, hidden_size: int,
 @torch.inference_mode()
 @pytest.mark.parametrize("seed", SEEDS)
 def test_fp8_quant_large(seed: int) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
 
     num_tokens = 1024000  # Mistral-Nemo's max_position_embeddings
     hidden_size = 1152  # Smallest hidden_size to reproduce the error

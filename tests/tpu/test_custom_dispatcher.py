@@ -1,6 +1,6 @@
 import os
 
-from vllm.compilation.levels import CompilationLevel
+from vllm.config import CompilationLevel
 
 from ..utils import compare_two_settings
 
@@ -13,7 +13,10 @@ os.environ["VLLM_RPC_TIMEOUT"] = "30000"
 def test_custom_dispatcher():
     compare_two_settings(
         "google/gemma-2b",
-        arg1=["--enforce-eager"],
-        arg2=["--enforce-eager"],
-        env1={"VLLM_TORCH_COMPILE_LEVEL": str(CompilationLevel.DYNAMO_ONCE)},
-        env2={"VLLM_TORCH_COMPILE_LEVEL": str(CompilationLevel.DYNAMO_AS_IS)})
+        arg1=[
+            "--enforce-eager",
+            f"-O{CompilationLevel.DYNAMO_ONCE}",
+        ],
+        arg2=["--enforce-eager", f"-O{CompilationLevel.DYNAMO_AS_IS}"],
+        env1={},
+        env2={})

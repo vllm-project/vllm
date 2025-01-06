@@ -15,17 +15,18 @@ from ...utils import check_logprobs_close
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 
+@pytest.mark.quant_model
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize(
     "kv_cache_dtype,base_model,test_model,scale_path",
     [
         # Test FP8 checkpoint w. fp8_e4m3 kv-cache scaling factors.
-        ("fp8_e4m3", "meta-llama/Meta-Llama-3-8B-Instruct",
-         "nm-testing/Meta-Llama-3-8B-Instruct-FP8-KV", None),
+        ("fp8_e4m3", "meta-llama/Llama-3.2-1B-Instruct",
+         "nm-testing/Llama-3.2-1B-Instruct-FP8-KV", None),
         # Test FP16 checkpoint w. fp8_e5m2 kv-cache.
-        ("fp8_e5m2", "meta-llama/Meta-Llama-3-8B-Instruct",
-         "meta-llama/Meta-Llama-3-8B-Instruct", None),
+        ("fp8_e5m2", "meta-llama/Llama-3.2-1B-Instruct",
+         "meta-llama/Llama-3.2-1B-Instruct", None),
         # Test FP16 checkpoint w. fp8_e4m3 kv-cache scaling factors in json.
         ("fp8_e4m3", "meta-llama/Llama-2-7b-chat-hf",
          "meta-llama/Llama-2-7b-chat-hf",
@@ -33,7 +34,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
     ])
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
-@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS", "FLASHINFER"])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.

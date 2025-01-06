@@ -13,6 +13,7 @@ class ServerConfig(TypedDict, total=False):
     arguments: List[str]
     system_prompt: Optional[str]
     supports_parallel: Optional[bool]
+    supports_rocm: Optional[bool]
 
 
 def patch_system_prompt(messages: List[Dict[str, Any]],
@@ -36,7 +37,7 @@ def ensure_system_prompt(messages: List[Dict[str, Any]],
 
 # universal args for all models go here. also good if you need to test locally
 # and change type or KV cache quantization or something.
-ARGS: List[str] = ["--enable-auto-tool-choice", "--max-model-len", "8096"]
+ARGS: List[str] = ["--enable-auto-tool-choice", "--max-model-len", "1024"]
 
 CONFIGS: Dict[str, ServerConfig] = {
     "hermes": {
@@ -88,6 +89,36 @@ CONFIGS: Dict[str, ServerConfig] = {
         "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
         "to the user's question - just respond to it normally."
     },
+    "granite20b": {
+        "model":
+        "mbayser/granite-20b-functioncalling-FP8-KV",
+        "arguments": [
+            "--tool-call-parser", "granite-20b-fc", "--chat-template",
+            str(VLLM_PATH /
+                "examples/tool_chat_template_granite_20b_fc.jinja"),
+            "--max_num_seqs", "1", "--enforce-eager", "--cpu-offload-gb", "20"
+        ],
+        "supports_parallel":
+        False,
+        "supports_rocm":
+        False,
+    },
+    "granite-3.0-8b": {
+        "model":
+        "ibm-granite/granite-3.0-8b-instruct",
+        "arguments": [
+            "--tool-call-parser", "granite", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_granite.jinja")
+        ],
+    },
+    "granite-3.1-8b": {
+        "model": "ibm-granite/granite-3.1-8b-instruct",
+        "arguments": [
+            "--tool-call-parser",
+            "granite",
+        ],
+        "supports_parallel": True,
+    },
     "internlm": {
         "model":
         "internlm/internlm2_5-7b-chat",
@@ -99,7 +130,17 @@ CONFIGS: Dict[str, ServerConfig] = {
         ],
         "supports_parallel":
         False,
-    }
+    },
+    "toolACE": {
+        "model":
+        "Team-ACE/ToolACE-8B",
+        "arguments": [
+            "--tool-call-parser", "pythonic", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_toolace.jinja")
+        ],
+        "supports_parallel":
+        True,
+    },
 }
 
 WEATHER_TOOL: ChatCompletionToolParam = {

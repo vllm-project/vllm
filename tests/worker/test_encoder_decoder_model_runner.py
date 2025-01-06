@@ -5,10 +5,10 @@ import pytest
 import torch
 
 from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
-from vllm.utils import is_cpu, make_tensor_with_pad
+from vllm.utils import make_tensor_with_pad
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
-from vllm.worker.model_runner import _get_graph_batch_size
 
 BATCH_SIZES = [1, 4, 16, 64, 256]
 
@@ -18,20 +18,13 @@ def _create_model_runner(model: str, *args,
     engine_args = EngineArgs(model, *args, **kwargs)
     engine_config = engine_args.create_engine_config()
     model_runner = EncoderDecoderModelRunner(
-        model_config=engine_config.model_config,
-        parallel_config=engine_config.parallel_config,
-        scheduler_config=engine_config.scheduler_config,
-        device_config=engine_config.device_config,
-        cache_config=engine_config.cache_config,
-        load_config=engine_config.load_config,
-        lora_config=engine_config.lora_config,
-        prompt_adapter_config=engine_config.prompt_adapter_config,
+        vllm_config=engine_config,
         is_driver_worker=True,
     )
     return model_runner
 
 
-@pytest.mark.skipif(condition=is_cpu(),
+@pytest.mark.skipif(condition=current_platform.is_cpu(),
                     reason="CPU backend is currently "
                     "unsupported for encoder/ "
                     "decoder models")
@@ -74,7 +67,7 @@ def test_empty_seq_group():
     assert return_seq_lens is None
 
 
-@pytest.mark.skipif(condition=is_cpu(),
+@pytest.mark.skipif(condition=current_platform.is_cpu(),
                     reason="CPU backend is currently "
                     "unsupported for encoder/ "
                     "decoder models")
@@ -264,7 +257,7 @@ def test_prepare_prompt(batch_size):
     assert torch.equal(actual, expected)
 
 
-@pytest.mark.skipif(condition=is_cpu(),
+@pytest.mark.skipif(condition=current_platform.is_cpu(),
                     reason="CPU backend is currently "
                     "unsupported for encoder/ "
                     "decoder models")
@@ -490,7 +483,7 @@ def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
 def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
     """
     Tests that for encoder-decoder models with CUDA Graph capture and replay
-    enabled, the tensors used during the decode phase are correctly padded 
+    enabled, the tensors used during the decode phase are correctly padded
     for varying input batch sizes.
     """
     model_runner = _create_model_runner(
@@ -554,7 +547,8 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
     # With CUDA Graph capture and replay enabled, the decoder and encoder
     # input sequences will be padded. Create the expected padded tensors
     # accordingly.
-    graph_batch_size = _get_graph_batch_size(expanded_batch_size)
+    graph_batch_size = model_runner.vllm_config.pad_for_cudagraph(
+        expanded_batch_size)
     cuda_graph_pad_size = graph_batch_size - expanded_batch_size
     padded_seq_lens = seq_lens + list(itertools.repeat(1, cuda_graph_pad_size))
     padded_encoder_seq_lens = encoder_seq_lens + list(

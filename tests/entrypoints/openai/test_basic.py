@@ -1,3 +1,4 @@
+import asyncio
 from http import HTTPStatus
 from typing import List
 
@@ -83,10 +84,8 @@ async def client(server):
     indirect=True,
 )
 @pytest.mark.asyncio
-async def test_show_version(client: openai.AsyncOpenAI):
-    base_url = str(client.base_url)[:-3].strip("/")
-
-    response = requests.get(base_url + "/version")
+async def test_show_version(server: RemoteOpenAIServer):
+    response = requests.get(server.url_for("version"))
     response.raise_for_status()
 
     assert response.json() == {"version": VLLM_VERSION}
@@ -102,9 +101,56 @@ async def test_show_version(client: openai.AsyncOpenAI):
     indirect=True,
 )
 @pytest.mark.asyncio
-async def test_check_health(client: openai.AsyncOpenAI):
-    base_url = str(client.base_url)[:-3].strip("/")
-
-    response = requests.get(base_url + "/health")
+async def test_check_health(server: RemoteOpenAIServer):
+    response = requests.get(server.url_for("health"))
 
     assert response.status_code == HTTPStatus.OK
+
+
+@pytest.mark.parametrize(
+    "server_args",
+    [
+        pytest.param(["--max-model-len", "10100"],
+                     id="default-frontend-multiprocessing"),
+        pytest.param(
+            ["--disable-frontend-multiprocessing", "--max-model-len", "10100"],
+            id="disable-frontend-multiprocessing")
+    ],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_request_cancellation(server: RemoteOpenAIServer):
+    # clunky test: send an ungodly amount of load in with short timeouts
+    # then ensure that it still responds quickly afterwards
+
+    chat_input = [{"role": "user", "content": "Write a long story"}]
+    client = server.get_async_client(timeout=0.5)
+    tasks = []
+    # Request about 2 million tokens
+    for _ in range(200):
+        task = asyncio.create_task(
+            client.chat.completions.create(messages=chat_input,
+                                           model=MODEL_NAME,
+                                           max_tokens=10000,
+                                           extra_body={"min_tokens": 10000}))
+        tasks.append(task)
+
+    done, pending = await asyncio.wait(tasks,
+                                       return_when=asyncio.ALL_COMPLETED)
+
+    # Make sure all requests were sent to the server and timed out
+    # (We don't want to hide other errors like 400s that would invalidate this
+    # test)
+    assert len(pending) == 0
+    for d in done:
+        with pytest.raises(openai.APITimeoutError):
+            d.result()
+
+    # If the server had not cancelled all the other requests, then it would not
+    # be able to respond to this one within the timeout
+    client = server.get_async_client(timeout=5)
+    response = await client.chat.completions.create(messages=chat_input,
+                                                    model=MODEL_NAME,
+                                                    max_tokens=10)
+
+    assert len(response.choices) == 1

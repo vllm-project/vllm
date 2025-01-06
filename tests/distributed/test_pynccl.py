@@ -59,10 +59,9 @@ def worker_fn():
                                      device=get_world_group().device)
     tensor = torch.ones(16, 1024, 1024,
                         dtype=torch.float32).cuda(pynccl_comm.rank)
-    with pynccl_comm.change_state(enable=True):
-        pynccl_comm.all_reduce(tensor)
-    result = tensor.mean().cpu().item()
-    assert result == pynccl_comm.world_size
+    tensor = pynccl_comm.all_reduce(tensor)
+    torch.cuda.synchronize()
+    assert torch.all(tensor == pynccl_comm.world_size).cpu().item()
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -81,17 +80,16 @@ def multiple_allreduce_worker_fn():
     group = groups[0] if torch.distributed.get_rank() in [0, 1] else groups[1]
     pynccl_comm = PyNcclCommunicator(group=group, device=device)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
-    with pynccl_comm.change_state(enable=True):
-        # two groups can communicate independently
-        if torch.distributed.get_rank() in [0, 1]:
-            pynccl_comm.all_reduce(tensor)
-            pynccl_comm.all_reduce(tensor)
-            result = tensor.mean().cpu().item()
-            assert result == 4
-        else:
-            pynccl_comm.all_reduce(tensor)
-            result = tensor.mean().cpu().item()
-            assert result == 2
+    # two groups can communicate independently
+    if torch.distributed.get_rank() in [0, 1]:
+        tensor = pynccl_comm.all_reduce(tensor)
+        tensor = pynccl_comm.all_reduce(tensor)
+        torch.cuda.synchronize()
+        assert torch.all(tensor == 4).cpu().item()
+    else:
+        tensor = pynccl_comm.all_reduce(tensor)
+        torch.cuda.synchronize()
+        assert torch.all(tensor == 2).cpu().item()
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
@@ -107,17 +105,17 @@ def multiple_allreduce_with_vllm_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
     ensure_model_parallel_initialized(2, 2)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
-    with graph_capture():
+    with graph_capture(device=device):
         # two tp groups can communicate independently
         if torch.distributed.get_rank() in [0, 1]:
             tensor = tensor_model_parallel_all_reduce(tensor)
             tensor = tensor_model_parallel_all_reduce(tensor)
-            result = tensor.mean().cpu().item()
-            assert result == 4
+            torch.cuda.synchronize()
+            assert torch.all(tensor == 4).cpu().item()
         else:
             tensor = tensor_model_parallel_all_reduce(tensor)
-            result = tensor.mean().cpu().item()
-            assert result == 2
+            torch.cuda.synchronize()
+            assert torch.all(tensor == 2).cpu().item()
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
@@ -137,17 +135,81 @@ def worker_fn_with_cudagraph():
         # run something in the default stream to initialize torch engine
         a = torch.ones((4, 4), device=f'cuda:{pynccl_comm.rank}')
         torch.cuda.synchronize()
-        with torch.cuda.graph(
-                graph, stream=pynccl_comm.stream), pynccl_comm.change_state(
-                    enable=True):
-            # operation during the graph capture is recorded but not executed
-            # see https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#creating-a-graph-using-stream-capture # noqa
-            pynccl_comm.all_reduce(a)
-        pynccl_comm.stream.synchronize()
-        assert a.mean().cpu().item() == pynccl_comm.world_size**0
+        with torch.cuda.graph(graph):
+            a_out = pynccl_comm.all_reduce(a)
+        torch.cuda.synchronize()
         graph.replay()
-        pynccl_comm.stream.synchronize()
-        assert a.mean().cpu().item() == pynccl_comm.world_size**1
+        torch.cuda.synchronize()
+        assert torch.all(a_out == pynccl_comm.world_size).cpu().item()
+
+
+@worker_fn_wrapper
+def all_gather_worker_fn():
+    pynccl_comm = PyNcclCommunicator(get_world_group().cpu_group,
+                                     device=get_world_group().device)
+
+    rank = pynccl_comm.rank
+    world_size = pynccl_comm.world_size
+    device = f'cuda:{pynccl_comm.rank}'
+
+    num_elems = 1000
+    tensor = torch.arange(num_elems, dtype=torch.float32,
+                          device=device) + rank * num_elems
+    result = torch.zeros(num_elems * world_size,
+                         dtype=torch.float32,
+                         device=device)
+
+    expected = torch.cat([
+        torch.arange(num_elems, dtype=torch.float32) + r * num_elems
+        for r in range(world_size)
+    ]).to(device)
+
+    pynccl_comm.all_gather(result, tensor)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
+def test_pynccl_all_gather():
+    distributed_run(all_gather_worker_fn, 2)
+
+
+@worker_fn_wrapper
+def reduce_scatter_worker_fn():
+    pynccl_comm = PyNcclCommunicator(get_world_group().cpu_group,
+                                     device=get_world_group().device)
+
+    rank = pynccl_comm.rank
+    world_size = pynccl_comm.world_size
+    device = f'cuda:{pynccl_comm.rank}'
+
+    num_elems = 1000
+    tensor = torch.arange(num_elems, dtype=torch.float32,
+                          device=device) + rank * num_elems
+    assert (num_elems % world_size == 0)
+    result = torch.zeros(num_elems // world_size,
+                         dtype=torch.float32,
+                         device=device)
+
+    # Calculate expected result for this rank's chunk
+    scattered_size = num_elems // world_size
+    all_tensors = [
+        torch.arange(num_elems, dtype=torch.float32) + r * num_elems
+        for r in range(world_size)
+    ]
+    expected = sum(tensor[rank * scattered_size:(rank + 1) * scattered_size]
+                   for tensor in all_tensors).to(device)
+
+    pynccl_comm.reduce_scatter(result, tensor)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
+def test_pynccl_reduce_scatter():
+    distributed_run(reduce_scatter_worker_fn, 2)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -166,17 +228,15 @@ def send_recv_worker_fn():
     else:
         tensor = torch.empty(16, 1024, 1024,
                              dtype=torch.float32).cuda(pynccl_comm.rank)
-    with pynccl_comm.change_state(enable=True):
-        if pynccl_comm.rank == 0:
-            pynccl_comm.send(tensor,
-                             dst=(pynccl_comm.rank + 1) %
-                             pynccl_comm.world_size)
-        else:
-            pynccl_comm.recv(tensor,
-                             src=(pynccl_comm.rank - 1) %
-                             pynccl_comm.world_size)
-    result = tensor.mean().cpu().item()
-    assert result == 1
+
+    if pynccl_comm.rank == 0:
+        pynccl_comm.send(tensor,
+                         dst=(pynccl_comm.rank + 1) % pynccl_comm.world_size)
+    else:
+        pynccl_comm.recv(tensor,
+                         src=(pynccl_comm.rank - 1) % pynccl_comm.world_size)
+    torch.cuda.synchronize()
+    assert torch.all(tensor == 1).cpu().item()
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -205,26 +265,55 @@ def multiple_send_recv_worker_fn():
                              1024,
                              dtype=torch.float32,
                              device=device)
-    with pynccl_comm.change_state(enable=True):
-        if torch.distributed.get_rank() in [0, 1]:
-            pynccl_comm.send(tensor,
-                             dst=(pynccl_comm.rank + 1) %
-                             pynccl_comm.world_size)
-        else:
-            pynccl_comm.recv(tensor,
-                             src=(pynccl_comm.rank - 1) %
-                             pynccl_comm.world_size)
-    result = tensor.mean().cpu().item()
-    if torch.distributed.get_rank() in [0, 2]:
-        assert result == 1
+    if torch.distributed.get_rank() in [0, 1]:
+        pynccl_comm.send(tensor,
+                         dst=(pynccl_comm.rank + 1) % pynccl_comm.world_size)
     else:
-        assert result == 2
+        pynccl_comm.recv(tensor,
+                         src=(pynccl_comm.rank - 1) % pynccl_comm.world_size)
+    torch.cuda.synchronize()
+    if torch.distributed.get_rank() in [0, 2]:
+        assert torch.all(tensor == 1).cpu().item()
+    else:
+        assert torch.all(tensor == 2).cpu().item()
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
                     reason="Need at least 4 GPUs to run the test.")
 def test_pynccl_multiple_send_recv():
     distributed_run(multiple_send_recv_worker_fn, 4)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 4,
+                    reason="Need at least 4 GPUs to run the test.")
+def test_pynccl_broadcast():
+    distributed_run(broadcast_worker_fn, 4)
+
+
+@worker_fn_wrapper
+def broadcast_worker_fn():
+    # Test broadcast for every root rank.
+    # Essentially this is an all-gather operation.
+    pynccl_comm = PyNcclCommunicator(get_world_group().cpu_group,
+                                     device=get_world_group().device)
+    recv_tensors = [
+        torch.empty(16,
+                    1024,
+                    1024,
+                    dtype=torch.float32,
+                    device=pynccl_comm.device)
+        for i in range(pynccl_comm.world_size)
+    ]
+    recv_tensors[pynccl_comm.rank] = torch.ones(
+        16, 1024, 1024, dtype=torch.float32,
+        device=pynccl_comm.device) * pynccl_comm.rank
+
+    for i in range(pynccl_comm.world_size):
+        pynccl_comm.broadcast(recv_tensors[i], src=i)
+        # the broadcast op might be launched in a different stream
+        # need to synchronize to make sure the tensor is ready
+        torch.cuda.synchronize()
+        assert torch.all(recv_tensors[i] == i).cpu().item()
 
 
 def test_ncclGetUniqueId():

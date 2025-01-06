@@ -21,6 +21,38 @@ AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
                      MistralTokenizer]
 
 
+def decode_tokens(
+    tokenizer: AnyTokenizer,
+    token_ids: list[int],
+    *,
+    skip_special_tokens: bool = False,
+) -> str:
+    """
+    Backend-agnostic equivalent of HF's
+    :code:`tokenizer.decode(token_ids, skip_special_tokens=...)`.
+    """
+    return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
+
+
+def encode_tokens(
+    tokenizer: AnyTokenizer,
+    text: str,
+    *,
+    add_special_tokens: Optional[bool] = None,
+) -> list[int]:
+    """
+    Backend-agnostic equivalent of HF's
+    :code:`tokenizer.encode(text, add_special_tokens=...)`.
+    """
+    if isinstance(tokenizer, MistralTokenizer):
+        return tokenizer.tokenizer.encode(text,
+                                          bos=add_special_tokens,
+                                          eos=add_special_tokens)
+    elif add_special_tokens is not None:
+        return tokenizer.encode(text, add_special_tokens=add_special_tokens)
+    return tokenizer.encode(text)
+
+
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     """Get tokenizer with cached properties.
 
@@ -35,6 +67,7 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
         tokenizer.all_special_tokens_extended)
     tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
     tokenizer_len = len(tokenizer)
+    max_token_id = max(tokenizer.get_vocab().values())
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
 
@@ -49,6 +82,10 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
         @property
         def all_special_tokens_extended(self):
             return tokenizer_all_special_tokens_extended
+
+        @property
+        def max_token_id(self):
+            return max_token_id
 
         def __len__(self):
             return tokenizer_len
@@ -127,7 +164,7 @@ def get_tokenizer(
     if is_from_mistral_org and tokenizer_mode != "mistral":
         warnings.warn(
             'It is strongly recommended to run mistral models with '
-            '`--tokenizer_mode "mistral"` to ensure correct '
+            '`--tokenizer-mode "mistral"` to ensure correct '
             'encoding and decoding.',
             FutureWarning,
             stacklevel=2)

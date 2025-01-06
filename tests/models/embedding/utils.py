@@ -16,14 +16,15 @@ def check_embeddings_close(
 
     for prompt_idx, (embeddings_0, embeddings_1) in enumerate(
             zip(embeddings_0_lst, embeddings_1_lst)):
-        assert len(embeddings_0) == len(embeddings_1)
+        assert len(embeddings_0) == len(embeddings_1), (
+            f"Length mismatch: {len(embeddings_0)} vs. {len(embeddings_1)}")
 
         sim = F.cosine_similarity(torch.tensor(embeddings_0),
                                   torch.tensor(embeddings_1),
                                   dim=0)
 
         fail_msg = (f"Test{prompt_idx}:"
-                    f"\n{name_0}:\t{embeddings_0!r}"
-                    f"\n{name_1}:\t{embeddings_1!r}")
+                    f"\n{name_0}:\t{embeddings_0[:16]!r}"
+                    f"\n{name_1}:\t{embeddings_1[:16]!r}")
 
         assert sim >= 1 - tol, fail_msg

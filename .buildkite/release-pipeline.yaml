@@ -1,33 +1,72 @@
 steps:
   - label: "Build wheel - CUDA 12.1"
     agents:
-      queue: cpu_queue
+      queue: cpu_queue_postmerge
     commands:
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.1.0 --tag vllm-ci:build-image --target build --progress plain ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-      # rename the files to change linux -> manylinux1
-      - "for f in artifacts/dist/*.whl; do mv -- \"$$f\" \"$${f/linux/manylinux1}\"; done"
-      - "mv artifacts/dist/$(ls artifacts/dist) artifacts/dist/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
-      - "aws s3 cp artifacts/dist/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl s3://vllm-wheels/$BUILDKITE_COMMIT/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
-      - "aws s3 cp artifacts/dist/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl s3://vllm-wheels/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+      - "bash .buildkite/upload-wheels.sh"
     env:
       DOCKER_BUILDKIT: "1"
 
-  - block: "Build CUDA 11.8 wheel"
-    key: block-build-cu118-wheel
-  
+  # Note(simon): We can always build CUDA 11.8 wheel to ensure the build is working.
+  # However, this block can be uncommented to save some compute hours.
+  # - block: "Build CUDA 11.8 wheel"
+  #   key: block-build-cu118-wheel
+
   - label: "Build wheel - CUDA 11.8"
-    depends_on: block-build-cu118-wheel
+    # depends_on: block-build-cu118-wheel
     agents:
-      queue: cpu_queue
+      queue: cpu_queue_postmerge
     commands:
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=11.8.0 --tag vllm-ci:build-image --target build --progress plain ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-      # rename the files to change linux -> manylinux1
-      - "for f in artifacts/dist/*.whl; do mv -- \"$$f\" \"$${f/linux/manylinux1}\"; done"
-      - "aws s3 cp --recursive artifacts/dist s3://vllm-wheels/$BUILDKITE_COMMIT/"
-      - "aws s3 cp --recursive artifacts/dist s3://vllm-wheels/nightly/"
+      - "bash .buildkite/upload-wheels.sh"
+    env:
+      DOCKER_BUILDKIT: "1"
+
+  - block: "Build release image"
+    depends_on: ~
+    key: block-release-image-build
+
+  - label: "Build release image"
+    depends_on: block-release-image-build
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.1.0 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT --target vllm-openai --progress plain ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
+
+  - label: "Build and publish TPU release image"
+    depends_on: ~
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: tpu_queue_postmerge
+    commands:
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --tag vllm/vllm-tpu:nightly --tag vllm/vllm-tpu:$BUILDKITE_COMMIT --progress plain -f Dockerfile.tpu ."
+      - "docker push vllm/vllm-tpu:nightly"
+      - "docker push vllm/vllm-tpu:$BUILDKITE_COMMIT"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllm
+          password-env: DOCKERHUB_TOKEN
+    env:
+      DOCKER_BUILDKIT: "1"
+
+  - block: "Build CPU release image"
+    key: block-cpu-release-image-build
+    depends_on: ~
+
+  - label: "Build and publish CPU release image"
+    depends_on: block-cpu-release-image-build
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$RELEASE_VERSION --progress plain -f Dockerfile.cpu ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$RELEASE_VERSION"
     env:
       DOCKER_BUILDKIT: "1"

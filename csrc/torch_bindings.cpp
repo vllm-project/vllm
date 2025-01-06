@@ -18,6 +18,9 @@
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
 
+  ops.def("weak_ref_tensor(Tensor input) -> Tensor");
+  ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
+
   // Attention ops
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
@@ -60,6 +63,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_tanh_and_mul", torch::kCUDA, &gelu_tanh_and_mul);
 
+  // FATReLU implementation.
+  ops.def("fatrelu_and_mul(Tensor! out, Tensor input, float threshold) -> ()");
+  ops.impl("fatrelu_and_mul", torch::kCUDA, &fatrelu_and_mul);
+
   // GELU implementation used in GPT-2.
   ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_new", torch::kCUDA, &gelu_new);
@@ -94,7 +101,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
-      "rms_norm(Tensor! out, Tensor input, Tensor weight, float epsilon) -> "
+      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
       "()");
   ops.impl("rms_norm", torch::kCUDA, &rms_norm);
 
@@ -103,6 +110,31 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
+
+  // Layernorm-quant
+  // Apply Root Mean Square (RMS) Normalization to the input tensor.
+  ops.def(
+      "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
+      "Tensor scale, float epsilon) -> "
+      "()");
+  ops.impl("rms_norm_static_fp8_quant", torch::kCUDA,
+           &rms_norm_static_fp8_quant);
+
+  // In-place fused Add and RMS Normalization.
+  ops.def(
+      "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
+      "Tensor! residual, Tensor weight, "
+      "Tensor scale, float epsilon) -> ()");
+  ops.impl("fused_add_rms_norm_static_fp8_quant", torch::kCUDA,
+           &fused_add_rms_norm_static_fp8_quant);
+
+  // Fused Layernorm + Quant kernels
+  ops.def(
+      "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
+      "Tensor weight, Tensor! scale, float epsilon, "
+      "Tensor? scale_ub, Tensor!? residual) -> ()");
+  ops.impl("rms_norm_dynamic_per_token_quant", torch::kCUDA,
+           &rms_norm_dynamic_per_token_quant);
 
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
@@ -179,13 +211,36 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   //  conditionally compiled so impl in source file
 
   // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
-  ops.def("machete_supported_schedules(int btype) -> str[]");
   ops.def(
-      "machete_gemm(Tensor A, Tensor B, int btype, "
-      "             Tensor? scales, Tensor? zeros, int? group_size, "
-      "             Tensor? C, float? alpha, float? beta, str? schedule)"
-      "-> Tensor");
-  ops.def("machete_prepack_B(Tensor B, int btype) -> Tensor");
+      "machete_supported_schedules("
+      "   ScalarType a_type,"
+      "   int b_type,"
+      "   ScalarType? maybe_group_scales_type,"
+      "   ScalarType? maybe_group_zeros_type,"
+      "   ScalarType? maybe_channel_scales_type,"
+      "   ScalarType? maybe_token_scales_type,"
+      "   ScalarType? maybe_out_type"
+      ") -> str[]");
+  ops.def(
+      "machete_mm("
+      "   Tensor A,"
+      "   Tensor B,"
+      "   int b_type,"
+      "   ScalarType? out_type,"
+      "   Tensor? group_scales,"
+      "   Tensor? group_zeros,"
+      "   int?    group_size,"
+      "   Tensor? channel_scales,"
+      "   Tensor? token_scales,"
+      "   str?    schedule"
+      ") -> Tensor");
+  ops.def(
+      "machete_prepack_B("
+      "   Tensor B,"
+      "   ScalarType a_type,"
+      "   int b_type,"
+      "   ScalarType? group_scales_type"
+      ") -> Tensor");
   // conditionally compiled so impl registration is in source file
 
   ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
@@ -197,7 +252,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor b_zeros, Tensor g_idx, Tensor perm, Tensor workspace, "
       "int b_q_type, "
       "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
-      "bool has_zp, bool use_fp32_reduce) -> Tensor");
+      "bool has_zp, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
   // conditionally compiled so impl registration is in source file
 
   // gptq_marlin repack from GPTQ.
@@ -211,6 +266,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
       "SymInt size_n, int num_bits) -> Tensor");
   // conditionally compiled so impl registrations are in source file
+#endif
 
   // Dequantization for GGML.
   ops.def("ggml_dequantize(Tensor W, int type, SymInt m, SymInt n) -> Tensor");
@@ -227,6 +283,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "ggml_mul_mat_a8(Tensor W, Tensor X, int type, SymInt row) -> Tensor");
   ops.impl("ggml_mul_mat_a8", torch::kCUDA, &ggml_mul_mat_a8);
 
+#ifndef USE_ROCM
   // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
   ops.def(
       "fp8_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
@@ -263,6 +320,28 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // capability
   ops.def("cutlass_scaled_mm_supports_fp8(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
+
+  // Check if cutlass sparse scaled_mm is supported for CUDA devices of the
+  // given capability
+  ops.def(
+      "cutlass_sparse_scaled_mm_supported(int cuda_device_capability) -> bool");
+  ops.impl("cutlass_sparse_scaled_mm_supported",
+           &cutlass_sparse_scaled_mm_supported);
+
+  // CUTLASS sparse GEMM, supporting symmetric per-tensor or per-row/column
+  // quantization, as well as bias
+  ops.def(
+      "cutlass_scaled_sparse_mm(Tensor! out, Tensor a,"
+      "                         Tensor bt_nzs,"
+      "                         Tensor bt_meta, Tensor a_scales,"
+      "                         Tensor b_scales, Tensor? bias) -> ()");
+  ops.impl("cutlass_scaled_sparse_mm", torch::kCUDA, &cutlass_scaled_sparse_mm);
+
+  // CUTLASS sparse matrix compressor
+  ops.def(
+      "cutlass_sparse_compress_entry(Tensor! a_nzs, Tensor! a_meta,"
+      "                              Tensor a) -> bool");
+  ops.impl("cutlass_sparse_compress_entry", &cutlass_sparse_compress_entry);
 
   // Mamba selective scan kernel
   ops.def(
@@ -315,41 +394,34 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Compute FP8 quantized tensor for given scaling factor.
   ops.def(
-      "static_scaled_fp8_quant(Tensor! out, Tensor input, Tensor scale) -> ()");
+      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale) -> "
+      "()");
   ops.impl("static_scaled_fp8_quant", torch::kCUDA, &static_scaled_fp8_quant);
 
   // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
   ops.def(
-      "dynamic_scaled_fp8_quant(Tensor! out, Tensor input, Tensor! scale) -> "
+      "dynamic_scaled_fp8_quant(Tensor! result, Tensor input, Tensor! scale) "
+      "-> "
       "()");
   ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
 
   // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
   ops.def(
-      "dynamic_per_token_scaled_fp8_quant(Tensor! out, Tensor input, "
+      "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
       "Tensor! scale, Tensor? scale_ub) -> "
       "()");
   ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCUDA,
            &dynamic_per_token_scaled_fp8_quant);
 
-  // Aligning the number of tokens to be processed by each expert such
-  // that it is divisible by the block size.
-  ops.def(
-      "moe_align_block_size(Tensor topk_ids, int num_experts,"
-      "                     int block_size, Tensor! sorted_token_ids,"
-      "                     Tensor! experts_ids,"
-      "                     Tensor! num_tokens_post_pad) -> ()");
-  ops.impl("moe_align_block_size", torch::kCUDA, &moe_align_block_size);
-
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
-      "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
+      "static_scaled_int8_quant(Tensor! result, Tensor input, Tensor scale,"
       "Tensor? azp) -> ()");
   ops.impl("static_scaled_int8_quant", torch::kCUDA, &static_scaled_int8_quant);
 
   // Compute int8 quantized tensor and scaling factor
   ops.def(
-      "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
+      "dynamic_scaled_int8_quant(Tensor! result, Tensor input, Tensor! scale, "
       "Tensor!? azp) -> ()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);
@@ -413,27 +485,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   // Custom all-reduce kernels
   custom_ar.def(
-      "init_custom_ar(Tensor meta, Tensor rank_data, "
-      "str[] handles, int[] offsets, int rank, "
-      "bool full_nvlink) -> int");
+      "init_custom_ar(int[] ipc_tensors, Tensor rank_data, "
+      "int rank, bool full_nvlink) -> int");
   custom_ar.impl("init_custom_ar", torch::kCUDA, &init_custom_ar);
-
-  custom_ar.def("all_reduce_reg(int fa, Tensor inp, Tensor! out) -> ()");
-  custom_ar.impl("all_reduce_reg", torch::kCUDA, &all_reduce_reg);
-
   custom_ar.def(
-      "all_reduce_unreg(int fa, Tensor inp, Tensor reg_buffer, Tensor! out) -> "
-      "()");
-  custom_ar.impl("all_reduce_unreg", torch::kCUDA, &all_reduce_unreg);
+      "all_reduce(int fa, Tensor inp, Tensor! out, int reg_buffer, "
+      "int reg_buffer_sz_bytes) -> ()");
+  custom_ar.impl("all_reduce", torch::kCUDA, &all_reduce);
 
   custom_ar.def("dispose", &dispose);
   custom_ar.def("meta_size", &meta_size);
 
-  custom_ar.def(
-      "register_buffer(int fa, Tensor t, str[] handles, "
-      "int[] offsets) -> ()");
-  custom_ar.impl("register_buffer", torch::kCUDA, &register_buffer);
-
+  custom_ar.def("register_buffer", &register_buffer);
   custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta);
   custom_ar.def("register_graph_buffers", &register_graph_buffers);
 }

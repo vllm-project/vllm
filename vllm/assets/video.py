@@ -2,13 +2,13 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import List, Literal
 
+import cv2
 import numpy as np
 import numpy.typing as npt
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
-from vllm.multimodal.utils import (sample_frames_from_video,
-                                   try_import_video_packages)
+from vllm.multimodal.video import sample_frames_from_video
 
 from .base import get_cache_dir
 
@@ -19,7 +19,7 @@ def download_video_asset(filename: str) -> str:
     Download and open an image from huggingface
     repo: raushan-testing-hf/videos-test
     """
-    video_directory = get_cache_dir() / "video-eample-data"
+    video_directory = get_cache_dir() / "video-example-data"
     video_directory.mkdir(parents=True, exist_ok=True)
 
     video_path = video_directory / filename
@@ -35,8 +35,6 @@ def download_video_asset(filename: str) -> str:
 
 
 def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
-    cv2 = try_import_video_packages()
-
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file {path}")
@@ -59,7 +57,6 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
 
 def video_to_pil_images_list(path: str,
                              num_frames: int = -1) -> List[Image.Image]:
-    cv2 = try_import_video_packages()
     frames = video_to_ndarrays(path, num_frames)
     return [
         Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))

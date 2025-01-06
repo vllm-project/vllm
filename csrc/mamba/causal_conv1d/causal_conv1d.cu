@@ -53,12 +53,12 @@ void set_conv_params_fwd(ConvParamsBase &params,
                          const at::Tensor x,
                          const at::Tensor weight,
                          const at::Tensor out,
-                         const c10::optional<at::Tensor>& bias,
+                         const std::optional<at::Tensor>& bias,
                          bool silu_activation,
                          int64_t pad_slot_id,
-                         const c10::optional<at::Tensor>& query_start_loc = std::nullopt,
-                         const c10::optional<at::Tensor>& cache_indices = std::nullopt,
-                         const c10::optional<at::Tensor>& has_initial_state = std::nullopt) {
+                         const std::optional<at::Tensor>& query_start_loc = std::nullopt,
+                         const std::optional<at::Tensor>& cache_indices = std::nullopt,
+                         const std::optional<at::Tensor>& has_initial_state = std::nullopt) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -93,11 +93,11 @@ void set_conv_params_fwd(ConvParamsBase &params,
 
 
 void causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
-                  const c10::optional<at::Tensor> &bias_,
-                  const c10::optional<at::Tensor> &conv_states,
-                  const c10::optional<at::Tensor> &query_start_loc,
-                  const c10::optional<at::Tensor> &cache_indices,
-                  const c10::optional<at::Tensor> &has_initial_state,
+                  const std::optional<at::Tensor> &bias_,
+                  const std::optional<at::Tensor> &conv_states,
+                  const std::optional<at::Tensor> &query_start_loc,
+                  const std::optional<at::Tensor> &cache_indices,
+                  const std::optional<at::Tensor> &has_initial_state,
                   bool silu_activation,
                  // used to identify padding entries if cache_indices provided
                  // in case of padding, the kernel will return early
@@ -194,10 +194,10 @@ void causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
 void causal_conv1d_update(const at::Tensor &x,
                      const at::Tensor &conv_state,
                      const at::Tensor &weight,
-                     const c10::optional<at::Tensor> &bias_,
+                     const std::optional<at::Tensor> &bias_,
                      bool silu_activation,
-                     const c10::optional<at::Tensor> &cache_seqlens_,
-                     const c10::optional<at::Tensor> &conv_state_indices_,
+                     const std::optional<at::Tensor> &cache_seqlens_,
+                     const std::optional<at::Tensor> &conv_state_indices_,
                      // used to identify padding entries if cache_indices provided
                      // in case of padding, the kernel will return early
                      int64_t pad_slot_id) {
@@ -418,6 +418,31 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
             typename Ktraits::BlockStoreT(smem_store).Store(out, out_vals_store, seqlen - chunk * kChunkSize);
         }
         out += kChunkSize;
+
+        int final_state_position =  ((seqlen - (kWidth - 1)) - (n_chunks - 1) * kChunkSize);
+        // in case the final state is separated between the last "smem_exchange" and 
+        // and the one before it (chunk = n_chunks - 1 and chunk = n_chunks - 2), 
+        // (which occurs when `final_state_position` is a non-positivie index)
+        // we load the correct data from smem_exchange from both chunks, the last chunk iteration and the one before it
+        if (conv_states != nullptr && final_state_position < 0 && seqlen > kWidth){
+            input_t vals_load[kNElts] = {0};
+            if ((chunk == n_chunks - 2) && (tidx == kNThreads - 1)){
+                // chunk = n_chunks - 2, a segment of the final state sits in the last index
+                reinterpret_cast<vec_t *>(vals_load)[0] = smem_exchange[kNThreads - 1];
+                #pragma unroll
+                for (int w = 0; w < -final_state_position; ++w){
+                    conv_states[w] = vals_load[kNElts + final_state_position + w];
+                }
+            }
+            if ((chunk == n_chunks - 1) && tidx == 0){
+                // chunk = n_chunks - 1, the second segment of the final state first positions
+                reinterpret_cast<vec_t *>(vals_load)[0] = smem_exchange[0];
+                for (int w = -final_state_position; w < kWidth - 1; ++w){
+                    conv_states[w] = vals_load[w + final_state_position];
+                }
+                return;
+            }
+        }
     }
     // Final state is stored in the smem_exchange last token slot,
     // in case seqlen < kWidth, we would need to take the final state from the 
@@ -446,9 +471,14 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
         }
         else {
             // in case the final state is in between the threads data
-            reinterpret_cast<vec_t *>(x_vals_load)[1] = smem_exchange[last_thread + 1];
-            reinterpret_cast<vec_t *>(x_vals_load)[0] = smem_exchange[last_thread];
             const int offset = ((seqlen - (kWidth - 1)) % (kNElts));
+            if ((offset + kWidth - 2) >= kNElts && (last_thread + 1 < kNThreads)){
+                // In case last_thread == kNThreads - 1, accessing last_thread + 1 will result in a 
+                // illegal access error on H100.
+                // Therefore, we access last_thread + 1, only if the final state data sits there
+                reinterpret_cast<vec_t *>(x_vals_load)[1] = smem_exchange[last_thread + 1];
+            }
+            reinterpret_cast<vec_t *>(x_vals_load)[0] = smem_exchange[last_thread];
             #pragma unroll
             for (int w = 0; w < kWidth - 1; ++w){
                 conv_states[w] = x_vals_load[offset + w ];

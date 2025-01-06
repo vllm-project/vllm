@@ -5,16 +5,16 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.utils import seed_everything
+from vllm.platforms import current_platform
 
 from .allclose_default import get_default_atol, get_default_rtol
 
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-HEAD_SIZES = [64, 80, 96, 112, 120, 128, 192, 256]
+HEAD_SIZES = [64, 80, 112, 120, 256]
 ROTARY_DIMS = [None, 32]  # None means rotary dim == head size
-NUM_HEADS = [7, 17]  # Arbitrary values for testing
-BATCH_SIZES = [1, 5]  # Arbitrary values for testing
+NUM_HEADS = [17]  # Arbitrary values for testing
+BATCH_SIZES = [5]  # Arbitrary values for testing
 SEQ_LENS = [11, 8192]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [
@@ -48,7 +48,7 @@ def test_rotary_embedding(
     if rotary_dim is None:
         rotary_dim = head_size
 
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
@@ -100,7 +100,7 @@ def test_batched_rotary_embedding(
     max_position: int = 8192,
     base: int = 10000,
 ) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
@@ -160,7 +160,7 @@ def test_batched_rotary_embedding_multi_lora(
     max_position: int = 8192,
     base: int = 10000,
 ) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size

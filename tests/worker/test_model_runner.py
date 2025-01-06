@@ -9,22 +9,14 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import get_open_port
-from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
+from vllm.worker.model_runner import ModelRunner
 
 
 def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
     engine_args = EngineArgs(model, *args, **kwargs)
     engine_config = engine_args.create_engine_config()
     model_runner = ModelRunner(
-        model_config=engine_config.model_config,
-        parallel_config=engine_config.parallel_config,
-        scheduler_config=engine_config.scheduler_config,
-        device_config=engine_config.device_config,
-        cache_config=engine_config.cache_config,
-        load_config=engine_config.load_config,
-        lora_config=engine_config.lora_config,
-        prompt_adapter_config=engine_config.prompt_adapter_config,
-        observability_config=engine_config.observability_config,
+        vllm_config=engine_config,
         is_driver_worker=True,
     )
     return model_runner
@@ -184,7 +176,8 @@ def test_prepare_decode_cuda_graph(batch_size):
         model_input.attn_metadata, model_input.attn_metadata.slot_mapping)
     assert len(slot_mapping) == len(input_tokens)
 
-    expected_bs = _get_graph_batch_size(len(seq_group_metadata_list))
+    expected_bs = model_runner.vllm_config.pad_for_cudagraph(
+        len(seq_group_metadata_list))
     # Verify input metadata is correct for prompts.
     device = model_runner.device
     assert attn_metadata.num_prefills == 0

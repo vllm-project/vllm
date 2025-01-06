@@ -8,7 +8,7 @@ from ..openai.test_vision import TEST_IMAGE_URLS
 
 
 def test_chat():
-    llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
+    llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct")
 
     prompt1 = "Explain the concept of entropy."
     messages = [
@@ -26,7 +26,7 @@ def test_chat():
 
 
 def test_multi_chat():
-    llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
+    llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct")
 
     prompt1 = "Explain the concept of entropy."
     prompt2 = "Explain what among us is."

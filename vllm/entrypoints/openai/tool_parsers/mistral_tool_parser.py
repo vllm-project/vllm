@@ -19,7 +19,6 @@ from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -62,7 +61,7 @@ class MistralToolParser(ToolParser):
         ]  # map what has been streamed for each tool so far to a list
         self.bot_token = "[TOOL_CALLS]"
         self.bot_token_id = self.vocab.get(self.bot_token)
-        self.tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
+        self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
         if self.bot_token_id is None:
             raise RuntimeError(
                 "Mistral Tool Parser could not locate the tool call token in "
@@ -84,23 +83,33 @@ class MistralToolParser(ToolParser):
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
+
+        # first remove the BOT token
+        tool_content = model_output.replace(self.bot_token, "").strip()
+
         try:
 
-            # use a regex to find the tool call. remove the BOT token
-            #   and make sure to replace single quotes with double quotes
-            raw_tool_call = self.tool_call_regex.findall(
-                model_output.replace(self.bot_token, ""))[0]
+            # we first try to directly load the json as parsing very nested
+            # jsons is difficult
+            try:
+                function_call_arr = json.loads(tool_content)
+            except json.JSONDecodeError:
+                # use a regex to find the part corresponding to the tool call.
+                # NOTE: This use case should not happen if the model is trained
+                # correctly. It's a easy possible fix so it's included, but
+                # can be brittle for very complex / highly nested tool calls
+                raw_tool_call = self.tool_call_regex.findall(tool_content)[0]
+                function_call_arr = json.loads(raw_tool_call)
 
-            # load the JSON, and then use it to build the Function and
             # Tool Call
-            function_call_arr = json.loads(raw_tool_call)
             tool_calls: List[MistralToolCall] = [
                 MistralToolCall(
                     type="function",
                     function=FunctionCall(
                         name=raw_function_call["name"],
                         # function call args are JSON but as a string
-                        arguments=json.dumps(raw_function_call["arguments"])))
+                        arguments=json.dumps(raw_function_call["arguments"],
+                                             ensure_ascii=False)))
                 for raw_function_call in function_call_arr
             ]
 
@@ -116,7 +125,7 @@ class MistralToolParser(ToolParser):
             # return information to just treat the tool call as regular JSON
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
-                                                content=model_output)
+                                                content=tool_content)
 
     def extract_tool_calls_streaming(
         self,
@@ -190,7 +199,7 @@ class MistralToolParser(ToolParser):
                     diff: Union[str, None] = current_tool_call.get("arguments")
 
                     if diff:
-                        diff = json.dumps(diff).replace(
+                        diff = json.dumps(diff, ensure_ascii=False).replace(
                             self.streamed_args_for_tool[self.current_tool_id],
                             "")
                         delta = DeltaMessage(tool_calls=[
@@ -223,7 +232,7 @@ class MistralToolParser(ToolParser):
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       type="function",
-                                      id=f"chatcmpl-tool-{random_uuid()}",
+                                      id=MistralToolCall.generate_random_id(),
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
                                               exclude_none=True))
@@ -241,6 +250,8 @@ class MistralToolParser(ToolParser):
                 cur_arguments = current_tool_call.get("arguments")
 
                 new_text = delta_text.replace("\'", "\"")
+                if ('"}' in new_text):
+                    new_text = new_text[:new_text.rindex('"}')]
 
                 if not cur_arguments and not prev_arguments:
 
@@ -251,12 +262,15 @@ class MistralToolParser(ToolParser):
                         "mid-arguments")
                     delta = None
                 elif cur_arguments and not prev_arguments:
-                    cur_arguments_json = json.dumps(cur_arguments)
+                    cur_arguments_json = json.dumps(cur_arguments,
+                                                    ensure_ascii=False)[:-2]
                     logger.debug("finding %s in %s", new_text,
                                  cur_arguments_json)
 
+                    if (new_text not in cur_arguments_json):
+                        return None
                     arguments_delta = cur_arguments_json[:cur_arguments_json.
-                                                         index(new_text) +
+                                                         rindex(new_text) +
                                                          len(new_text)]
                     logger.debug("First tokens in arguments received: %s",
                                  arguments_delta)
@@ -270,8 +284,10 @@ class MistralToolParser(ToolParser):
                         self.current_tool_id] += arguments_delta
 
                 elif cur_arguments and prev_arguments:
-                    cur_args_json = json.dumps(cur_arguments)
-                    prev_args_json = json.dumps(prev_arguments)
+                    cur_args_json = json.dumps(cur_arguments,
+                                               ensure_ascii=False)
+                    prev_args_json = json.dumps(prev_arguments,
+                                                ensure_ascii=False)
                     logger.debug("Searching for diff between \n%s\n%s",
                                  cur_args_json, prev_args_json)
 

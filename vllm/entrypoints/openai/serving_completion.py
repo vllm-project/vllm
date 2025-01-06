@@ -1,7 +1,6 @@
 import asyncio
 import time
-from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
-                    Optional)
+from typing import AsyncGenerator, AsyncIterator, Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple, Union, cast
 
@@ -22,25 +21,16 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               RequestResponseMetadata,
                                               UsageInfo)
 # yapf: enable
-from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
-                                                    LoRAModulePath,
-                                                    OpenAIServing,
-                                                    PromptAdapterPath)
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
-from vllm.tracing import (contains_trace_headers, extract_trace_headers,
-                          log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import merge_async_iterators, random_uuid
+from vllm.utils import merge_async_iterators
 
 logger = init_logger(__name__)
-
-TypeTokenIDs = List[int]
-TypeTopLogProbs = List[Optional[Dict[int, float]]]
-TypeCreateLogProbsFn = Callable[
-    [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], CompletionLogProbs]
 
 
 class OpenAIServingCompletion(OpenAIServing):
@@ -49,20 +39,21 @@ class OpenAIServingCompletion(OpenAIServing):
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
-        base_model_paths: List[BaseModelPath],
+        models: OpenAIServingModels,
         *,
-        lora_modules: Optional[List[LoRAModulePath]],
-        prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
-                         base_model_paths=base_model_paths,
-                         lora_modules=lora_modules,
-                         prompt_adapters=prompt_adapters,
+                         models=models,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
+        diff_sampling_param = self.model_config.get_diff_sampling_param()
+        if diff_sampling_param:
+            logger.info(
+                "Overwriting default completion sampling param with: %s",
+                diff_sampling_param)
 
     async def create_completion(
         self,
@@ -93,16 +84,13 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "suffix is not currently supported")
 
-        model_name = self.base_model_paths[0].name
-        request_id = f"cmpl-{random_uuid()}"
+        request_id = f"cmpl-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[RequestOutput, None]] = []
         try:
             (
                 lora_request,
@@ -111,55 +99,56 @@ class OpenAIServingCompletion(OpenAIServing):
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-            prompts = list(
-                self._tokenize_prompt_input_or_inputs(
-                    request,
-                    tokenizer,
-                    request.prompt,
-                    truncate_prompt_tokens=request.truncate_prompt_tokens,
-                    add_special_tokens=request.add_special_tokens,
-                ))
+            request_prompts, engine_prompts = await self._preprocess_completion(
+                request,
+                tokenizer,
+                request.prompt,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
+                add_special_tokens=request.add_special_tokens,
+            )
+        except ValueError as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(str(e))
 
-            for i, prompt_inputs in enumerate(prompts):
+        # Schedule the request and get the result generator.
+        generators: List[AsyncGenerator[RequestOutput, None]] = []
+        try:
+            for i, engine_prompt in enumerate(engine_prompts):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
                 default_max_tokens = self.max_model_len - len(
-                    prompt_inputs["prompt_token_ids"])
+                    engine_prompt["prompt_token_ids"])
+                # Build default sampling params
+                default_sampling_params = (
+                    self.model_config.get_diff_sampling_param())
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens)
+                        default_max_tokens, default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
-                        default_max_tokens)
+                        default_max_tokens,
+                        self.model_config.logits_processor_pattern,
+                        default_sampling_params)
 
                 request_id_item = f"{request_id}-{i}"
 
                 self._log_inputs(request_id_item,
-                                 prompt_inputs,
+                                 request_prompts[i],
                                  params=sampling_params,
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
-                is_tracing_enabled = (await
-                                      self.engine_client.is_tracing_enabled())
-                trace_headers = None
-                if is_tracing_enabled:
-                    trace_headers = extract_trace_headers(raw_request.headers)
-                if not is_tracing_enabled and contains_trace_headers(
-                        raw_request.headers):
-                    log_tracing_disabled_warning()
+                trace_headers = (await
+                                 self._get_trace_headers(raw_request.headers))
 
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.engine_client.beam_search(
-                        prompt_inputs["prompt_token_ids"],
-                        request_id_item,
-                        sampling_params,
+                        prompt=engine_prompt,
+                        request_id=request_id,
+                        params=sampling_params,
                     )
                 else:
                     generator = self.engine_client.generate(
-                        {
-                            "prompt_token_ids":
-                            prompt_inputs["prompt_token_ids"]
-                        },
+                        engine_prompt,
                         sampling_params,
                         request_id_item,
                         lora_request=lora_request,
@@ -173,8 +162,10 @@ class OpenAIServingCompletion(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        result_generator = merge_async_iterators(
-            *generators, is_cancelled=raw_request.is_disconnected)
+        result_generator = merge_async_iterators(*generators)
+
+        model_name = self.models.model_name(lora_request)
+        num_prompts = len(engine_prompts)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
         # results. In addition, we do not stream the results when use
@@ -191,12 +182,12 @@ class OpenAIServingCompletion(OpenAIServing):
                 request_id,
                 created_time,
                 model_name,
-                num_prompts=len(prompts),
+                num_prompts=num_prompts,
                 tokenizer=tokenizer,
                 request_metadata=request_metadata)
 
         # Non-streaming response
-        final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
+        final_res_batch: List[Optional[RequestOutput]] = [None] * num_prompts
         try:
             async for i, res in result_generator:
                 final_res_batch[i] = res
@@ -208,7 +199,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 # We did not pass it into vLLM engine to avoid being redundant
                 # with the inputs token IDs
                 if final_res.prompt is None:
-                    final_res.prompt = prompts[i]["prompt"]
+                    final_res.prompt = request_prompts[i]["prompt"]
 
             final_res_batch_checked = cast(List[RequestOutput],
                                            final_res_batch)
@@ -380,7 +371,7 @@ class OpenAIServingCompletion(OpenAIServing):
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = final_usage_info
 
-        except ValueError as e:
+        except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
@@ -404,6 +395,12 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
             prompt_logprobs = final_res.prompt_logprobs
+            if prompt_logprobs:
+                for logprob_dict in prompt_logprobs:
+                    if logprob_dict:
+                        for logprob_values in logprob_dict.values():
+                            if logprob_values.logprob == float('-inf'):
+                                logprob_values.logprob = -9999.0
             prompt_text = final_res.prompt
 
             token_ids: GenericSequence[int]

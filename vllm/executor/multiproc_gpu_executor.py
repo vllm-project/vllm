@@ -3,20 +3,17 @@ import os
 from functools import partial
 from typing import Any, List, Optional
 
-import torch
-
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.gpu_executor import create_worker
-from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
-                                                  ResultHandler, WorkerMonitor)
+from vllm.executor.multiproc_worker_utils import (
+    ProcessWorkerWrapper, ResultHandler, WorkerMonitor,
+    set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
-from vllm.triton_utils import maybe_set_triton_cache_manager
 from vllm.utils import (_run_task_with_lock, cuda_device_count_stateless,
-                        cuda_is_initialized, get_distributed_init_method,
-                        get_open_port, get_vllm_instance_id, make_async,
+                        get_distributed_init_method, get_open_port, make_async,
                         update_environment_variables)
 
 logger = init_logger(__name__)
@@ -34,33 +31,8 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
 
-        # Ensure that VLLM_INSTANCE_ID is set, to be inherited by workers
-        os.environ["VLLM_INSTANCE_ID"] = get_vllm_instance_id()
-
-        # Disable torch async compiling which won't work with daemonic processes
-        os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
-
-        # Configure thread parallelism if OMP_NUM_THREADS isn't set
-        #
-        # Helps to avoid CPU contention. The default of spawning a thread per
-        # core combined with multiprocessing for each GPU can have a negative
-        # impact on performance. The contention is amplified when running in a
-        # container where CPU limits can cause throttling.
-        default_omp_num_threads = 1
-        if "OMP_NUM_THREADS" not in os.environ and (
-                current_parallelism :=
-                torch.get_num_threads()) > default_omp_num_threads:
-            logger.warning(
-                "Reducing Torch parallelism from %d threads to %d to avoid "
-                "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
-                "external environment to tune this value as needed.",
-                current_parallelism, default_omp_num_threads)
-            os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
-            torch.set_num_threads(default_omp_num_threads)
-
-        # workaround for https://github.com/vllm-project/vllm/issues/6103
-        if world_size > 1:
-            maybe_set_triton_cache_manager()
+        # Set multiprocessing envs that are common to V0 and V1
+        set_multiprocessing_worker_envs(self.parallel_config)
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
@@ -87,7 +59,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
                     result_handler,
                     partial(
                         create_worker,
-                        **self._get_create_worker_kwargs(
+                        **self._get_worker_kwargs(
                             rank=rank,
                             local_rank=rank,
                             distributed_init_method=distributed_init_method,
@@ -121,13 +93,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             update_environment_variables({
                 "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
             })
-
-        if (cuda_is_initialized()
-                and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
-            logger.warning("CUDA was previously initialized. We must use "
-                           "the `spawn` multiprocessing start method. Setting "
-                           "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'.")
-            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
         cuda_device_count = cuda_device_count_stateless()
         # Use confusing message for more common TP-only case.

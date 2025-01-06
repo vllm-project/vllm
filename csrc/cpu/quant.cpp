@@ -23,6 +23,19 @@ struct KernelVecType<c10::BFloat16> {
   using cvt_vec_type = vec_op::FP32Vec16;
 };
 
+template <>
+struct KernelVecType<c10::Half> {
+#ifdef __powerpc64__
+  // Power architecture-specific vector type
+  using load_vec_type = vec_op::FP32Vec16;
+#else
+  // Fallback for other architectures
+  using load_vec_type = vec_op::FP16Vec16;
+#endif
+  using azp_adj_load_vec_type = vec_op::INT32Vec16;
+  using cvt_vec_type = vec_op::FP32Vec16;
+};
+
 #ifdef __AVX512F__
 template <bool AZP, typename scalar_t>
 void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
@@ -346,7 +359,7 @@ void int8_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
                     const torch::Tensor& b,         // [IC, OC], column-major
                     const torch::Tensor& a_scales,  // [1] or [M]
                     const torch::Tensor& b_scales,  // [1] or [OC]
-                    const c10::optional<torch::Tensor>& bias  // [OC]
+                    const std::optional<torch::Tensor>& bias  // [OC]
 ) {
   CPU_KERNEL_GUARD_IN(cutlass_scaled_mm)
   // Checks for conformality
@@ -429,8 +442,8 @@ void int8_scaled_mm_azp(torch::Tensor& c,        // [M, OC], row-major
                         const torch::Tensor& a_scales,            // [1] or [M]
                         const torch::Tensor& b_scales,            // [1] or [OC]
                         const torch::Tensor& azp_adj,             // [OC]
-                        const c10::optional<torch::Tensor>& azp,  // [1] or [M]
-                        const c10::optional<torch::Tensor>& bias  // [OC]
+                        const std::optional<torch::Tensor>& azp,  // [1] or [M]
+                        const std::optional<torch::Tensor>& bias  // [OC]
 ) {
   CPU_KERNEL_GUARD_IN(cutlass_scaled_mm_azp)
   // Checks for conformality
@@ -548,7 +561,7 @@ void int8_scaled_mm_azp(torch::Tensor& c,        // [M, OC], row-major
 void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
                               const torch::Tensor& input,  // [..., hidden_size]
                               const torch::Tensor& scale,
-                              c10::optional<torch::Tensor> const& azp) {
+                              std::optional<torch::Tensor> const& azp) {
   CPU_KERNEL_GUARD_IN(static_scaled_int8_quant)
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());
@@ -577,7 +590,7 @@ void dynamic_scaled_int8_quant(
     torch::Tensor& out,          // [..., hidden_size]
     const torch::Tensor& input,  // [..., hidden_size]
     torch::Tensor& scale,        // [..., 1]
-    c10::optional<torch::Tensor> const& azp) {
+    std::optional<torch::Tensor> const& azp) {
   CPU_KERNEL_GUARD_IN(dynamic_scaled_int8_quant)
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());

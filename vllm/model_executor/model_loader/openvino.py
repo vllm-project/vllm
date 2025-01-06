@@ -12,12 +12,12 @@ from torch import nn
 import vllm.envs as envs
 from vllm.attention.backends.openvino import OpenVINOAttentionMetadata
 from vllm.config import DeviceConfig, ModelConfig
-from vllm.executor.openvino_executor import is_openvino_cpu
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import (LogitsProcessor,
                                                          _prune_hidden_states)
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -95,7 +95,7 @@ def _require_model_export(model_id, revision=None, subfolder=None):
         return True
 
 
-class OpenVINOCasualLM(nn.Module):
+class OpenVINOCausalLM(nn.Module):
 
     def __init__(
         self,
@@ -136,7 +136,7 @@ class OpenVINOCasualLM(nn.Module):
         ov_device = envs.VLLM_OPENVINO_DEVICE
         paged_attention_transformation(pt_model.model)
         _modify_cache_parameters(pt_model.model, kv_cache_dtype,
-                                 is_openvino_cpu())
+                                 current_platform.is_openvino_cpu())
 
         ov_compiled = ov_core.compile_model(pt_model.model, ov_device)
         self.ov_request = ov_compiled.create_infer_request()
@@ -190,7 +190,7 @@ def get_model(
     kv_cache_dtype: ov.Type,
     **kwargs,
 ) -> torch.nn.Module:
-    lora_config = kwargs.get("lora_config", None)
+    lora_config = kwargs.get("lora_config")
     ov_core = kwargs.get("ov_core")
     if lora_config:
         raise ValueError(
@@ -199,5 +199,5 @@ def get_model(
             "be added in the future. If this is important to you, "
             "please open an issue on github.")
 
-    return OpenVINOCasualLM(ov_core, model_config, device_config,
+    return OpenVINOCausalLM(ov_core, model_config, device_config,
                             kv_cache_dtype)

@@ -81,6 +81,8 @@ instance/
 docs/_build/
 docs/source/getting_started/examples/*.rst
 !**/*.template.rst
+docs/source/getting_started/examples/*.md
+!**/*.template.md
 
 # PyBuilder
 .pybuilder/
@@ -202,3 +204,4 @@ benchmarks/*.json
 
 # Linting
 actionlint
+shellcheck*/

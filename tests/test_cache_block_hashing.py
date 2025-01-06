@@ -6,6 +6,7 @@ from typing import List, Optional
 
 import pytest
 
+from vllm.inputs import token_inputs
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Sequence
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
@@ -70,10 +71,8 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
                 hashes[-1].append([])
                 prompt_token_ids = tokenizer.encode(prompt)
                 seq = Sequence(seq_id,
-                               inputs={
-                                   "prompt": prompt,
-                                   "prompt_token_ids": prompt_token_ids,
-                               },
+                               inputs=token_inputs(prompt_token_ids,
+                                                   prompt=prompt),
                                block_size=block_size,
                                eos_token_id=tokenizer.tokenizer.eos_token_id,
                                lora_request=lora_request)

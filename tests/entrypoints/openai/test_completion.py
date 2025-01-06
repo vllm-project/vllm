@@ -28,6 +28,8 @@ PA_NAME = "swapnilbp/llama_tweet_ptune"
 # need to change to match the prompt adapter
 PA_NUM_VIRTUAL_TOKENS = 8
 
+GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
+
 
 @pytest.fixture(scope="module")
 def zephyr_lora_files():
@@ -157,15 +159,15 @@ async def test_added_lora_tokens(client: openai.AsyncOpenAI):
 @pytest.mark.asyncio
 async def test_added_lora_tokens_base_model(client: openai.AsyncOpenAI):
     # test using token IDs
-    completion = await client.completions.create(
-        model=MODEL_NAME,
-        prompt=[0, 0, 32000, 32001, 32002],
-        echo=True,
-        max_tokens=5,
-        temperature=0.0,
-    )
-    # Added tokens should not appear in tokenized prompt
-    assert "vllm" not in completion.choices[0].text
+    with pytest.raises(openai.BadRequestError, match="out of vocabulary"):
+        # Added tokens should be rejected by the base model
+        await client.completions.create(
+            model=MODEL_NAME,
+            prompt=[0, 0, 32000, 32001, 32002],
+            echo=True,
+            max_tokens=5,
+            temperature=0.0,
+        )
 
 
 @pytest.mark.asyncio
@@ -338,6 +340,40 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
     assert chunk.choices[0].finish_reason == "length"
     assert chunk.choices[0].text
     assert "".join(chunks) == single_output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+)
+async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
+    """Streaming for parallel sampling.
+    The tokens from multiple samples, are flattened into a single stream,
+    with an index to indicate which sample the token belongs to.
+    """
+
+    prompt = "What is an LLM?"
+    n = 3
+    max_tokens = 5
+
+    stream = await client.completions.create(model=model_name,
+                                             prompt=prompt,
+                                             max_tokens=max_tokens,
+                                             n=n,
+                                             stream=True)
+    chunks: List[List[str]] = [[] for i in range(n)]
+    finish_reason_count = 0
+    async for chunk in stream:
+        index = chunk.choices[0].index
+        text = chunk.choices[0].text
+        chunks[index].append(text)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    assert finish_reason_count == n
+    for chunk in chunks:
+        assert len(chunk) == max_tokens
+        print("".join(chunk))
 
 
 @pytest.mark.asyncio
@@ -601,8 +637,7 @@ async def test_allowed_token_ids(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_json_completion(client: openai.AsyncOpenAI,
                                       guided_decoding_backend: str,
                                       sample_json_schema):
@@ -624,8 +659,7 @@ async def test_guided_json_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_regex_completion(client: openai.AsyncOpenAI,
                                        guided_decoding_backend: str,
                                        sample_regex):
@@ -646,8 +680,7 @@ async def test_guided_regex_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_choice_completion(client: openai.AsyncOpenAI,
                                         guided_decoding_backend: str,
                                         sample_guided_choice):
@@ -727,8 +760,7 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
                                           guided_decoding_backend: str,
                                           sample_json_schema, sample_regex):

@@ -1,158 +1,27 @@
-import sys
 from abc import ABC, abstractmethod
-from collections import UserDict, defaultdict
-from typing import (Any, Callable, Dict, List, Mapping, Optional, Tuple, Type,
-                    TypedDict, TypeVar, Union, cast, final)
+from collections import defaultdict
+from pathlib import Path
+from typing import (TYPE_CHECKING, Any, Callable, Generic, NamedTuple,
+                    Optional, Sequence, Tuple, Type, TypeVar, Union)
 
-import numpy as np
-import torch
-import torch.types
-from PIL import Image
 from torch import nn
-from typing_extensions import TypeAlias
 
-from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-from vllm.utils import (JSONTree, get_allowed_kwarg_only_overrides, is_list_of,
-                        json_map_leaves, resolve_mm_processor_kwargs)
+from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
+                        resolve_mm_processor_kwargs)
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
+    from vllm.sequence import SequenceGroupMetadata
+
+from .inputs import (ModalityData, MultiModalDataDict, MultiModalKwargs,
+                     PlaceholderRange)
 
 logger = init_logger(__name__)
 
-NestedTensors = Union[List["NestedTensors"], List[torch.Tensor], torch.Tensor]
-"""
-Uses a list instead of a tensor if the dimensions of each element do not match.
-"""
-
-BatchedTensorInputs: TypeAlias = Dict[str, NestedTensors]
-"""
-A dictionary containing nested tensors which have been batched via
-:meth:`MultiModalInputs.batch`.
-"""
-
-if sys.version_info < (3, 9):
-    # UserDict cannot be subscripted
-    class _MultiModalInputsBase(UserDict):
-        pass
-else:
-
-    class _MultiModalInputsBase(UserDict[str, NestedTensors]):
-        pass
-
-
-class MultiModalInputs(_MultiModalInputsBase):
-    """
-    A dictionary that represents the keyword arguments to
-    :meth:`~torch.nn.Module.forward`.
-    """
-
-    @staticmethod
-    def _try_stack(nested_tensors: NestedTensors) -> NestedTensors:
-        """
-        Recursively stacks lists of tensors when they all have the same shape.
-        """
-        if isinstance(nested_tensors, torch.Tensor):
-            return nested_tensors
-
-        if isinstance(nested_tensors, np.ndarray):
-            return torch.from_numpy(nested_tensors)
-
-        if isinstance(nested_tensors, (int, float)):
-            return torch.tensor(nested_tensors)
-
-        stacked = [MultiModalInputs._try_stack(t) for t in nested_tensors]
-        if not is_list_of(stacked, torch.Tensor, check="all"):
-            # Only tensors (not lists) can be stacked.
-            return stacked
-
-        tensors_ = cast(List[torch.Tensor], stacked)
-        if any(t.shape != tensors_[0].shape for t in tensors_):
-            # The tensors have incompatible shapes and can't be stacked.
-            return tensors_
-
-        return torch.stack(tensors_)
-
-    @staticmethod
-    def batch(inputs_list: List["MultiModalInputs"]) -> BatchedTensorInputs:
-        """
-        Batch multiple inputs together into a dictionary.
-
-        The resulting dictionary has the same keys as the inputs.
-        If the corresponding value from each input is a tensor and they all
-        share the same shape, the output value is a single batched tensor;
-        otherwise, the output value is a list containing the original value
-        from each input.
-        """
-        if len(inputs_list) == 0:
-            return {}
-
-        item_lists: Dict[str, List[NestedTensors]] = defaultdict(list)
-
-        for inputs in inputs_list:
-            # For models that supports multiple modalities (e.g. Qwen2-VL),
-            # different modalities will return different data keys,
-            # so batch() should skip the same key check.
-
-            for k, v in inputs.items():
-                item_lists[k].append(v)
-
-        return {
-            k: MultiModalInputs._try_stack(item_list)
-            for k, item_list in item_lists.items()
-        }
-
-    @staticmethod
-    def as_kwargs(
-        batched_inputs: BatchedTensorInputs,
-        *,
-        device: torch.types.Device,
-    ) -> BatchedTensorInputs:
-        json_inputs = cast(JSONTree[torch.Tensor], batched_inputs)
-
-        json_mapped = json_map_leaves(
-            lambda x: x.to(device, non_blocking=True),
-            json_inputs,
-        )
-
-        return cast(BatchedTensorInputs, json_mapped)
-
-
-_T = TypeVar("_T")
-
-MultiModalData: TypeAlias = Union[_T, List[_T]]
-"""
-Either a single data instance, or a list of data instances.
-
-The number of data instances allowed per modality is restricted by
-`--limit-mm-per-prompt`.
-"""
-
-
-@final
-class MultiModalDataBuiltins(TypedDict, total=False):
-    """Modality types that are predefined by vLLM."""
-
-    image: MultiModalData[Image.Image]
-    """The input image(s)."""
-
-    audio: MultiModalData[Tuple[np.ndarray, Union[int, float]]]
-    """The input audio item(s) and corresponding sampling rate(s)."""
-
-
-MultiModalDataDict = Union[MultiModalDataBuiltins,
-                           Mapping[str, MultiModalData[object]]]
-"""
-A dictionary containing an item for each modality type to input.
-
-Note:
-    This dictionary also accepts modality keys defined outside
-    :class:`MultiModalDataBuiltins` as long as a customized plugin is registered
-    through the :class:`~vllm.multimodal.MULTIMODAL_REGISTRY`.
-    Read more on that :ref:`here <adding_multimodal_plugin>`.
-"""
-
-MultiModalInputMapper = Callable[[InputContext, MultiModalData[object]],
-                                 MultiModalInputs]
+MultiModalInputMapper = Callable[[InputContext, ModalityData[object]],
+                                 MultiModalKwargs]
 """
 Return a dictionary to be passed as keyword arguments to
 :meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
@@ -167,6 +36,7 @@ Calculate the maximum number of multimodal tokens input to the language
 model. This does not include tokens that correspond to the input text.
 """
 
+_T = TypeVar("_T")
 N = TypeVar("N", bound=Type[nn.Module])
 
 
@@ -181,12 +51,12 @@ class MultiModalPlugin(ABC):
     (i.e., the modality of the data).
 
     See also:
-        :ref:`adding_multimodal_plugin`
+        :ref:`adding-multimodal-plugin`
     """
 
     def __init__(self) -> None:
-        self._input_mappers: Dict[Type[nn.Module], MultiModalInputMapper] = {}
-        self._max_mm_tokens: Dict[Type[nn.Module], MultiModalTokensCalc] = {}
+        self._input_mappers = ClassRegistry[nn.Module, MultiModalInputMapper]()
+        self._max_mm_tokens = ClassRegistry[nn.Module, MultiModalTokensCalc]()
 
     @abstractmethod
     def get_data_key(self) -> str:
@@ -199,9 +69,9 @@ class MultiModalPlugin(ABC):
     def _default_input_mapper(
         self,
         ctx: InputContext,
-        data: MultiModalData[object],
+        data: ModalityData[Any],
         **mm_processor_kwargs,
-    ) -> MultiModalInputs:
+    ) -> MultiModalKwargs:
         """
         Return a dictionary to be passed as keyword arguments to
         :meth:`~torch.nn.Module.forward`. This is similar in concept to
@@ -225,27 +95,32 @@ class MultiModalPlugin(ABC):
         If `None` is provided, then the default input mapper is used instead.
 
         See also:
-            - :ref:`input_processing_pipeline`
-            - :ref:`enabling_multimodal_inputs`
+            - :ref:`input-processing-pipeline`
+            - :ref:`enabling-multimodal-inputs`
         """
 
         def wrapper(model_cls: N) -> N:
-            if model_cls in self._input_mappers:
+            if self._input_mappers.contains(model_cls, strict=True):
                 logger.warning(
                     "Model class %s already has an input mapper "
                     "registered to %s. It is overwritten by the new one.",
-                    model_cls, self)
+                    model_cls,
+                    self,
+                )
 
-            self._input_mappers[model_cls] = mapper \
-                or self._default_input_mapper
+            self._input_mappers[model_cls] = (mapper
+                                              or self._default_input_mapper)
 
             return model_cls
 
         return wrapper
 
-    def map_input(self, model_config: ModelConfig,
-                  data: MultiModalData[object],
-                  mm_processor_kwargs: Dict[str, Any]) -> MultiModalInputs:
+    def map_input(
+        self,
+        model_config: "ModelConfig",
+        data: ModalityData[Any],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+    ) -> MultiModalKwargs:
         """
         Transform the data into a dictionary of model inputs using the
         input mapper registered for that model.
@@ -256,9 +131,10 @@ class MultiModalPlugin(ABC):
             TypeError: If the data type is not supported.
 
         See also:
-            - :ref:`input_processing_pipeline`
-            - :ref:`enabling_multimodal_inputs`
+            - :ref:`input-processing-pipeline`
+            - :ref:`enabling-multimodal-inputs`
         """
+
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
 
@@ -269,6 +145,9 @@ class MultiModalPlugin(ABC):
         if mapper is None:
             raise KeyError(f"No input mapper in {self} is registered for "
                            f"model class {model_cls.__name__}.")
+
+        if mm_processor_kwargs is None:
+            mm_processor_kwargs = {}
 
         # In the case of the default mapper, we have to get resource
         # processor through its HuggingFace autoclass; since this goes
@@ -312,27 +191,29 @@ class MultiModalPlugin(ABC):
         If `None` is provided, then the default calculation is used instead.
 
         See also:
-            :ref:`enabling_multimodal_inputs`
+            :ref:`enabling-multimodal-inputs`
         """
 
         def wrapper(model_cls: N) -> N:
-            if model_cls in self._max_mm_tokens:
+            if self._max_mm_tokens.contains(model_cls, strict=True):
                 logger.warning(
                     "Model class %s already calculates maximum number of "
                     "tokens in %s. It is overwritten by the new one.",
-                    model_cls, self)
+                    model_cls,
+                    self,
+                )
 
             if isinstance(max_mm_tokens, int):
                 self._validate_max_multimodal_tokens(max_mm_tokens)
 
-            self._max_mm_tokens[model_cls] = max_mm_tokens \
-                or self._default_max_multimodal_tokens
+            self._max_mm_tokens[model_cls] = (
+                max_mm_tokens or self._default_max_multimodal_tokens)
 
             return model_cls
 
         return wrapper
 
-    def get_max_multimodal_tokens(self, model_config: ModelConfig) -> int:
+    def get_max_multimodal_tokens(self, model_config: "ModelConfig") -> int:
         """
         Get the maximum number of multi-modal tokens
         for profiling the memory usage of a model.
@@ -342,20 +223,20 @@ class MultiModalPlugin(ABC):
         The model is identified by ``model_config``.
 
         See also:
-            :ref:`enabling_multimodal_inputs`
+            :ref:`enabling-multimodal-inputs`
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
+        from vllm.model_executor.models import supports_multimodal
 
         model_cls, _ = get_model_architecture(model_config)
 
-        if model_cls not in self._input_mappers:
+        if not supports_multimodal(model_cls):
             return 0
 
         max_mm_tokens = self._max_mm_tokens.get(model_cls)
         if max_mm_tokens is None:
-            raise KeyError(f"No maximum number of multi-modal tokens is given "
-                           f"for model class {model_cls.__name__} in {self}.")
+            return 0
 
         if callable(max_mm_tokens):
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
@@ -366,3 +247,232 @@ class MultiModalPlugin(ABC):
         self._validate_max_multimodal_tokens(max_mm_tokens)
 
         return max_mm_tokens
+
+
+class MultiModalPlaceholderMap:
+    """
+    Relates multi-modal embeddings to their corresponding placeholders.
+    """
+
+    class IndexMap(NamedTuple):
+        src: list[int]
+        dest: list[int]
+
+    src_ranges: list[range]
+    """
+    The indices of the multi-modal embeddings that will replace the
+    corresponding placeholder embeddings pointed to by ``dest_ranges``.
+    """
+
+    src_len: int
+    """
+    The total number of flattened multi-modal embeddings.
+    """
+
+    dest_ranges: list[range]
+    """
+    The indices of the placeholder embeddings that will be replaced by the
+    multimodal embeddings.
+    """
+
+    dest_len: int
+    """
+    The total number of embeddings in the destination tensor.
+    """
+
+    def __init__(self):
+        self.src_ranges = []
+        self.src_len = 0
+        self.dest_ranges = []
+        self.dest_len = 0
+
+    @classmethod
+    def from_seq_group(
+        cls, seq_group: "SequenceGroupMetadata", positions: range
+    ) -> Tuple[Optional[MultiModalDataDict], dict[str,
+                                                  "MultiModalPlaceholderMap"]]:
+        """
+        Returns the multi-modal items that intersect with the portion of a
+        prompt (``seq_group``) represented by ``positions``, as well as a
+        ``MultiModalPlaceholderMap`` that relates the multi-modal embedding
+        vectors to their corresponding placeholders.
+
+        Examples:
+
+        .. code-block::
+
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |.................................|
+
+                images      = [A, B]
+                src_ranges  = [(0, 4), (4, 8)]
+                dest_ranges = [(0, 4), (5, 9)]
+
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |  .....                          |
+
+                images      = [A, B]
+                src_ranges  = [(2, 4), (4, 6)]
+                dest_ranges = [(0, 2), (3, 5)]
+
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |     .........                   |
+
+                images      = [B]
+                src_ranges  = [(0, 4)]
+                dest_ranges = [(0, 4)]
+
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |          .......................|
+
+                images      = []
+                src_ranges  = []
+                dest_ranges = []
+        """
+        seq_mm_data = seq_group.multi_modal_data
+        seq_mm_placeholders = seq_group.multi_modal_placeholders
+
+        if not seq_mm_data or not seq_mm_placeholders:
+            return seq_mm_data, {}
+
+        # For merged processor, we directly use mm_kwargs as mm_data
+        if isinstance(seq_mm_data, MultiModalKwargs):
+            placeholder_maps = dict[str, MultiModalPlaceholderMap]()
+
+            for modality, placeholders in seq_mm_placeholders.items():
+                placeholder_map = MultiModalPlaceholderMap()
+
+                if positions:
+                    placeholder_map.append_items_from_seq_group(
+                        positions,
+                        # Dummy, since we don't care about intersecting items
+                        [None] * len(placeholders),
+                        placeholders,
+                    )
+
+                placeholder_maps[modality] = placeholder_map
+
+            return seq_mm_data, placeholder_maps
+
+        mm_data = {**seq_mm_data}
+        placeholder_maps = defaultdict[str, MultiModalPlaceholderMap](
+            MultiModalPlaceholderMap)
+
+        for modality, placeholders in seq_mm_placeholders.items():
+            mm_items = mm_data.pop(modality)
+            if not isinstance(mm_items, list):
+                mm_items = [mm_items]
+
+            if positions:
+                intersecting_items = placeholder_maps[modality] \
+                    .append_items_from_seq_group(
+                        positions,
+                        mm_items,
+                        placeholders,
+                    )
+
+                if intersecting_items:
+                    mm_data[modality] = intersecting_items
+
+        return mm_data, placeholder_maps
+
+    def append_items_from_seq_group(
+        self,
+        positions: range,
+        multi_modal_items: list[_T],
+        multi_modal_placeholders: Sequence[PlaceholderRange],
+    ) -> list[_T]:
+        """
+        Adds the multi-modal items that intersect ```positions`` to this
+        placeholder map and returns the intersecting items.
+        """
+        intersecting_items = []
+
+        if len(multi_modal_items) != len(multi_modal_placeholders):
+            raise ValueError(
+                "Multi-modal placeholders and items must have the same length."
+            )
+        for placeholder_dict, mm_item in zip(multi_modal_placeholders,
+                                             multi_modal_items):
+            placeholder = range(
+                placeholder_dict["offset"],
+                placeholder_dict["offset"] + placeholder_dict["length"],
+            )
+            intersection = range(
+                max(positions.start, placeholder.start),
+                min(positions.stop, placeholder.stop),
+            )
+
+            if not intersection:
+                # Skip this multi-modal item.
+                continue
+
+            token_embedding_range = range(
+                intersection.start - positions.start,
+                intersection.stop - positions.start,
+            )
+
+            multimodal_embedding_range = range(
+                intersection.start - placeholder.start + self.src_len,
+                intersection.stop - placeholder.start + self.src_len,
+            )
+
+            intersecting_items.append(mm_item)
+            self.dest_ranges.append(token_embedding_range)
+            self.src_ranges.append(multimodal_embedding_range)
+            self.src_len += len(placeholder)
+
+        self.dest_len += len(positions)
+        return intersecting_items
+
+    def extend(self, other: "MultiModalPlaceholderMap"):
+        """
+        Adds the placeholders from another ``MultiModalPlaceholderMap`` to this
+        instance based on the source and destination tensors being
+        concatenated.
+        """
+
+        self.src_ranges.extend(
+            range(self.src_len + r.start, self.src_len + r.stop)
+            for r in other.src_ranges)
+        self.src_len += other.src_len
+        self.dest_ranges.extend(
+            range(self.dest_len + r.start, self.dest_len + r.stop)
+            for r in other.dest_ranges)
+        self.dest_len += other.dest_len
+
+    def index_map(self) -> "IndexMap":
+        """
+        Finalizes the placeholder map into lists of indices that can be used to
+        index the source and destination tensors.
+        """
+
+        src_indices = [i for r in self.src_ranges for i in r]
+        dest_indices = [i for r in self.dest_ranges for i in r]
+
+        if len(src_indices) != len(dest_indices):
+            raise ValueError(
+                f"The number of source ({len(src_indices)}) and destination "
+                f"indices ({len(dest_indices)}) must be the same.")
+
+        return MultiModalPlaceholderMap.IndexMap(src=src_indices,
+                                                 dest=dest_indices)
+
+
+class MediaIO(ABC, Generic[_T]):
+
+    @abstractmethod
+    def load_bytes(self, data: bytes) -> _T:
+        raise NotImplementedError
+
+    @abstractmethod
+    def load_base64(self, media_type: str, data: str) -> _T:
+        """
+        List of media types:
+        https://www.iana.org/assignments/media-types/media-types.xhtml
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def load_file(self, filepath: Path) -> _T:
+        raise NotImplementedError

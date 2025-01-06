@@ -25,7 +25,15 @@ from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
 from vllm.platforms import current_platform
-from vllm.utils import print_warning_once
+from vllm.utils import PlaceholderModule, print_warning_once
+
+try:
+    from runai_model_streamer import SafetensorsStreamer
+except ImportError:
+    runai_model_streamer = PlaceholderModule(
+        "runai_model_streamer")  # type: ignore[assignment]
+    SafetensorsStreamer = runai_model_streamer.placeholder_attr(
+        "SafetensorsStreamer")
 
 logger = init_logger(__name__)
 
@@ -188,7 +196,7 @@ def get_quant_config(model_config: ModelConfig,
             f"{quant_config_files}")
 
     quant_config_file = quant_config_files[0]
-    with open(quant_config_file, "r") as f:
+    with open(quant_config_file) as f:
         config = json.load(f)
 
         if model_config.quantization == "bitsandbytes":
@@ -306,7 +314,7 @@ def filter_duplicate_safetensors_files(hf_weights_files: List[str],
 
     # Iterate through the weight_map (weight_name: safetensors files)
     # to identify weights that we should use.
-    with open(index_file_name, "r") as f:
+    with open(index_file_name) as f:
         weight_map = json.load(f)["weight_map"]
     weight_files_in_index = set()
     for weight_name in weight_map:
@@ -382,7 +390,7 @@ def np_cache_weights_iterator(
             with open(weight_names_file, "w") as f:
                 json.dump(weight_names, f)
 
-    with open(weight_names_file, "r") as f:
+    with open(weight_names_file) as f:
         weight_names = json.load(f)
 
     for name in weight_names:
@@ -410,6 +418,23 @@ def safetensors_weights_iterator(
                 yield name, param
 
 
+def runai_safetensors_weights_iterator(
+    hf_weights_files: List[str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    """Iterate over the weights in the model safetensor files."""
+    enable_tqdm = not torch.distributed.is_initialized(
+    ) or torch.distributed.get_rank() == 0
+    with SafetensorsStreamer() as streamer:
+        for st_file in tqdm(
+                hf_weights_files,
+                desc="Loading safetensors using Runai Model Streamer",
+                disable=not enable_tqdm,
+                bar_format=_BAR_FORMAT,
+        ):
+            streamer.stream_file(st_file)
+            yield from streamer.get_tensors()
+
+
 def pt_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
@@ -423,8 +448,7 @@ def pt_weights_iterator(
             bar_format=_BAR_FORMAT,
     ):
         state = torch.load(bin_file, map_location="cpu")
-        for name, param in state.items():
-            yield name, param
+        yield from state.items()
         del state
         torch.cuda.empty_cache()
 
