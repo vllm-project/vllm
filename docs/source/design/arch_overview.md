@@ -77,8 +77,7 @@ python -m vllm.entrypoints.openai.api_server --model <model>
 
 That code can be found in <gh-file:vllm/entrypoints/openai/api_server.py>.
 
-More details on the API server can be found in the {doc}`OpenAI Compatible
-Server </serving/openai_compatible_server>` document.
+More details on the API server can be found in the [OpenAI-Compatible Server](#openai-compatible-server) document.
 
 ## LLM Engine
 

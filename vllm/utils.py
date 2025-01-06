@@ -1938,7 +1938,7 @@ def _check_multiproc_method():
                        "the `spawn` multiprocessing start method. Setting "
                        "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
                        "See https://docs.vllm.ai/en/latest/getting_started/"
-                       "debugging.html#python-multiprocessing "
+                       "troubleshooting.html#python-multiprocessing "
                        "for more information.")
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 

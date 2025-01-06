@@ -1,6 +1,6 @@
 (installation-xpu)=
 
-# Installation with XPU
+# Installation for XPUs
 
 vLLM initially supports basic model inferencing and serving on Intel GPU platform.
 

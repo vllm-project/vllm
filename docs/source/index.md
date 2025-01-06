@@ -50,7 +50,7 @@ For more information, check out the following:
 - [vLLM announcing blog post](https://vllm.ai) (intro to PagedAttention)
 - [vLLM paper](https://arxiv.org/abs/2309.06180) (SOSP 2023)
 - [How continuous batching enables 23x throughput in LLM inference while reducing p50 latency](https://www.anyscale.com/blog/continuous-batching-llm-inference) by Cade Daniel et al.
-- {ref}`vLLM Meetups <meetups>`.
+- [vLLM Meetups](#meetups)
 
 ## Documentation
 
@@ -58,18 +58,11 @@ For more information, check out the following:
 :caption: Getting Started
 :maxdepth: 1
 
-getting_started/installation
-getting_started/amd-installation
-getting_started/openvino-installation
-getting_started/cpu-installation
-getting_started/gaudi-installation
-getting_started/arm-installation
-getting_started/neuron-installation
-getting_started/tpu-installation
-getting_started/xpu-installation
+getting_started/installation/index
 getting_started/quickstart
-getting_started/debugging
 getting_started/examples/examples_index
+getting_started/troubleshooting
+getting_started/faq
 ```
 
 ```{toctree}
@@ -110,7 +103,6 @@ usage/structured_outputs
 usage/spec_decode
 usage/compatibility_matrix
 usage/performance
-usage/faq
 usage/engine_args
 usage/env_vars
 usage/usage_stats
