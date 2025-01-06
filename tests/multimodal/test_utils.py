@@ -210,6 +210,7 @@ class TestCase(NamedTuple):
 
 def test_merge_and_sort_multimodal_metadata():
 
+    # yapf: disable
     test_cases = [
         # Single modality should return result as is but flattened
         TestCase(mm_positions={
@@ -225,6 +226,7 @@ def test_merge_and_sort_multimodal_metadata():
                      PlaceholderRange(offset=3, length=2)
                  ],
                  expected_hashes=["hash1", "hash2"]),
+
         # Single modality without hashes return None for mm hash.
         TestCase(mm_positions={
             "image": [
@@ -239,6 +241,7 @@ def test_merge_and_sort_multimodal_metadata():
                      PlaceholderRange(offset=2, length=2)
                  ],
                  expected_hashes=None),
+
         # Multiple modalities with hashes should return sorted modalities
         # and flattened ranges and hashes.
         TestCase(mm_positions={
@@ -265,6 +268,7 @@ def test_merge_and_sort_multimodal_metadata():
                  expected_hashes=[
                      "audio_hash1", "audio_hash2", "image_hash1", "image_hash2"
                  ]),
+
         # Multiple modalities without hashes should return sorted modalities
         # and flattened ranges and None.
         TestCase(mm_positions={
@@ -286,6 +290,7 @@ def test_merge_and_sort_multimodal_metadata():
                      PlaceholderRange(offset=11, length=5)
                  ],
                  expected_hashes=None),
+
         # Three modalities
         TestCase(mm_positions={
             "image": [
@@ -320,6 +325,7 @@ def test_merge_and_sort_multimodal_metadata():
                      "video_hash3", "image_hash1", "image_hash2"
                  ]),
     ]
+    # yapf: enable
 
     for (mm_positions, mm_hashes, expected_modalities, expected_ranges,
          expected_hashes) in test_cases:
@@ -333,6 +339,7 @@ def test_merge_and_sort_multimodal_metadata():
 
 def test_merge_and_sort_multimodal_metadata_with_interleaving():
 
+    # yapf: disable
     test_cases = [
 
         # <image> <audio> <image> <audio>
@@ -373,6 +380,7 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
                  expected_ranges=[],
                  expected_hashes=None),
     ]
+    # yapf: enable
 
     for case in test_cases:
         with pytest.raises(ValueError) as ex_info:
