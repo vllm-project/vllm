@@ -75,7 +75,7 @@ class UltravoxProcessingMixin(ProcessingMixin):
         hf_processor = self._get_hf_processor(sampling_rate=sampling_rate)
         audio_processor = hf_processor.audio_processor  # type: ignore
         feature_extractor = audio_processor.feature_extractor  # type: ignore
-        assert isinstance(feature_extractor, feature_extractor)
+        assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
 
