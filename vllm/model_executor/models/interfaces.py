@@ -39,8 +39,12 @@ class SupportsMultiModal(Protocol):
 
         The output embeddings must be one of the following formats:
         - A list or tuple of 2D tensors, where each tensor corresponds to 
-          each input image.
+          each input multimodal data item (e.g, image).
         - A single 3D tensor, with the batch dimension grouping the 2D tensors.
+
+        NOTE: The returned multimodal embeddings must be in the same order as 
+        the appearances of their corresponding multimodal data item in the 
+        input prompt.
         """
         ...
 
