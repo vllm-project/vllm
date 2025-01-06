@@ -66,6 +66,30 @@ getting_started/faq
 ```
 
 ```{toctree}
+:caption: Models
+:maxdepth: 1
+
+models/supported_models
+models/generative_models
+models/pooling_models
+models/loaders/index
+```
+
+```{toctree}
+:caption: Features
+:maxdepth: 1
+
+features/quantization/index
+features/lora
+features/tool_calling
+features/structured_outputs
+features/automatic_prefix_caching
+features/disagg_prefill
+features/spec_decode
+features/compatibility_matrix
+```
+
+```{toctree}
 :caption: Inference and Serving
 :maxdepth: 1
 
@@ -89,30 +113,6 @@ deployment/k8s
 deployment/nginx
 deployment/frameworks/index
 deployment/integrations/index
-```
-
-```{toctree}
-:caption: Models
-:maxdepth: 1
-
-models/supported_models
-models/generative_models
-models/pooling_models
-models/loaders/index
-```
-
-```{toctree}
-:caption: Features
-:maxdepth: 1
-
-features/quantization/index
-features/lora
-features/tool_calling
-features/structured_outputs
-features/automatic_prefix_caching
-features/disagg_prefill
-features/spec_decode
-features/compatibility_matrix
 ```
 
 ```{toctree}
