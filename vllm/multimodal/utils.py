@@ -482,8 +482,7 @@ def merge_and_sort_multimodal_metadata(
                 mm_hashes[modalities[0]])
 
     placeholder_lists_with_modality = [(modality, mm_positions[modality])
-                                       for modality in modalities
-                                       if modality in mm_positions]
+                                       for modality in modalities]
 
     if mm_hashes is None:
         sorted_placeholder_lists = sorted(placeholder_lists_with_modality,
