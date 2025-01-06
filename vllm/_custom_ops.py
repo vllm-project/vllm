@@ -1104,6 +1104,7 @@ def register_graph_buffers(fa: int, handles: List[str],
                            offsets: List[List[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
 
+
 def allocate_meta_buffer(size: int) -> torch.Tensor:
     return torch.ops._C_custom_ar.allocate_meta_buffer(size)
 

@@ -24,7 +24,8 @@ from vllm.logger import init_logger
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              DbrxConfig, EAGLEConfig,
-                                             Grok1Config, ExaoneConfig, H2OVLChatConfig,
+                                             ExaoneConfig, Grok1Config,
+                                             H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,

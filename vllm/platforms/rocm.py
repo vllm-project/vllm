@@ -1,6 +1,6 @@
 import os
 from functools import lru_cache, wraps
-from typing import TYPE_CHECKING, List, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
 from amdsmi import (AmdSmiException, amdsmi_get_gpu_board_info,

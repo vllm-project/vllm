@@ -183,7 +183,6 @@ class ModelConfig:
         factors.append(self.model)
         factors.append(self.dtype)
         factors.append(self.quantization)
-        factors.append(self.quantization_param_path)
         factors.append(self.revision)
         factors.append(self.code_revision)
         factors.append(self.trust_remote_code)
@@ -560,6 +559,7 @@ class ModelConfig:
 
             # Detect which checkpoint is it
             for name in QUANTIZATION_METHODS:
+                from vllm.platforms import current_platform
                 method = get_quantization_config(name)
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
@@ -1350,7 +1350,6 @@ class ParallelConfig:
     def _verify_args(self) -> None:
         # Lazy import to avoid circular import
         from vllm.executor.executor_base import ExecutorBase
-        from vllm.platforms import current_platform
         if self.distributed_executor_backend not in (
                 "ray", "mp", None) and not (isinstance(
                     self.distributed_executor_backend, type) and issubclass(
