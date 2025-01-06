@@ -6,7 +6,7 @@ Install:
 - [`docker`](https://docs.docker.com/engine/install/)
 - [`docker compose`](https://docs.docker.com/compose/install/linux/#install-using-the-repository)
 
-### Launch
+## Launch
 
 Prometheus metric logging is enabled by default in the OpenAI-compatible server. Launch via the entrypoint:
 ```bash
@@ -35,11 +35,11 @@ python3 ../../benchmarks/benchmark_serving.py \
 
 Navigating to [`http://localhost:8000/metrics`](http://localhost:8000/metrics) will show the raw Prometheus metrics being exposed by vLLM.
 
-### Grafana Dashboard
+## Grafana Dashboard
 
 Navigate to [`http://localhost:3000`](http://localhost:3000). Log in with the default username (`admin`) and password (`admin`).
 
-#### Add Prometheus Data Source
+### Add Prometheus Data Source
 
 Navigate to [`http://localhost:3000/connections/datasources/new`](http://localhost:3000/connections/datasources/new) and select Prometheus. 
 
@@ -47,7 +47,7 @@ On Prometheus configuration page, we need to add the `Prometheus Server URL` in 
 
 Click `Save & Test`. You should get a green check saying "Successfully queried the Prometheus API.".
 
-#### Import Dashboard 
+### Import Dashboard 
 
 Navigate to [`http://localhost:3000/dashboard/import`](http://localhost:3000/dashboard/import), upload `grafana.json`, and select the `prometheus` datasource. You should see a screen that looks like the following:
 
