@@ -34,7 +34,11 @@ CATEGORIES = {
 
 
 def is_example(path: Path) -> bool:
-    return path.is_dir() or path.suffix in (".py", ".md")
+    if path.suffix in (".py", ".md"):
+        return True
+    if path.is_dir():
+        return any(file.suffix == ".md" for file in path.iterdir())
+    return False
 
 
 def fix_case(text: str) -> str:
