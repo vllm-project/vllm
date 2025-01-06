@@ -1,9 +1,8 @@
 import base64
 import mimetypes
 import os
-from collections import namedtuple
 from tempfile import NamedTemporaryFile, TemporaryDirectory
-from typing import Dict, Tuple
+from typing import TYPE_CHECKING, Dict, NamedTuple, Optional, Tuple
 
 import numpy as np
 import pytest
@@ -14,6 +13,10 @@ from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import (MediaConnector,
                                    merge_and_sort_multimodal_metadata,
                                    repeat_and_pad_placeholder_tokens)
+
+if TYPE_CHECKING:
+    from vllm.multimodal.hasher import MultiModalHashDict
+    from vllm.multimodal.inputs import MultiModalPlaceholderDict
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_URLS = [
@@ -196,16 +199,13 @@ def test_repeat_and_pad_placeholder_tokens(model):
         assert ranges == expected_ranges
 
 
-# Each test case is a tuple of :
-# - mm_positions: MultiModalPlaceholderDict
-# - mm_hashes: Optional[MultiModalHashDict]
-# - expected sorted modalities: list[str]
-# - expected sorted & flattened PlaceholderRanges: list[PlaceholderRange]
-# - expected sorted & flattened hash strings: Optional[list[str]]
-TestCase = namedtuple("TestCase", [
-    "mm_positions", "mm_hashes", "expected_modalities", "expected_ranges",
-    "expected_hashes"
-])
+# Used for the next two tests related to `merge_and_sort_multimodal_metadata`.
+class TestCase(NamedTuple):
+    mm_positions: "MultiModalPlaceholderDict"
+    mm_hashes: Optional["MultiModalHashDict"]
+    expected_modalities: list[str]
+    expected_ranges: list[PlaceholderRange]
+    expected_hashes: Optional[list[str]]
 
 
 def test_merge_and_sort_multimodal_metadata():
@@ -350,8 +350,8 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
                      "image": ["image_hash1", "image_hash2"],
                      "audio": ["audio_hash1", "audio_hash2"]
                  },
-                 expected_modalities=None,
-                 expected_ranges=None,
+                 expected_modalities=[],
+                 expected_ranges=[],
                  expected_hashes=None),
 
         # <image> <image> <video> <audio> <image>
@@ -369,8 +369,8 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
             ]
         },
                  mm_hashes=None,
-                 expected_modalities=None,
-                 expected_ranges=None,
+                 expected_modalities=[],
+                 expected_ranges=[],
                  expected_hashes=None),
     ]
 
