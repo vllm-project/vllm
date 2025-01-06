@@ -14,7 +14,7 @@ ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev
 # Remove sccache    
-RUN python3 -m pip install --upgrade pip
+RUN python3 -m pip install --upgrade pip && pip install setuptools_scm
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
 ARG COMMON_WORKDIR
 WORKDIR ${COMMON_WORKDIR}
@@ -45,7 +45,6 @@ RUN cd vllm \
 FROM scratch AS export_vllm
 ARG COMMON_WORKDIR
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/dist/*.whl /
-COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/rocm_patch /rocm_patch
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements*.txt /
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
@@ -80,12 +79,6 @@ ENV VLLM_INSTALL_PUNICA_KERNELS=1
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     cd /install \
     && pip install -U -r requirements-rocm.txt \
-    && case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
-           *"rocm-6.0"*) \
-               patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h rocm_patch/rocm_bf16.patch;; \
-           *"rocm-6.1"*) \
-               cp rocm_patch/libamdhip64.so.6 /opt/rocm/lib/libamdhip64.so.6;; \
-           *) ;; esac \
     && pip uninstall -y vllm \
     && pip install *.whl
 
