@@ -116,7 +116,7 @@ class IncrementalDetokenizer:
         self,
         sampled_token_ids: List[int],
         token_ids_lst: List[torch.Tensor],
-        logprobs_lst: List[torch.Tensor],
+        sample_logprobs_lst: List[torch.Tensor],
     ) -> Optional[SampleLogprobs]:
         """
         Lists are only of length >1 if EngineCore made
@@ -124,7 +124,7 @@ class IncrementalDetokenizer:
 
         Tensors are:
             token_ids: [topk + 1]: topk token ids at pos
-            logprobs:  [topk + 1]: topk logprobs at pos
+            sample_logprobs:  [topk + 1]: topk logprobs at pos
         """
         if self.num_logprobs == 0:
             # Sample logprobs disabled for this request
@@ -132,7 +132,7 @@ class IncrementalDetokenizer:
         assert self.logprobs is not None
 
         for sampled_token_id, logprobs, token_ids in zip(
-                sampled_token_ids, logprobs_lst, token_ids_lst):
+                sampled_token_ids, sample_logprobs_lst, token_ids_lst):
 
             # Split into sampled vs top_k.
             assert sampled_token_id == token_ids[0].item(), (
@@ -175,14 +175,14 @@ class IncrementalDetokenizer:
     def _update_prompt_logprobs(
         self,
         token_ids: Optional[torch.Tensor],
-        logprobs: Optional[torch.Tensor],
+        prompt_logprobs: Optional[torch.Tensor],
     ) -> Optional[PromptLogprobs]:
         if self.num_prompt_logprobs == 0:
             # Prompt logprobs disabled for this request
             return None
-        assert logprobs is not None
+        assert prompt_logprobs is not None
         assert token_ids is not None
-        if logprobs.numel() == 0:
+        if prompt_logprobs.numel() == 0:
             # Prompt logprobs are enabled for this request but prefill
             # is finished and no more logprobs are being streamed from
             # engine core
@@ -196,32 +196,22 @@ class IncrementalDetokenizer:
         # [num_tok, num_lps] -> [num_tok * num_lps]
         decoded_tokens = detokenize_non_incrementally(self.tokenizer,
                                                       token_ids)
-
-        # Make Logprob for each tokens. The first Logprob is None.
-        num_tokens, num_logprobs = logprobs.shape
-        if len(self.prompt_logprobs) == 0:
-            # Buffer initial chunk of logprobs during prefill
-            self.prompt_logprobs = [None] + [
-                self._make_pos_logprob_dict(
-                    logprobs[tok_idx].tolist(),
-                    token_ids[tok_idx].tolist(),
-                    # Deal with the flattening from above.
-                    decoded_tokens[tok_idx * num_logprobs:],
-                    num_logprobs,
-                ) for tok_idx in range(num_tokens)
-            ]
-        else:
-            # Buffer subsequent chunk of logprobs during prefill
-            self.prompt_logprobs += [
-                self._make_pos_logprob_dict(
-                    logprobs[tok_idx].tolist(),
-                    token_ids[tok_idx].tolist(),
-                    # Deal with the flattening from above.
-                    decoded_tokens[tok_idx * num_logprobs:],
-                    num_logprobs,
-                ) for tok_idx in range(num_tokens)
-            ]
-
+        # Make Logprob for each token.
+        num_tokens, num_logprobs = prompt_logprobs.shape
+        chunk_prompt_logprobs = [
+            self._make_pos_logprob_dict(
+                prompt_logprobs[tok_idx].tolist(),
+                token_ids[tok_idx].tolist(),
+                # Deal with the flattening from above.
+                decoded_tokens[tok_idx * num_logprobs:],
+                num_logprobs,
+            ) for tok_idx in range(num_tokens)
+        ]
+        # Buffer prefill chunk
+        self.prompt_logprobs = (
+            ([None]  # First logprob is None
+             if len(self.prompt_logprobs) == 0 else self.prompt_logprobs) +
+            chunk_prompt_logprobs)
         return self.prompt_logprobs
 
     @staticmethod

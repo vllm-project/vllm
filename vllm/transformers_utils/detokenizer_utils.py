@@ -86,7 +86,7 @@ def detokenize_non_incrementally(
     flat_token_ids = token_ids.reshape(-1, 1)
     # FIXME(andy): deal with MistralTokenizer not having
     # batch_decode. Follow up if hard?
-    return tokenizer.batch_decode(flat_token_ids)
+    return tokenizer.batch_decode(flat_token_ids)  # type: ignore
 
 
 # Based on
