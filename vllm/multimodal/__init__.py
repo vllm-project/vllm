@@ -1,4 +1,5 @@
 from .base import MultiModalPlaceholderMap, MultiModalPlugin
+from .hasher import MultiModalHashDict, MultiModalHasher
 from .inputs import (BatchedTensorInputs, ModalityData, MultiModalDataBuiltins,
                      MultiModalDataDict, MultiModalKwargs,
                      MultiModalPlaceholderDict, NestedTensors)
@@ -18,6 +19,8 @@ __all__ = [
     "ModalityData",
     "MultiModalDataBuiltins",
     "MultiModalDataDict",
+    "MultiModalHashDict",
+    "MultiModalHasher",
     "MultiModalKwargs",
     "MultiModalPlaceholderDict",
     "MultiModalPlaceholderMap",
