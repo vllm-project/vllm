@@ -37,7 +37,7 @@ print(output)
 If vLLM successfully returns text (for generative models) or hidden states (for pooling models), it indicates that your model is supported.
 ````
 
-Otherwise, please refer to [Adding a New Model](#adding-a-new-model) and [Enabling Multimodal Inputs](#enabling-multimodal-inputs) for instructions on how to implement your model in vLLM.
+Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
 ### ModelScope

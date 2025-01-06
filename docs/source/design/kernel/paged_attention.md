@@ -1,3 +1,5 @@
+(design-paged-attention)=
+
 # vLLM Paged Attention
 
 - Currently, vLLM utilizes its own implementation of a multi-head query
