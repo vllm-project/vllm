@@ -166,7 +166,7 @@ class Processor:
                     key=lambda mm_input: modality_order_dict[list(
                         mm_input.modalities)[0]])
 
-            # Apply mm input cache update (and input mapper is necessary).
+            # Apply mm input cache update (and input mapper if necessary).
             sorted_mm_inputs = self.mm_input_mapper_client.process_inputs(
                 mm_data=decoder_mm_data,
                 mm_hashes=sorted_mm_hashes,
