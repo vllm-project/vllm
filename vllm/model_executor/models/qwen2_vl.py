@@ -59,8 +59,9 @@ from vllm.multimodal.inputs import (ImageItem, ModalityData,
 from vllm.multimodal.parse import (ImageSize, ModalityDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataItems, ProcessorInputs,
+                                        MultiModalDataItems, ProcessingMixin,
                                         PromptReplacement)
+from vllm.multimodal.profiling import BaseProfilingInfo, ProcessorInputs
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
@@ -708,10 +709,44 @@ class Qwen2MultiModalDataParser(MultiModalDataParser):
         return super()._parse_video_data(data)
 
 
-class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
+class Qwen2VLProcessingMixin(ProcessingMixin):
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None, "video": None}
+    def _get_hf_config(self):
+        return self.ctx.get_hf_config(Qwen2VLConfig)
+
+    def _get_hf_processor(
+        self,
+        *,
+        min_pixels: Optional[int] = None,
+        max_pixels: Optional[int] = None,
+    ) -> Qwen2VLProcessor:
+        hf_processor = self.ctx.get_hf_processor(Qwen2VLProcessor)
+        image_processor = hf_processor.image_processor  # type: ignore
+        assert isinstance(image_processor, Qwen2VLImageProcessor)
+
+        if min_pixels:
+            image_processor.min_pixels = min_pixels
+        if max_pixels:
+            image_processor.max_pixels = max_pixels
+        if max_pixels or min_pixels:
+            image_processor.size = {
+                "min_pixels": image_processor.min_pixels,
+                "max_pixels": image_processor.max_pixels,
+            }
+
+        return hf_processor
+
+    def _get_image_processor(
+        self,
+        *,
+        min_pixels: Optional[int] = None,
+        max_pixels: Optional[int] = None,
+    ):
+        hf_processor = self._get_hf_processor(min_pixels=min_pixels,
+                                              max_pixels=max_pixels)
+        image_processor = hf_processor.image_processor  # type: ignore
+        assert isinstance(image_processor, Qwen2VLImageProcessor)
+        return image_processor
 
     def _get_vision_info(
         self,
@@ -721,14 +756,13 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         num_frames: int = 1,
         do_resize: bool = True,
     ) -> tuple[ImageSize, int]:
-        hf_config = self.ctx.get_hf_config(Qwen2VLConfig)
+        hf_config = self._get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = vision_config.temporal_patch_size
 
-        hf_processor = self._get_hf_processor()
-        image_processor = self._get_image_processor(hf_processor)
+        image_processor = self._get_image_processor()
 
         if do_resize:
             resized_height, resized_width = smart_resize(
@@ -753,7 +787,45 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
 
         return preprocessed_size, num_vision_tokens
 
-    def _get_dummy_image_size(self) -> ImageSize:
+    def _get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        _, num_image_tokens = self._get_vision_info(
+            image_width=image_width,
+            image_height=image_height,
+        )
+        return num_image_tokens
+
+    def _get_num_video_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        num_frames: int,
+    ) -> int:
+        _, num_video_tokens = self._get_vision_info(
+            image_width=image_width,
+            image_height=image_height,
+            num_frames=num_frames,
+        )
+        return num_video_tokens
+
+
+class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None, "video": None}
+
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        return {
+            "image": self._get_max_image_tokens(),
+            "video": self._get_max_video_tokens(seq_len),
+        }
+
+    def _get_image_size_with_most_features(self) -> ImageSize:
         max_image_size, _ = self._get_vision_info(
             image_width=9999999,
             image_height=9999999,
@@ -761,27 +833,27 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         return max_image_size
 
     def _get_max_image_tokens(self) -> int:
-        _, max_image_tokens = self._get_vision_info(
-            image_width=9999999,
-            image_height=9999999,
-        )
-        return max_image_tokens
+        target_width, target_height = self._get_image_size_with_most_features()
 
-    def _get_max_video_tokens(self, num_frames: int) -> int:
-        _, max_video_tokens = self._get_vision_info(
-            image_width=9999999,
-            image_height=9999999,
-            num_frames=num_frames,
+        return self._get_num_image_tokens(
+            image_width=target_width,
+            image_height=target_height,
         )
-        return max_video_tokens
 
     def _get_max_video_frames(self, max_tokens: int) -> int:
+        target_width, target_height = self._get_image_size_with_most_features()
+
         num_frames = 0
 
         while True:
             next_num_frames = num_frames + 1
+            next_max_tokens = self._get_num_video_tokens(
+                image_width=target_width,
+                image_height=target_height,
+                num_frames=next_num_frames,
+            )
 
-            if self._get_max_video_tokens(next_num_frames) > max_tokens:
+            if next_max_tokens > max_tokens:
                 break
 
             num_frames = next_num_frames
@@ -797,56 +869,73 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
         max_total_frames = self._get_max_video_frames(seq_len -
                                                       max_image_tokens)
 
-        return max(max_total_frames // max(max_videos, 1), 1)
+        num_frames = max(max_total_frames // max(max_videos, 1), 1)
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        max_image_tokens = self._get_max_image_tokens()
+        # Temporary workaround for https://github.com/huggingface/transformers/issues/35412
+        if num_frames > 1 and num_frames % 2 == 1:
+            num_frames += 1
 
-        num_frames = self._get_dummy_num_frames(seq_len)
-        max_video_tokens = self._get_max_video_tokens(num_frames)
+        return num_frames
 
-        return {
-            "image": max_image_tokens,
-            "video": max_video_tokens,
+    def _get_max_video_tokens(self, seq_len: int) -> int:
+        target_width, target_height = self._get_image_size_with_most_features()
+
+        return self._get_num_video_tokens(
+            image_width=target_width,
+            image_height=target_height,
+            num_frames=self._get_dummy_num_frames(seq_len),
+        )
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+
+        hf_processor = self._get_hf_processor()
+        image_token: str = hf_processor.image_token
+        video_token: str = hf_processor.video_token
+        target_width, target_height = self._get_image_size_with_most_features()
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images),
+            "video":
+            self._get_dummy_videos(
+                width=target_width,
+                height=target_height,
+                num_frames=self._get_dummy_num_frames(seq_len),
+                num_videos=num_videos,
+            )
         }
+
+        return ProcessorInputs(
+            prompt_text=image_token * num_images + video_token * num_videos,
+            mm_data=mm_data,
+        )
+
+
+class Qwen2VLMultiModalProcessor(Qwen2VLProcessingMixin,
+                                 BaseMultiModalProcessor):
+
+    def _get_profiling_info(self) -> BaseProfilingInfo:
+        return Qwen2VLProfilingInfo(self.ctx)
 
     def _get_data_parser(self) -> MultiModalDataParser:
         return Qwen2MultiModalDataParser()
 
-    def _get_image_processor(self, hf_processor: Qwen2VLProcessor):
-        image_processor = hf_processor.image_processor  # type: ignore
-        assert isinstance(image_processor, Qwen2VLImageProcessor)
-        return image_processor
-
-    def _get_hf_processor(
-        self,
-        *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-    ) -> Qwen2VLProcessor:
-        hf_processor = self.ctx.get_hf_processor(Qwen2VLProcessor)
-        image_processor = self._get_image_processor(hf_processor)
-
-        if min_pixels:
-            image_processor.min_pixels = min_pixels
-        if max_pixels:
-            image_processor.max_pixels = max_pixels
-        if max_pixels or min_pixels:
-            image_processor.size = {
-                "min_pixels": image_processor.min_pixels,
-                "max_pixels": image_processor.max_pixels,
-            }
-
-        return hf_processor
-
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_processor = self._get_hf_processor()
-        image_processor = self._get_image_processor(hf_processor)
+        hf_processor = self._get_hf_processor(**hf_processor_mm_kwargs)
+        image_processor = self._get_image_processor(**hf_processor_mm_kwargs)
 
         # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
         # image_token and video_token registered
@@ -899,38 +988,6 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor):
                 "video", video_slices),
             video_embeds=MultiModalFieldConfig.flat("video", video_slices),
             video_grid_thw=MultiModalFieldConfig.batched("video"),
-        )
-
-    def _get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
-        hf_processor = self._get_hf_processor()
-        image_token: str = hf_processor.image_token
-        video_token: str = hf_processor.video_token
-        target_width, target_height = self._get_dummy_image_size()
-
-        mm_data = {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images),
-            "video":
-            self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
-                num_frames=self._get_dummy_num_frames(seq_len),
-                num_videos=num_videos,
-            )
-        }
-
-        return ProcessorInputs(
-            prompt_text=image_token * num_images + video_token * num_videos,
-            mm_data=mm_data,
         )
 
 
