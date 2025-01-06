@@ -62,7 +62,9 @@ $ pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER
 
 ## Install the latest code
 
-LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for Linux running on a x86 platform with CUDA 12 for every commit since `v0.5.3`. You can download and install it with the following command:
+LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for Linux running on a x86 platform with CUDA 12 for every commit since `v0.5.3`.
+
+### Install the latest code using `pip`
 
 ```console
 $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
@@ -76,6 +78,27 @@ $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm
 ```
 
 Note that the wheels are built with Python 3.8 ABI (see [PEP 425](https://peps.python.org/pep-0425/) for more details about ABI), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (`1.0.0.dev`) is just a placeholder to have a unified URL for the wheels. The actual versions of wheels are contained in the wheel metadata. Although we don't support Python 3.8 any more (because PyTorch 2.5 dropped support for Python 3.8), the wheels are still built with Python 3.8 ABI to keep the same wheel name as before.
+
+Due to the limitation of `pip`, you have to specify the full URL of the wheel file
+
+### Install the latest code using `uv`
+
+Another way to install the latest code is to use `uv`:
+
+```console
+$ uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly
+```
+
+If you want to access the wheels for previous commits, you can specify the commit hash in the URL:
+
+```console
+$ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
+$ uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
+```
+
+The `uv` approach works for vLLM `v0.6.6` and later.
+
+### Install the latest code using docker
 
 Another way to access the latest code is to use the docker images:
 
