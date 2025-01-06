@@ -8,7 +8,6 @@ import msgspec
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -229,6 +228,7 @@ def initialize_ray_cluster(
             the default Ray cluster address.
     """
     assert_ray_available()
+    from vllm.platforms import current_platform
 
     # Connect to a ray cluster.
     if current_platform.is_rocm() or current_platform.is_xpu():

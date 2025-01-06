@@ -544,6 +544,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         model_input.record_step_event(current_stream)
 
         if get_pp_group().is_last_rank and self.is_driver_worker:
+            assert isinstance(output, list)
             assert len(
                 output
             ) == 1, "MultiStepModelRunner requires single-step base_models"
@@ -821,7 +822,7 @@ def _pythonize_sampler_output(
 
     for sgdx, (seq_group,
                sample_result) in enumerate(zip(seq_groups, samples_list)):
-        # Reminder: Please update docs/source/usage/compatibility_matrix.md
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         # (Check for Guided Decoding)
         if seq_group.sampling_params.logits_processors:

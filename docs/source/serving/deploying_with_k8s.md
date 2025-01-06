@@ -43,11 +43,15 @@ metadata:
   name: hf-token-secret
   namespace: default
 type: Opaque
-data:
+stringData:
   token: "REPLACE_WITH_TOKEN"
 ```
 
-Create a deployment file for vLLM to run the model server. The following example deploys the `Mistral-7B-Instruct-v0.3` model:
+Next to create the deployment file for vLLM to run the model server. The following example deploys the `Mistral-7B-Instruct-v0.3` model.
+
+Here are two examples for using NVIDIA GPU and AMD GPU. 
+
+- NVIDIA GPU
 
 ```yaml
 apiVersion: apps/v1
@@ -118,6 +122,79 @@ spec:
           initialDelaySeconds: 60
           periodSeconds: 5
 ```
+
+- AMD GPU
+
+You can refer to the `deployment.yaml` below if using AMD ROCm GPU like MI300X.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mistral-7b
+  namespace: default
+  labels:
+    app: mistral-7b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mistral-7b
+  template:
+    metadata:
+      labels:
+        app: mistral-7b
+    spec:
+      volumes:
+      # PVC
+      - name: cache-volume
+        persistentVolumeClaim:
+          claimName: mistral-7b
+      # vLLM needs to access the host's shared memory for tensor parallel inference.
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "8Gi"
+      hostNetwork: true
+      hostIPC: true
+      containers:
+      - name: mistral-7b
+        image: rocm/vllm:rocm6.2_mi300_ubuntu20.04_py3.9_vllm_0.6.4
+        securityContext:
+          seccompProfile:
+            type: Unconfined
+          runAsGroup: 44
+          capabilities:
+            add:
+            - SYS_PTRACE
+        command: ["/bin/sh", "-c"]
+        args: [
+          "vllm serve mistralai/Mistral-7B-v0.3 --port 8000 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
+        ]
+        env:
+        - name: HUGGING_FACE_HUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token-secret
+              key: token
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            cpu: "10"
+            memory: 20G
+            amd.com/gpu: "1"
+          requests:
+            cpu: "6"
+            memory: 6G
+            amd.com/gpu: "1"
+        volumeMounts:
+        - name: cache-volume
+          mountPath: /root/.cache/huggingface
+        - name: shm
+          mountPath: /dev/shm
+```
+You can get the full example with steps and sample yaml files from <https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve>.
 
 2. **Create a Kubernetes Service for vLLM**
 

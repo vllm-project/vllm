@@ -63,7 +63,7 @@ torch::Tensor mm_dispatch_{{type_sig}}(MMArgs args) {
 
 
 static inline std::optional<at::ScalarType> maybe_scalartype(
-    c10::optional<at::Tensor> const& t) {
+    std::optional<at::Tensor> const& t) {
     if (!t) {
       return std::nullopt;
     } else {
@@ -189,7 +189,7 @@ using Kernel_{{type_sig}} = MacheteKernelTemplate<
   {{DataTypeTag[t.b_group_zeropoint]}}, // GroupZeroT
   {{DataTypeTag[t.b_channel_scale]}}, // ChannelScaleT
   {{DataTypeTag[t.a_token_scale]}}, // TokenScaleT
-  cutlass::gemm::KernelTmaWarpSpecializedCooperativeMixedInput,
+  cutlass::gemm::KernelTmaWarpSpecializedCooperative,
   Sch>;
 
 {% for sch in schs %}
@@ -223,7 +223,7 @@ torch::Tensor prepack_B_dispatch(PrepackBArgs args) {
         {{DataTypeTag[t.convert]}}, // ElementConvert
         {{DataTypeTag[t.accumulator]}}, // Accumulator
         cutlass::layout::ColumnMajor,
-        cutlass::gemm::KernelTmaWarpSpecializedCooperativeMixedInput>
+        cutlass::gemm::KernelTmaWarpSpecializedCooperative>
     >(args.B); 
   }
   {%- endfor %}
@@ -239,7 +239,7 @@ torch::Tensor prepack_B_dispatch(PrepackBArgs args) {
 }; // namespace machete
 """
 
-TmaMI = MixedInputKernelScheduleType.TmaWarpSpecializedCooperativeMixedInput
+TmaMI = MixedInputKernelScheduleType.TmaWarpSpecializedCooperative
 TmaCoop = EpilogueScheduleType.TmaWarpSpecializedCooperative
 
 
@@ -300,7 +300,7 @@ def generate_sch_sig(schedule_config: ScheduleConfig) -> str:
 # mostly unique shorter sch_sig
 def generate_terse_sch_sig(schedule_config: ScheduleConfig) -> str:
     kernel_terse_names_replace = {
-        "KernelTmaWarpSpecializedCooperativeMixedInput_": "TmaMI_",
+        "KernelTmaWarpSpecializedCooperative": "TmaMI_",
         "TmaWarpSpecializedCooperative_": "TmaCoop_",
         "StreamKScheduler": "streamK",
     }

@@ -15,7 +15,7 @@ The performance benchmarks are used for development to confirm whether new chang
 
 The latest performance results are hosted on the public [vLLM Performance Dashboard](https://perf.vllm.ai).
 
-More information on the performance benchmarks and their parameters can be found [here](https://github.com/vllm-project/vllm/blob/main/.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
+More information on the performance benchmarks and their parameters can be found [here](gh-file:.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
 
 (nightly-benchmarks)=
 
@@ -25,4 +25,4 @@ These compare vLLM's performance against alternatives (`tgi`, `trt-llm`, and `lm
 
 The latest nightly benchmark results are shared in major release blog posts such as [vLLM v0.6.0](https://blog.vllm.ai/2024/09/05/perf-update.html).
 
-More information on the nightly benchmarks and their parameters can be found [here](https://github.com/vllm-project/vllm/blob/main/.buildkite/nightly-benchmarks/nightly-descriptions.md).
+More information on the nightly benchmarks and their parameters can be found [here](gh-file:.buildkite/nightly-benchmarks/nightly-descriptions.md).

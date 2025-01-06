@@ -7,7 +7,7 @@ from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
-MODEL_PATH = "Qwen/Qwen2-VL-7B-Instruct"
+MODEL_PATH = "Qwen/Qwen2-VL-2B-Instruct"
 
 PROMPT_TEMPLATE = (
     "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
@@ -22,7 +22,7 @@ IMAGE_ASSETS = [
 
 # After fine-tuning with LoRA, all generated content should start begin `A`.
 EXPECTED_OUTPUT = [
-    "A stop sign stands prominently in the foreground, with a traditional Chinese gate and a black SUV in the background, illustrating a blend of modern and cultural elements.",  # noqa: E501
+    "A red stop sign stands prominently in the foreground, with a traditional Chinese gate and a black SUV in the background, illustrating a blend of modern and cultural elements.",  # noqa: E501
     "A majestic skyscraper stands tall, partially obscured by a vibrant canopy of cherry blossoms, against a clear blue sky.",  # noqa: E501
 ]
 
@@ -49,10 +49,9 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     # Print the outputs.
     generated_texts: List[str] = []
     for output in outputs:
-        prompt = output.prompt
         generated_text = output.outputs[0].text.strip()
         generated_texts.append(generated_text)
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Generated text: {generated_text!r}")
     return generated_texts
 
 
@@ -76,3 +75,7 @@ def test_qwen2vl_lora(qwen2vl_lora_files):
     output1 = do_sample(llm, qwen2vl_lora_files, lora_id=1)
     for i in range(len(EXPECTED_OUTPUT)):
         assert EXPECTED_OUTPUT[i].startswith(output1[i])
+
+    output2 = do_sample(llm, qwen2vl_lora_files, lora_id=2)
+    for i in range(len(EXPECTED_OUTPUT)):
+        assert EXPECTED_OUTPUT[i].startswith(output2[i])

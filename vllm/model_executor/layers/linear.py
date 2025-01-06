@@ -14,11 +14,14 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+# yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           BlockQuantScaleParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            PerTensorScaleParameter,
                                            RowvLLMParameter)
+# yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
@@ -235,7 +238,9 @@ class ReplicatedLinear(LinearBase):
         assert param.size() == loaded_weight.size()
         param.data.copy_(loaded_weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
         output = self.quant_method.apply(self, x, bias)
@@ -623,8 +628,24 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         assert loaded_shard_id < len(self.output_sizes)
 
         tp_size = get_tensor_model_parallel_world_size()
-        shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
-        shard_size = self.output_sizes[loaded_shard_id] // tp_size
+
+        if isinstance(param, BlockQuantScaleParameter):
+            from vllm.model_executor.layers.quantization.fp8 import (
+                Fp8LinearMethod, Fp8MoEMethod)
+            assert self.quant_method is not None
+            assert isinstance(self.quant_method,
+                              (Fp8LinearMethod, Fp8MoEMethod))
+            weight_block_size = self.quant_method.quant_config.weight_block_size
+            assert weight_block_size is not None
+            block_n, _ = weight_block_size[0], weight_block_size[1]
+            shard_offset = (
+                (sum(self.output_sizes[:loaded_shard_id]) + block_n - 1) //
+                block_n) // tp_size
+            shard_size = ((self.output_sizes[loaded_shard_id] + block_n - 1) //
+                          block_n // tp_size)
+        else:
+            shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
+            shard_size = self.output_sizes[loaded_shard_id] // tp_size
 
         param.load_merged_column_weight(loaded_weight=loaded_weight,
                                         shard_id=loaded_shard_id,

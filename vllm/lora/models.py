@@ -4,7 +4,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Type
+from typing import Any, Callable, Dict, List, Optional, Sequence, Type, Union
 
 import safetensors.torch
 import torch
@@ -173,7 +173,7 @@ class LoRAModel(AdapterModel):
         return cls(lora_model_id,
                    peft_helper.r,
                    loras,
-                   scaling_factor=peft_helper.vllm_scaling_factor)
+                   scaling_factor=peft_helper.vllm_long_context_scaling_factor)
 
     @classmethod
     def from_local_checkpoint(
@@ -219,6 +219,7 @@ class LoRAModel(AdapterModel):
 
         config["vllm_max_position_embeddings"] = max_position_embeddings
         peft_helper = PEFTHelper.from_dict(config)
+        unexpected_modules: List[Union[list[str], str]]
         if os.path.isfile(lora_tensor_path):
             tensors: Dict[str, torch.Tensor] = {}
             # Find unexpected modules.
@@ -231,7 +232,8 @@ class LoRAModel(AdapterModel):
             with safetensors.safe_open(lora_tensor_path,
                                        framework="pt") as f:  # type: ignore
                 for lora_module in f.keys():  # noqa
-                    module_name, _, _ = parse_fine_tuned_lora_name(lora_module)
+                    module_name, _, _ = parse_fine_tuned_lora_name(
+                        lora_module, weights_mapper)
                     part_name = module_name.split(".")[-1]
                     if part_name not in expected_lora_modules:
                         unexpected_modules.append(module_name)
