@@ -23,7 +23,7 @@ $ conda activate myenv
 $ pip install vllm
 ```
 
-Please refer to the {ref}`installation documentation <installation>` for more details on installing vLLM.
+Please refer to the [installation documentation](#installation-index) for more details on installing vLLM.
 
 (offline-batched-inference)=
 
