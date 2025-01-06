@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple
 
-import numpy.typing as npt
 import pytest
+import torch
 from transformers import AutoTokenizer
 
 from tests.v1.engine.utils import (generate_dummy_prompt_logprobs,
@@ -29,32 +29,30 @@ STOP_STRINGS = ["I love working on", "company by far", "brother in"]
 
 FULL_TOKENS = [tokenizer(text).input_ids for text in FULL_STRINGS]
 PROMPT_LEN = 5
+
+# Tokenize prompts under test & create dummy generated tokens
 PROMPT_TOKENS = [
     tokenizer(text).input_ids[:PROMPT_LEN] for text in FULL_STRINGS
 ]
-PROMPT_LOGPROBS_RAW: List[Tuple[npt.NDArray, npt.NDArray]] = [
+GENERATION_TOKENS = [
+    tokenizer(text).input_ids[PROMPT_LEN:] for text in FULL_STRINGS
+]
+
+# Generate dummy prompt logprobs & sample logprobs for initializing
+# the mock engine
+PROMPT_LOGPROBS: List[Tuple[torch.Tensor, torch.Tensor]] = [
     generate_dummy_prompt_logprobs(prompt_tokens_list=tokens_list,
                                    num_logprobs=NUM_PROMPT_LOGPROBS,
                                    tokenizer=tokenizer)
     for tokens_list in PROMPT_TOKENS
 ]
-# PROMPT_LOGPROBS = [
-#     _new_logprobs_detokenized(logprobs=logprobs, tokenizer=tokenizer)
-#     for logprobs in PROMPT_LOGPROBS_RAW
-# ]
-GENERATION_TOKENS = [
-    tokenizer(text).input_ids[PROMPT_LEN:] for text in FULL_STRINGS
-]
-GENERATION_LOGPROBS_RAW = [
+GENERATION_LOGPROBS = [
     generate_dummy_sample_logprobs(sampled_tokens_list=tokens_list,
                                    num_logprobs=NUM_SAMPLE_LOGPROBS,
                                    tokenizer=tokenizer)
     for tokens_list in GENERATION_TOKENS
 ]
-# GENERATION_LOGPROBS = [
-#     _new_logprobs_detokenized(logprobs=logprobs, tokenizer=tokenizer)
-#     for logprobs in GENERATION_LOGPROBS_RAW
-# ]
+
 PROMPT_STRINGS = [
     tokenizer.decode(prompt_tokens,
                      skip_special_tokens=True,
@@ -74,9 +72,9 @@ class MockEngineCore:
         self,
         generated_tokens_list: List[List[int]],
         prompt_tokens_list: List[List[int]],
-        generated_logprobs_raw: Optional[List[List[Tuple[npt.NDArray,
-                                                         npt.NDArray]]]],
-        prompt_logprobs_raw: Optional[List[Tuple[npt.NDArray, npt.NDArray]]],
+        generated_logprobs_raw: Optional[List[List[Tuple[torch.Tensor,
+                                                         torch.Tensor]]]],
+        prompt_logprobs_raw: Optional[List[Tuple[torch.Tensor, torch.Tensor]]],
     ) -> None:
         self.generated_tokens_list = generated_tokens_list
         self.prompt_tokens_list = prompt_tokens_list
@@ -117,6 +115,7 @@ class MockEngineCore:
                     new_token_ids=[generated_token_ids[token_idx]],
                     finished=False,
                     logprobs=logprobs,
+                    logprobs_token_ids=logprobs,
                     prompt_logprobs=prompt_logprobs,
                     prompt_logprobs_token_ids=prompt_logprobs_token_ids,
                 )
@@ -144,12 +143,12 @@ def test_incremental_detokenization(
     do_generated_logprobs = logprobs is not None
     do_prompt_logprobs = prompt_logprobs is not None
     detokenizer = Detokenizer(TOKENIZER_NAME)
-    engine_core = MockEngineCore(generated_tokens_list=GENERATION_TOKENS,
-                                 prompt_tokens_list=PROMPT_TOKENS,
-                                 generated_logprobs_raw=GENERATION_LOGPROBS_RAW
-                                 if do_generated_logprobs else None,
-                                 prompt_logprobs_raw=PROMPT_LOGPROBS_RAW
-                                 if do_prompt_logprobs else None)
+    engine_core = MockEngineCore(
+        generated_tokens_list=GENERATION_TOKENS,
+        prompt_tokens_list=PROMPT_TOKENS,
+        generated_logprobs_raw=GENERATION_LOGPROBS
+        if do_generated_logprobs else None,
+        prompt_logprobs_raw=PROMPT_LOGPROBS if do_prompt_logprobs else None)
 
     # Make N requests.
     requests = [
@@ -232,12 +231,12 @@ def test_stop_string(
     do_generated_logprobs = logprobs is not None
     do_prompt_logprobs = prompt_logprobs is not None
     detokenizer = Detokenizer(TOKENIZER_NAME)
-    engine_core = MockEngineCore(generated_tokens_list=GENERATION_TOKENS,
-                                 prompt_tokens_list=PROMPT_TOKENS,
-                                 generated_logprobs_raw=GENERATION_LOGPROBS_RAW
-                                 if do_generated_logprobs else None,
-                                 prompt_logprobs_raw=PROMPT_LOGPROBS_RAW
-                                 if do_prompt_logprobs else None)
+    engine_core = MockEngineCore(
+        generated_tokens_list=GENERATION_TOKENS,
+        prompt_tokens_list=PROMPT_TOKENS,
+        generated_logprobs_raw=GENERATION_LOGPROBS
+        if do_generated_logprobs else None,
+        prompt_logprobs_raw=PROMPT_LOGPROBS if do_prompt_logprobs else None)
 
     # Make N requests.
     requests = [

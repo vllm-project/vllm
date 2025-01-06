@@ -2,8 +2,7 @@
 import random
 from typing import List, Tuple
 
-import numpy as np
-import numpy.typing as npt
+import torch
 from transformers.tokenization_utils import PreTrainedTokenizer
 
 from vllm.outputs import RequestOutput
@@ -16,7 +15,7 @@ def _create_random_top_logprob_test_vector(
     num_logprobs: int,
     lower: float,
     upper: float,
-) -> npt.NDArray:
+) -> torch.Tensor:
     """Create a random vector of top logprob float values.
     
     Use to create fake sample logprobs for testing.
@@ -31,16 +30,16 @@ def _create_random_top_logprob_test_vector(
       upper: upper range of logprob float values
 
     Returns:
-      1D length-`num_logprobs` np array of float logprob values
+      1D length-`num_logprobs` torch Tensor of float logprob values
     """
-    return np.random.rand(num_logprobs) * (upper - lower) + lower
+    return torch.rand(num_logprobs) * (upper - lower) + lower
 
 
 def _create_random_top_logprob_test_matrix(
     shape: Tuple,
     lower: float,
     upper: float,
-) -> npt.NDArray:
+) -> torch.Tensor:
     """Create a random matrix of top logprob float values.
     
     Use to create fake prompt logprobs for testing.
@@ -56,24 +55,20 @@ def _create_random_top_logprob_test_matrix(
       upper: upper range of logprob float values
 
     Returns:
-      2D num_tokens x num_logprobs np array of float logprob values
+      2D num_tokens x num_logprobs torch Tensor of float logprob values
     """
-    return np.random.rand(*shape) * (upper - lower) + lower
+    return torch.rand(*shape) * (upper - lower) + lower
 
 
 def _create_random_top_token_test_vector(
-    num_logprobs: int,
-    lower: int,
-    upper: int,
-    sampled_token_id: int,
-    adjust_num_logprobs: bool,
-) -> npt.NDArray:
+        num_logprobs: int, lower: int, upper: int, sampled_token_id: int,
+        adjust_num_logprobs: bool) -> torch.Tensor:
     """Create a random vector of top logprob token indices
 
     Use to create fake sample logprobs for testing. The sampled token
     ID must always be one of the top logprobs, which this dummy test
     vector generator enforces. OpenAI API
-    compatible engines must be able to return an addition sample
+    compatible engines must be able to return an additional sample
     logprob for the sampled token if the sampled token was not
     among the top sample logprobs; `adjust_num_logprobs` emulates
     this behavior by increasing the vector length by 1 if
@@ -89,23 +84,27 @@ def _create_random_top_token_test_vector(
                            logprobs
 
     Returns:
-      1D length-x np array of token ids where x is
+      1D length-x torch Tensor of token ids where x is
       `num_logprobs+1` if `adjust_num_logprobs` and
       `num_logprobs` otherwise
     """
-    choice_list = list(range(lower, upper))
-    res = np.random.choice(choice_list, (num_logprobs +
-                                         (1 if adjust_num_logprobs else 0), ),
-                           replace=False)
-    res[-1] = sampled_token_id
-    return res
+    # Calculate the final number of logprobs required
+    total_logprobs = num_logprobs + (1 if adjust_num_logprobs else 0)
+
+    # Generate random indices using torch
+    choice_tensor = torch.randperm(upper - lower)[:total_logprobs] + lower
+
+    # Ensure the sampled token ID is included in the tensor
+    choice_tensor[-1] = sampled_token_id
+
+    return choice_tensor
 
 
 def _create_random_top_token_test_matrix(
-    shape: Tuple,
+    shape: Tuple[int, int],
     lower: int,
     upper: int,
-) -> npt.NDArray:
+) -> torch.Tensor:
     """Create a random matrix of top logprob token indices
 
     Use to create fake prompt logprobs for testing.
@@ -114,24 +113,24 @@ def _create_random_top_token_test_matrix(
     replacement.
 
     Args:
-      shape: (num_tokens,num_logprobs) tuple representing
+      shape: (num_tokens, num_logprobs) tuple representing
              matrix shape
       lower: lower range of token ids
       upper: upper range of token ids
 
     Returns:
-      2D num_tokens x num_logprobs np array of token ids
+      2D num_tokens x num_logprobs torch Tensor of token ids
     """
-    choice_list = list(range(lower, upper))
-    res = np.random.choice(choice_list, (shape[0], shape[1]), replace=False)
-    return res
+    num_elements = shape[0] * shape[1]
+    choice_tensor = torch.randperm(upper - lower)[:num_elements] + lower
+    return choice_tensor.view(shape)
 
 
 def generate_dummy_sample_logprobs(
     sampled_tokens_list: List,
     num_logprobs: int,
     tokenizer: PreTrainedTokenizer,
-) -> List[Tuple[npt.NDArray, npt.NDArray]]:
+) -> List[Tuple[torch.Tensor, torch.Tensor]]:
     """Generate dummy sample logprobs
 
     Generate a test data structure which imitates the list of sample logprobs
@@ -143,8 +142,8 @@ def generate_dummy_sample_logprobs(
       tokenizer: model tokenizer to use for detokenization
 
     Returns
-      List of (logprobs vector, top token ids vector) np array tuples; each pair
-      of vectors have the same length which is either `num_logprobs` or
+      List of (logprobs vector, top token ids vector) torch Tensor tuples; each
+      pair of vectors have the same length which is either `num_logprobs` or
       `num_logprobs+1`
     """
     res = []
@@ -163,10 +162,10 @@ def generate_dummy_prompt_logprobs(
     prompt_tokens_list: List,
     num_logprobs: int,
     tokenizer: PreTrainedTokenizer,
-) -> Tuple[npt.NDArray, npt.NDArray]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Generate dummy prompt logprobs
 
-    Generate a test data structure which imitates the np arrays of prompt
+    Generate a test data structure which imitates the torch Tensors of prompt
     logprobs which would be assembled in the engine core during chunked
     prefill.
 
@@ -176,7 +175,7 @@ def generate_dummy_prompt_logprobs(
       tokenizer: model tokenizer to use for detokenization
 
     Returns
-      Single Tuple of (logprobs matrix, top token ids matrix) np arrays,
+      Single Tuple of (logprobs matrix, top token ids matrix) torch Tensor,
       where both matrices have dimensions
       num_prompt_tokens x num_logprobs
     """
