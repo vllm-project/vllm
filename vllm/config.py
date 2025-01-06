@@ -636,14 +636,12 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        # Reminder: Please update docs/source/usage/compatibility_matrix.md
-        # If the feature combo become valid
-        if not current_platform.is_async_output_supported(self.enforce_eager):
-            logger.warning(
-                "Async output processing is not supported on the "
-                "current platform type %s.", current_platform.device_type)
-            self.use_async_output_proc = False
-            return
+        # if device_config.device_type not in ("cuda", "tpu"):
+        #     logger.warning(
+        #         "Async output processing is only supported for CUDA or TPU. "
+        #         "Disabling it for other platforms.")
+        #     self.use_async_output_proc = False
+        #     return
 
         if envs.VLLM_USE_RAY_SPMD_WORKER:
             logger.warning(

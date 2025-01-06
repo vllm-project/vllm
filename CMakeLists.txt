@@ -84,12 +84,34 @@ endif()
 find_package(Torch REQUIRED)
 
 #
+message(STATUS "Enabling core extension.")
+
+# # Define _core_C extension
+# #  built for (almost) every target platform, (excludes TPU and Neuron)
+
+# set(VLLM_EXT_SRC
+#   "csrc/core/torch_bindings.cpp")
+
+# define_gpu_extension_target(
+#   _core_C
+#   DESTINATION vllm
+#   LANGUAGE CXX
+#   SOURCES ${VLLM_EXT_SRC}
+#   COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
+#   USE_SABI 3
+#   WITH_SOABI)
+
+#
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
     NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
     if (VLLM_TARGET_DEVICE STREQUAL "cpu")
         include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+    elseif(VLLM_TARGET_DEVICE STREQUAL "xpu")
+        message(STATUS "Building XPU")
+        set(VLLM_GPU_LANG "SYCL")
+        include(${CMAKE_CURRENT_LIST_DIR}/cmake/xpu_extension.cmake)
     else()
         return()
     endif()
@@ -242,112 +264,19 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/custom_all_reduce.cu"
     "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
-    "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
-    "csrc/sparse/cutlass/sparse_compressor_entry.cu"
-    "csrc/cutlass_extensions/common.cpp")
-
-  set_gencode_flags_for_srcs(
-    SRCS "${VLLM_EXT_SRC}"
-    CUDA_ARCHS "${CUDA_ARCHS}")
-
-  # Only build Marlin kernels if we are building for at least some compatible archs.
-  # Keep building Marlin for 9.0 as there are some group sizes and shapes that
-  # are not supported by Machete yet.
-  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.7;8.9;9.0" ${CUDA_ARCHS})
-  if (MARLIN_ARCHS)
-    set(MARLIN_SRCS
-       "csrc/quantization/fp8/fp8_marlin.cu"
-       "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
-       "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
-       "csrc/quantization/marlin/qqq/marlin_qqq_gemm_kernel.cu"
-       "csrc/quantization/gptq_marlin/gptq_marlin.cu"
-       "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
-       "csrc/quantization/gptq_marlin/awq_marlin_repack.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${MARLIN_SRCS}"
-      CUDA_ARCHS "${MARLIN_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${MARLIN_SRCS}")
-    message(STATUS "Building Marlin kernels for archs: ${MARLIN_ARCHS}")
-  else()
-    message(STATUS "Not building Marlin kernels as no compatible archs found"
-                   " in CUDA target architectures")
-  endif()
-
-  # The cutlass_scaled_mm kernels for Hopper (c3x, i.e. CUTLASS 3.x) require
-  # CUDA 12.0 or later (and only work on Hopper, 9.0/9.0a for now).
-  cuda_archs_loose_intersection(SCALED_MM_3X_ARCHS "9.0;9.0a" "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
-    set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
-      CUDA_ARCHS "${SCALED_MM_3X_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_C3X=1")
-    message(STATUS "Building scaled_mm_c3x for archs: ${SCALED_MM_3X_ARCHS}")
-  else()
-    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
-      message(STATUS "Not building scaled_mm_c3x as CUDA Compiler version is "
-                     "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
-                     "later if you intend on running FP8 quantized models on "
-                     "Hopper.")
-    else()
-      message(STATUS "Not building scaled_mm_c3x as no compatible archs found "
-                     "in CUDA target architectures")
-    endif()
-
-    # clear SCALED_MM_3X_ARCHS so the scaled_mm_c2x kernels know we didn't
-    # build any 3x kernels
-    set(SCALED_MM_3X_ARCHS)
-  endif()
+    "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu"
+    "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu")
 
   #
-  # For the cutlass_scaled_mm kernels we want to build the c2x (CUTLASS 2.x)
-  # kernels for the remaining archs that are not already built for 3x.
-  cuda_archs_loose_intersection(SCALED_MM_2X_ARCHS
-    "7.5;8.0;8.6;8.7;8.9;9.0" "${CUDA_ARCHS}")
-  # subtract out the archs that are already built for 3x
-  list(REMOVE_ITEM SCALED_MM_2X_ARCHS ${SCALED_MM_3X_ARCHS})
-  if (SCALED_MM_2X_ARCHS)
-    set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
-      CUDA_ARCHS "${SCALED_MM_2X_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_C2X=1")
-    message(STATUS "Building scaled_mm_c2x for archs: ${SCALED_MM_2X_ARCHS}")
-  else()
-    if (SCALED_MM_3X_ARCHS)
-      message(STATUS "Not building scaled_mm_c2x as all archs are already built"
-                     " for and covered by scaled_mm_c3x")
-    else()
-      message(STATUS "Not building scaled_mm_c2x as no compatible archs found "
-                    "in CUDA target architectures")
-    endif()
-  endif()
-
-  #
-  # 2:4 Sparse Kernels
-
-  # The 2:4 sparse kernels cutlass_scaled_sparse_mm and cutlass_compressor
-  # require CUDA 12.2 or later (and only work on Hopper, 9.0/9.0a for now).
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_3X_ARCHS)
-    set(SRCS "csrc/sparse/cutlass/sparse_compressor_c3x.cu"
-             "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
-      CUDA_ARCHS "${SCALED_MM_3X_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SPARSE_SCALED_MM_C3X=1")
-    message(STATUS "Building sparse_scaled_mm_c3x for archs: ${SCALED_MM_3X_ARCHS}")
-  else()
-    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_3X_ARCHS)
-      message(STATUS "Not building sparse_scaled_mm_c3x kernels as CUDA Compiler version is "
-                     "not >= 12.2, we recommend upgrading to CUDA 12.2 or later "
-                     "if you intend on running FP8 sparse quantized models on Hopper.")
-    else()
-      message(STATUS "Not building sparse_scaled_mm_c3x as no compatible archs found "
-                     "in CUDA target architectures")
-    endif()
+  # The CUTLASS kernels for Hopper require sm90a to be enabled.
+  # This is done via the below gencode option, BUT that creates kernels for both sm90 and sm90a.
+  # That adds an extra 17MB to compiled binary, so instead we selectively enable it.
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
+    set_source_files_properties(
+          "csrc/quantization/cutlass_w8a8/scaled_mm_c3x.cu"
+          PROPERTIES
+          COMPILE_FLAGS
+          "-gencode arch=compute_90a,code=sm_90a")
   endif()
 
 

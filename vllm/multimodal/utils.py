@@ -11,6 +11,7 @@ from PIL import Image
 
 import vllm.envs as envs
 from vllm.connections import global_http_connection
+from vllm.envs import VLLM_AUDIO_FETCH_TIMEOUT, VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 from vllm.utils import PlaceholderModule
@@ -123,12 +124,19 @@ async def async_fetch_image(image_url: str,
 
     By default, the image is converted into RGB format.
     """
-    if image_url.startswith('http'):
-        image_raw = await global_http_connection.async_get_bytes(
-            image_url,
+    import os
+    if os.path.exists(image_url):
+       image = Image.open(image_url).convert('RGB')
+    elif image_url.startswith('http'):
+        try:
+            import requests
+            image = Image.open(requests.get(image_url, stream=True).raw)
+        except:
+            image_raw = await global_http_connection.async_get_bytes(
+                image_url,
             timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
         )
-        image = _load_image_from_bytes(image_raw)
+            image = _load_image_from_bytes(image_raw)
 
     elif image_url.startswith('data:image'):
         image = _load_image_from_data_url(image_url)

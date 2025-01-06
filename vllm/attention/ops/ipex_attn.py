@@ -9,6 +9,7 @@ except ImportError:
 import torch
 
 from vllm import _custom_ops as ops
+from vllm._ipex_ops import ipex_ops
 
 
 class _PagedAttention:
@@ -186,6 +187,45 @@ class _IPEXPagedAttention(_PagedAttention):
             output, query.contiguous(), key_cache, value_cache, head_mapping,
             scale, block_tables, context_lens, block_size, max_context_len,
             alibi_slopes)
+
+        return output
+
+    @staticmethod
+    def forward_prefix(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache_dtype: str,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_tables: torch.Tensor,
+        subquery_start_loc: torch.Tensor,
+        prompt_lens_tensor: torch.Tensor,
+        context_lens: torch.Tensor,
+        max_subquery_len: int,
+        alibi_slopes: Optional[torch.Tensor],
+        *args,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    @staticmethod
+    def swap_blocks(
+        src_kv_cache: torch.Tensor,
+        dst_kv_cache: torch.Tensor,
+        src_to_dst: Dict[int, int],
+        *args,
+    ) -> None:
+        ipex_ops.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
+
+    @staticmethod
+    def copy_blocks(
+        kv_caches: List[torch.Tensor],
+        src_to_dists: Dict[int, List[int]],
+        *args,
+    ) -> None:
+        key_caches = [kv_cache[0] for kv_cache in kv_caches]
+        value_caches = [kv_cache[1] for kv_cache in kv_caches]
+        ipex_ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
 
 PagedAttention = _IPEXPagedAttention if _use_ipex else _PagedAttention

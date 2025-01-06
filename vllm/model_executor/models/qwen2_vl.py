@@ -253,12 +253,37 @@ class Qwen2VisionAttention(nn.Module):
                                       prefix=f"{prefix}.proj")
 
         # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
-        if self.attn_backend not in {
-                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
-        }:
-            raise RuntimeError(
-                f"Qwen2-VL does not support {self.attn_backend} backend now.")
+        # selected_backend: Optional[_Backend] = get_global_forced_attn_backend()
+        # if selected_backend is None:
+        #     backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
+        #     if backend_by_env_var is not None:
+        #         selected_backend = backend_name_to_enum(backend_by_env_var)
+        # if selected_backend is None:
+        #     # For Volta and Turing GPUs, use xformers instead.
+        #     device_available = current_platform.get_device_capability()[0] >= 8
+        #     if device_available:
+        #         from transformers.utils import is_flash_attn_2_available
+
+        #         if is_flash_attn_2_available():
+        #             self._use_flash_attn = True
+        #         else:
+        #             logger.warning(
+        #                 "Current Qwen2-VL implementation has a bug with "
+        #                 "`vllm-flash-attn` inside vision module, so we use "
+        #                 "xformers backend instead. You can run `pip install "
+        #                 "flash-attn to use flash-attention backend.")
+        #             self._use_flash_attn = False
+        #     else:
+        #         self._use_flash_attn = False
+        # else:
+        #     if selected_backend == _Backend.FLASH_ATTN:
+        #         self._use_flash_attn = True
+        #     elif selected_backend == _Backend.XFORMERS:
+        #         self._use_flash_attn = False
+        #     else:
+        #         raise RuntimeError(
+        #             f"Qwen2-VL does not support {selected_backend} backend now."
+        #         )
 
     def forward(
         self,
@@ -266,6 +291,7 @@ class Qwen2VisionAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor = None,
     ) -> torch.Tensor:
+        seq_length = x.shape[0]
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
 
@@ -285,57 +311,56 @@ class Qwen2VisionAttention(nn.Module):
         if rotary_pos_emb is not None:
             q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
             k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
-
-        if self.attn_backend == _Backend.FLASH_ATTN:
-            # from vllm_flash_attn.flash_attn_interface import (
-            #   flash_attn_varlen_func)
-            from flash_attn import flash_attn_varlen_func
-
-            q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-            output = flash_attn_varlen_func(q,
-                                            k,
-                                            v,
-                                            cu_seqlens_q=cu_seqlens,
-                                            cu_seqlens_k=cu_seqlens,
-                                            max_seqlen_q=max_seqlen,
-                                            max_seqlen_k=max_seqlen,
-                                            dropout_p=0,
-                                            causal=False)
-
-            context_layer = rearrange(output,
-                                      "(b s) ... -> b s ...",
-                                      b=batch_size)
-        elif self.attn_backend == _Backend.TORCH_SDPA:
-            seq_length = q.size(1)
-            q, k, v = (rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-            attention_mask = torch.zeros([1, seq_length, seq_length],
-                                         device=q.device,
-                                         dtype=torch.bool)
+        query = q.movedim(1, 2)
+        key = k.movedim(1, 2)
+        value = v.movedim(1, 2)
+        head_dim = query.shape[-1]
+        if len(cu_seqlens) == 2 and cu_seqlens.tolist() == [0, seq_length]:
+            attention_mask = None
+        else:
+            attention_mask = torch.full(
+                [1, seq_length, seq_length], torch.finfo(q.dtype).min, device=q.device, dtype=q.dtype
+            )
             for i in range(1, len(cu_seqlens)):
                 attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
-                               cu_seqlens[i - 1]:cu_seqlens[i]] = True
-            output = F.scaled_dot_product_attention(q,
-                                                    k,
-                                                    v,
-                                                    attention_mask,
-                                                    dropout_p=0.0)
-            context_layer = rearrange(output, "b h s d -> b s h d ")
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-            from xformers.ops.fmha.attn_bias import BlockDiagonalMask
+                            cu_seqlens[i - 1]:cu_seqlens[i]] = 0
+        from ipex_llm.transformers.models.common import attention_softmax
+        from ipex_llm.transformers.models.utils import use_sdp_non_causal
+        import math
+        if use_sdp_non_causal(head_dim, q.device, q.dtype):
+            import xe_addons
+            if attention_mask is not None:
+                attention_mask = attention_mask.unsqueeze(0)
+            attn_output = xe_addons.sdp_non_causal(query, key.contiguous(), value.contiguous(), attention_mask)
+            attn_output = attn_output.squeeze(0).transpose(0, 1)
+        else:
+            seq_lens = []
+            for i in range(1, len(cu_seqlens)):
+                seq_lens.append(cu_seqlens[i]-cu_seqlens[i-1]) 
+            att_masks = [None] * len(seq_lens)
 
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-            attn_bias = BlockDiagonalMask.from_seqlens(q_seqlen=seqlens,
-                                                       kv_seqlen=None)
+            num_tokens = q.shape[0] * q.shape[1]
+            attn_output = torch.empty(
+                    (num_tokens, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head),
+                    dtype=query.dtype, device=query.device)
+            start = 0
+            for seq_len, mask in zip(seq_lens,
+                                    att_masks):
+                end = start + seq_len
+                sub_out = torch.nn.functional.scaled_dot_product_attention(
+                    query[:, :, start:end, :],
+                    key[:, :, start:end, :],
+                    value[:, :, start:end, :],
+                    attn_mask=mask,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    scale= self.hidden_size_per_attention_head**-0.5).squeeze(0).movedim(
+                        0, 1)
+                attn_output[start:end, :, :] = sub_out
+                start = end
+        output = attn_output.reshape(-1, batch_size, self.hidden_size_per_attention_head * self.num_attention_heads_per_partition)
 
-            context_layer = xops.memory_efficient_attention_forward(
-                q, k, v, attn_bias=attn_bias, p=0, scale=None)
-        context_layer = rearrange(context_layer,
-                                  "b s h d -> s b (h d)").contiguous()
-
-        output, _ = self.proj(context_layer)
+        output, _ = self.proj(output)
         return output
 
 
@@ -570,9 +595,7 @@ class Qwen2VisionTransformer(nn.Module):
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
         # patchify
-        x = x.to(device=self.device, dtype=self.dtype)
         x = self.patch_embed(x)
-
         # compute position embedding
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
@@ -1042,7 +1065,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         if image_input["type"] == "image_embeds":
             return image_input["image_embeds"].type(self.visual.dtype)
 
-        pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+        # pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+        pixel_values = image_input["pixel_values"].to(torch.float16)
         image_embeds = self.visual(pixel_values,
                                    grid_thw=image_input["image_grid_thw"])
         return image_embeds

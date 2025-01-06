@@ -100,6 +100,9 @@ class Platform:
 
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
+    
+    def is_xpu(self) -> bool:
+        return self._enum == PlatformEnum.XPU
 
     def is_neuron(self) -> bool:
         return self._enum == PlatformEnum.NEURON

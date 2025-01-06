@@ -77,17 +77,10 @@ try:
 except Exception:
     pass
 
-is_neuron = False
-try:
-    import transformers_neuronx  # noqa: F401
-    is_neuron = True
-except ImportError:
-    pass
-
-is_openvino = False
+is_xpu = False
 try:
     from importlib.metadata import version
-    is_openvino = "openvino" in version("vllm")
+    is_xpu = "xpu" in version("vllm")
 except Exception:
     pass
 

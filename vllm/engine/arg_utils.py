@@ -112,8 +112,8 @@ class EngineArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
-    block_size: Optional[int] = None
-    enable_prefix_caching: Optional[bool] = None
+    block_size: int = 8
+    enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
