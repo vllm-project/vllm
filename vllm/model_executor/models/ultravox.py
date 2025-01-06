@@ -335,16 +335,16 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 
 @MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor)
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
-    # same as llamaforcasuallm (language model) minus embedding and other
-    # modules. embedding modules haven't been added as a caution
-    # since it could affect text but not audio
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
     }
 
+    # LoRA specific attributes
     #lm_head is not added for now since it requires logits_processor
     # which is missing from ultravox
+    # TODO : Add LoRA to the audio tower and projector.
     supported_lora_modules = [
         "qkv_proj", "o_proj", "gate_up_proj", "down_proj"
     ]
@@ -402,7 +402,10 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
-            language_model="language_model", tower_model="audio_tower")
+            language_model="language_model.",
+            connector="multi_modal_projector.",
+            tower_model="audio_tower.",
+        )
 
     def _audio_features_to_embeddings(
             self, input_features: torch.Tensor) -> torch.Tensor:
