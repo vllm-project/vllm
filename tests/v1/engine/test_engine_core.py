@@ -8,8 +8,8 @@ from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import EngineCore
+from vllm.v1.executor.abstract import Executor
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -43,7 +43,7 @@ def test_engine_core(monkeypatch):
         """Setup the EngineCore."""
         engine_args = EngineArgs(model=MODEL_NAME)
         vllm_config = engine_args.create_engine_config()
-        executor_class = AsyncLLM._get_executor_cls(vllm_config)
+        executor_class = Executor.get_class(vllm_config)
 
         engine_core = EngineCore(vllm_config=vllm_config,
                                  executor_class=executor_class)
@@ -149,7 +149,7 @@ def test_engine_core_advanced_sampling(monkeypatch):
         """Setup the EngineCore."""
         engine_args = EngineArgs(model=MODEL_NAME)
         vllm_config = engine_args.create_engine_config()
-        executor_class = AsyncLLM._get_executor_cls(vllm_config)
+        executor_class = Executor.get_class(vllm_config)
 
         engine_core = EngineCore(vllm_config=vllm_config,
                                  executor_class=executor_class)
