@@ -13,8 +13,7 @@ import pytest
 import torch
 
 from tests.kernels.utils import *
-from vllm.attention import (Attention, AttentionBackend, AttentionMetadata,
-                            AttentionType)
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_ROCM_HIP
 from vllm.attention.selector import (_Backend, _cached_get_attn_backend,
                                      global_force_attn_backend_context_manager)
@@ -139,7 +138,7 @@ def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
     if test_pt.num_blocks is None or test_pt.num_heads is None:
         # Caller does not require a KV cache
         return TestResources(
-            scale, attn_backend, attn,
+            scale, attn,
             torch.tensor([], dtype=torch.float32, device=CUDA_DEVICE))
 
     # Construct KV cache
@@ -626,7 +625,6 @@ def _run_encoder_attention_test(
       & attn_metadata
     '''
     assert attn_metadata.num_decode_tokens == 0
-    attn_type = AttentionType.ENCODER
     packed_qkv = encoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
     with set_forward_context(attn_metadata, vllm_config):
@@ -676,7 +674,6 @@ def _run_decoder_self_attention_test(
     * Attention.forward() applied to packed_{query,key,value}, kv_cache
       & attn_metadata
     '''
-    attn_type = AttentionType.DECODER
     attn = test_rsrcs.attn
     kv_cache = test_rsrcs.kv_cache
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
@@ -739,7 +736,6 @@ def _run_encoder_decoder_cross_attention_test(
     '''
     assert decoder_test_params.packed_qkvo.packed_qkv is not None
 
-    attn_type = AttentionType.ENCODER_DECODER
     attn = test_rsrcs.attn
     kv_cache = test_rsrcs.kv_cache
     if cross_test_params is None:
