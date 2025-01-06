@@ -66,19 +66,26 @@ getting_started/faq
 ```
 
 ```{toctree}
-:caption: Serving
+:caption: Inference and Serving
 :maxdepth: 1
 
+serving/offline_inference
 serving/openai_compatible_server
-serving/deploying_with_docker
-serving/deploying_with_k8s
-serving/deploying_with_helm
-serving/deploying_with_nginx
 serving/distributed_serving
 serving/metrics
-serving/integrations
-serving/tensorizer
-serving/runai_model_streamer
+serving/integrations/index
+serving/multimodal_inputs
+```
+
+```{toctree}
+:caption: Deployment
+:maxdepth: 1
+
+deployment/docker
+deployment/k8s
+deployment/nginx
+deployment/frameworks/index
+deployment/integrations/index
 ```
 
 ```{toctree}
@@ -90,6 +97,7 @@ models/generative_models
 models/pooling_models
 models/adding_model
 models/enabling_multimodal_inputs
+models/loaders/index
 ```
 
 ```{toctree}
@@ -97,7 +105,6 @@ models/enabling_multimodal_inputs
 :maxdepth: 1
 
 usage/lora
-usage/multimodal_inputs
 usage/tool_calling
 usage/structured_outputs
 usage/spec_decode

@@ -1,10 +1,10 @@
-(run-on-llamaindex)=
+(serving-llamaindex)=
 
-# Serving with llama_index
+# LlamaIndex
 
-vLLM is also available via [llama_index](https://github.com/run-llama/llama_index) .
+vLLM is also available via [LlamaIndex](https://github.com/run-llama/llama_index) .
 
-To install llamaindex, run
+To install LlamaIndex, run
 
 ```console
 $ pip install llama-index-llms-vllm -q

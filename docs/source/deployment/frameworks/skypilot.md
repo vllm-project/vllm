@@ -1,6 +1,6 @@
-(on-cloud)=
+(deployment-skypilot)=
 
-# Deploying and scaling up with SkyPilot
+# SkyPilot
 
 ```{raw} html
 <p align="center">
