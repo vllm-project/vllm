@@ -122,28 +122,28 @@ class LlavaNextProcessingMixin(BaseLlavaProcessingMixin):
         num_patch_width: int,
     ) -> tuple[int, int]:
         # NOTE: Use float32 to remain consistent with HF output
-        current_height = np.float32(npatches * num_patch_height)
-        current_width = np.float32(npatches * num_patch_width)
+        current_height_f = np.float32(npatches * num_patch_height)
+        current_width_f = np.float32(npatches * num_patch_width)
 
-        original_width = np.float32(original_width)  # type: ignore
-        original_height = np.float32(original_height)  # type: ignore
+        original_width_f = np.float32(original_width)
+        original_height_f = np.float32(original_height)
 
-        original_aspect_ratio = original_width / original_height
-        current_aspect_ratio = current_width / current_height
+        original_aspect_ratio = original_width_f / original_height_f
+        current_aspect_ratio = current_width_f / current_height_f
 
         if original_aspect_ratio > current_aspect_ratio:
-            scale_factor = current_width / original_width
-            new_height = int(original_height * scale_factor)
-            padding = (current_height - new_height) // 2
-            current_height -= 2 * padding
+            scale_factor = current_width_f / original_width_f
+            new_height = int(original_height_f * scale_factor)
+            padding = (current_height_f - new_height) // 2
+            current_height_f -= 2 * padding
         else:
-            scale_factor = current_height / original_height
-            new_width = int(original_width * scale_factor)
-            padding = (current_width - new_width) // 2
-            current_width -= 2 * padding
+            scale_factor = current_height_f / original_height_f
+            new_width = int(original_width_f * scale_factor)
+            padding = (current_width_f - new_width) // 2
+            current_width_f -= 2 * padding
 
-        unpadded_features = int(current_height * current_width)
-        newline_features = int(current_height)
+        unpadded_features = int(current_height_f * current_width_f)
+        newline_features = int(current_height_f)
 
         return (unpadded_features, newline_features)
 
