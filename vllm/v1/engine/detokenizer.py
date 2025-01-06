@@ -51,6 +51,7 @@ class IncrementalDetokenizer:
     prompt_logprobs: Optional[PromptLogprobs]
     cumulative_logprob: Optional[float]
     num_logprobs: int
+    num_prompt_logprobs: int
 
     # Accounting for stop string buffering
     stop_buffer_length: int
@@ -83,6 +84,7 @@ class IncrementalDetokenizer:
             stop_buffer_length = 0
 
         logprobs = request.sampling_params.logprobs
+        prompt_logprobs = request.sampling_params.prompt_logprobs
         return cls(
             output_text="",
             tokens=tokens,
@@ -105,7 +107,8 @@ class IncrementalDetokenizer:
             stop_buffer_length=stop_buffer_length,
             cumulative_logprob=(0. if logprobs else None),
             logprobs=([] if logprobs else None),
-            prompt_logprobs=None,
+            prompt_logprobs=([] if prompt_logprobs else None),
+            num_prompt_logprobs=(prompt_logprobs or 0),
             num_logprobs=(logprobs or 0),
         )
 
@@ -123,8 +126,8 @@ class IncrementalDetokenizer:
             token_ids: [topk + 1]: topk token ids at pos
             logprobs:  [topk + 1]: topk logprobs at pos
         """
-
         if self.num_logprobs == 0:
+            # Sample logprobs disabled for this request
             return None
         assert self.logprobs is not None
 
@@ -174,15 +177,17 @@ class IncrementalDetokenizer:
         token_ids: Optional[torch.Tensor],
         logprobs: Optional[torch.Tensor],
     ) -> Optional[PromptLogprobs]:
-
-        # Skip if no prompt logprobs were generated.
-        if token_ids is None:
+        if self.num_prompt_logprobs == 0:
+            # Prompt logprobs disabled for this request
             return None
-        assert logprobs is not None
 
-        # EngineCore does not stream until entire prompt complete,
-        # so Detokenizer should get all prompt lps at once.
-        assert self.prompt_logprobs is None
+        # Prompt logprobs enabled but none generated in this step
+        if token_ids is None or (logprobs is not None
+                                 and logprobs.numel() == 0):
+            # EngineCore does not stream until entire prompt complete,
+            # so Detokenizer should get all prompt lps at once.
+            return []
+        assert logprobs is not None
 
         # Detokenize non-incrementally.
         # NOTE(rob): the output is flattened:
@@ -199,7 +204,7 @@ class IncrementalDetokenizer:
                 # Deal with the flattening from above.
                 decoded_tokens[tok_idx * num_logprobs:],
                 num_logprobs,
-            ) for tok_idx in range(num_tokens)
+            ) for tok_idx in range(num_tokens - 1)
         ]
 
         return self.prompt_logprobs

@@ -109,7 +109,9 @@ class MockEngineCore:
                         prompt_logprobs_token_ids = self.prompt_logprobs_raw[
                             req_idx][1]
                     else:
-                        (prompt_logprobs, prompt_logprobs_token_ids) = ([], [])
+                        (prompt_logprobs,
+                         prompt_logprobs_token_ids) = (torch.empty(0, 0),
+                                                       torch.empty(0, 0))
                 else:
                     (prompt_logprobs, prompt_logprobs_token_ids) = (None, None)
                 output = EngineCoreOutput(
