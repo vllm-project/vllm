@@ -1,10 +1,9 @@
 import functools
 from collections import UserDict
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional,
+from typing import (TYPE_CHECKING, Any, Dict, Mapping, Optional, Protocol,
                     Sequence, Type, TypeVar)
 
 import torch.nn as nn
-from typing_extensions import TypeAlias
 
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
@@ -15,7 +14,8 @@ from .audio import AudioPlugin
 from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
 from .image import ImagePlugin
 from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
-from .processing import BaseMultiModalProcessor
+from .processing import BaseMultiModalProcessor, ProcessingCache
+from .utils import cached_get_tokenizer
 from .video import VideoPlugin
 
 if TYPE_CHECKING:
@@ -23,15 +23,22 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# TODO: Tune the MM cache size
+MM_CACHE_SIZE = 256
+
 N = TypeVar("N", bound=Type[nn.Module])
 
-MultiModalProcessorFactory: TypeAlias = Callable[[InputProcessingContext],
-                                                 BaseMultiModalProcessor]
-"""
-Constructs a :class:`MultiModalProcessor` instance from the context.
 
-The processing metadata should be derived from the context.
-"""
+class MultiModalProcessorFactory(Protocol):
+    """Constructs a :class:`MultiModalProcessor` instance from the context."""
+
+    def __call__(
+        self,
+        ctx: InputProcessingContext,
+        *,
+        cache: Optional[ProcessingCache] = None,
+    ) -> BaseMultiModalProcessor:
+        ...
 
 
 class _MultiModalLimits(UserDict["ModelConfig", Dict[str, int]]):
@@ -71,12 +78,14 @@ class MultiModalRegistry:
 
         self._limits_by_model = _MultiModalLimits()
 
+        self._processing_cache = ProcessingCache(MM_CACHE_SIZE)
+
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
         """
         Register a multi-modal plugin so it can be recognized by vLLM.
 
         See also:
-            :ref:`adding_multimodal_plugin`
+            :ref:`adding-multimodal-plugin`
         """
         data_type_key = plugin.get_data_key()
 
@@ -200,6 +209,28 @@ class MultiModalRegistry:
         """
         return self.register_max_multimodal_tokens("image", max_mm_tokens)
 
+    def get_max_tokens_per_item_by_modality(
+        self,
+        model_config: "ModelConfig",
+    ) -> Mapping[str, int]:
+        """
+        Get the maximum number of tokens per data item from each modality
+        for profiling the memory usage of a model.
+
+        Note:
+            This is currently directly used only in V1.
+        """
+        if self.has_processor(model_config):
+            tokenizer = cached_get_tokenizer(model_config.tokenizer)
+            processor = self.create_processor(model_config, tokenizer)
+            seq_len = model_config.max_model_len
+            return processor.profiling_info.get_mm_max_tokens_per_item(seq_len)
+
+        return {
+            key: plugin.get_max_multimodal_tokens(model_config)
+            for key, plugin in self._plugins.items()
+        }
+
     def get_max_tokens_by_modality(
         self,
         model_config: "ModelConfig",
@@ -216,9 +247,9 @@ class MultiModalRegistry:
         limits_per_plugin = self._limits_by_model[model_config]
 
         return {
-            key: (limits_per_plugin[key] *
-                  plugin.get_max_multimodal_tokens(model_config))
-            for key, plugin in self._plugins.items()
+            key: limits_per_plugin[key] * max_tokens_per_mm_item
+            for key, max_tokens_per_mm_item in
+            self.get_max_tokens_per_item_by_modality(model_config).items()
         }
 
     def get_max_multimodal_tokens(self, model_config: "ModelConfig") -> int:
@@ -294,8 +325,8 @@ class MultiModalRegistry:
         invoked to transform the data into a dictionary of model inputs.
 
         See also:
-            - :ref:`input_processing_pipeline`
-            - :ref:`enabling_multimodal_inputs`
+            - :ref:`input-processing-pipeline`
+            - :ref:`enabling-multimodal-inputs`
         """
 
         def wrapper(model_cls: N) -> N:
@@ -311,15 +342,18 @@ class MultiModalRegistry:
 
         return wrapper
 
-    def has_processor(self, model_config: "ModelConfig") -> bool:
-        """
-        Test whether a multi-modal processor is defined for a specific model.
-        """
+    def _get_model_cls(self, model_config: "ModelConfig"):
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
 
         model_cls, _ = get_model_architecture(model_config)
-        return model_cls in self._processor_factories
+        return model_cls
+
+    def has_processor(self, model_config: "ModelConfig") -> bool:
+        """
+        Test whether a multi-modal processor is defined for a specific model.
+        """
+        return self._get_model_cls(model_config) in self._processor_factories
 
     def create_processor(
         self,
@@ -329,12 +363,11 @@ class MultiModalRegistry:
         """
         Create a multi-modal processor for a specific model and tokenizer.
         """
-
-        # Avoid circular import
-        from vllm.model_executor.model_loader import get_model_architecture
-
-        model_cls, _ = get_model_architecture(model_config)
+        model_cls = self._get_model_cls(model_config)
         processor_factory = self._processor_factories[model_cls]
 
         ctx = InputProcessingContext(model_config, tokenizer)
-        return processor_factory(ctx)
+        cache = (None if model_config.disable_mm_preprocessor_cache else
+                 self._processing_cache)
+
+        return processor_factory(ctx, cache=cache)

@@ -112,6 +112,91 @@ __global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
   }
 }
 
+// TODO(simon): this is temporarily adapted from
+// https://github.com/sgl-project/sglang/commit/31548116a8dc8c6df7e146e0587335a59fc5b9d7
+// we did this to unblock Deepseek V3 but there should be a better
+// implementation to manage shared memory.
+template <typename scalar_t>
+__global__ void moe_align_block_size_global_mem_kernel(
+    scalar_t* __restrict__ topk_ids, int32_t* sorted_token_ids,
+    int32_t* expert_ids, int32_t* total_tokens_post_pad, int32_t num_experts,
+    int32_t block_size, size_t numel, int32_t* tokens_cnts, int32_t* cumsum) {
+  const size_t tokens_per_thread = CEILDIV(numel, blockDim.x);
+  const size_t start_idx = threadIdx.x * tokens_per_thread;
+
+  for (int i = 0; i < num_experts; ++i) {
+    tokens_cnts[index(num_experts, threadIdx.x + 1, i)] = 0;
+  }
+
+  /**
+   * In the first step we compute token_cnts[thread_index + 1][expert_index],
+   * which counts how many tokens in the token shard of thread_index are
+   * assigned to expert expert_index.
+   */
+  for (int i = start_idx; i < numel && i < start_idx + tokens_per_thread; ++i) {
+    ++tokens_cnts[index(num_experts, threadIdx.x + 1, topk_ids[i])];
+  }
+
+  __syncthreads();
+
+  // For each expert we accumulate the token counts from the different threads.
+  for (int eid = threadIdx.x; eid < num_experts; eid += blockDim.x) {
+    tokens_cnts[index(num_experts, 0, eid)] = 0;
+    for (int i = 1; i <= blockDim.x; ++i) {
+      tokens_cnts[index(num_experts, i, eid)] +=
+          tokens_cnts[index(num_experts, i - 1, eid)];
+    }
+  }
+
+  __syncthreads();
+
+  // We accumulate the token counts of all experts in thread 0.
+  if (threadIdx.x == 0) {
+    cumsum[0] = 0;
+    for (int i = 1; i <= num_experts; ++i) {
+      cumsum[i] = cumsum[i - 1] +
+                  CEILDIV(tokens_cnts[index(num_experts, blockDim.x, i - 1)],
+                          block_size) *
+                      block_size;
+    }
+    *total_tokens_post_pad = cumsum[num_experts];
+  }
+
+  __syncthreads();
+
+  /**
+   * For each expert, each thread processes the tokens of the corresponding
+   * blocks and stores the corresponding expert_id for each block.
+   */
+  for (int eid = threadIdx.x; eid < num_experts; eid += blockDim.x) {
+    for (int i = cumsum[eid]; i < cumsum[eid + 1]; i += block_size) {
+      expert_ids[i / block_size] = eid;
+    }
+  }
+
+  /**
+   * Each thread processes a token shard, calculating the index of each token
+   * after sorting by expert number. Given the example topk_ids =
+   * [0,1,2,1,2,3,0,3,4] and block_size = 4, then the output would be [0, 6, *,
+   * *, 1, 3, *, *, 2, 4, *, *, 5, 7, *, *, 8, *, *, *], where * represents a
+   * padding value(preset in python).
+   */
+  for (int i = start_idx; i < numel && i < start_idx + tokens_per_thread; ++i) {
+    int32_t expert_id = topk_ids[i];
+    /** The cumsum[expert_id] stores the starting index of the tokens that the
+     * expert with expert_id needs to process, and
+     * tokens_cnts[threadIdx.x][expert_id] stores the indices of the tokens
+     * processed by the expert with expert_id within the current thread's token
+     * shard.
+     */
+    int32_t rank_post_pad =
+        tokens_cnts[index(num_experts, threadIdx.x, expert_id)] +
+        cumsum[expert_id];
+    sorted_token_ids[rank_post_pad] = i;
+    ++tokens_cnts[index(num_experts, threadIdx.x, expert_id)];
+  }
+}
+
 template <typename scalar_t, int TOPK>
 __global__ void moe_sum_kernel(
     scalar_t* __restrict__ out,          // [..., d]

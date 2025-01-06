@@ -31,14 +31,6 @@ def test_prefix_caching_from_cli():
     assert engine_args.enable_prefix_caching
 
 
-def test_defaults():
-    engine_args = EngineArgs(model="facebook/opt-125m")
-
-    # Assert V1 defaults
-    assert (engine_args.enable_prefix_caching
-            ), "V1 turns on prefix caching by default"
-
-
 def test_defaults_with_usage_context():
     engine_args = EngineArgs(model="facebook/opt-125m")
     vllm_config: VllmConfig = engine_args.create_engine_config(
@@ -52,10 +44,3 @@ def test_defaults_with_usage_context():
         UsageContext.OPENAI_API_SERVER)
     assert vllm_config.scheduler_config.max_num_seqs == 1024
     assert vllm_config.scheduler_config.max_num_batched_tokens == 2048
-
-
-def test_prefix_cache_disabled_with_multimodel():
-    engine_args = EngineArgs(model="llava-hf/llava-1.5-7b-hf")
-
-    vllm_config = engine_args.create_engine_config(UsageContext.LLM_CLASS)
-    assert not vllm_config.cache_config.enable_prefix_caching

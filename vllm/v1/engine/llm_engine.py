@@ -42,8 +42,6 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
-
-        # TODO: Can we avoid this?
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -55,9 +53,12 @@ class LLMEngine:
         self.tokenizer.ping()
 
         # Processor (convert Inputs --> EngineCoreRequests)
-        self.processor = Processor(vllm_config.model_config,
-                                   vllm_config.lora_config, self.tokenizer,
-                                   input_registry, mm_registry)
+        self.processor = Processor(model_config=vllm_config.model_config,
+                                   cache_config=vllm_config.cache_config,
+                                   lora_config=vllm_config.lora_config,
+                                   tokenizer=self.tokenizer,
+                                   input_registry=input_registry,
+                                   mm_registry=mm_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
         self.detokenizer = Detokenizer(
@@ -69,11 +70,11 @@ class LLMEngine:
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
-            vllm_config,
-            executor_class,
-            usage_context,
             multiprocess_mode=multiprocess_mode,
             asyncio_mode=False,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=False,
         )
 
     @classmethod
@@ -88,7 +89,7 @@ class LLMEngine:
 
         # Create the engine configs.
         vllm_config = engine_args.create_engine_config(usage_context)
-        executor_class = cls._get_executor_cls(vllm_config)
+        executor_class = Executor.get_class(vllm_config)
 
         if VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.debug("Enabling multiprocessing for LLMEngine.")
@@ -101,21 +102,6 @@ class LLMEngine:
                    usage_context=usage_context,
                    stat_loggers=stat_loggers,
                    multiprocess_mode=enable_multiprocessing)
-
-    @classmethod
-    def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
-        executor_class: Type[Executor]
-        distributed_executor_backend = (
-            vllm_config.parallel_config.distributed_executor_backend)
-        if distributed_executor_backend == "mp":
-            from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-            executor_class = MultiprocExecutor
-        else:
-            assert (distributed_executor_backend is None)
-            from vllm.v1.executor.uniproc_executor import UniprocExecutor
-            executor_class = UniprocExecutor
-
-        return executor_class
 
     def get_num_unfinished_requests(self) -> int:
         return self.detokenizer.get_num_unfinished_requests()
@@ -146,15 +132,17 @@ class LLMEngine:
     ) -> None:
 
         # 1) Process raw inputs into the request.
-        detokenizer_req, engine_core_req = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            trace_headers, prompt_adapter_request, priority)
+        request = self.processor.process_inputs(request_id, prompt, params,
+                                                arrival_time, lora_request,
+                                                trace_headers,
+                                                prompt_adapter_request,
+                                                priority)
 
         # 2) Add the request to Detokenizer.
-        self.detokenizer.add_request(detokenizer_req)
+        self.detokenizer.add_request(request)
 
         # 3) Add the request to EngineCore.
-        self.engine_core.add_request(engine_core_req)
+        self.engine_core.add_request(request)
 
     def step(self) -> List[RequestOutput]:
 
@@ -170,8 +158,6 @@ class LLMEngine:
             self.abort_request(requests_to_abort)
 
         return request_outputs
-
-    # TODO(rob): Can we get rid of these?
 
     def get_model_config(self):
         return self.model_config
@@ -197,10 +183,3 @@ class LLMEngine:
                             f"found type: {type(tokenizer_group)}")
 
         return tokenizer_group
-
-    def __del__(self):
-        self.shutdown()
-
-    def shutdown(self):
-        if engine_core := getattr(self, "engine_core", None):
-            engine_core.shutdown()

@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
-    VLLM_USE_FLASHINFER_SAMPLER: bool = False
+    VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
     VLLM_USE_FLASHINFER_REJECTION_SAMPLER: bool = False
     VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     VLLM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
+    VLLM_DISABLE_COMPILE_CACHE: bool = False
     Q_SCALE_CONSTANT: int = 20
     K_SCALE_CONSTANT: int = 20
     V_SCALE_CONSTANT: int = 10
@@ -333,7 +334,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # If set, vllm will use flashinfer sampler
     "VLLM_USE_FLASHINFER_SAMPLER":
-    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_SAMPLER", "0"))),
+    lambda: bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
+    if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ else None,
 
     # If set, vllm will force flashinfer to use tensor cores;
     # otherwise will use heuristic based on model architecture.
@@ -556,6 +558,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))),
     "VLLM_LOG_BATCHSIZE_INTERVAL":
     lambda: float(os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")),
+    "VLLM_DISABLE_COMPILE_CACHE":
+    lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
 }
 
 # end-env-vars-definition

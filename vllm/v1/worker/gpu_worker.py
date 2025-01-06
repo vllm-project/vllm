@@ -48,6 +48,7 @@ class Worker:
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
+        self.parallel_config.rank = rank
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -202,7 +203,6 @@ class Worker:
     ) -> ModelRunnerOutput:
         output = self.model_runner.execute_model(scheduler_output)
         return output if self.rank == 0 else None
-        return output
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:

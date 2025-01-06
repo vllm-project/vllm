@@ -6,21 +6,7 @@ import msgspec
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
-from vllm.sampling_params import RequestOutputKind, SamplingParams
-
-
-@dataclass
-class DetokenizerRequest:
-
-    request_id: str
-    prompt: Optional[str]
-    prompt_token_ids: List[int]
-    skip_special_tokens: bool
-    spaces_between_special_tokens: bool
-    output_kind: RequestOutputKind
-
-    stop: List[str]
-    include_stop_str_in_output: bool
+from vllm.sampling_params import SamplingParams
 
 
 @dataclass

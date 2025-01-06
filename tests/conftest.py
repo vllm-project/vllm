@@ -31,7 +31,6 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
                          to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
-from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
                         identity)
@@ -41,6 +40,7 @@ logger = init_logger(__name__)
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
+_SYS_MSG = os.path.join(_TEST_DIR, "system_messages", "sonnet3.5_nov2024.txt")
 
 _M = TypeVar("_M")
 _PromptMultiModalInput = Union[List[_M], List[List[_M]]]
@@ -178,6 +178,12 @@ def example_prompts() -> List[str]:
     return prompts
 
 
+@pytest.fixture
+def example_system_message() -> str:
+    with open(_SYS_MSG) as f:
+        return f.read()
+
+
 class DecoderPromptType(Enum):
     """For encoder/decoder models only."""
     CUSTOM = 1
@@ -242,6 +248,7 @@ _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 class HfRunner:
 
     def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
+        from vllm.platforms import current_platform
         if x is None or isinstance(x, (bool, )):
             return x
 

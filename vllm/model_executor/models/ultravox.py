@@ -2,32 +2,33 @@
 """PyTorch Ultravox model."""
 
 import math
-from functools import cached_property, lru_cache
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
+from functools import cached_property
+from typing import (Any, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
 
-import numpy as np
 import torch
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import functional as F
-from transformers import BatchFeature
+from transformers import BatchFeature, ProcessorMixin
 from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.inputs import InputContext
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataDict,
-                                        MultiModalDataItems, ProcessorInputs,
+                                        MultiModalDataItems, ProcessingMixin,
                                         PromptReplacement)
+from vllm.multimodal.profiling import BaseProfilingInfo, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
@@ -55,102 +56,153 @@ UltravoxAudioInputs = Union[UltravoxAudioFeatureInputs,
                             UltravoxAudioEmbeddingInputs]
 
 
-@lru_cache
-def cached_feature_extractor(model_id: str) -> WhisperFeatureExtractor:
-    return WhisperFeatureExtractor.from_pretrained(model_id)
+class UltravoxProcessingMixin(ProcessingMixin):
 
-
-def whisper_feature_extractor(ctx: InputContext) -> WhisperFeatureExtractor:
-    return cached_feature_extractor(
-        ctx.get_hf_config(UltravoxConfig).audio_model_id)
-
-
-def get_ultravox_max_audio_tokens(ctx: InputContext):
-    feature_extractor = whisper_feature_extractor(ctx)
-    return math.ceil(feature_extractor.chunk_length * _AUDIO_TOKENS_PER_SECOND)
-
-
-class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
-
-    def _get_feature_extractor(self) -> WhisperFeatureExtractor:
-        return self._get_hf_processor().audio_processor.feature_extractor
-
-    def _resample_audio(
+    def _get_hf_processor(
         self,
-        audio: np.ndarray,
-        sr: int,
-    ) -> Dict[str, Union[np.ndarray, int]]:
-        # resample audio to the model's sampling rate
-        feature_extractor = self._get_feature_extractor()
-        if sr != feature_extractor.sampling_rate:
-            try:
-                import librosa
-            except ImportError as exc:
-                raise ImportError(
-                    "Please install vllm[audio] for audio support.") from exc
-            audio = librosa.resample(audio,
-                                     orig_sr=sr,
-                                     target_sr=feature_extractor.sampling_rate)
-            sr = feature_extractor.sampling_rate
-        return {"audio": audio, "sampling_rate": sr}
+        *,
+        # Ignored in initialization
+        sampling_rate: Optional[int] = None,
+    ) -> ProcessorMixin:
+        return self.ctx.get_hf_processor()
 
-    def _apply_hf_processor(
+    def _get_feature_extractor(
+        self,
+        *,
+        # Ignored in initialization
+        sampling_rate: Optional[int] = None,
+    ) -> WhisperFeatureExtractor:
+        hf_processor = self._get_hf_processor(sampling_rate=sampling_rate)
+        audio_processor = hf_processor.audio_processor  # type: ignore
+        feature_extractor = audio_processor.feature_extractor  # type: ignore
+        assert isinstance(feature_extractor, WhisperFeatureExtractor)
+        return feature_extractor
+
+
+class UltravoxProfilingInfo(UltravoxProcessingMixin, BaseProfilingInfo):
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"audio": None}
+
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        feature_extractor = self._get_feature_extractor()
+        max_audio_tokens = math.ceil(feature_extractor.chunk_length *
+                                     _AUDIO_TOKENS_PER_SECOND)
+
+        return {"audio": max_audio_tokens}
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        feature_extractor = self._get_feature_extractor()
+
+        sampling_rate = feature_extractor.sampling_rate
+        audio_len = feature_extractor.chunk_length * sampling_rate
+        num_audios = mm_counts.get("audio", 0)
+
+        mm_data = {
+            "audio":
+            self._get_dummy_audios(length=audio_len, num_audios=num_audios)
+        }
+
+        return ProcessorInputs(
+            prompt_text="<|audio|>" * num_audios,
+            mm_data=mm_data,
+        )
+
+
+class UltravoxMultiModalProcessor(UltravoxProcessingMixin,
+                                  BaseMultiModalProcessor):
+
+    def _get_profiling_info(self) -> BaseProfilingInfo:
+        return UltravoxProfilingInfo(self.ctx)
+
+    def _get_data_parser(self) -> MultiModalDataParser:
+        feature_extractor = self._get_feature_extractor()
+        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
+
+    def _call_hf_processor(
         self,
         prompt: str,
-        mm_data: MultiModalDataDict,
-        mm_processor_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if not mm_data or not mm_data.get("audio", None):
-            return super()._apply_hf_processor(prompt, mm_data,
-                                               mm_processor_kwargs)
+        # Text-only input not supported in composite processor
+        if not mm_data:
+            tokenizer = self._get_tokenizer()
 
-        audio_data = mm_data["audio"]
-        if not isinstance(audio_data, list):
-            audio_data = [audio_data]
+            prompt_ids = tokenizer.encode(
+                prompt,
+                add_special_tokens=False,  # type: ignore
+            )
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        mm_data = dict(mm_data)
+        audios = mm_data.pop("audios", [])
+        assert isinstance(audios, list)
+
+        if not audios:
+            return super()._call_hf_processor(
+                prompt=prompt,
+                mm_data=mm_data,
+                mm_kwargs=mm_kwargs,
+            )
+
+        feature_extractor = self._get_feature_extractor()
+        mm_kwargs = dict(
+            **mm_kwargs,
+            sampling_rate=feature_extractor.sampling_rate,
+        )
 
         # Ultravox processor doesn't support multiple inputs,
         # therefore we need to input text and audio one by one
-        tokenizer = self._get_tokenizer()
         audio_features, audio_token_len = [], []
-        processed_inputs = {}
-        for audio, sr in audio_data:
-            data = self._resample_audio(audio, sr)
-            processed_inputs = super()._apply_hf_processor(
-                prompt, data, mm_processor_kwargs)
-            prompt = tokenizer.decode(processed_inputs["input_ids"][0],
-                                      skip_special_tokens=False)
-            audio_features.append(
-                processed_inputs.pop("audio_values").squeeze(0))
-            audio_token_len.append(
-                processed_inputs.pop("audio_token_len").item())
+        shared_outputs = {}
+        for audio in audios:
+            # NOTE: Ultravox processor accepts "audio" instead of "audios"
+            item_processor_data = dict(**mm_data, audio=audio)
 
-        return dict(
-            **processed_inputs,
+            item_outputs = super()._call_hf_processor(
+                prompt=prompt,
+                mm_data=item_processor_data,
+                mm_kwargs=mm_kwargs,
+            )
+
+            audio_features.append(item_outputs.pop("audio_values")[0])
+            audio_token_len.append(item_outputs.pop("audio_token_len").item())
+            shared_outputs = item_outputs
+
+        combined_outputs = dict(
+            **shared_outputs,
             audio_features=audio_features,
             audio_token_len=audio_token_len,
         )
+        return BatchFeature(combined_outputs)
 
-    def _get_processor_data(
+    def _get_mm_fields_config(
         self,
-        mm_data: MultiModalDataDict,
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        # Ultravox uses "audio" instead of "audios" as calling keyword
-        processor_data, passthrough_data = super()._get_processor_data(mm_data)
-        if "audios" in processor_data:
-            processor_data["audio"] = processor_data.pop("audios")
-        return processor_data, passthrough_data
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            audio_features=MultiModalFieldConfig.batched("audio"),
+            audio_token_len=MultiModalFieldConfig.batched("audio"),
+            audio_embeds=MultiModalFieldConfig.batched("audio"),
+        )
 
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
-        hf_inputs: BatchFeature,
-        mm_processor_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, Any],
+        out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_processor = self._get_hf_processor()
-        placeholder = hf_processor.audio_token_replacement
+        hf_processor = self._get_hf_processor(**hf_processor_mm_kwargs)
+        placeholder = hf_processor.audio_token_replacement  # type: ignore
 
         def get_replacement_ultravox(item_idx: int):
-            audio_token_len = hf_inputs["audio_token_len"][item_idx]
+            audio_token_len = out_mm_kwargs["audio_token_len"][item_idx]
             return placeholder * audio_token_len
 
         return [
@@ -160,24 +212,6 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor):
                 replacement=get_replacement_ultravox,
             )
         ]
-
-    def _get_dummy_mm_inputs(
-        self,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        feature_extractor = self._get_feature_extractor()
-        sampling_rate = feature_extractor.sampling_rate
-        audio_len = feature_extractor.chunk_length * sampling_rate
-
-        audio_count = mm_counts["audio"]
-        audio = np.zeros(audio_len)
-        data = {"audio": [(audio, sampling_rate)] * audio_count}
-
-        return ProcessorInputs(
-            prompt_text="<|audio|>" * audio_count,
-            mm_data=data,
-            mm_processor_kwargs={},
-        )
 
 
 class StackAudioFrames(nn.Module):
@@ -298,10 +332,11 @@ class ModifiedWhisperEncoder(WhisperEncoder):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-    "audio", get_ultravox_max_audio_tokens)
 @MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor)
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -495,9 +530,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
 
         loader = AutoWeightsLoader(self,
                                    ignore_unexpected_prefixes=["audio_tower."])
-        return loader.load_weights(weights, mapper=hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

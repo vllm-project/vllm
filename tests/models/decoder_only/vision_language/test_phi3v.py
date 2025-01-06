@@ -5,7 +5,7 @@ from typing import List, Optional, Tuple, Type
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.multimodal.utils import rescale_image_size
+from vllm.multimodal.image import rescale_image_size
 from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
 
