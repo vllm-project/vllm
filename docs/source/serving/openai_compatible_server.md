@@ -217,7 +217,7 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 
 We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 [Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;
-see our [Multimodal Inputs](../usage/multimodal_inputs.md) guide for more information.
+see our [Multimodal Inputs](#multimodal-inputs) guide for more information.
 - *Note: `image_url.detail` parameter is not supported.*
 
 Code example: <gh-file:examples/openai_chat_completion_client.py>

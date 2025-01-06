@@ -79,6 +79,9 @@ serving/metrics
 serving/integrations
 serving/tensorizer
 serving/runai_model_streamer
+serving/engine_args
+serving/env_vars
+serving/usage_stats
 ```
 
 ```{toctree}
@@ -88,53 +91,28 @@ serving/runai_model_streamer
 models/supported_models
 models/generative_models
 models/pooling_models
-models/adding_model
-models/enabling_multimodal_inputs
 ```
 
 ```{toctree}
-:caption: Usage
+:caption: Features
 :maxdepth: 1
 
-usage/lora
-usage/multimodal_inputs
-usage/tool_calling
-usage/structured_outputs
-usage/spec_decode
-usage/compatibility_matrix
-usage/performance
-usage/engine_args
-usage/env_vars
-usage/usage_stats
-usage/disagg_prefill
-```
-
-```{toctree}
-:caption: Quantization
-:maxdepth: 1
-
-quantization/supported_hardware
-quantization/auto_awq
-quantization/bnb
-quantization/gguf
-quantization/int8
-quantization/fp8
-quantization/fp8_e5m2_kvcache
-quantization/fp8_e4m3_kvcache
-```
-
-```{toctree}
-:caption: Automatic Prefix Caching
-:maxdepth: 1
-
-automatic_prefix_caching/apc
-automatic_prefix_caching/details
+features/quantization/index
+features/lora
+features/multimodal_inputs
+features/tool_calling
+features/structured_outputs
+features/automatic_prefix_caching
+features/disagg_prefill
+features/spec_decode
+features/compatibility_matrix
 ```
 
 ```{toctree}
 :caption: Performance
 :maxdepth: 1
 
+performance/optimization
 performance/benchmarks
 ```
 
@@ -148,10 +126,8 @@ community/meetups
 community/sponsors
 ```
 
-% API Documentation: API reference aimed at vllm library usage
-
 ```{toctree}
-:caption: API Documentation
+:caption: API Reference
 :maxdepth: 2
 
 dev/sampling_params
@@ -160,30 +136,32 @@ dev/offline_inference/offline_index
 dev/engine/engine_index
 ```
 
-% Design: docs about vLLM internals
+% Design Documents: Details about vLLM internals
 
 ```{toctree}
-:caption: Design
+:caption: Design Documents
 :maxdepth: 2
 
 design/arch_overview
 design/huggingface_integration
 design/plugin_system
-design/input_processing/model_inputs_index
 design/kernel/paged_attention
+design/input_processing/model_inputs_index
 design/multimodal/multimodal_index
+design/automatic_prefix_caching
 design/multiprocessing
 ```
 
-% For Developers: contributing to the vLLM project
+% Developer Guide: How to contribute to the vLLM project
 
 ```{toctree}
-:caption: For Developers
+:caption: Developer Guide
 :maxdepth: 2
 
 contributing/overview
 contributing/profiling/profiling_index
 contributing/dockerfile/dockerfile
+contributing/model/index
 ```
 
 # Indices and tables

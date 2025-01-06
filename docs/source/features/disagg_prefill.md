@@ -41,13 +41,13 @@ Key abstractions for disaggregated prefilling:
 
 Here is a figure illustrating how the above 3 abstractions are organized:
 
-```{image} /assets/usage/disagg_prefill/abstraction.jpg
+```{image} /assets/features/disagg_prefill/abstraction.jpg
 :alt: Disaggregated prefilling abstractions
 ```
 
 The workflow of disaggregated prefilling is as follows:
 
-```{image} /assets/usage/disagg_prefill/overview.jpg
+```{image} /assets/features/disagg_prefill/overview.jpg
 :alt: Disaggregated prefilling workflow
 ```
 
