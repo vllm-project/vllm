@@ -1,6 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Optional, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
 
 import numpy as np
@@ -24,6 +24,10 @@ logger = init_logger(__name__)
 cached_get_tokenizer = lru_cache(get_tokenizer)
 
 _M = TypeVar("_M")
+
+if TYPE_CHECKING:
+    from .hasher import MultiModalHashDict
+    from .inputs import MultiModalPlaceholderDict
 
 
 class MediaConnector:
@@ -437,3 +441,83 @@ def consecutive_placeholder_ranges(
         PlaceholderRange(offset=initial_offset + i * item_size,
                          length=item_size) for i in range(num_items)
     ]
+
+
+def merge_and_sort_multimodal_metadata(
+    mm_positions: "MultiModalPlaceholderDict",
+    mm_hashes: Optional["MultiModalHashDict"],
+) -> tuple[list[str], list[PlaceholderRange], Optional[list[str]]]:
+    """Given a MultiModalPlaceholderDict, merge all PlaceholderRange
+    objects from all available modalities into a single list of 
+    PlaceholderRange, sorted by their offset (starting index in the input 
+    sequence) in the ascending order.
+
+    Optionally if a MultiModalHashDict is given, same operation will be 
+    applied to the object and the sorted list of hashes will be returned.
+
+    Raises:
+        ValueError: If the input prompt has interleaved placeholders from
+            different modalities (e.g, "<image><audio><image> Describe the 
+            content.")
+    
+    Returns:
+        list[str]: Sorted list of involved modalities.
+        list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from 
+            mm_positions.
+        Optional[list[str]]: Sorted list of all hashes from mm_hashes if 
+            given, None otherwise.
+    """
+
+    modalities = list(mm_positions.keys())
+
+    assert len(modalities) > 0, "No modalities found in the mm_positions."
+
+    # For single modality, placeholder ranges and hashes are already sorted
+    # so we can return the list directly.
+    if len(modalities) == 1:
+        if mm_hashes is None:
+            return modalities, list(mm_positions[modalities[0]]), None
+        else:
+            return modalities, list(mm_positions[modalities[0]]), list(
+                mm_hashes[modalities[0]])
+
+    placeholder_lists_with_modality = [(modality, mm_positions[modality])
+                                       for modality in modalities]
+
+    if mm_hashes is None:
+        sorted_placeholder_lists = sorted(placeholder_lists_with_modality,
+                                          key=lambda x: x[1][0]['offset'])
+        sorted_hash_lists = None
+    else:
+        hashes_lists = [
+            mm_hashes[modality] for modality in modalities
+            if modality in mm_hashes
+        ]
+        sorted_pairs = sorted(zip(placeholder_lists_with_modality,
+                                  hashes_lists),
+                              key=lambda x: x[0][1][0]['offset'])
+        sorted_placeholder_tuple, sorted_hash_tuple = zip(*sorted_pairs)
+        sorted_placeholder_lists = list(sorted_placeholder_tuple)
+        sorted_hash_lists = list(sorted_hash_tuple)
+
+    sorted_modalities = [modality for modality, _ in sorted_placeholder_lists]
+
+    # Flatten sorted list of lists to a single list and verify there is no
+    # interleaving of placeholders from different modalities.
+    merged_placeholders: list[PlaceholderRange] = []
+    for modality, placeholder_list in sorted_placeholder_lists:
+        if merged_placeholders and placeholder_list[0][
+                'offset'] < merged_placeholders[-1]['offset']:
+            raise ValueError(
+                "Interleaved mixed-modality inference is currently not "
+                "supported.")
+        merged_placeholders.extend(placeholder_list)
+
+    if sorted_hash_lists is not None:
+        merged_hashes = []
+        for hash_list in sorted_hash_lists:
+            merged_hashes.extend(hash_list)
+    else:
+        merged_hashes = None
+
+    return sorted_modalities, merged_placeholders, merged_hashes
