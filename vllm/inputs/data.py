@@ -145,9 +145,6 @@ class TokenInputs(TypedDict):
     prompt_token_ids: List[int]
     """The token IDs of the prompt."""
 
-    prompt_embeds: NotRequired[torch.Tensor]
-    """The embeddings of the prompt, if available."""
-
     token_type_ids: NotRequired[List[int]]
     """The token type IDs of the prompt."""
 
@@ -155,6 +152,9 @@ class TokenInputs(TypedDict):
     """
     The original prompt text corresponding to the token IDs, if available.
     """
+
+    prompt_embeds: NotRequired[torch.Tensor]
+    """The embeddings of the prompt, if available."""
 
     multi_modal_data: NotRequired["MultiModalDataDict"]
     """
