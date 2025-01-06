@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Dict, List, Tuple, cast
+from typing import TYPE_CHECKING, Dict, List
 
 import numpy as np
 import torch
@@ -6,13 +6,13 @@ import torch
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.inputs import INPUT_REGISTRY
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, cdiv, is_pin_memory_available)
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
+                        is_pin_memory_available)
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.ipex_attn import IPEXAttentionBackend
 from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -162,9 +162,7 @@ class XPUModelRunner(GPUModelRunner):
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table[:num_reqs].copy_(
-            self.input_batch.block_table_cpu_tensor[:num_reqs],
-            non_blocking=True)
+        self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
@@ -220,8 +218,8 @@ class XPUModelRunner(GPUModelRunner):
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
-        block_numbers = (self.input_batch.block_table_cpu_tensor.flatten()
-                         [block_table_indices].numpy())
+        block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
+        block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
         block_offsets = positions_np % self.block_size
         np.add(block_numbers * self.block_size,
                block_offsets,
@@ -279,7 +277,8 @@ class XPUModelRunner(GPUModelRunner):
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_start_loc=seq_start_loc,
-            block_table=self.input_batch.block_table[:num_reqs],
+            block_table=(
+                self.input_batch.block_table.get_device_tensor()[:num_reqs]),
             slot_mapping=slot_mapping,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
