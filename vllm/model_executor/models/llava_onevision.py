@@ -19,8 +19,8 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
-from vllm.multimodal.parse import (MultiModalDataItems, VideoEmbeddingItems,
-                                   VideoProcessorItems)
+from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
+                                   VideoEmbeddingItems, VideoProcessorItems)
 from vllm.multimodal.processing import MultiModalFieldConfig, PromptReplacement
 from vllm.multimodal.profiling import BaseProfilingInfo, ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -169,6 +169,22 @@ class LlavaOnevisionProcessingMixin(LlavaNextProcessingMixin):
 
 class LlavaOnevisionProfilingInfo(LlavaOnevisionProcessingMixin,
                                   BaseLlavaProfilingInfo):
+
+    def _get_image_size_with_most_features(self) -> ImageSize:
+        hf_config = self._get_hf_config()
+        largest_feature_size, largest_feature_pinpoint = 0, None
+        for (height, width) in hf_config.image_grid_pinpoints:
+            feat_size = self._get_num_image_tokens(image_width=width,
+                                                   image_height=height)
+            if feat_size > largest_feature_size:
+                largest_feature_size = feat_size
+                largest_feature_pinpoint = ImageSize(width=width,
+                                                     height=height)
+
+        if largest_feature_size == 0 or largest_feature_pinpoint is None:
+            raise ValueError("Cannot have a largest feature size of 0!")
+
+        return largest_feature_pinpoint
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
