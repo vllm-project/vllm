@@ -6,9 +6,6 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, NamedTuple, Optional, Protocol, TypeVar, Union
 
-import numpy as np
-import numpy.typing as npt
-from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 
 from vllm import envs
