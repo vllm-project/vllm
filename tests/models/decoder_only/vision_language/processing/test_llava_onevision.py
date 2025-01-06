@@ -18,7 +18,8 @@ def processor_for_llava_onevision():
 @pytest.mark.parametrize("model_id",
                          ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
 @pytest.mark.parametrize("image_size", [(1669, 2560), (2560, 1669), (183, 488),
-                                        (488, 183), (198, 176), (176, 198)])
+                                        (488, 183), (198, 176), (176, 198),
+                                        (161, 184), (184, 161)])
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_prompt_replacements(
     processor_for_llava_onevision,
