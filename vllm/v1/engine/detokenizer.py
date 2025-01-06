@@ -180,14 +180,16 @@ class IncrementalDetokenizer:
         if self.num_prompt_logprobs == 0:
             # Prompt logprobs disabled for this request
             return None
-
-        # Prompt logprobs enabled but none generated in this step
-        if token_ids is None or (logprobs is not None
-                                 and logprobs.numel() == 0):
-            # EngineCore does not stream until entire prompt complete,
-            # so Detokenizer should get all prompt lps at once.
-            return []
         assert logprobs is not None
+        assert token_ids is not None
+        if logprobs.numel() == 0:
+            # Prompt logprobs are enabled for this request but prefill
+            # is finished and no more logprobs are being streamed from
+            # engine core
+            return []
+        # Prompt logprobs are enabled & engine core is streaming prompt
+        # logprobs, in one or more chunks.
+        assert self.prompt_logprobs is not None
 
         # Detokenize non-incrementally.
         # NOTE(rob): the output is flattened:
@@ -197,15 +199,28 @@ class IncrementalDetokenizer:
 
         # Make Logprob for each tokens. The first Logprob is None.
         num_tokens, num_logprobs = logprobs.shape
-        self.prompt_logprobs = [None] + [
-            self._make_pos_logprob_dict(
-                logprobs[tok_idx].tolist(),
-                token_ids[tok_idx].tolist(),
-                # Deal with the flattening from above.
-                decoded_tokens[tok_idx * num_logprobs:],
-                num_logprobs,
-            ) for tok_idx in range(num_tokens - 1)
-        ]
+        if len(self.prompt_logprobs) == 0:
+            # Buffer initial chunk of logprobs during prefill
+            self.prompt_logprobs = [None] + [
+                self._make_pos_logprob_dict(
+                    logprobs[tok_idx].tolist(),
+                    token_ids[tok_idx].tolist(),
+                    # Deal with the flattening from above.
+                    decoded_tokens[tok_idx * num_logprobs:],
+                    num_logprobs,
+                ) for tok_idx in range(num_tokens)
+            ]
+        else:
+            # Buffer subsequent chunk of logprobs during prefill
+            self.prompt_logprobs += [
+                self._make_pos_logprob_dict(
+                    logprobs[tok_idx].tolist(),
+                    token_ids[tok_idx].tolist(),
+                    # Deal with the flattening from above.
+                    decoded_tokens[tok_idx * num_logprobs:],
+                    num_logprobs,
+                ) for tok_idx in range(num_tokens)
+            ]
 
         return self.prompt_logprobs
 

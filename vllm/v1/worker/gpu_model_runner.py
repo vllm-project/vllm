@@ -502,10 +502,15 @@ class GPUModelRunner:
         # If we have 3 sequences in the batch of lens [2, 5, 3],
         # req_indices = [0, 0, 1, 1, 1, 1, 1, 2, 2, 2].
         # Thus, prompt_indices is where req_indices == req_idx.
+        print("\n\nreq_id_to_index:", self.input_batch.req_id_to_index, "\n\n")
+        print("\nreq_id:", req_id, "\n")
+        print("\nreq_indices:", req_indices, "\n")
+        print("\nscheduler_output.partial_req_ids:",
+              scheduler_output.partial_req_ids, "\n")
         req_idx = self.input_batch.req_id_to_index[req_id]
         indices = self.arange_np[:req_indices.shape[0]]
         prompt_indices = indices[req_indices == req_idx]
-
+        print("\n\n")
         # Remove the sample token if there is one.
         if req_id not in scheduler_output.partial_req_ids:
             prompt_indices = prompt_indices[:-1]

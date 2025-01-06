@@ -123,8 +123,6 @@ class Sampler(nn.Module):
 
         # Concatenate with the sampled token_ids if provided.
         if sampled_token_ids is not None:
-            # TODO(rob): do we need to return the rank of the sampled?
-            # TODO(andy): is this indexing right?
             sampled_logprobs = logprobs[torch.arange(logprobs.size(0)),
                                         sampled_token_ids].unsqueeze(-1)
             sampled_token_ids = sampled_token_ids.unsqueeze(-1)

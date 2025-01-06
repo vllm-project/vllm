@@ -429,6 +429,10 @@ class Scheduler:
                     # in the decoder's KV cache.
                     self.encoder_cache_manager.free(request, input_id)
 
+            # Extract prompt logprobs for this req if needed.
+            prompt_logprobs, prompt_logprobs_token_ids = (
+                prompt_logprobs_dict.get(req_id, (None, None)))
+
             if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
                 # NOTE(woosuk): Currently, we assume that each request
@@ -452,13 +456,6 @@ class Scheduler:
                     logprobs_token_ids = [logprobs_token_ids_cpu[req_index]]
                     logprobs = [logprobs_cpu[req_index]]
 
-                # Extract prompt logprobs for this req if needed.
-                # FIXME(rob): Currently we throw away the prompt logprobs
-                # of an in progress partial request. We can handle this
-                # by updating the Request object to hold prompt logprobs.
-                prompt_logprobs, prompt_logprobs_token_ids = (
-                    prompt_logprobs_dict.get(req_id, (None, None)))
-
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
                     request_id=req_id,
@@ -475,6 +472,22 @@ class Scheduler:
                 # Breakout of the loop.
                 if stopped:
                     continue
+
+            elif prompt_logprobs is not None:
+                # Chunked prefill & prompt logprobs is enabled; transmit partial
+                # logprobs via EngineCoreOutput
+                # Add EngineCoreOutput for this Request.
+                output = EngineCoreOutput(
+                    request_id=req_id,
+                    new_token_ids=[],
+                    finished=request.is_finished(),
+                    finish_reason=request.get_finished_reason(),
+                    stop_reason=request.stop_reason,
+                    logprobs_token_ids=[],
+                    logprobs=[],
+                    prompt_logprobs_token_ids=prompt_logprobs_token_ids,
+                    prompt_logprobs=prompt_logprobs)
+                engine_core_outputs.append(output)
 
             new_running.append(request)
         self.running = new_running
