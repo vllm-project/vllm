@@ -211,10 +211,9 @@ class GPUModelRunner:
             if num_new_blocks == 0:
                 continue
             start_index = len(req_state.block_ids)
-            end_index = start_index + num_new_blocks
             req_state.block_ids.extend(req_data.new_block_ids)
-            self.input_batch.block_table_cpu[
-                req_index, start_index:end_index] = req_data.new_block_ids
+            self.input_batch.block_table.append_row(req_index, start_index,
+                                                    req_data.new_block_ids)
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
@@ -275,9 +274,7 @@ class GPUModelRunner:
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table[:num_reqs].copy_(
-            self.input_batch.block_table_cpu_tensor[:num_reqs],
-            non_blocking=True)
+        self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
@@ -333,8 +330,8 @@ class GPUModelRunner:
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
-        block_numbers = (self.input_batch.block_table_cpu_tensor.flatten()
-                         [block_table_indices].numpy())
+        block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
+        block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
         block_offsets = positions_np % self.block_size
         np.add(block_numbers * self.block_size,
                block_offsets,
@@ -450,7 +447,8 @@ class GPUModelRunner:
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_start_loc=seq_start_loc,
-            block_table=self.input_batch.block_table[:num_reqs],
+            block_table=(
+                self.input_batch.block_table.get_device_tensor()[:num_reqs]),
             slot_mapping=slot_mapping,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
