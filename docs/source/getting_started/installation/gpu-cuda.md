@@ -12,19 +12,39 @@ vLLM is a Python library that also contains pre-compiled C++ and CUDA (12.1) bin
 
 ## Install released versions
 
-You can install vLLM using pip:
+### Create a new Python environment
+
+You can create a new Python environment using `conda`:
 
 ```console
 $ # (Recommended) Create a new conda environment.
 $ conda create -n myenv python=3.12 -y
 $ conda activate myenv
+```
 
+Or you can create a new Python environment using [uv](https://docs.astral.sh/uv/), a very fast Python environment manager. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment using the following command:
+
+```console
+$ # (Recommended) Create a new uv environment. Use `--seed` to install `pip` and `setuptools` in the environment.
+$ uv venv myenv --python 3.12 --seed
+```
+
+In order to be performant, vLLM has to compile many cuda kernels. The compilation unfortunately introduces binary incompatibility with other CUDA versions and PyTorch versions, even for the same PyTorch version with different building configurations.
+
+Therefore, it is recommended to install vLLM with a **fresh new** environment. If either you have a different CUDA version or you want to use an existing PyTorch installation, you need to build vLLM from source. See [below](#build-from-source) for more details.
+
+### Install vLLM
+
+You can install vLLM using `pip` or `uv pip`:
+
+```console
 $ # Install vLLM with CUDA 12.1.
-$ pip install vllm
+$ pip install vllm # If you are using pip.
+$ uv pip install vllm # If you are using uv.
 ```
 
 ```{note}
-Although we recommend using `conda` to create and manage Python environments, it is highly recommended to use `pip` to install vLLM. This is because `pip` can install `torch` with separate library packages like `NCCL`, while `conda` installs `torch` with statically linked `NCCL`. This can cause issues when vLLM tries to use `NCCL`. See <gh-issue:8420> for more details.
+Please do not use `conda` to install `vllm`. `conda` installs `torch` with statically linked `NCCL`. This can cause issues when vLLM tries to use `NCCL`. See <gh-issue:8420> for more details.
 ```
 
 ````{note}
@@ -37,11 +57,6 @@ $ export VLLM_VERSION=0.6.1.post1
 $ export PYTHON_VERSION=310
 $ pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu118
 ```
-
-In order to be performant, vLLM has to compile many cuda kernels. The compilation unfortunately introduces binary incompatibility with other CUDA versions and PyTorch versions, even for the same PyTorch version with different building configurations.
-
-Therefore, it is recommended to install vLLM with a **fresh new** conda environment. If either you have a different CUDA version or you want to use an existing PyTorch installation, you need to build vLLM from source. See below for instructions.
-````
 
 (install-the-latest-code)=
 
