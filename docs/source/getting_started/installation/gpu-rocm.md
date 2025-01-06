@@ -1,6 +1,6 @@
 (installation-rocm)=
 
-# Installation with ROCm
+# Installation for ROCm
 
 vLLM supports AMD GPUs with ROCm 6.2.
 
