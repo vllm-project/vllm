@@ -32,7 +32,7 @@ def _create_random_top_logprob_test_vector(
     Returns:
       1D length-`num_logprobs` torch Tensor of float logprob values
     """
-    return torch.rand(num_logprobs) * (upper - lower) + lower
+    return torch.rand(num_logprobs + 1) * (upper - lower) + lower
 
 
 def _create_random_top_logprob_test_matrix(
@@ -89,13 +89,13 @@ def _create_random_top_token_test_vector(
       `num_logprobs` otherwise
     """
     # Calculate the final number of logprobs required
-    total_logprobs = num_logprobs + (1 if adjust_num_logprobs else 0)
+    total_logprobs = num_logprobs + 1
 
     # Generate random indices using torch
     choice_tensor = torch.randperm(upper - lower)[:total_logprobs] + lower
 
     # Ensure the sampled token ID is included in the tensor
-    choice_tensor[-1] = sampled_token_id
+    choice_tensor[0] = sampled_token_id
 
     return choice_tensor
 
@@ -200,8 +200,7 @@ def _decode_token(
     Returns:
       string representation of token
     """
-    return tokenizer.convert_ids_to_tokens([tok_id],
-                                           skip_special_tokens=False)[0]
+    return tokenizer.batch_decode([tok_id])[0]
 
 
 def validate_requests_logprobs(

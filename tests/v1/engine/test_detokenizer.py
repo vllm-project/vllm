@@ -95,11 +95,13 @@ class MockEngineCore:
             if len(generated_token_ids) > token_idx:
                 if do_logprobs:
                     assert self.generated_logprobs_raw is not None
-                    logprobs = [
-                        self.generated_logprobs_raw[req_idx][token_idx]
-                    ]
+                    (logprobs, logprobs_token_ids) = (
+                        self.generated_logprobs_raw[req_idx][token_idx])
+                    logprobs = [logprobs]
+                    logprobs_token_ids = [logprobs_token_ids]
                 else:
                     logprobs = None
+                    logprobs_token_ids = None
                 if do_prompt_logprobs:
                     if self.current_idx == 0:
                         assert self.prompt_logprobs_raw is not None
@@ -115,7 +117,7 @@ class MockEngineCore:
                     new_token_ids=[generated_token_ids[token_idx]],
                     finished=False,
                     logprobs=logprobs,
-                    logprobs_token_ids=logprobs,
+                    logprobs_token_ids=logprobs_token_ids,
                     prompt_logprobs=prompt_logprobs,
                     prompt_logprobs_token_ids=prompt_logprobs_token_ids,
                 )
