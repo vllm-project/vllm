@@ -13,7 +13,7 @@ def assert_enc_dec_mr_supported_scenario(
     a supported scenario.
     '''
 
-    # Reminder: Please update docs/source/usage/compatibility_matrix.md
+    # Reminder: Please update docs/source/features/compatibility_matrix.md
     # If the feature combo become valid
 
     if enc_dec_mr.cache_config.enable_prefix_caching:

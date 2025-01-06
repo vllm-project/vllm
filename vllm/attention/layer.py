@@ -42,6 +42,7 @@ class Attention(nn.Module):
         logits_soft_cap: Optional[float] = None,
         per_layer_sliding_window: Optional[int] = None,
         prefix: str = "",
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         super().__init__()
         if per_layer_sliding_window is not None:
@@ -97,7 +98,7 @@ class Attention(nn.Module):
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
-                             blocksparse_params, logits_soft_cap)
+                             blocksparse_params, logits_soft_cap, attn_type)
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
@@ -123,6 +124,7 @@ class Attention(nn.Module):
         compilation_config.static_forward_context[
             prefix] = LayerForwardContext(self, torch.tensor([]))
         self.layer_name = prefix
+        self.attn_type = attn_type
 
     def forward(
         self,
@@ -131,18 +133,12 @@ class Attention(nn.Module):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
 
         if self.use_direct_call:
-            return self.impl.forward(query,
-                                     key,
-                                     value,
-                                     kv_cache,
-                                     attn_metadata,
-                                     self._k_scale,
-                                     self._v_scale,
-                                     attn_type=attn_type)
+            return self.impl.forward(query, key, value, kv_cache,
+                                     attn_metadata, self._k_scale,
+                                     self._v_scale)
         elif self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
@@ -156,11 +152,11 @@ class Attention(nn.Module):
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size)
             torch.ops.vllm.unified_attention_with_output(
-                query, key, value, output, attn_type, self.layer_name)
+                query, key, value, output, self.layer_name)
             return output.view(-1, hidden_size)
         else:
             return torch.ops.vllm.unified_attention(query, key, value,
-                                                    attn_type, self.layer_name)
+                                                    kv_cache, self.layer_name)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
@@ -238,28 +234,20 @@ def unified_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    attn_type: str,
     layer_name: str,
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     ctx = forward_context.layers[layer_name]
     self = ctx.attn_module
-    return self.impl.forward(query,
-                             key,
-                             value,
-                             ctx.kv_cache,
-                             attn_metadata,
-                             self._k_scale,
-                             self._v_scale,
-                             attn_type=attn_type)
+    return self.impl.forward(query, key, value, ctx.kv_cache, attn_metadata,
+                             self._k_scale, self._v_scale)
 
 
 def unified_attention_fake(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    attn_type: str,
     layer_name: str,
 ) -> torch.Tensor:
     return torch.empty_like(query).contiguous()
@@ -279,7 +267,6 @@ def unified_attention_with_output(
     key: torch.Tensor,
     value: torch.Tensor,
     output: torch.Tensor,
-    attn_type: str,
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
@@ -293,7 +280,6 @@ def unified_attention_with_output(
                       attn_metadata,
                       self._k_scale,
                       self._v_scale,
-                      attn_type=attn_type,
                       output=output)
 
 
@@ -302,7 +288,6 @@ def unified_attention_with_output_fake(
     key: torch.Tensor,
     value: torch.Tensor,
     output: torch.Tensor,
-    attn_type: str,
     layer_name: str,
 ) -> None:
     return
