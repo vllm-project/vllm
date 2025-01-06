@@ -1,6 +1,6 @@
 (installation-neuron)=
 
-# Installation with Neuron
+# Installation for Neuron
 
 vLLM 0.3.3 onwards supports model inferencing and serving on AWS Trainium/Inferentia with Neuron SDK with continuous batching.
 Paged Attention and Chunked Prefill are currently in development and will be available soon.
