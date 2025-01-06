@@ -350,7 +350,7 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(),(1.0, 1.0, 1.0)],
         patch_hf_runner=model_utils.mlomo_patch_hf_runner,
         postprocess_inputs=model_utils.molmo_post_processor
-        
+
     ),
     # Tests for phi3v currently live in another file because of a bug in
     # transformers. Once this issue is fixed, we can enable them here instead.

@@ -536,5 +536,7 @@ def mlomo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         return hf_processor.process(*args, **kwargs)
 
     hf_model.processor = _processor
-    HfRunner.generate_greedy_logprobs_limit = _generate_greedy_logprobs_limit
+    HfRunner.generate_greedy_logprobs_limit = \
+        _generate_greedy_logprobs_limit
+
     return hf_model
