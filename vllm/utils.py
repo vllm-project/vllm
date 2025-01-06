@@ -524,6 +524,13 @@ def get_open_port() -> int:
 
 
 def find_process_using_port(port: int) -> Optional[psutil.Process]:
+    # TODO: We can not check for running processes with network
+    # port on macOS. Therefore, we can not have a full graceful shutdown
+    # of vLLM. For now, let's not look for processes in this case.
+    # Ref: https://www.florianreinhard.de/accessdenied-in-psutil/
+    if sys.platform.startswith("darwin"):
+        return None
+
     for conn in psutil.net_connections():
         if conn.laddr.port == port:
             try:

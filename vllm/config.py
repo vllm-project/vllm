@@ -4,6 +4,7 @@ import enum
 import hashlib
 import json
 import os
+import sys
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -2253,6 +2254,13 @@ def _get_and_verify_dtype(
                     "using float16 by default. Float16 is not currently "
                     "supported for POWERPC.")
                 torch_dtype = torch.bfloat16
+            if (current_platform.is_cpu() and sys.platform.startswith("darwin")
+                    and current_platform.get_cpu_architecture()
+                    == CpuArchEnum.ARM and config_dtype == torch.bfloat16):
+                logger.info(
+                    "For macOS with Apple Silicon, bfloat16 is not supported. "
+                    "Setting dtype to float16.")
+                torch_dtype = torch.float16
 
             if current_platform.is_hpu() and config_dtype == torch.float16:
                 logger.info(
