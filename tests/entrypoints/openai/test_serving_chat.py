@@ -8,7 +8,8 @@ from vllm.config import MultiModalConfig
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_engine import BaseModelPath
+from vllm.entrypoints.openai.serving_models import (BaseModelPath,
+                                                    OpenAIServingModels)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MODEL_NAME = "openai-community/gpt2"
@@ -33,6 +34,7 @@ class MockModelConfig:
     hf_config = MockHFConfig()
     logits_processor_pattern = None
     diff_sampling_param: Optional[dict] = None
+    allowed_local_media_path: str = ""
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -49,14 +51,13 @@ async def _async_serving_chat_init():
     engine = MockEngine()
     model_config = await engine.get_model_config()
 
+    models = OpenAIServingModels(model_config, BASE_MODEL_PATHS)
     serving_completion = OpenAIServingChat(engine,
                                            model_config,
-                                           BASE_MODEL_PATHS,
+                                           models,
                                            response_role="assistant",
                                            chat_template=CHAT_TEMPLATE,
                                            chat_template_content_format="auto",
-                                           lora_modules=None,
-                                           prompt_adapters=None,
                                            request_logger=None)
     return serving_completion
 
@@ -71,14 +72,14 @@ def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
+    models = OpenAIServingModels(base_model_paths=BASE_MODEL_PATHS,
+                                 model_config=MockModelConfig())
     serving_chat = OpenAIServingChat(mock_engine,
                                      MockModelConfig(),
-                                     BASE_MODEL_PATHS,
+                                     models,
                                      response_role="assistant",
                                      chat_template=CHAT_TEMPLATE,
                                      chat_template_content_format="auto",
-                                     lora_modules=None,
-                                     prompt_adapters=None,
                                      request_logger=None)
     req = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -114,14 +115,14 @@ def test_serving_chat_could_load_correct_generation_config():
     mock_engine.errored = False
 
     # Initialize the serving chat
+    models = OpenAIServingModels(base_model_paths=BASE_MODEL_PATHS,
+                                 model_config=mock_model_config)
     serving_chat = OpenAIServingChat(mock_engine,
                                      mock_model_config,
-                                     BASE_MODEL_PATHS,
+                                     models,
                                      response_role="assistant",
                                      chat_template=CHAT_TEMPLATE,
                                      chat_template_content_format="auto",
-                                     lora_modules=None,
-                                     prompt_adapters=None,
                                      request_logger=None)
     req = ChatCompletionRequest(
         model=MODEL_NAME,

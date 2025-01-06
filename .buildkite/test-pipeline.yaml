@@ -106,14 +106,12 @@ steps:
   source_file_dependencies:
   - vllm/
   commands:
-  - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py
-  - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
   - pytest -v -s entrypoints/test_chat_utils.py
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
@@ -333,8 +331,6 @@ steps:
   - vllm/
   - tests/models
   commands:
-    - pip install -e ./plugins/vllm_add_dummy_model
-    - pytest -v -s models/test_oot_registration.py # it needs a clean process
     - pytest -v -s models/test_registry.py
     - pytest -v -s models/test_initialization.py
 
@@ -360,23 +356,25 @@ steps:
     - pytest -v -s models/decoder_only/language -m 'not core_model and not quant_model'
     - pytest -v -s models/embedding/language -m 'not core_model'
 
-- label: Multi-Modal Models Test (Standard) # 28min
+- label: Multi-Modal Models Test (Standard) # 40min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
   - tests/models/decoder_only/vision_language
   - tests/models/embedding/vision_language
+  - tests/models/encoder_decoder/audio_language
   - tests/models/encoder_decoder/vision_language
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/decoder_only/audio_language -m 'core_model or quant_model'
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/vision_language -m core_model
+    - pytest -v -s models/encoder_decoder/audio_language -m core_model
     - pytest -v -s models/encoder_decoder/language -m core_model
     - pytest -v -s models/encoder_decoder/vision_language -m core_model
 
-- label: Multi-Modal Models Test (Extended) 1 # 1h16m
+- label: Multi-Modal Models Test (Extended) 1 # 48m
   optional: true
   source_file_dependencies:
   - vllm/
@@ -469,10 +467,27 @@ steps:
   - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/decoder_only/vision_language/test_models.py -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
-  - pip install -e ./plugins/vllm_add_dummy_model
-  - pytest -v -s distributed/test_distributed_oot.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s kv_transfer/disagg_test.py
+
+- label: Plugin Tests (2 GPUs) # 40min
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+  fast_check: true
+  source_file_dependencies:
+  - vllm/plugins/
+  - tests/plugins/
+  commands:
+  # begin platform plugin tests, all the code in-between runs on dummy platform
+  - pip install -e ./plugins/vllm_add_dummy_platform
+  - pytest -v -s plugins_tests/test_platform_plugins.py
+  - pip uninstall vllm_add_dummy_platform -y
+  # end platform plugin tests
+  # other tests continue here:
+  - pip install -e ./plugins/vllm_add_dummy_model
+  - pytest -v -s distributed/test_distributed_oot.py
+  - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
+  - pytest -v -s models/test_oot_registration.py # it needs a clean process
 
 - label: Multi-step Tests (4 GPUs) # 36min
   working_dir: "/vllm-workspace/tests"

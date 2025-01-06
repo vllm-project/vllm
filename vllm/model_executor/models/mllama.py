@@ -770,6 +770,7 @@ class MllamaTextCrossAttention(nn.Module):
             self.scaling,
             self.num_local_key_value_heads,
             prefix=f"{prefix}.attn",
+            attn_type=AttentionType.ENCODER_DECODER,
         )
 
     def forward(
@@ -805,13 +806,9 @@ class MllamaTextCrossAttention(nn.Module):
                                                kv_range_for_decode,
                                                attn_metadata)
         else:
-            output = self.attn(q.view(-1,
-                                      self.num_local_heads * self.head_dim),
-                               k,
-                               v,
-                               kv_cache,
-                               attn_metadata,
-                               attn_type=AttentionType.ENCODER_DECODER)
+            output = self.attn(
+                q.view(-1, self.num_local_heads * self.head_dim), k, v,
+                kv_cache, attn_metadata)
         out, _ = self.o_proj(output)
         return out
 

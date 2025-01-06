@@ -355,7 +355,8 @@ class PoolingRequestOutput(Generic[_O]):
         pooled_data = seq_group.pooled_data
         assert pooled_data is not None
 
-        output = PoolingOutput(pooled_data)
+        data = pooled_data.to(dtype=torch.float32, device="cpu")
+        output = PoolingOutput(data)
         prompt_token_ids = seq_group.prompt_token_ids
         finished = seq_group.is_finished()
 
