@@ -135,7 +135,11 @@ class Processor:
         mm_positions = decoder_inputs.multi_modal_placeholders
 
         if mm_positions:
-            sorted_modalities, sorted_mm_positions, sorted_mm_hashes = merge_and_sort_multimodal_metadata(  # noqa: E501
+            (
+                sorted_modalities,
+                sorted_mm_positions,
+                sorted_mm_hashes,
+            ) = merge_and_sort_multimodal_metadata(
                 mm_positions,
                 mm_hashes,
             )

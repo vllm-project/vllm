@@ -2,8 +2,8 @@ from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import (Any, Literal, Optional, TypedDict, TypeVar, Union, cast,
-                    final)
+from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, TypeVar,
+                    Union, cast, final)
 
 import numpy as np
 import torch
@@ -13,6 +13,9 @@ from transformers import BatchFeature
 from typing_extensions import NotRequired, TypeAlias
 
 from vllm.utils import JSONTree, full_groupby, is_list_of, json_map_leaves
+
+if TYPE_CHECKING:
+    from .hasher import MultiModalHashDict
 
 _T = TypeVar("_T")
 
@@ -491,11 +494,6 @@ MultiModalPlaceholderDict = Mapping[str, Sequence[PlaceholderRange]]
 A dictionary containing placeholder ranges.
 """
 
-MultiModalHashDict = Mapping[str, list[str]]
-"""
-A dictionary containing hashes for items in each modality.
-"""
-
 
 class MultiModalInputsV2(TypedDict):
     """
@@ -518,7 +516,7 @@ class MultiModalInputsV2(TypedDict):
     mm_kwargs: MultiModalKwargs
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: NotRequired[MultiModalHashDict]
+    mm_hashes: NotRequired["MultiModalHashDict"]
     """The hashes of the multi-modal data."""
 
     mm_placeholders: MultiModalPlaceholderDict

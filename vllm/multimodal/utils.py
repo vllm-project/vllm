@@ -26,7 +26,8 @@ cached_get_tokenizer = lru_cache(get_tokenizer)
 _M = TypeVar("_M")
 
 if TYPE_CHECKING:
-    from ..multimodal import MultiModalHashDict, MultiModalPlaceholderDict
+    from .hasher import MultiModalHashDict
+    from .inputs import MultiModalPlaceholderDict
 
 
 class MediaConnector:

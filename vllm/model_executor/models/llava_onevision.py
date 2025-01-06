@@ -793,7 +793,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         if not modalities:
             return None
 
-        # The result multimoal_embeddings is tuple of tensors, with each
+        # The result multimodal_embeddings is tuple of tensors, with each
         # tensor correspoending to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 

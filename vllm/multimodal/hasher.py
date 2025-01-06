@@ -1,5 +1,5 @@
 import pickle
-from typing import TYPE_CHECKING, Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Mapping, Optional
 
 import numpy as np
 import torch
@@ -10,9 +10,13 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.inputs import TokensPrompt
-    from vllm.multimodal import MultiModalHashDict
 
 logger = init_logger(__name__)
+
+MultiModalHashDict = Mapping[str, list[str]]
+"""
+A dictionary containing hashes for items in each modality.
+"""
 
 
 class MultiModalHasher:
