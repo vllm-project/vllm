@@ -195,7 +195,7 @@ class Example:
         include = "include" if self.main_file.suffix == ".md" else "literalinclude"
         content += f":::{{{include}}} {make_relative(self.main_file)}\n:::\n\n"
         if self.other_files:
-            content += "## Example source\n\n"
+            content += "## Example materials\n\n"
             for file in self.other_files:
                 include = "include" if file.suffix == ".md" else "literalinclude"
                 content += f":::{{admonition}} {file.relative_to(self.path)}\n:class: dropdown\n\n"
