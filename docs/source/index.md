@@ -161,8 +161,7 @@ design/multiprocessing
 contributing/overview
 contributing/profiling/profiling_index
 contributing/dockerfile/dockerfile
-contributing/model/adding_model
-contributing/model/enabling_multimodal_inputs
+contributing/model/index
 ```
 
 # Indices and tables
