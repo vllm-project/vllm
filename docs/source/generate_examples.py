@@ -33,7 +33,7 @@ CATEGORIES = {
 
 
 def is_example(path: Path) -> bool:
-    return path.is_dir() or path.suffix == ".py"
+    return path.is_dir() or path.suffix in (".py", ".md")
 
 
 def fix_case(text: str) -> str:
@@ -176,11 +176,12 @@ class Example:
         title = self.title.lower()
         with open(self.main_file, "r") as f:
             content = f.read().lower()
+        final_category = "Other"
         for category, category_info in CATEGORIES.items():
             if any(indicator in content or indicator in title
                    for indicator in category_info["keywords"]):
-                return category
-        return category
+                final_category = category
+        return final_category
 
     def generate(self) -> str:
         # Convert the path to a relative path from __file__
