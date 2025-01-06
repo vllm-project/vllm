@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 
+
 def fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -21,7 +22,6 @@ def fused_moe(
     num_tokens = hidden_states.shape[:-1].numel()
     num_experts = w1.shape[0]
     intermediate_size = w2.shape[-1]
-    device = hidden_states.device
     dtype = hidden_states.dtype
 
     hidden_states = hidden_states.view(num_tokens, hidden_size)
@@ -31,7 +31,7 @@ def fused_moe(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     topk_weights = topk_weights.to(dtype)
-    
+
     final_hidden_states = None
     for expert_idx in range(num_experts):
         expert_w1 = w1[expert_idx]
