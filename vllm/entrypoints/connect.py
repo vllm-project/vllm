@@ -3,6 +3,7 @@ import uvicorn
 import zmq
 import zmq.asyncio
 from fastapi import FastAPI, Request
+from starlette.datastructures import Headers
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
 # from fastapi.lifespan import Lifespan
@@ -19,7 +20,6 @@ socket_decode_num = 5
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger('vllm.entrypoints.connect')
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -50,12 +50,13 @@ async def create_socket_pool(url: str, num_sockets: int, zmqctx: zmq.asyncio.Con
     return sockets
 
 # select a scoket and execute task
-async def execute_task_async(request: dict, sockets: list):
+async def execute_task_async(route: str, headers: Headers, request: dict, sockets: list):
     sock = await sockets.get()
     try:
         requestBody = json.dumps(request)
-        logger.info(f"Sending requestBody: {requestBody}")
-        await sock.send(requestBody.encode())
+        headersJson = json.dumps(dict(headers))
+        logger.info(f"Sending requestBody: {requestBody} to {route} with headers: {headersJson}")
+        await sock.send_multipart([route.encode(), headersJson.encode(), requestBody.encode()])
         logger.info(f"Sent end")
         while True:
             logger.info(f"Waiting for reply")
@@ -73,18 +74,19 @@ async def execute_task_async(request: dict, sockets: list):
 async def chat_completions(request: Request):
     try:
         original_request_data = await request.json()
+        header = request.headers
         logger.info(f"Received request: {original_request_data}")
         prefill_request = original_request_data.copy()
         # change max_tokens = 1 to let it only do prefill
         prefill_request['max_tokens'] = 1
-
+        route = "/v1/completions"
         # finish prefill
-        async for x in execute_task_async(prefill_request, app.state.sockets_prefill):
+        async for x in execute_task_async(route, header, prefill_request, app.state.sockets_prefill):
             logger.info(f"{x}")
             continue
 
         # return decode
-        return StreamingResponse(execute_task_async(original_request_data, app.state.sockets_decode), media_type="text/event-stream")
+        return StreamingResponse(execute_task_async(route, header,original_request_data, app.state.sockets_decode), media_type="text/event-stream")
     
     except Exception as e:
         import sys

@@ -24,7 +24,7 @@ async def test_connect(session):
         "stream_options": {
                 "include_usage": True
         }
-}) as response:
+}, headers={"Content-Type": "application/json"}) as response:
             print(response.status)
             if response.status == 200:
                 transfer_encoding = response.headers.get('Transfer-Encoding')

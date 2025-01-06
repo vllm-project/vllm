@@ -14,8 +14,11 @@ async def worker_routine(worker_url: str,
     socket.connect(worker_url)
     print(f"worker-{i} {worker_url} started")
     while True:
-        identity, string  = await socket.recv_multipart()
-        print(f"worker-{i} Received request: [{identity} {string} ]")
+        identity, url, headers, string  = await socket.recv_multipart()
+        print(f"worker-{i} Received request identity: [{identity} ]")
+        print(f"worker-{i} Received request url: [{url} ]")
+        print(f"worker-{i} Received request headers: [{headers} ]")
+        print(f"worker-{i} Received request string: [{string} ]")
         streamreply = ['{"id":"chatcmpl-123","object":"chat.completion.chunk","created":1694268190,"model":"gpt-4o-mini", "system_fingerprint": "fp_44709d6fcb", "choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}]}',
 '{"id":"chatcmpl-123","object":"chat.completion.chunk","created":1694268190,"model":"gpt-4o-mini", "system_fingerprint": "fp_44709d6fcb", "choices":[{"index":0,"delta":{"content":"Hello"},"logprobs":null,"finish_reason":null}]}',
 '{"id":"chatcmpl-123","object":"chat.completion.chunk","created":1694268190,"model":"gpt-4o-mini", "system_fingerprint": "fp_44709d6fcb", "choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}]}'
