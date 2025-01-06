@@ -1,6 +1,6 @@
 (offline-inference)=
 
-# Offline inference
+# Offline Inference
 
 You can run vLLM in your own code on a list of prompts.
 
@@ -26,7 +26,7 @@ Please refer to the above pages for more details about each API.
 [API Reference](/dev/offline_inference/offline_index)
 ```
 
-## Configuration options
+## Configuration Options
 
 This section lists the most common options for running the vLLM engine.
 For a full list, refer to the [Engine Arguments](#engine-args) page.

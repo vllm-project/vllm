@@ -29,7 +29,7 @@ For non-CUDA platforms, please refer [here](#installation-index) for specific in
 
 (quickstart-offline)=
 
-## Offline batched inference
+## Offline Batched Inference
 
 With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference.py>
 
@@ -77,7 +77,7 @@ for output in outputs:
 
 (quickstart-online)=
 
-## OpenAI-compatible server
+## OpenAI-Compatible Server
 
 vLLM can be deployed as a server that implements the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
 By default, it starts the server at `http://localhost:8000`. You can specify the address with `--host` and `--port` arguments. The server currently hosts one model at a time and implements endpoints such as [list models](https://platform.openai.com/docs/api-reference/models/list), [create chat completion](https://platform.openai.com/docs/api-reference/chat/completions/create), and [create completion](https://platform.openai.com/docs/api-reference/completions/create) endpoints.

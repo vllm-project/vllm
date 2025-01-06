@@ -1,4 +1,4 @@
-# External integrations
+# External Integrations
 
 ```{toctree}
 :maxdepth: 1
