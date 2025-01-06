@@ -6,7 +6,7 @@ from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
 
 from vllm.attention.selector import (_Backend, _cached_get_attn_backend,
                                      global_force_attn_backend_context_manager)
-from vllm.multimodal.utils import rescale_image_size
+from vllm.multimodal.image import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,

@@ -238,7 +238,8 @@ class BertSelfAttention(nn.Module):
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+                              prefix=f"{prefix}.attn",
+                              attn_type=AttentionType.ENCODER_ONLY)
 
     def forward(
         self,
@@ -248,12 +249,7 @@ class BertSelfAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        output = self.attn(q,
-                           k,
-                           v,
-                           kv_cache,
-                           attn_metadata,
-                           attn_type=AttentionType.ENCODER_ONLY)
+        output = self.attn(q, k, v, kv_cache, attn_metadata)
         return output
 
 
@@ -409,6 +405,7 @@ class BertEmbeddingModel(nn.Module):
        model: An instance of BertModel used for forward operations.
        _pooler: An instance of Pooler used for pooling operations.
    """
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -441,8 +438,7 @@ class BertEmbeddingModel(nn.Module):
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
-        weights = hf_to_vllm_mapper.apply(weights)
+        weights = self.hf_to_vllm_mapper.apply(weights)
         weights = ((name, data) for name, data in weights
                    if not name.startswith("lm_head."))
         self.model.load_weights(weights)

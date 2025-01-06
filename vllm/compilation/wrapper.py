@@ -28,11 +28,12 @@ class TorchCompileWrapperWithCustomDispatcher:
                  compiled_callable: Optional[Callable] = None,
                  compilation_level: int = 0):
 
+        vllm_config = get_current_vllm_config()
+        self.vllm_config = vllm_config
         if compiled_callable is None:
             # default compilation settings
             # compiling the forward method
 
-            vllm_config = get_current_vllm_config()
             backend = vllm_config.compilation_config.init_backend(vllm_config)
 
             compiled_callable = torch.compile(
@@ -81,6 +82,13 @@ class TorchCompileWrapperWithCustomDispatcher:
             return
 
         self.compiled_codes.append(new_code)
+
+        if self.vllm_config.compilation_config.use_cudagraph and \
+            "update" in new_code.co_names:
+            import depyf
+            src = depyf.decompile(new_code)
+            msg = "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler because it will cause silent errors. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified (please search for the usage of the function `update`):\n" + src  # noqa
+            raise RuntimeError(msg)
 
     @contextmanager
     def dispatch_to_code(self, index: int):
