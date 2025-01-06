@@ -1,4 +1,4 @@
-# Alternative Model Loaders
+# Built-in Extensions
 
 ```{toctree}
 :maxdepth: 1

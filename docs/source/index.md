@@ -69,16 +69,16 @@ getting_started/faq
 :caption: Models
 :maxdepth: 1
 
-models/supported_models
 models/generative_models
 models/pooling_models
+models/supported_models
+models/extensions/index
 ```
 
 ```{toctree}
 :caption: Features
 :maxdepth: 1
 
-features/model_loaders/index
 features/quantization/index
 features/lora
 features/tool_calling
