@@ -104,7 +104,7 @@ class AsyncLLM(EngineClient):
         else:
             vllm_config = engine_config
 
-        executor_class = cls._get_executor_cls(vllm_config)
+        executor_class = Executor.get_class(vllm_config)
 
         # Create the AsyncLLM.
         return cls(
@@ -125,20 +125,6 @@ class AsyncLLM(EngineClient):
 
         if handler := getattr(self, "output_handler", None):
             handler.cancel()
-
-    @classmethod
-    def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
-        executor_class: Type[Executor]
-        distributed_executor_backend = (
-            vllm_config.parallel_config.distributed_executor_backend)
-        if distributed_executor_backend == "mp":
-            from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-            executor_class = MultiprocExecutor
-        else:
-            assert (distributed_executor_backend is None)
-            from vllm.v1.executor.uniproc_executor import UniprocExecutor
-            executor_class = UniprocExecutor
-        return executor_class
 
     async def add_request(
         self,

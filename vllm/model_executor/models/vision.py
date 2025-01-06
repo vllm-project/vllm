@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar
+from typing import Final, Generic, Protocol, TypeVar
 
 from transformers import PretrainedConfig
 
@@ -27,20 +27,30 @@ class VisionEncoderInfo(ABC, Generic[_C]):
         raise NotImplementedError
 
     @abstractmethod
-    def get_num_patches(self) -> int:
-        raise NotImplementedError
-
-    @abstractmethod
     def get_image_size(self) -> int:
         raise NotImplementedError
 
+    @abstractmethod
+    def get_patch_size(self) -> int:
+        raise NotImplementedError
 
-def vision_encoder_info(vision_config: PretrainedConfig) -> VisionEncoderInfo:
+    @abstractmethod
+    def get_patch_grid_length(self) -> int:
+        raise NotImplementedError
+
+
+class VisionLanguageConfig(Protocol):
+    vision_config: Final[PretrainedConfig]
+
+
+def get_vision_encoder_info(
+        hf_config: VisionLanguageConfig) -> VisionEncoderInfo:
     # Avoid circular imports
     from .clip import CLIPEncoderInfo, CLIPVisionConfig
     from .pixtral import PixtralHFEncoderInfo, PixtralVisionConfig
     from .siglip import SiglipEncoderInfo, SiglipVisionConfig
 
+    vision_config = hf_config.vision_config
     if isinstance(vision_config, CLIPVisionConfig):
         return CLIPEncoderInfo(vision_config)
     if isinstance(vision_config, PixtralVisionConfig):

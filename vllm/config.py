@@ -644,7 +644,7 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        # Reminder: Please update docs/source/usage/compatibility_matrix.md
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         from vllm.platforms import current_platform
         if not current_platform.is_async_output_supported(self.enforce_eager):
@@ -665,7 +665,7 @@ class ModelConfig:
         if self.runner_type == "pooling":
             self.use_async_output_proc = False
 
-        # Reminder: Please update docs/source/usage/compatibility_matrix.md
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if speculative_config:
             logger.warning("Async output processing is not supported with"
@@ -1015,11 +1015,6 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
-        from vllm.platforms import current_platform
-        if (current_platform.is_cuda() and self.block_size is not None
-                and self.block_size > 32):
-            raise ValueError("CUDA Paged Attention kernel only supports "
-                             f"block sizes up to 32. Got {self.block_size}.")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
@@ -2069,7 +2064,7 @@ class LoRAConfig:
                            model_config.quantization)
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
-        # Reminder: Please update docs/source/usage/compatibility_matrix.md
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if scheduler_config.chunked_prefill_enabled:
             logger.warning("LoRA with chunked prefill is still experimental "

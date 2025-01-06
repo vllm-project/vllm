@@ -37,7 +37,7 @@ print(output)
 If vLLM successfully returns text (for generative models) or hidden states (for pooling models), it indicates that your model is supported.
 ````
 
-Otherwise, please refer to [Adding a New Model](#adding-a-new-model) and [Enabling Multimodal Inputs](#enabling-multimodal-inputs) for instructions on how to implement your model in vLLM.
+Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
 ### ModelScope
@@ -647,7 +647,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `llava-hf/llava-onevision-qwen2-7b-ov-hf`, `llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `MiniCPMV`
   - MiniCPM-V
   - T + I<sup>E+</sup>
