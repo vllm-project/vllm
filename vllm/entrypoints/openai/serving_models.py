@@ -11,9 +11,12 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               ModelCard, ModelList,
                                               ModelPermission,
                                               UnloadLoraAdapterRequest)
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.utils import AtomicCounter
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -167,6 +170,8 @@ class OpenAIServingModels:
                                          status_code=HTTPStatus.BAD_REQUEST)
 
         self.lora_requests.append(lora_request)
+        logger.info("Loaded new LoRA adapter: name '%s', path '%s'", lora_name,
+                    lora_path)
         return f"Success: LoRA adapter '{lora_name}' added successfully."
 
     async def unload_lora_adapter(
@@ -182,6 +187,7 @@ class OpenAIServingModels:
             lora_request for lora_request in self.lora_requests
             if lora_request.lora_name != lora_name
         ]
+        logger.info("Removed LoRA adapter: name '%s'", lora_name)
         return f"Success: LoRA adapter '{lora_name}' removed successfully."
 
     async def _check_load_lora_adapter_request(
