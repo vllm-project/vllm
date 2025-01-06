@@ -145,20 +145,18 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         if is_prompt:
             (input_tokens, input_positions, attn_metadata, seq_lens,
              multi_modal_kwargs, lora_index_mapping, lora_prompt_mapping,
-             lora_requests) = self._prepare_prompt(self.seq_group_metadata_list)
+             lora_requests) = self._prepare_prompt(
+                 self.seq_group_metadata_list)
         else:
-            (input_tokens, input_positions, attn_metadata,
-             lora_index_mapping, lora_prompt_mapping,
-             lora_requests) = self._prepare_decode(self.seq_group_metadata_list)
+            (input_tokens, input_positions, attn_metadata, lora_index_mapping,
+             lora_prompt_mapping, lora_requests) = self._prepare_decode(
+                 self.seq_group_metadata_list)
             seq_lens = []
             multi_modal_kwargs = None
 
         if self.runner.lora_config:
-            lora_mapping = LoRAMapping(
-                lora_index_mapping,
-                lora_prompt_mapping,
-                is_prompt
-            )
+            lora_mapping = LoRAMapping(lora_index_mapping, lora_prompt_mapping,
+                                       is_prompt)
         else:
             lora_mapping = None
 
@@ -187,7 +185,6 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         multi_modal_placeholder_maps: Dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
-        multi_modal_inputs_list: List[MultiModalInputs] = []
         lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
@@ -244,9 +241,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                     [lora_id] *
                     (seq_len -
                      computed_len if seq_group_metadata.sampling_params
-                     and seq_group_metadata.sampling_params.prompt_logprobs is not None
-                     else 1))
-
+                     and seq_group_metadata.sampling_params.prompt_logprobs
+                     is not None else 1))
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -323,8 +319,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
     def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, 
-               List[int], List[int], Set[LoRARequest]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int],
+               List[int], Set[LoRARequest]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -470,7 +466,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
-        
+
         if self.lora_config:
             assert supports_lora(self.model), "Model does not support LoRA"
             assert not supports_multimodal(

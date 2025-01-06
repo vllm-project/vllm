@@ -28,7 +28,6 @@ elif is_xpu():
     sgmv_expand_slice = ipex_ops.sgmv_expand_slice
     sgmv_shrink = ipex_ops.sgmv_shrink
 
-
 if TYPE_CHECKING:
     # avoid circuit import
     from vllm.lora.layers import LoRAMapping
@@ -73,7 +72,7 @@ def convert_mapping(
     vocab_size: int,
     extra_vocab_size: int,
     long_lora_context: Optional["LongContextLoRAContext"] = None,
-    device: torch.device = torch.device("cuda"),
+    device: torch.device = "cuda",
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
            Optional[torch.Tensor], List[int]]:
     """Converts LoRAMapping to index tensors.
