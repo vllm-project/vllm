@@ -273,14 +273,6 @@ class SequenceData(msgspec.Struct,
         self._update_cached_all_tokens()
 
     @property
-    def prompt_embeds(self) -> Optional[torch.Tensor]:
-        return self._prompt_embeds
-
-    @prompt_embeds.setter
-    def prompt_embeds(self, prompt_embeds: Optional[torch.Tensor]) -> None:
-        self._prompt_embeds = prompt_embeds
-
-    @property
     def output_token_ids_array(self) -> array:
         """Return the prompt token ids in array type.
 
@@ -289,6 +281,14 @@ class SequenceData(msgspec.Struct,
         """
         assert isinstance(self._output_token_ids, array)
         return self._output_token_ids
+    
+    @property
+    def prompt_embeds(self) -> Optional[torch.Tensor]:
+        return self._prompt_embeds
+    
+    @prompt_embeds.setter
+    def prompt_embeds(self, prompt_embeds: torch.Tensor) -> None:
+        self._prompt_embeds = prompt_embeds
 
     @property
     def mrope_position_delta(self) -> Optional[int]:
@@ -397,8 +397,8 @@ class SequenceData(msgspec.Struct,
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self._prompt_token_ids}, "
+                f"prompt_embeds={getattr(self._prompt_embeds, 'shape', None)}, "
                 f"output_token_ids={self.output_token_ids}, "
-                f"prompt_embeds={getattr(self.prompt_embeds, 'shape', None)}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"get_num_computed_tokens={self.get_num_computed_tokens()})")
 
