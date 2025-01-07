@@ -50,22 +50,22 @@ async def create_socket_pool(url: str, num_sockets: int, zmqctx: zmq.asyncio.Con
     return sockets
 
 # select a scoket and execute task
-async def execute_task_async(route: str, headers: Headers, request: dict, sockets: list):
+async def execute_task_async(route: str, headers: dict, request: dict, sockets: list):
     sock = await sockets.get()
     try:
         requestBody = json.dumps(request)
-        headersJson = json.dumps(dict(headers))
+        headersJson = json.dumps(headers)
         logger.info(f"Sending requestBody: {requestBody} to {route} with headers: {headersJson}")
         await sock.send_multipart([route.encode(), headersJson.encode(), requestBody.encode()])
         logger.info(f"Sent end")
         while True:
             logger.info(f"Waiting for reply")
-            reply = await sock.recv_multipart()
-            logger.info(f"Received result: {reply}")
-            yield f"data: {reply[0].decode()}\n\n"
-            if "finish_reason" in reply[0].decode() and "stop" in reply[0].decode():
+            [contentType, reply] = await sock.recv_multipart()
+            logger.info(f"Received result: {contentType}, {reply}")
+            reply = reply.decode()
+            yield f"{reply}"
+            if "[DONE]" in reply:
                 logger.info(f"Received stop signal, return socket")
-                yield "data: [DONE]\n\n"
                 break
     finally:
         await sockets.put(sock)
@@ -73,16 +73,20 @@ async def execute_task_async(route: str, headers: Headers, request: dict, socket
 @app.post('/v1/connect/completions')
 async def chat_completions(request: Request):
     try:
+        # Add the X-Request-Id header to the raw headers list
+        x_request_id = str(uuid.uuid4())
+        header = dict(request.headers)
+        if header.get("X-Request-Id") is None:
+            logger.info(f"add X-Request-Id: {x_request_id}")
+            header["X-Request-Id"] = x_request_id
         original_request_data = await request.json()
-        header = request.headers
-        logger.info(f"Received request: {original_request_data}")
+        logger.info(f"Received request: {original_request_data} header: {header}")
         prefill_request = original_request_data.copy()
         # change max_tokens = 1 to let it only do prefill
         prefill_request['max_tokens'] = 1
         route = "/v1/completions"
         # finish prefill
         async for x in execute_task_async(route, header, prefill_request, app.state.sockets_prefill):
-            logger.info(f"{x}")
             continue
 
         # return decode
