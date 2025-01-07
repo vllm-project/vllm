@@ -723,7 +723,6 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
                     "but not found the expected name in the model "
                     f"(e.g. {remapped_name}). {scale_name} is "
                     "not loaded.")
-                # print(params_dict.keys())
                 return None
             return remapped_name
 
