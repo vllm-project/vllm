@@ -56,6 +56,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
                 replace_parameter(
                     layer, self.i_s_name,
                     torch.nn.Parameter(input_scale.max(), requires_grad=False))
+                setattr(layer, self.i_zp_name, None)
             else:
                 input_zero_point = getattr(layer, self.i_zp_name)
 
@@ -69,7 +70,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
                                                    int8_traits.min)
                 replace_parameter(
                     layer, self.i_s_name,
-                    torch.nn.Parameter(scale.max(), requires_grad=False))
+                    torch.nn.Parameter(scale, requires_grad=False))
 
                 # AZP loaded as int8 but used as int32
                 azp = (int8_traits.min -
@@ -87,9 +88,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         # For more details, see csrc/quantization/cutlass_w8a8/Epilogues.md
         # https://github.com/vllm-project/vllm/blob/8d59dbb00044a588cab96bcdc028006ed922eb06/csrc/quantization/cutlass_w8a8/Epilogues.md
         if not self.config.input_symmetric:
-            layer.azp_adj = layer.weight.sum(dim=0,
-                                             keepdim=True,
-                                             dtype=torch.int32)
+            layer.azp_adj = layer.weight.sum(dim=0, keepdim=True, dtype=torch.int32)
         else:
             layer.azp_adj = None
 

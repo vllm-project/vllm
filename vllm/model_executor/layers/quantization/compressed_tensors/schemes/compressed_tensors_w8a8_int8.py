@@ -90,10 +90,6 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
                     data=torch.empty(1, dtype=torch.int8),
                     weight_loader=weight_loader)
                 layer.register_parameter("input_zero_point", input_zero_point)
-        else:
-            layer.input_scale = None
-            layer.input_zero_point = None
-            layer.azp_adj = None
 
         self.kernel = kernel_type(c=scaled_mm_linear_kernel_config,
                                   w_q_param_name="weight",
