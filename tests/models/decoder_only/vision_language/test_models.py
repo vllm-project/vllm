@@ -341,6 +341,16 @@ VLM_TEST_SETTINGS = {
         ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
     ),
+    "molmo": VLMTestInfo(
+        models=["allenai/Molmo-7B-D-0924"],
+        test_type=(VLMTestType.IMAGE),
+        prompt_formatter=lambda img_prompt:"User: " + img_prompt + " Assistant:", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        image_size_factors=[(),(1.0, 1.0, 1.0)],
+        patch_hf_runner=model_utils.mlomo_patch_hf_runner,
+        postprocess_inputs=model_utils.molmo_post_processor,
+    ),
     # Tests for phi3v currently live in another file because of a bug in
     # transformers. Once this issue is fixed, we can enable them here instead.
     # https://github.com/huggingface/transformers/issues/34307

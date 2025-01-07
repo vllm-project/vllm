@@ -1,4 +1,3 @@
-import pickle
 import re
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -7,23 +6,21 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, NamedTuple, Optional, Protocol, TypeVar, Union
 
-import numpy as np
-import numpy.typing as npt
-import torch
-from blake3 import blake3
-from PIL import Image
-from transformers import BatchFeature, ProcessorMixin
+from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 
+from vllm import envs
 from vllm.inputs import DummyData, InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
 from vllm.utils import LRUCache, flatten_2d_lists, full_groupby
 
+from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalFieldConfig,
                      MultiModalInputsV2, MultiModalKwargs,
                      MultiModalKwargsItem, PlaceholderRange)
 from .parse import MultiModalDataItems, MultiModalDataParser
+from .profiling import BaseProfilingInfo
 
 logger = init_logger(__name__)
 
@@ -466,14 +463,6 @@ def find_mm_placeholders(
     return dict(full_groupby_modality(it))
 
 
-@dataclass
-class ProcessorInputs:
-    """Keyword arguments to :meth:`BaseMultiModalProcessor`."""
-    prompt_text: str
-    mm_data: MultiModalDataDict
-    hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
-
-
 class ProcessingCache:
 
     def __init__(self, capacity: int) -> None:
@@ -494,56 +483,6 @@ class ProcessingCache:
             logger.debug("ProcessingCache: hit_ratio = %.2f",
                          cache_stats.hit_ratio)
 
-    def _serialize_item(self, obj: object) -> bytes:
-        # Simple cases
-        if isinstance(obj, str):
-            return obj.encode("utf-8")
-        if isinstance(obj, bytes):
-            return obj
-        if isinstance(obj, Image.Image):
-            return obj.tobytes()
-
-        # Convertible to NumPy arrays
-        if isinstance(obj, torch.Tensor):
-            obj = obj.numpy()
-        if isinstance(obj, (int, float)):
-            obj = np.array(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tobytes()
-
-        logger.warning(
-            "No serialization method found for %s. "
-            "Falling back to pickle.", type(obj))
-
-        return pickle.dumps(obj)
-
-    def _item_to_bytes(
-        self,
-        key: str,
-        obj: object,
-    ) -> Iterable[tuple[bytes, bytes]]:
-        # Recursive cases
-        if isinstance(obj, (list, tuple)):
-            for i, elem in enumerate(obj):
-                yield from self._item_to_bytes(f"{key}.{i}", elem)
-        elif isinstance(obj, dict):
-            for k, v in obj.items():
-                yield from self._item_to_bytes(f"{key}.{k}", v)
-        else:
-            key_bytes = self._serialize_item(key)
-            value_bytes = self._serialize_item(obj)
-            yield key_bytes, value_bytes
-
-    def _hash_kwargs(self, **kwargs: object) -> str:
-        hasher = blake3()
-
-        for k, v in kwargs.items():
-            for k_bytes, v_bytes in self._item_to_bytes(k, v):
-                hasher.update(k_bytes)
-                hasher.update(v_bytes)
-
-        return hasher.hexdigest()
-
     def get(
         self,
         model_id: str,
@@ -562,9 +501,9 @@ class ProcessingCache:
         """
         self._maybe_log_cache_stats()
 
-        cache_key = self._hash_kwargs(model_id=model_id,
-                                      **{modality: input_item},
-                                      **input_kwargs)
+        cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
+                                                 **{modality: input_item},
+                                                 **input_kwargs)
         return self._cache.get(cache_key)
 
     def put(
@@ -579,15 +518,39 @@ class ProcessingCache:
         Put a processed multi-modal item into the cache
         according to its dependencies (see :meth:`get`).
         """
-        cache_key = self._hash_kwargs(model_id=model_id,
-                                      **{modality: input_item},
-                                      **input_kwargs)
+        cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
+                                                 **{modality: input_item},
+                                                 **input_kwargs)
         self._cache.put(cache_key, output_kwargs)
 
 
-class BaseMultiModalProcessor(ABC):
+class ProcessingMixin:
+    """
+    Contains helper functions to perform processing.
+
+    Not to be confused with :class:`transformers.ProcessorMixin`.
+    """
+    ctx: InputProcessingContext
+
+    def _get_tokenizer(self) -> AnyTokenizer:
+        return self.ctx.tokenizer
+
+    def _get_hf_config(self) -> PretrainedConfig:
+        return self.ctx.get_hf_config()
+
+    def _get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
+        """
+        Subclasses can override this method to handle
+        specific kwargs from model config or user inputs.
+        """
+        return self.ctx.get_hf_processor(**kwargs)
+
+
+class BaseMultiModalProcessor(ProcessingMixin, ABC):
     """
     Abstract base class to process multi-modal inputs to be used in vLLM.
+
+    Not to be confused with :class:`transformers.ProcessorMixin`.
     """
 
     def __init__(self,
@@ -601,6 +564,9 @@ class BaseMultiModalProcessor(ABC):
         self.cache = cache
         self.enable_sanity_checks = enable_sanity_checks
 
+        self.data_parser = self._get_data_parser()
+        self.profiling_info = self._get_profiling_info()
+
     def __call__(
         self,
         prompt: str,
@@ -609,32 +575,9 @@ class BaseMultiModalProcessor(ABC):
     ) -> MultiModalInputsV2:
         return self.apply(prompt, mm_data, hf_processor_mm_kwargs)
 
-    @abstractmethod
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        """
-        Return the maximum supported number of items for each modality.
-
-        A value of `None` means unlimited number of items.
-
-        Omitting a modality from the returned dictionary means that
-        it is not supported at all.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        """
-        Get the maximum possible number of tokens per data item
-        for each modality.
-
-        The dictionary returned by this method should have the same
-        keys as that returned by :meth:`get_supported_mm_limits`.
-        """
-        raise NotImplementedError
-
     def _get_data_parser(self) -> MultiModalDataParser:
         """
-        Construct a data parser to preprocess multi-modal data items
+        Construct a parser to preprocess multi-modal data items
         before passing them to :meth:`_get_hf_mm_data`.
 
         You can support additional modalities by creating a subclass
@@ -642,15 +585,12 @@ class BaseMultiModalProcessor(ABC):
         """
         return MultiModalDataParser()
 
-    def _get_hf_processor(self) -> ProcessorMixin:
+    def _get_profiling_info(self) -> BaseProfilingInfo:
         """
-        Subclasses can add keyword arguments to this method to accept
-        additional kwargs from model config or user inputs.
+        Get the profiling information to find the worst-case memory usage of
+        the model.
         """
-        return self.ctx.get_hf_processor()
-
-    def _get_tokenizer(self) -> AnyTokenizer:
-        return self.ctx.tokenizer
+        raise NotImplementedError
 
     def _to_mm_items(
         self,
@@ -660,8 +600,7 @@ class BaseMultiModalProcessor(ABC):
         Normalize :class:`MultiModalDataDict` to :class:`MultiModalDataItems`
         before passing them to :meth:`_get_hf_mm_data`.
         """
-        parser = self._get_data_parser()
-        mm_items = parser.parse_mm_data(mm_data)
+        mm_items = self.data_parser.parse_mm_data(mm_data)
 
         mm_limits = self.ctx.get_mm_config().limit_per_prompt
         for modality, items in mm_items.items():
@@ -799,7 +738,7 @@ class BaseMultiModalProcessor(ABC):
 
         # Some HF processors (e.g. Qwen2-VL) expect corresponding
         # multi-modal tokens to be in the prompt text
-        dummy_inputs = self._get_dummy_processor_inputs(
+        dummy_inputs = self.profiling_info.get_dummy_processor_inputs(
             self.ctx.model_config.max_model_len,
             mm_missing_counts,
         )
@@ -1057,6 +996,24 @@ class BaseMultiModalProcessor(ABC):
         """
         mm_items = self._to_mm_items(mm_data)
 
+        # Create MM hashes (only used in V1)
+        # TODO: Use these hash keys for caching operations in apply_hf_processor
+        # instead of rehashing.
+
+        if envs.VLLM_USE_V1:
+            model_id = self.ctx.model_config.model
+            mm_hashes = {
+                modality: [
+                    MultiModalHasher.hash_kwargs(model_id=model_id,
+                                                 **{modality: item},
+                                                 **hf_processor_mm_kwargs)
+                    for item in items
+                ]
+                for modality, items in mm_items.items()
+            }
+        else:
+            mm_hashes = None
+
         prompt_ids, mm_kwargs = self._cached_apply_hf_processor(
             prompt_text,
             mm_items,
@@ -1130,76 +1087,18 @@ class BaseMultiModalProcessor(ABC):
             prompt=prompt_text,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
+            mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
-
-    def _get_dummy_audios(
-        self,
-        *,
-        length: int,
-        num_audios: int,
-    ) -> list[npt.NDArray]:
-        audio = np.zeros((length, ))
-        return [audio] * num_audios
-
-    def _get_dummy_images(
-        self,
-        *,
-        width: int,
-        height: int,
-        num_images: int,
-    ) -> list[Image.Image]:
-        image = Image.new("RGB", (width, height), color=0)
-        return [image] * num_images
-
-    def _get_dummy_videos(
-        self,
-        *,
-        width: int,
-        height: int,
-        num_frames: int,
-        num_videos: int,
-    ) -> list[npt.NDArray]:
-        video = np.zeros((num_frames, width, height, 3))
-        return [video] * num_videos
-
-    @abstractmethod
-    def _get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        """
-        Build the multi-modal portion of the input which, after processing,
-        results in `mm_max_tokens` in :meth:`get_dummy_data`.
-        """
-        raise NotImplementedError
-
-    def _get_and_validate_dummy_mm_counts(self) -> Mapping[str, int]:
-        mm_limit_per_prompt = self.ctx.get_mm_config().limit_per_prompt
-        supported_mm_limits = self.get_supported_mm_limits()
-
-        mm_limits = {
-            modality: mm_limit_per_prompt.get(modality, 1)
-            for modality in supported_mm_limits
-        }
-
-        for modality, supported_limit in supported_mm_limits.items():
-            limit = mm_limits[modality]
-            if supported_limit is not None and supported_limit < limit:
-                raise ValueError(
-                    f"You set {modality}={limit} (or defaulted to 1) in "
-                    f"`--limit-mm-per-prompt`, but this model only supports "
-                    f"at most {supported_limit} {modality} items.")
-
-        return mm_limits
 
     def _get_dummy_mm_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> MultiModalInputsV2:
-        processor_inputs = self._get_dummy_processor_inputs(seq_len, mm_counts)
+        profiling = self.profiling_info
+        processor_inputs = profiling.get_dummy_processor_inputs(
+            seq_len, mm_counts)
 
         return self.apply(
             prompt_text=processor_inputs.prompt_text,
@@ -1211,8 +1110,9 @@ class BaseMultiModalProcessor(ABC):
         # Avoid circular import
         from vllm.sequence import SequenceData
 
-        mm_counts = self._get_and_validate_dummy_mm_counts()
-        mm_max_tokens_per_item = self.get_mm_max_tokens_per_item(seq_len)
+        profiling = self.profiling_info
+        mm_counts = profiling.get_mm_limits()
+        mm_max_tokens_per_item = profiling.get_mm_max_tokens_per_item(seq_len)
         if mm_counts.keys() != mm_max_tokens_per_item.keys():
             raise AssertionError(
                 "The keys returned by `get_supported_mm_limits`"
@@ -1240,7 +1140,9 @@ class BaseMultiModalProcessor(ABC):
                 "tokens.")
 
         total_len = len(prompt_token_ids)
-        if total_len > seq_len:
+
+        # V0 does not support chunked prefill.
+        if total_len > seq_len and not envs.VLLM_USE_V1:
             logger.warning(
                 "The context length (%d) of the model is too short "
                 "to hold the multi-modal embeddings in the worst case "

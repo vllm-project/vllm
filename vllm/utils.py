@@ -58,7 +58,7 @@ logger = init_logger(__name__)
 
 # Exception strings for non-implemented encoder/decoder scenarios
 
-# Reminder: Please update docs/source/usage/compatibility_matrix.md
+# Reminder: Please update docs/source/features/compatibility_matrix.md
 # If the feature combo become valid
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
@@ -1938,7 +1938,7 @@ def _check_multiproc_method():
                        "the `spawn` multiprocessing start method. Setting "
                        "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
                        "See https://docs.vllm.ai/en/latest/getting_started/"
-                       "debugging.html#python-multiprocessing "
+                       "troubleshooting.html#python-multiprocessing "
                        "for more information.")
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
