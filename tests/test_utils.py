@@ -312,10 +312,10 @@ def test_bind_kv_cache():
     from vllm.attention import Attention
 
     ctx = {
-    'layers.0.self_attn': Attention(32, 128, 0.1),
-    'layers.1.self_attn': Attention(32, 128, 0.1),
-    'layers.2.self_attn': Attention(32, 128, 0.1),
-    'layers.3.self_attn': Attention(32, 128, 0.1),
+        'layers.0.self_attn': Attention(32, 128, 0.1),
+        'layers.1.self_attn': Attention(32, 128, 0.1),
+        'layers.2.self_attn': Attention(32, 128, 0.1),
+        'layers.3.self_attn': Attention(32, 128, 0.1),
     }
     kv_cache = [
         torch.zeros((1, )),
