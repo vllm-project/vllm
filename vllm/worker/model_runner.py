@@ -5,6 +5,7 @@ import itertools
 import time
 import warnings
 import weakref
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
                     Tuple, Type, TypeVar, Union)
@@ -1023,8 +1024,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.graph_runners: List[Dict[int, CUDAGraphRunner]] = [
             {} for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
-        self.graph_memory_pool: Optional[Tuple[
-            int, int]] = None  # Set during graph capture.
 
         self.has_inner_state = model_config.has_inner_state
 
@@ -1453,149 +1452,90 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=self.model_config.dtype,
                 device=self.device)
 
-        with self.attn_state.graph_capture(max_batch_size), graph_capture(
-                self.device) as graph_capture_context:
-            # NOTE: Capturing the largest batch size first may help reduce the
-            # memory usage of CUDA graph.
-            for virtual_engine in range(
-                    self.parallel_config.pipeline_parallel_size):
-                # Only rank 0 should print progress bar during capture
-                capture_sizes = (
-                    tqdm(
-                        self.vllm_config.compilation_config.capture_sizes,
-                        desc="Capturing CUDA graph shapes",
-                    ) if get_tensor_model_parallel_rank() == 0 else
-                    self.vllm_config.compilation_config.capture_sizes)
-                for batch_size in capture_sizes:
-                    attn_metadata = (
-                        self.attn_state.graph_capture_get_metadata_for_batch(
-                            batch_size,
-                            is_encoder_decoder_model=self.model_config.
-                            is_encoder_decoder))
+        graph_memory_pool: Optional[Tuple[int, int]] = None
 
-                    if self.lora_config:
-                        lora_mapping = LoRAMapping(
-                            **dict(index_mapping=[0] * batch_size,
-                                   prompt_mapping=[0] * batch_size,
-                                   is_prefill=False))
-                        self.set_active_loras(set(), lora_mapping)
+        for doing_warmup in [True, False]:
+            with self.attn_state.graph_capture(max_batch_size):
+                with graph_capture() if not doing_warmup else nullcontext() as graph_capture_context:
+                    # NOTE: Capturing the largest batch size first may help reduce the
+                    # memory usage of CUDA graph.
+                    for virtual_engine in range(
+                            self.parallel_config.pipeline_parallel_size):
+                        for batch_size in \
+                            self.vllm_config.compilation_config.capture_sizes:
+                            attn_metadata = (
+                                self.attn_state.graph_capture_get_metadata_for_batch(
+                                    batch_size,
+                                    is_encoder_decoder_model=self.model_config.
+                                    is_encoder_decoder))
 
-                    if self.prompt_adapter_config:
-                        prompt_adapter_mapping = PromptAdapterMapping(
-                            [-1] * batch_size,
-                            [-1] * batch_size,
-                        )
-                        self.set_active_prompt_adapters(
-                            set(), prompt_adapter_mapping)
-                    graph_runner = CUDAGraphRunner(
-                        self.model, self.attn_backend.get_name(),
-                        self.attn_state.graph_clone(batch_size),
-                        self.model_config.is_encoder_decoder)
+                            if self.lora_config:
+                                lora_mapping = LoRAMapping(
+                                    **dict(index_mapping=[0] * batch_size,
+                                           prompt_mapping=[0] * batch_size,
+                                           is_prefill=False))
+                                self.set_active_loras(set(), lora_mapping)
 
-                    capture_inputs = {
-                        "input_ids":
-                        input_tokens[:batch_size],
-                        "positions":
-                        input_positions[..., :batch_size],
-                        "intermediate_inputs":
-                        intermediate_inputs[:batch_size]
-                        if intermediate_inputs is not None else None,
-                        "kv_caches":
-                        kv_caches[virtual_engine],
-                        "attn_metadata":
-                        attn_metadata,
-                    }
-                    if previous_hidden_states is not None:
-                        capture_inputs[
-                            "previous_hidden_states"] = previous_hidden_states[:
-                                                                               batch_size]
+                            if self.prompt_adapter_config:
+                                prompt_adapter_mapping = PromptAdapterMapping(
+                                    [-1] * batch_size,
+                                    [-1] * batch_size,
+                                )
+                                self.set_active_prompt_adapters(
+                                    set(), prompt_adapter_mapping)
 
-                    if self.has_inner_state:
-                        # Only used by Mamba-based models CUDA graph atm (Jamba)
-                        capture_inputs.update({
-                            "seqlen_agnostic_capture_inputs":
-                            self.model.get_seqlen_agnostic_capture_inputs(
-                                batch_size)
-                        })
-                    if self.model_config.is_encoder_decoder:
-                        # add the additional inputs to capture for
-                        # encoder-decoder models.
-                        self._update_inputs_to_capture_for_enc_dec_model(
-                            capture_inputs)
+                            if doing_warmup:
+                                graph_runner = CUDAGraphRunner(
+                                    self.model, self.attn_backend.get_name(),
+                                    self.attn_state.graph_clone(batch_size),
+                                self.model_config.is_encoder_decoder)
+                            else:
+                                graph_runner = self.graph_runners[virtual_engine][batch_size]
 
-                    with set_forward_context(attn_metadata, self.vllm_config):
-                        graph_runner.warmup(**capture_inputs)
-                    self.graph_runners[virtual_engine][batch_size] = (
-                        graph_runner)
+                            capture_inputs = {
+                                "input_ids":
+                                input_tokens[:batch_size],
+                                "positions":
+                                input_positions[..., :batch_size],
+                                "intermediate_inputs":
+                                intermediate_inputs[:batch_size]
+                                if intermediate_inputs is not None else None,
+                                "kv_caches":
+                                kv_caches[virtual_engine],
+                                "attn_metadata":
+                                attn_metadata,
+                            }
 
-        with self.attn_state.graph_capture(
-                max_batch_size), graph_capture() as graph_capture_context:
-            # NOTE: Capturing the largest batch size first may help reduce the
-            # memory usage of CUDA graph.
-            for virtual_engine in range(
-                    self.parallel_config.pipeline_parallel_size):
-                for batch_size in \
-                    self.vllm_config.compilation_config.capture_sizes:
-                    attn_metadata = (
-                        self.attn_state.graph_capture_get_metadata_for_batch(
-                            batch_size,
-                            is_encoder_decoder_model=self.model_config.
-                            is_encoder_decoder))
+                            if not doing_warmup:
+                                capture_inputs["memory_pool"] = graph_memory_pool
+                                capture_inputs["stream"] = graph_capture_context.stream
 
-                    if self.lora_config:
-                        lora_mapping = LoRAMapping(
-                            **dict(index_mapping=[0] * batch_size,
-                                   prompt_mapping=[0] * batch_size,
-                                   is_prefill=False))
-                        self.set_active_loras(set(), lora_mapping)
+                            if previous_hidden_states is not None:
+                                capture_inputs[
+                                    "previous_hidden_states"] = previous_hidden_states[:
+                                                                                       batch_size]
 
-                    if self.prompt_adapter_config:
-                        prompt_adapter_mapping = PromptAdapterMapping(
-                            [-1] * batch_size,
-                            [-1] * batch_size,
-                        )
-                        self.set_active_prompt_adapters(
-                            set(), prompt_adapter_mapping)
-                    graph_runner = self.graph_runners[virtual_engine][batch_size]
+                            if self.has_inner_state:
+                                # Only used by Mamba-based models CUDA graph atm (Jamba)
+                                capture_inputs.update({
+                                    "seqlen_agnostic_capture_inputs":
+                                    self.model.get_seqlen_agnostic_capture_inputs(
+                                        batch_size)
+                                })
+                            if self.model_config.is_encoder_decoder:
+                                # add the additional inputs to capture for
+                                # encoder-decoder models.
+                                self._update_inputs_to_capture_for_enc_dec_model(
+                                    capture_inputs)
 
-                    capture_inputs = {
-                        "input_ids":
-                        input_tokens[:batch_size],
-                        "positions":
-                        input_positions[..., :batch_size],
-                        "intermediate_inputs":
-                        intermediate_inputs[:batch_size]
-                        if intermediate_inputs is not None else None,
-                        "kv_caches":
-                        kv_caches[virtual_engine],
-                        "attn_metadata":
-                        attn_metadata,
-                        "memory_pool":
-                        self.graph_memory_pool,
-                        "stream":
-                        graph_capture_context.stream
-                    }
-                    if previous_hidden_states is not None:
-                        capture_inputs[
-                            "previous_hidden_states"] = previous_hidden_states[:
-                                                                               batch_size]
-
-                    if self.has_inner_state:
-                        # Only used by Mamba-based models CUDA graph atm (Jamba)
-                        capture_inputs.update({
-                            "seqlen_agnostic_capture_inputs":
-                            self.model.get_seqlen_agnostic_capture_inputs(
-                                batch_size)
-                        })
-                    if self.model_config.is_encoder_decoder:
-                        # add the additional inputs to capture for
-                        # encoder-decoder models.
-                        self._update_inputs_to_capture_for_enc_dec_model(
-                            capture_inputs)
-
-                    with set_forward_context(attn_metadata, self.vllm_config):
-                        graph_runner.capture(**capture_inputs)
-                    self.graph_memory_pool = graph_runner.graph.pool()
+                            with set_forward_context(attn_metadata, self.vllm_config):
+                                if doing_warmup:
+                                    graph_runner.warmup(**capture_inputs)
+                                    self.graph_runners[virtual_engine][batch_size] = (
+                                        graph_runner)
+                                else:
+                                    graph_runner.capture(**capture_inputs)
+                                    graph_memory_pool = graph_runner.graph.pool()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -1721,14 +1661,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
         if prefill_meta is None and decode_meta.use_cuda_graph:
-            #print(f"DECODE {model_input.input_tokens.shape}")
+            print(f"START DECODE {model_input.input_tokens.shape}")
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][
                 graph_batch_size]
+            print(f"END DECODE {model_input.input_tokens.shape}")
         else:
-            #print(f"PREFILL {model_input.input_tokens.shape}")
+            print(f"START PREFILL {model_input.input_tokens.shape}")
             model_executable = self.model
+            print(f"END PREFILL {model_input.input_tokens.shape}")
 
         # Receive KV cache in distributed KV cache transfer setting
         # In disagg prefill setting, it will also recv hidden states and bypass
@@ -1887,7 +1829,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             1. current vLLM instance is KV cache producer/prefill vLLM instance
             2. this batch is not a profiling run
             3. this batch is a prefill run
-
+            
         Args:
             model_input: input to the model executable
             kv_caches: vLLM's paged memory
@@ -1953,6 +1895,7 @@ class CUDAGraphRunner(nn.Module):
                 intermediate_tensors=intermediate_inputs,
                 **kwargs,
             )
+        torch.cuda.synchronize()
 
     def capture(
         self,

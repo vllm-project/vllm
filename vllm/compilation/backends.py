@@ -22,41 +22,12 @@ from .inductor_pass import InductorPass, pass_context
 from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
 from .dump_graph import dump_graph
-from .shape_prop import ShapeProp
 
 logger = init_logger(__name__)
 
 
 def pprint(x):
     pass
-
-ID = 0
-PASSES = {}
-def get_dummy_pass(id: int):
-    def dummy_pass(g: fx.Graph):
-        print(f"DUMMY PASS {id}")
-
-    pass_fn = PASSES.get(id)
-    if pass_fn is None:
-        pass_fn = dummy_pass
-        PASSES[id] = pass_fn
-
-    return pass_fn
-
-
-def add_dummy_pass(fn):
-    # Disable for now
-    if True or fn is None:
-        return fn
-    else:
-        global ID
-        dummy = get_dummy_pass(ID)
-        ID = ID + 1
-        def compose(graph: fx.GraphModule):
-            dummy(graph)
-            fn(graph)
-
-    return compose
 
 
 def wrap_inductor(graph: fx.GraphModule,
@@ -81,8 +52,6 @@ def wrap_inductor(graph: fx.GraphModule,
 
     compilation_counter.num_inductor_compilations += 1
 
-    #logger.info("Inputs: %s", ", ".join([str((inp.shape, inp.dtype) if isinstance(inp, torch.Tensor) else inp) for inp in example_inputs][0:3]))
-
     from torch._inductor import config
     from torch._inductor.compile_fx import compile_fx
 
@@ -93,9 +62,6 @@ def wrap_inductor(graph: fx.GraphModule,
 
     if additional_inductor_config is not None:
         current_config.update(additional_inductor_config)
-
-    current_config["post_grad_custom_post_pass"] = \
-        add_dummy_pass(current_config["post_grad_custom_post_pass"])
 
     if isinstance(runtime_shape, int):
         # for a specific batchsize, tuning triton kernel parameters
@@ -218,70 +184,6 @@ class SplitItem:
     graph: fx.GraphModule
 
 
-def find_last(nodes, op):
-    last = None
-    found = False
-    for n in nodes:
-        if n.op == op:
-            found = True
-        if found and n.op != op:
-            break
-        last = n
-    return last
-
-
-def add_input_output_to_graph(gm: fx.GraphModule, arg_name, add_output: bool = False):
-    last_input = find_last(gm.graph.nodes, 'placeholder')
-    assert last_input is not None
-    with gm.graph.inserting_after(last_input):
-        input_node = gm.graph.placeholder(arg_name, "f16[s0, 4096]", None) # type_expr?
-
-    if add_output:
-        last_output = find_last(gm.graph.nodes, 'output')
-        assert last_output is not None
-        if isinstance(last_output.args[0], tuple):
-            last_output.args = (last_output.args[0] + (input_node, ), )
-        else:
-            last_output.args = (last_output.args + (input_node, ), )
-
-    return input_node
-
-
-def add_residual_args(split_gm: fx.GraphModule):
-    names = [name for (name, module) in split_gm.named_modules()]
-    count = 0
-    new_arg = f"my_residual_{count}"
-    new_input = add_input_output_to_graph(split_gm, new_arg, False)
-
-    for n in split_gm.graph.nodes:
-        if n.op == 'call_module' and n.target in names:
-            count += 1
-            n.args = n.args + (new_input,)
-            submod = getattr(split_gm, n.target)
-            new_arg = f"my_residual_{count}"
-            add_input_output_to_graph(submod, new_arg, True)
-
-            output_node = find_last(submod.graph.nodes, 'output')
-            assert output_node is not None
-            outputs = output_node.args[0]
-
-            if isinstance(outputs, tuple) and len(outputs) > 2:
-                with split_gm.graph.inserting_after(n):
-                    new_input = split_gm.graph.call_function(operator.getitem, (n, len(outputs) - 1))
-            else:
-                with split_gm.graph.inserting_after(n):
-                    new_input = split_gm.graph.call_function(operator.getitem, (n, 1))
-                    old_output = split_gm.graph.call_function(operator.getitem, (n, 0))
-                del n.users[new_input]
-                del n.users[old_output]
-                n.replace_all_uses_with(old_output)
-                n.users[old_output] = None
-                n.users[new_input] = None
-            submod.recompile()
-
-    split_gm.recompile()
-
-
 def split_graph(graph: fx.GraphModule,
                 ops: List[str]) -> Tuple[fx.GraphModule, List[SplitItem]]:
     # split graph by ops
@@ -327,8 +229,6 @@ def split_graph(graph: fx.GraphModule,
     # sort by intetger graph_id, rather than string name
     outputs.sort(key=lambda x: x.graph_id)
 
-    #add_residual_args(split_gm)
-
     return split_gm, outputs
 
 
@@ -362,12 +262,12 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         self.vllm_config = vllm_config
 
     def run(self, *args):
-        self.fake_args = [
+        fake_args = [
             self.fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
             for t in args
         ]
         with self.fake_mode:
-            return super().run(*self.fake_args)
+            return super().run(*fake_args)
 
     def call_module(self, target: torch.fx.node.Target,
                     args: Tuple[torch.fx.node.Argument,
@@ -641,16 +541,14 @@ class PiecewiseBackend:
         if not self.first_run_finished:
             self.first_run_finished = True
             self.check_for_ending_compilation()
-            pprint(f"RUNNING GENERAL 1")
+            pprint(f"RUN GENERAL 1")
             return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
         if runtime_shape not in self.concrete_size_entries:
             # we don't need to do anything for this shape
-            pprint(f"RUNNING GENERAL 2, RS = {runtime_shape}, shapes = {[(x,e.use_cudagraph,e.runnable) for x,e in self.concrete_size_entries.items()]}")
+            pprint(f"RUN GENERAL 2 - {runtime_shape}")
             return self.compiled_graph_for_general_shape(*args)
-
-        pprint(f"GOT HERE RS = {runtime_shape}, shapes = {[(x,e.use_cudagraph,e.runnable) for x,e in self.concrete_size_entries.items()]}")
 
         entry = self.concrete_size_entries[runtime_shape]
 
@@ -676,7 +574,7 @@ class PiecewiseBackend:
                 self.check_for_ending_compilation()
 
         if not entry.use_cudagraph:
-            pprint(f"RUNNING STATIC {runtime_shape}!")
+            pprint(f"RUN STATIC {runtime_shape}")
             return entry.runnable(*args)
 
         if entry.cudagraph is None:
@@ -688,7 +586,7 @@ class PiecewiseBackend:
                         entry.num_finished_warmup,
                         self.compilation_config.cudagraph_num_of_warmups,
                         runtime_shape)
-                pprint(f"RUNNING CUDAGRAPH WARMUP {entry.runtime_shape}")
+                pprint(f"RUN STATIC CUDAGRAPH WARMUP 1 {runtime_shape}")
                 return entry.runnable(*args)
 
             if self.is_first_graph:
@@ -719,6 +617,7 @@ class PiecewiseBackend:
                 # mind-exploding: carefully manage the reference and memory.
                 with torch.cuda.graph(cudagraph, pool=self.graph_pool):
                     # `output` is managed by pytorch's cudagraph pool
+                    pprint(f"RUN STATIC CUDAGRAPH WARMUP 2 {runtime_shape}")
                     output = entry.runnable(*args)
                     if self.is_last_graph:
                         # by converting it to weak ref,
@@ -750,7 +649,6 @@ class PiecewiseBackend:
                 f" Expected {entry.input_addresses}, got {new_input_addresses}"
             )
 
-        pprint(f"RUNNING CUDAGRAPH {entry.runtime_shape}")
-
+        pprint(f"RUN STATIC CUDAGRAPH REPLAY {runtime_shape}")
         entry.cudagraph.replay()
         return entry.output
