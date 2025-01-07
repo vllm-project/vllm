@@ -974,7 +974,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         # Note: num_prefill_tokens is calculated using the length of
         # input_tokens after padding.
         num_prefill_tokens = input_tokens_tensor.numel()
-        if prefix_block_list_tensor:
+        if prefix_block_list_tensor is not None:
             prefix_block_list_tensor = prefix_block_list_tensor.to(
                 self.device, non_blocking=True)
         input_tokens_tensor = input_tokens_tensor.to(  # type: ignore
