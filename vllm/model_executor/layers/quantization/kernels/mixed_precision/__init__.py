@@ -7,7 +7,7 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision.machete imp
     MacheteLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.marlin import ( # noqa: E501
     MarlinLinearKernel)
-from vllm.model_executor.layers.quantization.kernels.MPLinearKernel import ( # noqa: E501
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.MPLinearKernel import ( # noqa: E501
     MPLinearKernel, MPLinearLayerConfig)
 from vllm.platforms import current_platform
 
