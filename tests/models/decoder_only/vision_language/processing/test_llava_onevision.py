@@ -106,8 +106,8 @@ def test_processor_prompt_replacements_regression(
     )
 
 
-@pytest.skip("This test takes around 2 hours to run. "
-             "Comment this out to run it manually.")
+@pytest.mark.skip("This test takes around 2 hours to run. "
+                  "Comment this out to run it manually.")
 @pytest.mark.parametrize("model_id",
                          ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"])
 @pytest.mark.parametrize("num_imgs", [1])
