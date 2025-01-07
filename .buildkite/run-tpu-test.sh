@@ -14,8 +14,9 @@ remove_docker_container
 # For HF_TOKEN.
 source /etc/environment
 # Run a simple end-to-end example.
-docker run --privileged --net host --shm-size=16G -it -e "HF_TOKEN=$HF_TOKEN" --name tpu-test vllm-tpu /bin/bash -c \
-    "python3 -m pip install git+https://github.com/thuml/depyf.git \
+docker run --privileged --net host --shm-size=16G -it \
+    -e "HF_TOKEN=$HF_TOKEN" --name tpu-test vllm-tpu \
+    /bin/bash -c "python3 -m pip install git+https://github.com/thuml/depyf.git \
     && python3 -m pip install pytest \
     && python3 -m pip install lm_eval[api]==0.4.4 \
     && pytest -v -s /workspace/vllm/tests/entrypoints/openai/test_accuracy.py \
