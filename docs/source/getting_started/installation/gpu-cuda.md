@@ -48,9 +48,7 @@ $ pip install vllm # If you are using pip.
 $ uv pip install vllm # If you are using uv.
 ```
 
-````{note}
-As of now, vLLM's binaries are compiled with CUDA 12.1 and public PyTorch release versions by default.
-We also provide vLLM binaries compiled with CUDA 11.8 and public PyTorch release versions:
+As of now, vLLM's binaries are compiled with CUDA 12.1 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 11.8 and public PyTorch release versions:
 
 ```console
 $ # Install vLLM with CUDA 11.8.
@@ -71,7 +69,7 @@ LLM inference is a fast-evolving field, and the latest code may contain bug fixe
 $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 ```
 
-If you want to access the wheels for previous commits, you can specify the commit hash in the URL:
+If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
 
 ```console
 $ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
@@ -90,14 +88,14 @@ Another way to install the latest code is to use `uv`:
 $ uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly
 ```
 
-If you want to access the wheels for previous commits, you can specify the commit hash in the URL:
+If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
 
 ```console
 $ export VLLM_COMMIT=eb881ed006ca458b052905e33f0d16dbb428063a # use full commit hash from the main branch
 $ uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
 ```
 
-The `uv` approach works for vLLM `v0.6.6` and later. What's unique about `uv`, is that packages in `--extra-index-url` has [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes), while `pip` will combine packages from `--extra-index-url` and the default index, and only choose the latest version, which makes it impossible to easily install a developing version before the released version.
+The `uv` approach works for vLLM `v0.6.6` and later, and it has an easy-to-remember command. What's unique about `uv`, is that packages in `--extra-index-url` has [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior makes it possible to install a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. By contrast, `pip` will combine packages from `--extra-index-url` and the default index, and only choose the latest version, which makes it impossible to easily install a developing version before the released version.
 
 ### Install the latest code using docker
 
