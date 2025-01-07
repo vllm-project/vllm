@@ -640,7 +640,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `llava-hf/LLaVA-NeXT-Video-7B-hf`, etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `LlavaOnevisionForConditionalGeneration`
   - LLaVA-Onevision
   - T + I<sup>+</sup> + V<sup>+</sup>
