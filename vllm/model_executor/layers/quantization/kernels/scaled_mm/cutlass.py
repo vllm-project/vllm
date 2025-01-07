@@ -15,7 +15,7 @@ from .ScaledMMLinearKernel import (ScaledMMLinearKernel,
 class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
 
     @classmethod
-    def get_min_capability(cls) -> Optional[int]:
+    def get_min_capability(cls) -> int:
         return 75
 
     @classmethod

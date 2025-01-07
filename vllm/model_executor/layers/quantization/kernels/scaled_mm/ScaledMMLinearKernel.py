@@ -16,7 +16,7 @@ class ScaledMMLinearKernel(ABC):
 
     @classmethod
     @abstractmethod
-    def get_min_capability(cls) -> Optional[int]:
+    def get_min_capability(cls) -> int:
         raise NotImplementedError
 
     @classmethod

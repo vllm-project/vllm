@@ -14,8 +14,10 @@ from .ScaledMMLinearKernel import (ScaledMMLinearKernel,
 class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
 
     @classmethod
-    def get_min_capability(cls) -> Optional[int]:
-        return None
+    def get_min_capability(cls) -> int:
+        raise NotImplementedError(
+            "TPU platform does have a concept of compute capability, "
+            "this method should not be called.")
 
     @classmethod
     def can_implement(
@@ -67,11 +69,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        w_q, w_s, i_s, i_zp, i_azp_adj = self._get_weight_params(layer)
-        assert i_s is None
-        assert i_zp is None
-        assert i_azp_adj is None
-        assert bias is None, "Bias is not supported for XLA yet."
+        w_q, w_s, _, _, _ = self._get_weight_params(layer)
 
         import torch_xla.experimental.xla_quantized_matmul  # noqa: F401
         return torch.ops.xla.quantized_matmul(x,
