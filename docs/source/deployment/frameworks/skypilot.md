@@ -1,6 +1,6 @@
-(on-cloud)=
+(deployment-skypilot)=
 
-# Deploying and scaling up with SkyPilot
+# SkyPilot
 
 ```{raw} html
 <p align="center">
@@ -12,9 +12,9 @@ vLLM can be **run and scaled to multiple service replicas on clouds and Kubernet
 
 ## Prerequisites
 
-- Go to the [HuggingFace model page](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) and request access to the model {code}`meta-llama/Meta-Llama-3-8B-Instruct`.
+- Go to the [HuggingFace model page](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) and request access to the model `meta-llama/Meta-Llama-3-8B-Instruct`.
 - Check that you have installed SkyPilot ([docs](https://skypilot.readthedocs.io/en/latest/getting-started/installation.html)).
-- Check that {code}`sky check` shows clouds or Kubernetes are enabled.
+- Check that `sky check` shows clouds or Kubernetes are enabled.
 
 ```console
 pip install skypilot-nightly

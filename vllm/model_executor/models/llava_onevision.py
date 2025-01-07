@@ -35,6 +35,9 @@ from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
+# For profile run
+_MAX_FRAMES_PER_VIDEO = 16
+
 
 class LlavaOnevisionVideoPixelInputs(TypedDict):
     type: Literal["pixel_values_videos"]
@@ -104,36 +107,37 @@ class LlavaOnevisionProcessingMixin(LlavaNextProcessingMixin):
         num_patch_height: int,
         num_patch_width: int,
     ) -> tuple[int, int]:
-        current_height = npatches * num_patch_height
-        current_width = npatches * num_patch_width
-
         # NOTE: Use float32 to remain consistent with HF output
-        original_aspect_ratio = np.array(original_width / original_height,
-                                         dtype=np.float32)
-        current_aspect_ratio = np.array(current_width / current_height,
-                                        dtype=np.float32)
+        current_height_f = np.float32(npatches * num_patch_height)
+        current_width_f = np.float32(npatches * num_patch_width)
+
+        original_width_f = np.float32(original_width)
+        original_height_f = np.float32(original_height)
+
+        original_aspect_ratio = original_width_f / original_height_f
+        current_aspect_ratio = current_width_f / current_height_f
 
         if original_aspect_ratio > current_aspect_ratio:
-            scale_factor = np.array(current_width / original_width,
-                                    dtype=np.float32)
-            new_height = int(original_height * scale_factor)
-            padding = (current_height - new_height) // 2
-            current_height -= 2 * padding
+            scale_factor = current_width_f / original_width_f
+            new_height = int(original_height_f * scale_factor)
+            padding = (current_height_f - new_height) // 2
+            current_height_f -= 2 * padding
         else:
-            scale_factor = np.array(current_height / original_height,
-                                    dtype=np.float32)
-            new_width = int(original_width * scale_factor)
-            padding = (current_width - new_width) // 2
-            current_width -= 2 * padding
+            scale_factor = current_height_f / original_height_f
+            new_width = int(original_width_f * scale_factor)
+            padding = (current_width_f - new_width) // 2
+            current_width_f -= 2 * padding
 
-        unpadded_features = current_height * current_width
-        newline_features = current_height
+        unpadded_features = int(current_height_f * current_width_f)
+        newline_features = int(current_height_f)
 
-        ratio = math.sqrt(current_height * current_width / (9 * npatches**2))
+        ratio = math.sqrt(current_height_f * current_width_f /
+                          (9 * npatches**2))
         if ratio > 1.1:
-            unpadded_features = int(current_height // ratio) * int(
-                current_width // ratio)
-            newline_features = int(current_height // ratio)
+            height_factor = int(current_height_f // ratio)
+            width_factor = int(current_width_f // ratio)
+            unpadded_features = height_factor * width_factor
+            newline_features = height_factor
 
         return (unpadded_features, newline_features)
 
@@ -223,8 +227,10 @@ class LlavaOnevisionProfilingInfo(LlavaOnevisionProcessingMixin,
         max_image_tokens = self._get_max_image_tokens() * max_images
         max_total_frames = self._get_max_video_frames(seq_len -
                                                       max_image_tokens)
+        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
+                                   _MAX_FRAMES_PER_VIDEO)
 
-        return max(max_total_frames // max(max_videos, 1), 1)
+        return max(max_frames_per_video, 1)
 
     def _get_max_video_tokens(self, seq_len: int) -> int:
         target_width, target_height = self._get_image_size_with_most_features()
@@ -558,13 +564,15 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         modalities = {}
 
-        if "pixel_values" in kwargs:
-            modalities["images"] = self._parse_and_validate_image_input(
-                **kwargs)
-
-        if "pixel_values_videos" in kwargs:
-            modalities["videos"] = self._parse_and_validate_video_input(
-                **kwargs)
+        # Preserve the order of modalities if there are multiple of them
+        # from the order of kwargs.
+        for input_key in kwargs:
+            if input_key == "pixel_values" and "images" not in modalities:
+                modalities["images"] = self._parse_and_validate_image_input(
+                    **kwargs)
+            if input_key == "pixel_values_videos" and "videos" not in modalities:  # noqa E501
+                modalities["videos"] = self._parse_and_validate_video_input(
+                    **kwargs)
 
         return modalities
 
@@ -824,21 +832,21 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         if not modalities:
             return None
 
-        # We make a tuple of each embedding with its modality string. This is a
-        # temporary workaround for models to handle mixed modalities when
-        # get_multimodal_embeddings and get_input_embeddings are called
-        # separately.
-        # TODO(ywang96): Add support for mixed-modality inference for v1.
-        multimodal_embeddings: List[Tuple[NestedTensors, str]] = []
+        # The result multimodal_embeddings is tuple of tensors, with each
+        # tensor correspoending to a multimodal data item (image or video).
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
-        if "images" in modalities:
-            image_input = modalities["images"]
-            vision_embeddings = self._process_image_input(image_input)
-            multimodal_embeddings.append((vision_embeddings, "image"))
-        if "videos" in modalities:
-            video_input = modalities["videos"]
-            video_embeddings = self._process_video_pixels(video_input)
-            multimodal_embeddings.append((video_embeddings, "video"))
+        # NOTE: It is important to iterate over the keys in this dictionary
+        # to preserve the order of the modalities.
+        for modality in modalities:
+            if modality == "images":
+                image_input = modalities["images"]
+                vision_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += tuple(vision_embeddings)
+            if modality == "videos":
+                video_input = modalities["videos"]
+                video_embeddings = self._process_video_pixels(video_input)
+                multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 
@@ -850,15 +858,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            for embeddings, modality in multimodal_embeddings:
-                if modality == "image":
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids, inputs_embeds, embeddings,
-                        self.config.image_token_index)
-                if modality == "video":
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids, inputs_embeds, embeddings,
-                        self.config.video_token_index)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                [self.config.image_token_index, self.config.video_token_index])
         return inputs_embeds
 
     def forward(

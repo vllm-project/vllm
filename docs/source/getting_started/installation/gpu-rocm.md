@@ -148,7 +148,7 @@ $ export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
 $ python3 setup.py develop
 ```
 
-This may take 5-10 minutes. Currently, {code}`pip install .` does not work for ROCm installation.
+This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
 
 ```{tip}
 - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.

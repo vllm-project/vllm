@@ -1,8 +1,10 @@
-# OpenAI Compatible Server
+(openai-compatible-server)=
 
-vLLM provides an HTTP server that implements OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API, and more!
+# OpenAI-Compatible Server
 
-You can start the server via the [`vllm serve`](#vllm-serve) command, or through [Docker](deploying_with_docker.md):
+vLLM provides an HTTP server that implements OpenAI's [Completions API](https://platform.openai.com/docs/api-reference/completions), [Chat API](https://platform.openai.com/docs/api-reference/chat), and more!
+
+You can start the server via the [`vllm serve`](#vllm-serve) command, or through [Docker](#deployment-docker):
 ```bash
 vllm serve NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
 ```
