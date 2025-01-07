@@ -1,4 +1,4 @@
-(apple-install)=
+(installation-apple)=
 
 # Installation for macOS
 
@@ -33,7 +33,8 @@ On macOS the `VLLM_TARGET_DEVICE` is automatically set to `cpu`, which currently
 
 ## Troubleshooting
 
-If the build has error like the following snippet, try to remove and reinstall the command line tools.
+If the build has error like the following snippet where standard C++ headers cannot be found, try to remove and reinstall your 
+[Command Line Tools for Xcode](https://developer.apple.com/download/all/).
 
 ```
 [...] fatal error: 'map' file not found
