@@ -58,6 +58,11 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
             layer, self.w_s_name,
             torch.nn.Parameter(weight_scale.data, requires_grad=False))
 
+        # Only support symmetric dynamic activation quantization.
+        setattr(layer, self.i_s_name, None)
+        setattr(layer, self.i_zp_name, None)
+        setattr(layer, self.azp_adj_name, None)
+
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
