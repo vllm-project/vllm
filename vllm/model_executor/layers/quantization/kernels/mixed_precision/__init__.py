@@ -1,17 +1,15 @@
 from typing import List, Optional, Type
 
 import vllm.envs as envs
-from vllm.model_executor.layers.quantization.kernels.mixed_precision.exllama import (	
-    ExllamaLinearKernel)	
-from vllm.model_executor.layers.quantization.kernels.mixed_precision.machete import (	
-    MacheteLinearKernel)	
-from vllm.model_executor.layers.quantization.kernels.mixed_precision.marlin import (	
-    MarlinLinearKernel)	
-from vllm.model_executor.layers.quantization.kernels.MPLinearKernel import (	
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.exllama import (
+    ExllamaLinearKernel)
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.machete import (
+    MacheteLinearKernel)
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.marlin import (
+    MarlinLinearKernel)
+from vllm.model_executor.layers.quantization.kernels.MPLinearKernel import (
     MPLinearKernel, MPLinearLayerConfig)
 from vllm.platforms import current_platform
-
-
 
 # in priority/performance order (when available)
 _POSSIBLE_KERNELS: List[Type[MPLinearKernel]] = [
