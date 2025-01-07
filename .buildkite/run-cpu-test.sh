@@ -30,7 +30,7 @@ function cpu_tests() {
   # offline inference
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2-"$NUMA_NODE" bash -c "
     set -e
-    python3 examples/offline_inference.py"
+    python3 examples/offline_inference/offline_inference.py"
 
   # Run basic model test
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" bash -c "

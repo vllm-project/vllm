@@ -12,6 +12,7 @@ EXAMPLE_DOC_DIR = ROOT_DIR / "docs/source/getting_started/examples"
 def fix_case(text: str) -> str:
     subs = {
         "api": "API",
+        "Cli": "CLI",
         "cpu": "CPU",
         "llm": "LLM",
         "tpu": "TPU",
@@ -165,9 +166,9 @@ def generate_examples():
         caption="Examples",
         maxdepth=2)
     category_indices = {
-        "offline_inference":
+        "offline_inference/offline_inference":
         Index(
-            path=EXAMPLE_DOC_DIR / "examples_offline_inference_index.md",
+            path=EXAMPLE_DOC_DIR / "examples_offline_inference/offline_inference_index.md",
             title="Offline Inference",
             description=
             "Offline inference examples demonstrate how to use vLLM in an offline setting, where the model is queried for predictions in batches.",  # noqa: E501
