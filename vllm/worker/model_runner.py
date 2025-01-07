@@ -1136,7 +1136,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.prompt_adapter_manager.create_prompt_adapter_manager(
                     self.model))
 
-        if self.kv_cache_dtype == "fp8" and current_platform.is_rocm():
+        if self.kv_cache_dtype == "fp8" and (current_platform.is_rocm()
+                                             or current_platform.is_cuda()):
             # Currently only ROCm accepts kv-cache scaling factors
             # via quantization_param_path and this will be deprecated
             # in the future.
@@ -1425,10 +1426,15 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = self.max_batchsize_to_capture
-        input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-        input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
+        input_tokens = torch.zeros(max_batch_size,
+                                   dtype=torch.long,
+                                   device=self.device)
+        input_positions = torch.zeros(max_batch_size,
+                                      dtype=torch.long,
+                                      device=self.device)
         if self.model_config.uses_mrope:
-            input_positions = torch.tile(input_positions, (3, 1))
+            input_positions = torch.tile(input_positions,
+                                         (3, 1)).cuda(device=self.device)
         # Prepare dummy previous_hidden_states only if needed by the model.
         # This is used by draft models such as EAGLE.
         previous_hidden_states = None
@@ -1447,8 +1453,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=self.model_config.dtype,
                 device=self.device)
 
-        with self.attn_state.graph_capture(
-                max_batch_size), graph_capture() as graph_capture_context:
+        with self.attn_state.graph_capture(max_batch_size), graph_capture(
+                self.device) as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for virtual_engine in range(
@@ -1548,10 +1554,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         """
         # During the decode phase encoder_input_ids and encoder_positions are
         # unset. Do the same thing for graph capture.
-        capture_inputs["encoder_input_ids"] = torch.tensor(
-            [], dtype=torch.long).cuda()
-        capture_inputs["encoder_positions"] = torch.tensor(
-            [], dtype=torch.long).cuda()
+        capture_inputs["encoder_input_ids"] = torch.tensor([],
+                                                           dtype=torch.long,
+                                                           device=self.device)
+        capture_inputs["encoder_positions"] = torch.tensor([],
+                                                           dtype=torch.long,
+                                                           device=self.device)
 
     @property
     def vocab_size(self) -> int:

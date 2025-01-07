@@ -1,6 +1,5 @@
 import asyncio
 import os
-import signal
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -41,21 +40,6 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
-
-        # The child processes will send SIGQUIT when unrecoverable
-        # errors happen. We kill the process tree here so that the
-        # stack trace is very evident.
-        # TODO: rather than killing the main process, we should
-        # figure out how to raise an AsyncEngineDeadError and
-        # handle at the API server level so we can return a better
-        # error code to the clients calling VLLM.
-        def sigquit_handler(signum, frame):
-            logger.fatal(
-                "AsyncLLM got SIGQUIT from worker processes, shutting "
-                "down. See stack trace above for root cause issue.")
-            kill_process_tree(os.getpid())
-
-        signal.signal(signal.SIGQUIT, sigquit_handler)
 
         assert start_engine_loop
 
@@ -103,9 +87,6 @@ class AsyncLLM(EngineClient):
 
         self.output_handler: Optional[asyncio.Task] = None
 
-    def __del__(self):
-        self.shutdown()
-
     @classmethod
     def from_engine_args(
         cls,
@@ -123,7 +104,7 @@ class AsyncLLM(EngineClient):
         else:
             vllm_config = engine_config
 
-        executor_class = cls._get_executor_cls(vllm_config)
+        executor_class = Executor.get_class(vllm_config)
 
         # Create the AsyncLLM.
         return cls(
@@ -144,20 +125,6 @@ class AsyncLLM(EngineClient):
 
         if handler := getattr(self, "output_handler", None):
             handler.cancel()
-
-    @classmethod
-    def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
-        executor_class: Type[Executor]
-        distributed_executor_backend = (
-            vllm_config.parallel_config.distributed_executor_backend)
-        if distributed_executor_backend == "mp":
-            from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-            executor_class = MultiprocExecutor
-        else:
-            assert (distributed_executor_backend is None)
-            from vllm.v1.executor.uniproc_executor import UniprocExecutor
-            executor_class = UniprocExecutor
-        return executor_class
 
     async def add_request(
         self,

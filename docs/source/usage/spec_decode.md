@@ -182,7 +182,7 @@ speculative decoding, breaking down the guarantees into three key areas:
 3. **vLLM Logprob Stability**
    \- vLLM does not currently guarantee stable token log probabilities (logprobs). This can result in different outputs for the
    same request across runs. For more details, see the FAQ section
-   titled *Can the output of a prompt vary across runs in vLLM?* in the {ref}`FAQs <faq>`.
+   titled *Can the output of a prompt vary across runs in vLLM?* in the [FAQs](#faq).
 
 **Conclusion**
 
@@ -195,7 +195,7 @@ can occur due to following factors:
 
 **Mitigation Strategies**
 
-For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the {ref}`FAQs <faq>`.
+For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the [FAQs](#faq).
 
 ## Resources for vLLM contributors
 

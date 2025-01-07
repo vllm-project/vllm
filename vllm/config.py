@@ -1015,11 +1015,6 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
-        from vllm.platforms import current_platform
-        if (current_platform.is_cuda() and self.block_size is not None
-                and self.block_size > 32):
-            raise ValueError("CUDA Paged Attention kernel only supports "
-                             f"block sizes up to 32. Got {self.block_size}.")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
@@ -2312,6 +2307,8 @@ def _get_and_verify_max_len(
         "seq_length",
         # Command-R
         "model_max_length",
+        # Whisper
+        "max_target_positions",
         # Others
         "max_sequence_length",
         "max_seq_length",
