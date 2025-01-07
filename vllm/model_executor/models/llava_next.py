@@ -21,7 +21,7 @@ from vllm.sequence import IntermediateTensors
 from .clip import CLIPVisionModel
 from .interfaces import SupportsMultiModal, SupportsPP
 from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
-                    LlavaDummyDataBuilder, LlavaLikeConfig,
+                    LlavaDummyInputsBuilder, LlavaLikeConfig,
                     LlavaMultiModalProjector, init_vision_tower_for_llava)
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
@@ -181,7 +181,7 @@ class LlavaNextMultiModalProcessor(
 
 @MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor,
                                         info=LlavaNextProcessingInfo,
-                                        dummy_data=LlavaDummyDataBuilder)
+                                        dummy=LlavaDummyInputsBuilder)
 class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 

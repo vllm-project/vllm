@@ -60,7 +60,7 @@ from vllm.multimodal.parse import (ImageSize, ModalityDataItems,
                                    MultiModalDataItems, MultiModalDataParser)
 from vllm.multimodal.processing import BaseProcessingInfo, PromptReplacement
 from vllm.multimodal.processor import BaseMultiModalProcessor
-from vllm.multimodal.profiling import BaseDummyDataBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
@@ -883,7 +883,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         )
 
 
-class Qwen2VLDummyDataBuilder(BaseDummyDataBuilder[Qwen2VLProcessingInfo]):
+class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
 
     def get_dummy_processor_inputs(
         self,
@@ -991,7 +991,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
 
 @MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor,
                                         info=Qwen2VLProcessingInfo,
-                                        dummy_data=Qwen2VLDummyDataBuilder)
+                                        dummy=Qwen2VLDummyInputsBuilder)
 class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                       SupportsLoRA, SupportsPP):
     packed_modules_mapping = {

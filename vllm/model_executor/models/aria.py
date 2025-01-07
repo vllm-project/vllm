@@ -26,7 +26,7 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import BaseProcessingInfo, PromptReplacement
 from vllm.multimodal.processor import BaseMultiModalProcessor
-from vllm.multimodal.profiling import BaseDummyDataBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.aria import (AriaMoELMConfig,
                                                   AriaVisionConfig)
@@ -464,7 +464,7 @@ class AriaProcessingInfo(BaseProcessingInfo):
         return max(hf_config.projector_patch_to_query_dict.values())
 
 
-class AriaDummyDataBuilder(BaseDummyDataBuilder[AriaProcessingInfo]):
+class AriaDummyInputsBuilder(BaseDummyInputsBuilder[AriaProcessingInfo]):
 
     def get_dummy_processor_inputs(
         self,
@@ -526,7 +526,7 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor[AriaProcessingInfo]):
 
 @MULTIMODAL_REGISTRY.register_processor(AriaMultiModalProcessor,
                                         info=AriaProcessingInfo,
-                                        dummy_data=AriaDummyDataBuilder)
+                                        dummy=AriaDummyInputsBuilder)
 class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     """
     Aria model for conditional generation tasks.

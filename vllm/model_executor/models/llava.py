@@ -29,7 +29,7 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
 from vllm.multimodal.processing import (BaseProcessingInfo, ProcessingCache,
                                         PromptReplacement)
 from vllm.multimodal.processor import BaseMultiModalProcessor
-from vllm.multimodal.profiling import BaseDummyDataBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .clip import CLIPVisionModel
@@ -170,7 +170,7 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
 _I = TypeVar("_I", bound=BaseLlavaProcessingInfo)
 
 
-class LlavaDummyDataBuilder(BaseDummyDataBuilder[_I]):
+class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
     def get_dummy_processor_inputs(
         self,
@@ -360,7 +360,7 @@ def _build_llava_or_pixtral_hf_info(
 
 def _build_llava_or_pixtral_hf_processor(
     info: _I,
-    dummy_data_builder: BaseDummyDataBuilder[_I],
+    dummy_inputs: BaseDummyInputsBuilder[_I],
     *,
     cache: Optional[ProcessingCache] = None,
     enable_sanity_checks: bool = True,
@@ -368,7 +368,7 @@ def _build_llava_or_pixtral_hf_processor(
     if isinstance(info, PixtralHFProcessingInfo):
         return PixtralHFMultiModalProcessor(
             info,
-            dummy_data_builder,  # type: ignore
+            dummy_inputs,  # type: ignore
             cache=cache,
             enable_sanity_checks=enable_sanity_checks,
         )
@@ -376,7 +376,7 @@ def _build_llava_or_pixtral_hf_processor(
     if isinstance(info, LlavaProcessingInfo):
         return LlavaMultiModalProcessor(
             info,
-            dummy_data_builder,  # type: ignore
+            dummy_inputs,  # type: ignore
             cache=cache,
             enable_sanity_checks=enable_sanity_checks,
         )
@@ -461,7 +461,7 @@ def init_vision_tower_for_llava(
 
 @MULTIMODAL_REGISTRY.register_processor(_build_llava_or_pixtral_hf_processor,
                                         info=_build_llava_or_pixtral_hf_info,
-                                        dummy_data=LlavaDummyDataBuilder)
+                                        dummy=LlavaDummyInputsBuilder)
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     # BitandBytes specific attributes
     bitsandbytes_stacked_params_mapping = {
@@ -793,6 +793,6 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 # `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'`
 @MULTIMODAL_REGISTRY.register_processor(MantisMultiModalProcessor,
                                         info=LlavaProcessingInfo,
-                                        dummy_data=LlavaDummyDataBuilder)
+                                        dummy=LlavaDummyInputsBuilder)
 class MantisForConditionalGeneration(LlavaForConditionalGeneration):
     pass

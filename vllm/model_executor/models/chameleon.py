@@ -33,7 +33,7 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import BaseProcessingInfo, PromptReplacement
 from vllm.multimodal.processor import BaseMultiModalProcessor
-from vllm.multimodal.profiling import BaseDummyDataBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import print_warning_once
 
@@ -68,7 +68,8 @@ class ChameleonProcessingInfo(BaseProcessingInfo):
         return processor.image_seq_length
 
 
-class ChameleonDummyDataBuilder(BaseDummyDataBuilder[ChameleonProcessingInfo]):
+class ChameleonDummyInputsBuilder(
+        BaseDummyInputsBuilder[ChameleonProcessingInfo]):
 
     def get_dummy_processor_inputs(
         self,
@@ -915,7 +916,7 @@ class ChameleonModel(nn.Module):
 
 @MULTIMODAL_REGISTRY.register_processor(ChameleonMultiModalProcessor,
                                         info=ChameleonProcessingInfo,
-                                        dummy_data=ChameleonDummyDataBuilder)
+                                        dummy=ChameleonDummyInputsBuilder)
 class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 

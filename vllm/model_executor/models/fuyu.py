@@ -37,7 +37,7 @@ from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import BaseProcessingInfo, PromptReplacement
 from vllm.multimodal.processor import BaseMultiModalProcessor
-from vllm.multimodal.profiling import BaseDummyDataBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsMultiModal, SupportsPP
@@ -117,7 +117,7 @@ class FuyuProcessingInfo(BaseProcessingInfo):
                          height=image_processor.size["height"])
 
 
-class FuyuDummyDataBuilder(BaseDummyDataBuilder[FuyuProcessingInfo]):
+class FuyuDummyInputsBuilder(BaseDummyInputsBuilder[FuyuProcessingInfo]):
 
     def get_dummy_processor_inputs(
         self,
@@ -244,7 +244,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
 
 @MULTIMODAL_REGISTRY.register_processor(FuyuMultiModalProcessor,
                                         info=FuyuProcessingInfo,
-                                        dummy_data=FuyuDummyDataBuilder)
+                                        dummy=FuyuDummyInputsBuilder)
 class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

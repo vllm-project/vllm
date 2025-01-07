@@ -21,7 +21,7 @@ from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
                                    VideoEmbeddingItems, VideoProcessorItems)
 from vllm.multimodal.processing import BaseProcessingInfo, PromptReplacement
 from vllm.multimodal.processor import BaseMultiModalProcessor
-from vllm.multimodal.profiling import BaseDummyDataBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
@@ -134,8 +134,8 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
         return max(max_total_frames // max(max_videos, 1), 1)
 
 
-class LlavaNextVideoDummyDataBuilder(
-        BaseDummyDataBuilder[LlavaNextVideoProcessingInfo]):
+class LlavaNextVideoDummyInputsBuilder(
+        BaseDummyInputsBuilder[LlavaNextVideoProcessingInfo]):
 
     def get_dummy_processor_inputs(
         self,
@@ -269,7 +269,7 @@ class LlavaNextMultiModalProjector(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(
     LlavaNextVideoMultiModalProcessor,
     info=LlavaNextVideoProcessingInfo,
-    dummy_data=LlavaNextVideoDummyDataBuilder,
+    dummy=LlavaNextVideoDummyInputsBuilder,
 )
 class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              SupportsPP):

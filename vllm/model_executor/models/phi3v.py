@@ -39,7 +39,7 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
                                         BoundPromptReplacement,
                                         PlaceholderInfo, PromptReplacement)
 from vllm.multimodal.processor import BaseMultiModalProcessor
-from vllm.multimodal.profiling import BaseDummyDataBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
@@ -344,7 +344,7 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
         return ImageSize(height=8000, width=50)
 
 
-class Phi3VDummyDataBuilder(BaseDummyDataBuilder[Phi3VProcessingInfo]):
+class Phi3VDummyInputsBuilder(BaseDummyInputsBuilder[Phi3VProcessingInfo]):
 
     def get_dummy_processor_inputs(
         self,
@@ -498,7 +498,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 
 @MULTIMODAL_REGISTRY.register_processor(Phi3VMultiModalProcessor,
                                         info=Phi3VProcessingInfo,
-                                        dummy_data=Phi3VDummyDataBuilder)
+                                        dummy=Phi3VDummyInputsBuilder)
 class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

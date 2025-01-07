@@ -2,7 +2,7 @@ from typing import Optional
 
 import torch
 
-from vllm.model_executor.models.llava import (LlavaDummyDataBuilder,
+from vllm.model_executor.models.llava import (LlavaDummyInputsBuilder,
                                               LlavaForConditionalGeneration,
                                               LlavaMultiModalProcessor,
                                               LlavaProcessingInfo)
@@ -12,7 +12,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 
 @MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
                                         info=LlavaProcessingInfo,
-                                        dummy_data=LlavaDummyDataBuilder)
+                                        dummy=LlavaDummyInputsBuilder)
 class MyLlava(LlavaForConditionalGeneration):
 
     def compute_logits(

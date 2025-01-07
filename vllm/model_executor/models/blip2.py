@@ -20,7 +20,7 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import BaseProcessingInfo, PromptReplacement
 from vllm.multimodal.processor import BaseMultiModalProcessor
-from vllm.multimodal.profiling import BaseDummyDataBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .blip import BlipVisionModel
@@ -413,7 +413,7 @@ class Blip2ProcessingInfo(BaseProcessingInfo):
         return hf_config.num_query_tokens
 
 
-class Blip2DummyDataBuilder(BaseDummyDataBuilder[Blip2ProcessingInfo]):
+class Blip2DummyInputsBuilder(BaseDummyInputsBuilder[Blip2ProcessingInfo]):
 
     def get_dummy_processor_inputs(
         self,
@@ -490,7 +490,7 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
 
 @MULTIMODAL_REGISTRY.register_processor(Blip2MultiModalProcessor,
                                         info=Blip2ProcessingInfo,
-                                        dummy_data=Blip2DummyDataBuilder)
+                                        dummy=Blip2DummyInputsBuilder)
 class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

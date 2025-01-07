@@ -8,7 +8,7 @@ from vllm.logger import init_logger
 from .inputs import MultiModalInputsV2
 from .processing import BaseProcessingInfo
 from .processor import BaseMultiModalProcessor
-from .profiling import BaseDummyDataBuilder
+from .profiling import BaseDummyInputsBuilder
 
 logger = init_logger(__name__)
 
@@ -30,8 +30,8 @@ class MultiModalProfiler(Generic[_I]):
         return self.processor.info
 
     @property
-    def dummy_data_builder(self) -> BaseDummyDataBuilder[_I]:
-        return self.processor.dummy_data_builder
+    def dummy_inputs(self) -> BaseDummyInputsBuilder[_I]:
+        return self.processor.dummy_inputs
 
     def _get_mm_limits(self) -> Mapping[str, int]:
         mm_config = self.processing.ctx.get_mm_config()
@@ -59,7 +59,7 @@ class MultiModalProfiler(Generic[_I]):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> MultiModalInputsV2:
-        factory = self.dummy_data_builder
+        factory = self.dummy_inputs
         processor_inputs = factory.get_dummy_processor_inputs(
             seq_len, mm_counts)
 

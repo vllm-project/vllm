@@ -42,7 +42,7 @@ from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import BaseProcessingInfo, PromptReplacement
 from vllm.multimodal.processor import BaseMultiModalProcessor
-from vllm.multimodal.profiling import BaseDummyDataBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsMultiModal, SupportsPP
@@ -115,8 +115,8 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
         return {"audio": max_output_lengths}
 
 
-class Qwen2AudioDummyDataBuilder(BaseDummyDataBuilder[Qwen2AudioProcessingInfo]
-                                 ):
+class Qwen2AudioDummyInputsBuilder(
+        BaseDummyInputsBuilder[Qwen2AudioProcessingInfo]):
 
     def get_dummy_processor_inputs(
         self,
@@ -237,7 +237,7 @@ class Qwen2AudioMultiModalProcessor(
 
 @MULTIMODAL_REGISTRY.register_processor(Qwen2AudioMultiModalProcessor,
                                         info=Qwen2AudioProcessingInfo,
-                                        dummy_data=Qwen2AudioDummyDataBuilder)
+                                        dummy=Qwen2AudioDummyInputsBuilder)
 class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsPP):
 

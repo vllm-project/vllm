@@ -17,7 +17,7 @@ from .image import ImagePlugin
 from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
 from .processing import ProcessingCache
 from .processor import BaseMultiModalProcessor, BaseProcessingInfo
-from .profiling import BaseDummyDataBuilder
+from .profiling import BaseDummyInputsBuilder
 from .utils import cached_get_tokenizer
 from .video import VideoPlugin
 
@@ -44,10 +44,12 @@ class ProcessingInfoFactory(Protocol[_I_co]):
         ...
 
 
-class DummyDataBuilderFactory(Protocol[_I]):
-    """Constructs a :class:`BaseDummyDataBuilder` instance from the context."""
+class DummyInputsBuilderFactory(Protocol[_I]):
+    """
+    Constructs a :class:`BaseDummyInputsBuilder` instance from the context.
+    """
 
-    def __call__(self, info: _I) -> BaseDummyDataBuilder[_I]:
+    def __call__(self, info: _I) -> BaseDummyInputsBuilder[_I]:
         ...
 
 
@@ -57,7 +59,7 @@ class MultiModalProcessorFactory(Protocol[_I]):
     def __call__(
         self,
         info: _I,
-        dummy_data_builder: BaseDummyDataBuilder[_I],
+        dummy_inputs: BaseDummyInputsBuilder[_I],
         *,
         cache: Optional[ProcessingCache] = None,
     ) -> BaseMultiModalProcessor[_I]:
@@ -68,7 +70,7 @@ class MultiModalProcessorFactory(Protocol[_I]):
 class _ProcessorFactories(Generic[_I]):
     info: ProcessingInfoFactory[_I]
     processor: MultiModalProcessorFactory[_I]
-    dummy_data: DummyDataBuilderFactory[_I]
+    dummy: DummyInputsBuilderFactory[_I]
 
     def build_processor(
         self,
@@ -77,8 +79,8 @@ class _ProcessorFactories(Generic[_I]):
         cache: Optional[ProcessingCache] = None,
     ):
         info = self.info(ctx)
-        dummy_data_builder = self.dummy_data(info)
-        return self.processor(info, dummy_data_builder, cache=cache)
+        dummy_inputs_builder = self.dummy(info)
+        return self.processor(info, dummy_inputs_builder, cache=cache)
 
 
 class _MultiModalLimits(UserDict["ModelConfig", Dict[str, int]]):
@@ -358,7 +360,7 @@ class MultiModalRegistry:
         processor: MultiModalProcessorFactory[_I],
         *,
         info: ProcessingInfoFactory[_I],
-        dummy_data: DummyDataBuilderFactory[_I],
+        dummy: DummyInputsBuilderFactory[_I],
     ):
         """
         Register a multi-modal processor to a model class. The processor
@@ -381,7 +383,7 @@ class MultiModalRegistry:
 
             self._processor_factories[model_cls] = _ProcessorFactories(
                 info=info,
-                dummy_data=dummy_data,
+                dummy=dummy,
                 processor=processor,
             )
 

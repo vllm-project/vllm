@@ -22,7 +22,7 @@ class ProcessorInputs:
 _I = TypeVar("_I", bound=BaseProcessingInfo)
 
 
-class BaseDummyDataBuilder(ABC, Generic[_I]):
+class BaseDummyInputsBuilder(ABC, Generic[_I]):
     """
     Abstract base class that constructs the dummy data to profile
     multi-modal models.

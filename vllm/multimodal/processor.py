@@ -17,7 +17,7 @@ from .processing import (BaseProcessingInfo, BoundPromptReplacement,
                          find_mm_placeholders, find_text_matches,
                          find_token_matches, full_groupby_modality,
                          replace_text_matches, replace_token_matches)
-from .profiling import BaseDummyDataBuilder
+from .profiling import BaseDummyInputsBuilder
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
 
@@ -31,14 +31,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def __init__(self,
                  info: _I,
-                 dummy_data_builder: BaseDummyDataBuilder[_I],
+                 dummy_inputs: BaseDummyInputsBuilder[_I],
                  *,
                  cache: Optional[ProcessingCache] = None,
                  enable_sanity_checks: bool = True) -> None:
         super().__init__()
 
         self.info = info
-        self.dummy_data_builder = dummy_data_builder
+        self.dummy_inputs = dummy_inputs
         self.cache = cache
         self.enable_sanity_checks = enable_sanity_checks
 
@@ -208,7 +208,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         # Some HF processors (e.g. Qwen2-VL) expect corresponding
         # multi-modal tokens to be in the prompt text
-        dummy_inputs = self.dummy_data_builder.get_dummy_processor_inputs(
+        dummy_inputs = self.dummy_inputs.get_dummy_processor_inputs(
             self.info.ctx.model_config.max_model_len,
             mm_missing_counts,
         )

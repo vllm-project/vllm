@@ -28,7 +28,7 @@ from vllm.utils import is_list_of
 
 from .clip import CLIPVisionModel
 from .interfaces import SupportsMultiModal, SupportsPP
-from .llava import LlavaDummyDataBuilder, init_vision_tower_for_llava
+from .llava import LlavaDummyInputsBuilder, init_vision_tower_for_llava
 from .llava_next import (BaseLlavaNextMultiModalProcessor, LlavaNextLikeConfig,
                          LlavaNextProcessingInfo)
 from .siglip import SiglipVisionModel
@@ -233,8 +233,8 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
         )
 
 
-class LlavaOnevisionDummyDataBuilder(
-        LlavaDummyDataBuilder[LlavaOnevisionProcessingInfo]):
+class LlavaOnevisionDummyInputsBuilder(
+        LlavaDummyInputsBuilder[LlavaOnevisionProcessingInfo]):
 
     def get_dummy_processor_inputs(
         self,
@@ -392,10 +392,9 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    LlavaOnevisionMultiModalProcessor,
-    info=LlavaOnevisionProcessingInfo,
-    dummy_data=LlavaOnevisionDummyDataBuilder)
+@MULTIMODAL_REGISTRY.register_processor(LlavaOnevisionMultiModalProcessor,
+                                        info=LlavaOnevisionProcessingInfo,
+                                        dummy=LlavaOnevisionDummyInputsBuilder)
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              SupportsPP):
 

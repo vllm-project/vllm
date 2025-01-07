@@ -27,7 +27,7 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import BaseProcessingInfo, PromptReplacement
 from vllm.multimodal.processor import BaseMultiModalProcessor
-from vllm.multimodal.profiling import BaseDummyDataBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
@@ -98,7 +98,8 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         return {"audio": max_audio_tokens}
 
 
-class UltravoxDummyDataBuilder(BaseDummyDataBuilder[UltravoxProcessingInfo]):
+class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo]
+                                 ):
 
     def get_dummy_processor_inputs(
         self,
@@ -340,7 +341,7 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 
 @MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor,
                                         info=UltravoxProcessingInfo,
-                                        dummy_data=UltravoxDummyDataBuilder)
+                                        dummy=UltravoxDummyInputsBuilder)
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     hf_to_vllm_mapper = WeightsMapper(

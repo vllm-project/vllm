@@ -690,7 +690,7 @@ def _test_processing_cache_correctness(
 
     baseline_processor = factories.build_processor(ctx, cache=None)
     cached_processor = factories.build_processor(ctx, cache=cache)
-    dummy_data_builder = baseline_processor.dummy_data_builder
+    dummy_inputs = baseline_processor.dummy_inputs
 
     rng = np.random.RandomState(0)
 
@@ -722,7 +722,7 @@ def _test_processing_cache_correctness(
         }
 
         mm_counts = {k: len(vs) for k, vs in mm_data.items()}
-        prompt = dummy_data_builder.get_dummy_processor_inputs(
+        prompt = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
         ).prompt_text
