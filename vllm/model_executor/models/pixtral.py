@@ -774,7 +774,7 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
     ) -> int:
         return get_pixtral_hf_image_feature_size(
             image_size=self.vision_config.image_size,
-            patch_size=self.get_image_size(),
+            patch_size=self.vision_config.patch_size,
         )
 
     def get_max_image_tokens(self) -> int:
