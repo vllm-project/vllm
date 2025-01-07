@@ -3,7 +3,6 @@ from functools import cached_property
 from typing import (Final, Iterable, List, Literal, Mapping, Optional,
                     Protocol, Set, Tuple, TypedDict, Union)
 
-import numpy as np
 import torch
 import torch.nn as nn
 from transformers import (BatchFeature, LlavaOnevisionConfig,
@@ -98,6 +97,8 @@ class LlavaOnevisionProcessingMixin(LlavaNextProcessingMixin):
     def _get_hf_processor(self):
         return self.ctx.get_hf_processor(LlavaOnevisionProcessor)
 
+    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L86
+    # with additional logic afterwards taken from LlavaOnevisionProcessor
     def _get_num_unpadded_features(
         self,
         *,
@@ -110,33 +111,27 @@ class LlavaOnevisionProcessingMixin(LlavaNextProcessingMixin):
         current_height = npatches * num_patch_height
         current_width = npatches * num_patch_width
 
-        # NOTE: Use float32 to remain consistent with HF output
-        original_aspect_ratio = np.array(original_width / original_height,
-                                         dtype=np.float32)
-        current_aspect_ratio = np.array(current_width / current_height,
-                                        dtype=np.float32)
+        aspect_ratio = original_width / original_height
+        current_aspect_ratio = current_width / current_height
 
-        if original_aspect_ratio > current_aspect_ratio:
-            scale_factor = np.array(current_width / original_width,
-                                    dtype=np.float32)
-            new_height = int(original_height * scale_factor)
+        if aspect_ratio > current_aspect_ratio:
+            new_height = (original_height * current_width) // original_width
             padding = (current_height - new_height) // 2
-            current_height -= 2 * padding
+            current_height = current_height - (2 * padding)
         else:
-            scale_factor = np.array(current_height / original_height,
-                                    dtype=np.float32)
-            new_width = int(original_width * scale_factor)
+            new_width = (original_width * current_height) // original_height
             padding = (current_width - new_width) // 2
-            current_width -= 2 * padding
+            current_width = current_width - (2 * padding)
 
         unpadded_features = current_height * current_width
         newline_features = current_height
 
         ratio = math.sqrt(current_height * current_width / (9 * npatches**2))
         if ratio > 1.1:
-            unpadded_features = int(current_height // ratio) * int(
-                current_width // ratio)
-            newline_features = int(current_height // ratio)
+            height_factor = int(current_height // ratio)
+            width_factor = int(current_width // ratio)
+            unpadded_features = height_factor * width_factor
+            newline_features = height_factor
 
         return (unpadded_features, newline_features)
 

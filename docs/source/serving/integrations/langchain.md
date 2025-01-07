@@ -1,10 +1,10 @@
-(run-on-langchain)=
+(serving-langchain)=
 
-# Serving with Langchain
+# LangChain
 
-vLLM is also available via [Langchain](https://github.com/langchain-ai/langchain) .
+vLLM is also available via [LangChain](https://github.com/langchain-ai/langchain) .
 
-To install langchain, run
+To install LangChain, run
 
 ```console
 $ pip install langchain langchain_community -q

@@ -227,12 +227,14 @@ class Qwen2AudioMultiModalProcessor(Qwen2AudioProcessingMixin,
         ]
 
     def _always_apply_prompt_replacements(self) -> bool:
-        # HF never applies prompt replacements, so we have to do it ourselves.
+        # Qwen2-Audio processor will start inserting placeholder tokens
+        # in an upcoming release:
+        # https://github.com/huggingface/transformers/pull/35534
         # NOTE: `_find_placeholders_by_modality` may incorrectly think that HF
         # has already performed processing for multi-audio input when the input
         # audios are short (the corresponding placeholders may take up fewer
         # tokens than the number of audio items)
-        return True
+        return not hasattr(self._get_hf_processor(), "audio_token")
 
 
 @MULTIMODAL_REGISTRY.register_processor(Qwen2AudioMultiModalProcessor)
@@ -333,13 +335,16 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         selected_audio_feature = audio_outputs.last_hidden_state
         audio_features = self.multi_modal_projector(selected_audio_feature)
         num_audios, max_audio_tokens, embed_dim = audio_features.shape
+        audio_output_lengths = audio_output_lengths.unsqueeze(1)
         audio_features_mask = torch.arange(max_audio_tokens).expand(
-            num_audios, max_audio_tokens
-        ).to(audio_output_lengths.device) < audio_output_lengths.unsqueeze(1)
+            num_audios, max_audio_tokens).to(
+                audio_output_lengths.device) < audio_output_lengths
         masked_audio_features = audio_features[audio_features_mask].view(
             -1, embed_dim)
 
-        return masked_audio_features
+        # Split to tuple of embeddings for individual audio input.
+        return torch.split(masked_audio_features,
+                           audio_output_lengths.flatten().tolist())
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
