@@ -1,13 +1,13 @@
 from typing import List, Optional, Type
 
 import vllm.envs as envs
-from vllm.model_executor.layers.quantization.kernels.mixed_precision.exllama import (
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.exllama import ( # noqa: E501
     ExllamaLinearKernel)
-from vllm.model_executor.layers.quantization.kernels.mixed_precision.machete import (
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.machete import ( # noqa: E501
     MacheteLinearKernel)
-from vllm.model_executor.layers.quantization.kernels.mixed_precision.marlin import (
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.marlin import ( # noqa: E501
     MarlinLinearKernel)
-from vllm.model_executor.layers.quantization.kernels.MPLinearKernel import (
+from vllm.model_executor.layers.quantization.kernels.MPLinearKernel import ( # noqa: E501
     MPLinearKernel, MPLinearLayerConfig)
 from vllm.platforms import current_platform
 
