@@ -90,4 +90,4 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
 
         # Explicitly capture control flow to make dynamo happy.
         # https://pytorch.org/docs/main/generated/exportdb/index.html#cond-branch-class-method # noqa: E501
-        return cond(bias is None, self._no_add_bias, self._add_bias, [out, bias])
+        return cond(bias, self._add_bias, self._no_add_bias, [out, bias])
