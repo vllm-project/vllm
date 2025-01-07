@@ -72,10 +72,11 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         w_q, w_s, _, _, _ = self._get_weight_params(layer)
 
         import torch_xla.experimental.xla_quantized_matmul  # noqa: F401
-        return torch.ops.xla.quantized_matmul(x,
-                                              w_q,
-                                              w_s,
-                                              zero_point=None,
-                                              block_size=-1,
-                                              int4_weight=False,
-                                              quantize_activation=True)
+        out = torch.ops.xla.quantized_matmul(x,
+                                             w_q,
+                                             w_s,
+                                             zero_point=None,
+                                             block_size=-1,
+                                             int4_weight=False,
+                                             quantize_activation=True)
+        return out + bias
