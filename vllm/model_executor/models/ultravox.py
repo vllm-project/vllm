@@ -356,7 +356,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.multi_modal_config = multimodal_config
         assert self.multi_modal_config
 
-        self.audio_token_id = config.audio_token_index
         self.secondary_weights = []
         self.audio_tower = ModifiedWhisperEncoder(config.audio_config)
         if config.audio_model_id is not None:
