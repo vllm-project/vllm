@@ -67,7 +67,14 @@ class UltravoxProcessingMixin(ProcessingMixin):
         # Ignored in initialization
         sampling_rate: Optional[int] = None,
     ) -> ProcessorMixin:
-        return self.ctx.get_hf_processor()
+        hf_processor = self.ctx.get_hf_processor()
+
+        # NOTE: Ultravox processing definition uses '<|eot_id|>' as the
+        # placeholder that will cause confusion with the actual end of turn
+        # token, thus we override placeholder with a reserved special
+        # token.
+        hf_processor.audio_token_replacement = _AUDIO_PLACEHOLDER_OVERRIDE
+        return hf_processor
 
     def _get_feature_extractor(
         self,
@@ -201,12 +208,8 @@ class UltravoxMultiModalProcessor(UltravoxProcessingMixin,
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-
-        # NOTE: Ultravox processing definition uses '<|eot_id|>' as the
-        # placeholder that will cause confusion with the actual end of turn
-        # token, thus we override placeholder with a reserved special
-        # token.
-        placeholder = _AUDIO_PLACEHOLDER_OVERRIDE
+        hf_processor = self._get_hf_processor(**hf_processor_mm_kwargs)
+        placeholder = hf_processor.audio_token_replacement  # type: ignore
 
         def get_replacement_ultravox(item_idx: int):
             audio_token_len = out_mm_kwargs["audio_token_len"][item_idx]
