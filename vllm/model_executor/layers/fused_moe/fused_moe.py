@@ -16,6 +16,10 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
+if current_platform.is_hpu():
+    from vllm_hpu_extension.ops import scaled_fp8_quant
+    ops.scaled_fp8_quant = scaled_fp8_quant
+
 logger = init_logger(__name__)
 
 

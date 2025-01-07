@@ -8,7 +8,10 @@ from vllm.platforms import current_platform
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
 TORCH_DEVICE_IDENTITY = torch.ones(1, dtype=torch.float32)
-
+if current_platform.is_hpu():
+    import habana_frameworks.torch.utils.experimental as htexp
+    from vllm_hpu_extension.ops import scaled_fp8_quant
+    ops.scaled_fp8_quant = scaled_fp8_quant
 
 def sparse_cutlass_supported() -> bool:
     if not current_platform.is_cuda():
@@ -33,7 +36,15 @@ def cutlass_fp8_supported() -> bool:
 def per_tensor_dequantize(
         tensor: torch.Tensor, inv_scale: Union[float,
                                                torch.Tensor]) -> torch.Tensor:
-    fake_qweight = tensor.to(torch.float16)
+    dtype = torch.float16
+    device = tensor.device
+    if current_platform.is_hpu():
+        dtype = torch.bfloat16
+        if htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2:
+            #dequant on cpu to avoid nan on gaudi2
+            tensor = tensor.to('cpu')
+
+    fake_qweight = tensor.to(dtype).to(device)
     dq_weight = fake_qweight * inv_scale
     return dq_weight
 
@@ -66,6 +77,10 @@ def requantize_with_max_scale(
         logical_widths: List[int]) -> Tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
     max_w_scale = weight_scale.max()
+    if current_platform.is_hpu() and htexp._get_device_type(
+    ) == htexp.synDeviceType.synDeviceGaudi2:
+        max_w_scale = max_w_scale * (torch.finfo(torch.float8_e4m3fn).max /
+                                     torch.finfo(torch.float8_e4m3fnuz).max)
 
     # QKV / MLP is fused in the on disk checkpoint if any of the
     # weight scales are still set to the default since we initialize
@@ -117,12 +132,17 @@ def apply_fp8_linear(
             use_per_token_if_dynamic=use_per_token_if_dynamic)
 
         # Fused GEMM_DQ
-        output = ops.cutlass_scaled_mm(qinput,
-                                       weight,
-                                       out_dtype=input.dtype,
-                                       scale_a=x_scale,
-                                       scale_b=weight_scale,
-                                       bias=bias)
+        if current_platform.is_hpu():
+            output = torch.ops.hpu.fp8_gemm_v2(qinput, False, weight, False,
+                                               None, input.dtype, x_scale,
+                                               weight_scale, None, False)
+        else:
+            output = ops.cutlass_scaled_mm(qinput,
+                                           weight,
+                                           out_dtype=input.dtype,
+                                           scale_a=x_scale,
+                                           scale_b=weight_scale,
+                                           bias=bias)
         return output.view(*output_shape)
 
     # torch.scaled_mm supports per tensor weights + activations only
@@ -131,12 +151,18 @@ def apply_fp8_linear(
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
         # This could change in the future.
-        qinput, x_scale = ops.scaled_fp8_quant(
-            input_2d,
-            input_scale,
-            num_token_padding=17,
-            use_per_token_if_dynamic=use_per_token_if_dynamic)
-
+        if current_platform.is_hpu():
+            qinput, x_scale = ops.scaled_fp8_quant(
+                input_2d,
+                input_scale,
+                batch_dim_padding=17,
+                use_per_token_if_dynamic=use_per_token_if_dynamic)
+        else:
+            qinput, x_scale = ops.scaled_fp8_quant(
+                input_2d,
+                input_scale,
+                num_token_padding=17,
+                use_per_token_if_dynamic=use_per_token_if_dynamic)
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
 

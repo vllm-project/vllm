@@ -28,6 +28,10 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            PerTensorScaleParameter)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils import print_warning_once
+if current_platform.is_hpu():
+    from vllm_hpu_extension.ops import scaled_fp8_quant
+    ops.scaled_fp8_quant = scaled_fp8_quant
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -133,7 +137,6 @@ class Fp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.cutlass_fp8_supported = cutlass_fp8_supported()
-
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
         self.use_marlin = (not current_platform.has_device_capability(89)

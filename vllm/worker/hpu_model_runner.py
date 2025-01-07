@@ -613,9 +613,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
-        if self.model_config.quantization == 'inc' or \
-           self.model_config.quantization == 'fp8':
-            htcore.hpu_set_env()
+        htcore.hpu_set_inference_env()
         with HabanaMemoryProfiler() as m:
             with HabanaMemoryProfiler() as m_getmodel:
                 self.model = get_model(vllm_config=self.vllm_config)

@@ -22,7 +22,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
     def __init__(self, strategy: str, is_static_input_scheme: bool):
         self.strategy = strategy
         self.is_static_input_scheme = is_static_input_scheme
-        self.cutlass_fp8_supported = cutlass_fp8_supported()
+        self.cutlass_fp8_supported = not current_platform.is_hpu() and \
+                                     cutlass_fp8_supported()
 
     @classmethod
     def get_min_capability(cls) -> int:
