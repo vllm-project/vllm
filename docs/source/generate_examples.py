@@ -226,7 +226,7 @@ def generate_examples():
     # Generate the index files
     for category_index in category_indices.values():
         if category_index.documents:
-            examples_index.documents.append(category_index.path.name)
+            examples_index.documents.insert(0, category_index.path.name)
             with open(category_index.path, "w+") as f:
                 f.write(category_index.generate())
 
