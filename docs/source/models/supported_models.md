@@ -1,9 +1,9 @@
 (supported-models)=
 
-# Supported Models
+# List of Supported Models
 
 vLLM supports generative and pooling models across various tasks.
-If a model supports more than one task, you can set the task via the {code}`--task` argument.
+If a model supports more than one task, you can set the task via the `--task` argument.
 
 For each task, we list the model architectures that have been implemented in vLLM.
 Alongside each architecture, we include some popular models that use it.
@@ -14,8 +14,8 @@ Alongside each architecture, we include some popular models that use it.
 
 By default, vLLM loads models from [HuggingFace (HF) Hub](https://huggingface.co/models).
 
-To determine whether a given model is supported, you can check the {code}`config.json` file inside the HF repository.
-If the {code}`"architectures"` field contains a model architecture listed below, then it should be supported in theory.
+To determine whether a given model is supported, you can check the `config.json` file inside the HF repository.
+If the `"architectures"` field contains a model architecture listed below, then it should be supported in theory.
 
 ````{tip}
 The easiest way to check if your model is really supported at runtime is to run the program below:
@@ -48,7 +48,7 @@ To use models from [ModelScope](https://www.modelscope.cn) instead of HuggingFac
 $ export VLLM_USE_MODELSCOPE=True
 ```
 
-And use with {code}`trust_remote_code=True`.
+And use with `trust_remote_code=True`.
 
 ```python
 from vllm import LLM
@@ -420,15 +420,15 @@ you should explicitly specify the task type to ensure that the model is used in 
 ```
 
 ```{note}
-{code}`ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
-You should manually set mean pooling by passing {code}`--override-pooler-config '{"pooling_type": "MEAN"}'`.
+`ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
+You should manually set mean pooling by passing `--override-pooler-config '{"pooling_type": "MEAN"}'`.
 ```
 
 ```{note}
-Unlike base Qwen2, {code}`Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
-You can set {code}`--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
+Unlike base Qwen2, `Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
+You can set `--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
 
-On the other hand, its 1.5B variant ({code}`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
+On the other hand, its 1.5B variant (`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
 despite being described otherwise on its model card.
 ```
 
@@ -468,8 +468,8 @@ If your model is not in the above list, we will try to automatically convert the
 {func}`vllm.model_executor.models.adapters.as_reward_model`. By default, we return the hidden states of each token directly.
 
 ```{important}
-For process-supervised reward models such as {code}`peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
-e.g.: {code}`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
+For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
+e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 ```
 
 #### Classification (`--task classify`)
@@ -537,13 +537,13 @@ The following modalities are supported depending on the model:
 - **V**ideo
 - **A**udio
 
-Any combination of modalities joined by {code}`+` are supported.
+Any combination of modalities joined by `+` are supported.
 
-- e.g.: {code}`T + I` means that the model supports text-only, image-only, and text-with-image inputs.
+- e.g.: `T + I` means that the model supports text-only, image-only, and text-with-image inputs.
 
-On the other hand, modalities separated by {code}`/` are mutually exclusive.
+On the other hand, modalities separated by `/` are mutually exclusive.
 
-- e.g.: {code}`T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
+- e.g.: `T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
 
 See [this page](#multimodal-inputs) on how to pass multi-modal inputs to the model.
 
@@ -731,8 +731,8 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 ````{important}
-To enable multiple multi-modal items per text prompt, you have to set {code}`limit_mm_per_prompt` (offline inference)
-or {code}`--limit-mm-per-prompt` (online inference). For example, to enable passing up to 4 images per text prompt:
+To enable multiple multi-modal items per text prompt, you have to set `limit_mm_per_prompt` (offline inference)
+or `--limit-mm-per-prompt` (online inference). For example, to enable passing up to 4 images per text prompt:
 
 ```python
 llm = LLM(
@@ -751,11 +751,11 @@ vLLM currently only supports adding LoRA to the language backbone of multimodal 
 ```
 
 ```{note}
-To use {code}`TIGER-Lab/Mantis-8B-siglip-llama3`, you have pass {code}`--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
+To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
 ```
 
 ```{note}
-The official {code}`openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork ({code}`HwwwH/MiniCPM-V-2`) for now.
+The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
 For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 ```
 
@@ -770,7 +770,7 @@ you should explicitly specify the task type to ensure that the model is used in 
 
 #### Text Embedding (`--task embed`)
 
-Any text generation model can be converted into an embedding model by passing {code}`--task embed`.
+Any text generation model can be converted into an embedding model by passing `--task embed`.
 
 ```{note}
 To get the best results, you should use pooling models that are specifically trained as such.
@@ -818,7 +818,7 @@ At vLLM, we are committed to facilitating the integration and support of third-p
 2. **Best-Effort Consistency**: While we aim to maintain a level of consistency between the models implemented in vLLM and other frameworks like transformers, complete alignment is not always feasible. Factors like acceleration techniques and the use of low-precision computations can introduce discrepancies. Our commitment is to ensure that the implemented models are functional and produce sensible results.
 
 ```{tip}
-When comparing the output of {code}`model.generate` from HuggingFace Transformers with the output of {code}`llm.generate` from vLLM, note that the former reads the model's generation config file (i.e., [generation_config.json](https://github.com/huggingface/transformers/blob/19dabe96362803fb0a9ae7073d03533966598b17/src/transformers/generation/utils.py#L1945)) and applies the default parameters for generation, while the latter only uses the parameters passed to the function. Ensure all sampling parameters are identical when comparing outputs.
+When comparing the output of `model.generate` from HuggingFace Transformers with the output of `llm.generate` from vLLM, note that the former reads the model's generation config file (i.e., [generation_config.json](https://github.com/huggingface/transformers/blob/19dabe96362803fb0a9ae7073d03533966598b17/src/transformers/generation/utils.py#L1945)) and applies the default parameters for generation, while the latter only uses the parameters passed to the function. Ensure all sampling parameters are identical when comparing outputs.
 ```
 
 3. **Issue Resolution and Model Updates**: Users are encouraged to report any bugs or issues they encounter with third-party models. Proposed fixes should be submitted via PRs, with a clear explanation of the problem and the rationale behind the proposed solution. If a fix for one model impacts another, we rely on the community to highlight and address these cross-model dependencies. Note: for bugfix PRs, it is good etiquette to inform the original author to seek their feedback.
