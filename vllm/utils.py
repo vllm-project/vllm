@@ -1827,8 +1827,6 @@ def memory_profiling(
     (c.) is tricky. We measure the total memory used in this GPU (`torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]`),
     subtract the baseline memory, the memory used by the model weights, and diff of `torch.cuda.memory_reserved()`.
     """ # noqa
-    gc.collect()
-    torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
 
     result = MemoryProfilingResult()
