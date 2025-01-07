@@ -25,7 +25,7 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 @dataclass
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
-    layers: Dict[str, Any]
+    attn_layers: Dict[str, Any]
     # TODO: extend to support per-layer dynamic forward context
     attn_metadata: "AttentionMetadata"  # set dynamically for each forward pass
 
@@ -54,7 +54,7 @@ def set_forward_context(attn_metadata: Any, vllm_config: VllmConfig):
     global _forward_context
     prev_context = _forward_context
     _forward_context = ForwardContext(
-        layers=vllm_config.compilation_config.static_forward_context,
+        attn_layers=vllm_config.compilation_config.static_forward_context,
         attn_metadata=attn_metadata)
     try:
         yield
