@@ -503,7 +503,7 @@ def kv_cache_scales_loader(
     KV cache scaling factors. The serialization should represent a dictionary
     whose keys are the TP ranks and values are another dictionary mapping layers
     to their KV cache scaling factors.
-    Keep this function in sync with the output of examples/fp8/extract_scales.py
+    Keep this function in sync with the output of examples/other/fp8/extract_scales.py
     """
     try:
         with open(filename) as f:
