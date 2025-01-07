@@ -31,6 +31,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         ProcessingMixin, PromptReplacement)
 from vllm.multimodal.profiling import BaseProfilingInfo, ProcessorInputs
 from vllm.sequence import IntermediateTensors
+from vllm.utils import is_list_of
 
 from .clip import CLIPVisionModel
 from .interfaces import SupportsMultiModal, SupportsPP
@@ -521,7 +522,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         return get_sampler()
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        # The image size may be different for Pixtral-HF
+        # Only the longest edge is equal to image_size for Pixtral-HF
         if self.config.vision_config.model_type == "pixtral":
             return data
 
@@ -550,10 +551,12 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
+            pixel_values = flatten_bn(pixel_values,
+                                      concat=is_list_of(pixel_values, list))
+
             return LlavaImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(
-                    flatten_bn(pixel_values, concat=True)),
+                data=self._validate_pixel_values(pixel_values),
             )
 
         if image_embeds is not None:
