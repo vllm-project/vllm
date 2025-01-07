@@ -38,7 +38,12 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.distributed import get_tensor_model_parallel_world_size
 from .utils import maybe_prefix
+# TODO best way to handle xformers imports?
+from xformers.ops.fmha.attn_bias import LowerTriangularMaskWithTensorBias
+# TODO func should be in backend interface
+from vllm.attention.backends.xformers import _get_attn_bias, _set_attn_bias
 
 
 class T5LayerNorm(nn.Module):
@@ -142,7 +147,6 @@ class T5Attention(nn.Module):
         prefix: str = ""
     ):
         super().__init__()
-        self.prefix = prefix
         self.attn_type =  attn_type
         # Cross-attention has no relative pos encoding anyway
         self.is_decoder = attn_type == AttentionType.DECODER
@@ -151,24 +155,17 @@ class T5Attention(nn.Module):
         self.relative_attention_max_distance = config.relative_attention_max_distance
         self.d_model = config.d_model
         self.key_value_proj_dim = config.d_kv
-        self.n_heads = config.num_heads
-        self.dropout = config.dropout_rate
+
+        # Partition heads across multiple tensor parallel GPUs.
+        tp_world_size = get_tensor_model_parallel_world_size()
+        assert config.num_heads % tp_world_size == 0
+        self.n_heads = config.num_heads // tp_world_size
+
         self.inner_dim = self.n_heads * self.key_value_proj_dim
         # No GQA in t5.
         self.n_kv_heads = self.n_heads
 
         self.qkv_proj = QKVParallelLinear(self.d_model, self.d_model // self.n_heads, self.n_heads, self.n_kv_heads, bias=False, quant_config=quant_config)
-
-        # TODO refactor in utils shared with bart
-        # if self.total_num_kv_heads >= tp_world_size:
-        #     # Number of KV heads is greater than TP size, so we partition
-        #     # the KV heads across multiple tensor parallel GPUs.
-        #     assert self.total_num_kv_heads % tp_world_size == 0
-        # else:
-        #     # Number of KV heads is less than TP size, so we replicate
-        #     # the KV heads across multiple tensor parallel GPUs.
-        #     assert tp_world_size % self.total_num_kv_heads == 0
-        # self.num_kv_heads = max(1, self.total_num_kv_heads // tp_world_size)
 
         # NOTE (NickLucche) T5 employs a scaled weight initialization scheme 
         # instead of scaling attention scores directly.
@@ -177,10 +174,8 @@ class T5Attention(nn.Module):
         # Only the first SelfAttention block in encoder decoder has this 
         # embedding layer, the others re-use its output.
         if self.has_relative_attention_bias:
-            print(f"EMBEDDING {self.relative_attention_num_buckets} TO {self.n_heads}, max dist {self.relative_attention_max_distance}")
             self.relative_attention_bias = VocabParallelEmbedding(self.relative_attention_num_buckets,\
                                                                    self.n_heads, org_num_embeddings=self.relative_attention_num_buckets, quant_config=quant_config)
-            # self.relative_attention_bias = nn.Embedding(self.relative_attention_num_buckets, self.n_heads)
         self.out_proj = RowParallelLinear(
             self.inner_dim,
             self.d_model,
@@ -276,8 +271,6 @@ class T5Attention(nn.Module):
         # NOTE (NickLucche) Attn bias is computed once per encoder or decoder
         # forward, on the first call to T5Attention.forward. Subsequent 
         # *self-attention* layers will re-use it.
-        # TODO func should be in backend interface
-        from vllm.attention.backends.xformers import _get_attn_bias, _set_attn_bias
         attn_bias = _get_attn_bias(attn_metadata, self.attn_type)
         if self.attn_type == AttentionType.ENCODER_DECODER:
             # Projection of encoder's hidden states, cross-attention.
@@ -288,85 +281,65 @@ class T5Attention(nn.Module):
                 v = None
             else:
                 assert attn_metadata.num_prefills > 0
-                # Prefill phase (first decode forward), caching kv
+                # Prefill phase (first decoder forward), caching kv
                 qkv_enc, _ = self.qkv_proj(encoder_hidden_states)
                 _, k, v = qkv_enc.split(self.inner_dim, dim=-1)
             # No custom attention bias must be set when running cross attn. 
             assert attn_bias is None
-        # Skip when profiling.
+
         # FIXME should be enabled on profiling run to assess memory of bias.
-        # TODO NOT compatible with CP here, assumes homogeneous batch
+        # TODO NOT compatible with CP here (as all encoder-decoder models), 
+        # as it assumes homogeneous batch (prefills or decodes).
         elif self.has_relative_attention_bias and not is_profile_run:
             assert attn_bias is None # to be recomputed
-            # Self-attention. T5 relative positional encoding. 
-            # Compute bias based on longest sequence in batch. Biases for
-            # shorter sequences are subsets of the longest.
-            if self.attn_type == AttentionType.ENCODER:
-                seq_len = attn_metadata.max_encoder_seq_len
-            else:
-                # Decoder can receive both prefill and decoding requests  
-                seq_len = attn_metadata.max_prefill_seq_len if attn_metadata.prefill_metadata else attn_metadata.max_decode_seq_len
-            block_aligned_seq_len = (seq_len + block_size - 1) // block_size * block_size
-
-            # TODO xformers-specific, attention bias are to be provided as a list.
+            # Self-attention. Compute T5 relative positional encoding. 
+            # The bias term is computed on longest sequence in batch. Biases 
+            # for shorter sequences are slices of the longest.
+            # TODO xformers-specific code.
             align_to = 8
-            print("IN", hidden_states.shape)
-            # TODO chunked prefill
             # what I want: (num_seqs, NH, L, L_pad) for prefill, (num_seqs, NH, 1, L_pad) for decodes
             if self.attn_type == AttentionType.ENCODER:
-                # NOTE seq padding needed for xformers!
-                # HINT: To use an `attn_bias` with a sequence length that is not a multiple of 8, you need to ensure memory is aligned by slicing a bigger tensor. Example: use `attn_bias = torch.zeros([1, 1, 5, 8])[:,:,:,:5]` instead of `torch.zeros([1, 1, 5, 5])`
+                # Encoder prefill stage, uses xFormers, hence sequence 
+                # padding/alignment to 8 is required.
+                seq_len = attn_metadata.max_encoder_seq_len
                 padded_seq_len = (seq_len + align_to - 1) // align_to * align_to
-                # FIXME blockdiagonal mask with tensor bias??
-                pb = self.compute_bias(seq_len, padded_seq_len).repeat(num_seqs, 1, 1, 1)
-                print(f"[{self.prefix}][ENCODING, xformers aligned] Seq len compute bias/shape", seq_len, padded_seq_len)
-                # print("SEQ LEN", attn_metadata.encoder_seq_lens, pb.shape) xformers needs a list, one matrix per sequence
-                attn_metadata.encoder_attn_bias = [p[:, :sq, :sq].unsqueeze(0) for p, sq in zip(pb, attn_metadata.encoder_seq_lens)]
-                print("Bias shape", attn_metadata.encoder_attn_bias[0].shape)
-            elif attn_metadata.decode_metadata is None: # TODO join with statement above
-                # NOTE first decoder step, prefill: seq len here is usually 1, but one can prepend different start tokens prior to generation. XFormers is used.    
-                print(f"[{self.prefix}][DECODER but xformers prefill]", attn_metadata.max_decode_seq_len, attn_metadata.max_prefill_seq_len)
-                padded_seq_len = (seq_len + align_to - 1) // align_to * align_to
-                # position_bias = self.compute_bias(seq_len, seq_len).repeat(num_seqs, 1, 1, 1)
-                # this is always 1 (seqlen) but needs filling!!
-                # position_bias = self.compute_bias(seq_len, align_to).repeat(num_seqs, 1, 1, 1)
+                # TODO (NickLucche) avoid extra copy on repeat, provide multiple slices of same memory
                 position_bias = self.compute_bias(seq_len, padded_seq_len).repeat(num_seqs, 1, 1, 1)
-                print(f"[{self.prefix}][DECODER but xformers prefill] Seq len compute bias/shape", seq_len, position_bias.shape)
+                # xFormers expects a list of biases, one matrix per sequence.
+                # As each sequence gets its own bias, no masking is required.
+                attn_bias = [p[None, :, :sq, :sq] for p, sq in zip(position_bias, attn_metadata.encoder_seq_lens)]
+            elif attn_metadata.prefill_metadata:
+                # Decoder prefill stage, uses xFormers, hence sequence
+                # padding/alignment to 8 is required. First decoder step, 
+                # seq_len is usually 1, but one can prepend different start 
+                # tokens prior to generation.    
+                seq_len = attn_metadata.max_prefill_seq_len
                 # ->align
-                # position_bias = position_bias.repeat(1, 1, align_to, align_to)
-                # print("DECODER RUN BUT NO METADATA", position_bias.shape)
-                # TODO debug, can it be removed?
-                # position_bias[:, :, 1:, 1:] = torch.finfo(position_bias.dtype).min
-                # attn_metadata.attn_bias = [pb[None, :, :seq_len, :seq_len] for pb in position_bias]
-                attn_metadata.attn_bias = [pb[None, :, :seq_len, :seq_len] for pb, sq in zip(position_bias, attn_metadata.seq_lens)]
-                # attn_metadata.attn_bias = [position_bias[:, :, :1, :seq_len]]
-                print("[DECODER but xformers prefill] Bias shape", attn_metadata.attn_bias[0].shape)
+                padded_seq_len = (seq_len + align_to - 1) // align_to * align_to
+                position_bias = self.compute_bias(seq_len, padded_seq_len).repeat(num_seqs, 1, 1, 1)
+                # Causal mask for prefill.
+                attn_bias = [LowerTriangularMaskWithTensorBias(pb[None, :, :sq, :sq]) for pb, sq in zip(position_bias, attn_metadata.seq_lens)]
             else:
-                # Repeat along dim0: (num_seqs, n_heads, 1, L)
-                # TODO (NickLucche): allow single bias for whole batch to avoid extra-copy.
-                # TODO this needs to be block aligned!!
-                # position_bias = self.compute_bias(seq_len, block_aligned_seq_len).repeat(num_seqs, 1, 1, 1)
-                position_bias = self.compute_bias(1, block_aligned_seq_len).repeat(num_seqs, 1, 1, 1)
-                # position_bias = self.compute_bias(seq_len, seq_len).repeat(num_seqs, 1, 1, 1)
-                print(f"[{self.prefix}][DECODING] Seq len compute bias/shape", seq_len, seq_len)
-                # position_bias[:, :, seq_len:, seq_len:] = torch.finfo(position_bias.dtype).min
-                attn_metadata.attn_bias = [position_bias]
-                # attn_metadata.attn_bias = [position_bias[:, :, :seq_len, :seq_len]]
-                print("Bias shape", attn_metadata.attn_bias[0].shape)
-            # TODO set attn bias
+                # Decoder decoding stage, uses PagedAttention, hence sequence
+                # padding/alignment to `block_size` is required. Expected 
+                # number of queries is always 1 (MQA not supported).  
+                seq_len = attn_metadata.max_decode_seq_len
+                block_aligned_seq_len = (seq_len + block_size - 1) // block_size * block_size
+                
+                # TODO bf16 bias support in PagedAttention.
+                position_bias = self.compute_bias(seq_len, block_aligned_seq_len).float()
+                # Bias for the last query, the one at current decoding step.
+                position_bias = position_bias[:, :, -1:, :].repeat(num_seqs, 1, 1, 1)
+                # No explicit masking required, this is done inside the 
+                # paged attention kernel based on the sequence length. 
+                attn_bias = [position_bias]
+                
+            # NOTE Assign bias term on metadata based on attn type: 
+            # ENCODER->`encoder_attn_bias`, DECODER->`attn_bias`.
+            _set_attn_bias(attn_metadata, attn_bias, self.attn_type)
         elif not self.has_relative_attention_bias and not is_profile_run:
             # Encoder/Decoder Self-Attention Layer, attn bias already cached.
             assert attn_bias is not None
-
-            # masking extra bias entries is done in the kernel
-            # mask = (seq_range >= prompt_lens).unsqueeze(1).unsqueeze(3)
-            # position_bias *= mask
-            # xformers masking
-                # for i in range(batch_size):
-                #     input_metadata.attn_bias[
-                #         i, :, :,
-                #         input_metadata.prompt_lens[i]:, ] = torch.finfo(
-                #             input_metadata.attn_bias.dtype).min
 
         attn_output = self.attn(q,
                         k,
@@ -374,10 +347,6 @@ class T5Attention(nn.Module):
                         kv_cache,
                         attn_metadata,
                         attn_type=self.attn_type)
-        # if not self.is_decoder:
-            # print("\n\nSAVING\n\n")
-            # torch.save(attn_output, "tensor_vllm.pth")
-            # FIXME all equal until the next line
         output, _ = self.out_proj(attn_output)
         return output
 
@@ -450,8 +419,6 @@ class T5Block(nn.Module):
             self.cross_attn = T5LayerCrossAttention(config, cache_config=cache_config, quant_config=quant_config, prefix=f"{prefix}.cross_attn")
 
         self.ffn = T5LayerFF(config, quant_config=quant_config)
-        # TODO remove
-        self.prefix = prefix
 
     def forward(
         self,
@@ -466,7 +433,6 @@ class T5Block(nn.Module):
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-        # print(f"[{self.prefix}] HIDDEN inblock", hidden_states.shape, hidden_states.mean())
         if self.is_decoder:
             hidden_states = self.cross_attn(
                 hidden_states=hidden_states,
@@ -474,11 +440,9 @@ class T5Block(nn.Module):
                 attn_metadata=attn_metadata,
                 encoder_hidden_states=encoder_hidden_states,
             )
-        # print(f"[{self.prefix}] HIDDEN inblock", hidden_states.shape, hidden_states.mean())
 
         # Apply Feed Forward layer
         hidden_states = self.ffn(hidden_states)
-        # print(f"[{self.prefix}] HIDDEN inblock", hidden_states.shape, hidden_states.mean())
         return hidden_states
 
 
@@ -496,7 +460,6 @@ class T5Stack(nn.Module):
                       prefix=f"{prefix}.blocks.{i}") for i in range(n_layers)]
         )
         self.final_layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
-        self.prefix = prefix # TODO remove
 
 
     def forward(
@@ -509,14 +472,12 @@ class T5Stack(nn.Module):
         hidden_states = self.embed_tokens(input_ids)
 
         for idx, block in enumerate(self.blocks):
-            # print(f"[{self.prefix}] HIDDEN", hidden_states.shape, hidden_states.mean())
             hidden_states = block(
                 hidden_states=hidden_states,
                 kv_cache=kv_caches[idx],
                 attn_metadata=attn_metadata,
                 encoder_hidden_states=encoder_hidden_states,
             )
-        # print(f"[{self.prefix}] HIDDEN out", hidden_states.shape, hidden_states.mean())
         hidden_states = self.final_layer_norm(hidden_states)
         return hidden_states
 
@@ -527,16 +488,17 @@ class T5Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix:str=""):
         super().__init__()
         config: T5Config = vllm_config.model_config.hf_config
-        # TODO lora
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-
-        self.padding_idx = config.pad_token_id # TODO decoding token
+        
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                    (lora_config.max_loras or 1)) if lora_config else 0
+        self.vocab_size = config.vocab_size + lora_vocab
+        self.padding_idx = config.pad_token_id
         self.shared = VocabParallelEmbedding(config.vocab_size, config.d_model, org_num_embeddings=config.vocab_size)
 
         self.encoder = T5Stack(config, False, config.num_layers, self.shared, cache_config=cache_config,quant_config=quant_config,prefix=f"{prefix}.encoder")
-        # assert config.num_layers == config.num_decoder_layers
         self.decoder = T5Stack(config, True, config.num_decoder_layers, self.shared, cache_config=cache_config,quant_config=quant_config, prefix=f"{prefix}.decoder")
 
     def get_input_embeddings(self, input_ids: torch.Tensor)->torch.Tensor:
@@ -556,7 +518,6 @@ class T5Model(nn.Module):
             # are provided as input: on a regular generate call, the encoder
             # runs once, on the prompt. Subsequent decoder calls re-use output
             # `encoder_hidden_states`.
-            print("Running on encoder input ids", encoder_input_ids.shape, "on this many sequences", len(attn_metadata.encoder_seq_lens))
             encoder_hidden_states = self.encoder(input_ids=encoder_input_ids,
                                                  kv_caches=kv_caches,
                                                  attn_metadata=attn_metadata)
@@ -564,16 +525,12 @@ class T5Model(nn.Module):
             attn_metadata.attn_bias = None
             attn_metadata.encoder_attn_bias = None
             attn_metadata.cross_attn_bias = None
-            print("ENC OUT HIDDEN", encoder_hidden_states.shape, encoder_hidden_states.mean())
-        print("Running on decoder input ids (0 as input token)", input_ids)
-        # decoder outputs consists of
-        # (dec_features, past_key_value, dec_hidden, dec_attn)
+
         decoder_outputs = self.decoder(
             input_ids=input_ids,
             encoder_hidden_states=encoder_hidden_states,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata)
-        print("DEC OUT HIDDEN", decoder_outputs.shape, decoder_outputs.mean())
         return decoder_outputs
 
 
@@ -589,9 +546,8 @@ class T5ForConditionalGeneration(nn.Module):
         self.model_dim = config.d_model
         self.config = config
         self.unpadded_vocab_size = config.vocab_size
-        # TODO
-        # if lora_config := vllm_config.lora_config:
-        #     self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        if lora_config := vllm_config.lora_config:
+            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
         self.model = T5Model(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
         # Although not in config, this is the default for hf models.
@@ -615,7 +571,6 @@ class T5ForConditionalGeneration(nn.Module):
             # Rescale output before projecting on vocab
             # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
             hidden_states = hidden_states * (self.model_dim**-0.5)
-        print("hidden states input", hidden_states.shape)
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
@@ -668,7 +623,7 @@ class T5ForConditionalGeneration(nn.Module):
 
         for name, loaded_weight in weights:
             # No relative position attn bias on cross attention. 
-            if name == "decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight":
+            if name in self._keys_to_ignore_on_load_unexpected:
                 continue
 
             # Handle some renaming
