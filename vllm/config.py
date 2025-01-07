@@ -2772,9 +2772,8 @@ class CompilationConfig(BaseModel):
     inductor_hash_cache: Any = PrivateAttr
 
     # Per-model forward context
-    # Map from layer name to the layer's forward context, which stores
-    # attention cls and kv_cache
-    static_forward_context: Dict[str, LayerForwardContext] = PrivateAttr
+    # Map from layer name to the attention cls
+    static_forward_context: Dict[str, Any] = PrivateAttr
 
     def compute_hash(self) -> str:
         """

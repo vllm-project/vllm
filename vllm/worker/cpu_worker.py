@@ -13,7 +13,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, register_kv_cache
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, bind_kv_cache
 from vllm.worker.cpu_enc_dec_model_runner import CPUEncoderDecoderModelRunner
 from vllm.worker.cpu_model_runner import CPUModelRunner, CPUModelRunnerBase
 from vllm.worker.cpu_pooling_model_runner import CPUPoolingModelRunner
@@ -66,8 +66,8 @@ class CPUCacheEngine:
 
         # Initialize the cache.
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks)
-        register_kv_cache(compilation_config.static_forward_context,
-                          self.cpu_cache)
+        bind_kv_cache(compilation_config.static_forward_context,
+                      self.cpu_cache)
 
     def _allocate_kv_cache(
         self,

@@ -7,8 +7,7 @@ import torch.nn.functional as F
 
 from vllm.attention import AttentionMetadata, AttentionType
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
-from vllm.config import (CacheConfig, LayerForwardContext,
-                         get_current_vllm_config)
+from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -119,12 +118,12 @@ class Attention(nn.Module):
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
-        # use a placeholder kv cache tensor during init, which will be replaced
-        # after kv cache initialization
-        compilation_config.static_forward_context[
-            prefix] = LayerForwardContext(self, torch.tensor([]))
+        compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
         self.attn_type = attn_type
+        # use a placeholder kv cache tensor during init, which will be replaced
+        # by bind_kv_cache
+        self.kv_cache = torch.tensor([])
 
     def forward(
         self,
@@ -238,9 +237,8 @@ def unified_attention(
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    ctx = forward_context.layers[layer_name]
-    self = ctx.attn_module
-    return self.impl.forward(query, key, value, ctx.kv_cache, attn_metadata,
+    self = forward_context.layers[layer_name]
+    return self.impl.forward(query, key, value, self.kv_cache, attn_metadata,
                              self._k_scale, self._v_scale)
 
 
@@ -271,12 +269,11 @@ def unified_attention_with_output(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    ctx = forward_context.layers[layer_name]
-    self = ctx.attn_module
+    self = forward_context.layers[layer_name]
     self.impl.forward(query,
                       key,
                       value,
-                      ctx.kv_cache,
+                      self.kv_cache,
                       attn_metadata,
                       self._k_scale,
                       self._v_scale,

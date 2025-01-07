@@ -6,9 +6,9 @@ from typing import AsyncIterator, Tuple
 import pytest
 import torch
 
-from vllm.utils import (FlexibleArgumentParser, StoreBoolean, deprecate_kwargs,
-                        get_open_port, memory_profiling, merge_async_iterators,
-                        register_kv_cache, supports_kw)
+from vllm.utils import (FlexibleArgumentParser, StoreBoolean, bind_kv_cache,
+                        deprecate_kwargs, get_open_port, memory_profiling,
+                        merge_async_iterators, supports_kw)
 
 from .utils import error_on_warning, fork_new_process_for_each_test
 
@@ -308,27 +308,63 @@ def test_memory_profiling():
     lib.cudaFree(handle2)
 
 
-def test_register_gpu_kv_cache():
+def test_bind_kv_cache():
     from vllm.attention import Attention
-    from vllm.config import LayerForwardContext
+
+    ctx = {
+    'layers.0.self_attn': Attention(32, 128, 0.1),
+    'layers.1.self_attn': Attention(32, 128, 0.1),
+    'layers.2.self_attn': Attention(32, 128, 0.1),
+    'layers.3.self_attn': Attention(32, 128, 0.1),
+    }
+    kv_cache = [
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+    ]
+    bind_kv_cache(ctx, kv_cache)
+    assert ctx['layers.0.self_attn'].kv_cache is kv_cache[0]
+    assert ctx['layers.1.self_attn'].kv_cache is kv_cache[1]
+    assert ctx['layers.2.self_attn'].kv_cache is kv_cache[2]
+    assert ctx['layers.3.self_attn'].kv_cache is kv_cache[3]
+
+def test_bind_kv_cache_non_attention():
+    from vllm.attention import Attention
 
     # example from Jamba PP=2
     ctx = {
-        'model.layers.20.attn':
-        LayerForwardContext(
-            attn_module=Attention(32, 128, 0.1),
-            kv_cache=None,
-        ),
-        'model.layers.28.attn':
-        LayerForwardContext(
-            attn_module=Attention(32, 128, 0.1),
-            kv_cache=None,
-        )
+        'model.layers.20.attn': Attention(32, 128, 0.1),
+        'model.layers.28.attn': Attention(32, 128, 0.1),
     }
     kv_cache = [
         torch.zeros((1, )),
         torch.zeros((1, )),
     ]
-    register_kv_cache(ctx, kv_cache)
+    bind_kv_cache(ctx, kv_cache)
     assert ctx['model.layers.20.attn'].kv_cache is kv_cache[0]
     assert ctx['model.layers.28.attn'].kv_cache is kv_cache[1]
+
+
+def test_bind_kv_cache_encoder_decoder():
+    from vllm.attention import Attention, AttentionType
+
+    # example from bart
+    ctx = {
+        'encoder.layers.0.self_attn.attn':
+            Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER),
+        'decoder.layers.0.encoder_attn.attn':
+            Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER_DECODER),
+        'decoder.layers.0.self_attn.attn':
+            Attention(32, 128, 0.1, attn_type=AttentionType.DECODER),
+    }
+
+    kv_cache = [
+        torch.zeros((1, )),
+    ]
+    encoder_kv_cache = ctx['encoder.layers.0.self_attn.attn'].kv_cache
+
+    bind_kv_cache(ctx, kv_cache)
+    assert ctx['encoder.layers.0.self_attn.attn'].kv_cache is encoder_kv_cache
+    assert ctx['decoder.layers.0.encoder_attn.attn'].kv_cache is kv_cache[0]
+    assert ctx['decoder.layers.0.self_attn.attn'].kv_cache is kv_cache[0]

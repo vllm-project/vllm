@@ -52,7 +52,7 @@ import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import LayerForwardContext, VllmConfig
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -1949,13 +1949,30 @@ def get_mp_context():
     return multiprocessing.get_context(mp_method)
 
 
-def register_kv_cache(ctx: Dict[str, "LayerForwardContext"],
-                      kv_cache: List[torch.Tensor]) -> None:
-    # Two things needed to be handled here:
+def bind_kv_cache(ctx: Dict[str, Any], kv_cache: List[torch.Tensor]) -> None:
+    # Bind the kv_cache tensor to Attention modules, similar to
+    # ctx[layer_name].kv_cache = kv_cache[extract_layer_index(layer_name)]
+    # Special things handled here:
     # 1. Some models have non-attention layers, e.g., Jamba
     # 2. Pipeline parallelism, each rank only has a subset of layers
+    # 3. Encoder attention has no kv cache
+    # 3. Encoder-decoder models, e.g., Bart, encoder-decoder attention and
+    #    decoder-only attention of the same layer (e.g., bart's
+    #    decoder.layers.1.self_attn and decoder.layers.1.encoder_attn is mapped
+    #    to the same kv cache tensor
+    from vllm.attention import AttentionType
     from vllm.model_executor.models.utils import extract_layer_index
-    layer_name_sorted = sorted(ctx.keys(), key=extract_layer_index)
-    for i, layer_name in enumerate(layer_name_sorted):
+    layer_need_kv_cache = [
+        layer_name for layer_name in ctx
+        if ctx[layer_name].attn_type in (AttentionType.DECODER,
+                                         AttentionType.ENCODER_DECODER)
+    ]
+    layer_index_sorted = sorted(
+        set(
+            extract_layer_index(layer_name)
+            for layer_name in layer_need_kv_cache))
+    for layer_name in layer_need_kv_cache:
+        kv_cache_idx = layer_index_sorted.index(
+            extract_layer_index(layer_name))
         forward_ctx = ctx[layer_name]
-        forward_ctx.kv_cache = kv_cache[i]
+        forward_ctx.kv_cache = kv_cache[kv_cache_idx]
