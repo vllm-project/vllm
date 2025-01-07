@@ -420,6 +420,9 @@ class MambaMixer2(CustomOp):
 
             initial_states = None
             if has_initial_states is not None and any(has_initial_states):
+                for idx in mamba_cache_params.state_indices_tensor[
+                        ~has_initial_states]:
+                    mamba_cache_params.ssm_state[idx].zero_()
                 initial_states = mamba_cache_params.ssm_state[
                     mamba_cache_params.state_indices_tensor]
 
