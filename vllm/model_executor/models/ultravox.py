@@ -38,6 +38,7 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     merge_multimodal_embeddings,
                     merge_multimodal_embeddings_from_map)
 
+_AUDIO_PLACEHOLDER_OVERRIDE = "<|reserved_special_token_0|>"
 _AUDIO_PLACEHOLDER_TOKEN = 128002
 _AUDIO_TOKENS_PER_SECOND = 6.25
 
@@ -200,8 +201,12 @@ class UltravoxMultiModalProcessor(UltravoxProcessingMixin,
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_processor = self._get_hf_processor(**hf_processor_mm_kwargs)
-        placeholder = hf_processor.audio_token_replacement  # type: ignore
+
+        # NOTE: Ultravox processing definition uses '<|eot_id|>' as the
+        # placeholder that will cause confusion with the actual end of turn
+        # token, thus we override placeholder with a reserved special
+        # token.
+        placeholder = _AUDIO_PLACEHOLDER_OVERRIDE
 
         def get_replacement_ultravox(item_idx: int):
             audio_token_len = out_mm_kwargs["audio_token_len"][item_idx]
@@ -348,6 +353,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.multi_modal_config = multimodal_config
         assert self.multi_modal_config
 
+        self.audio_token_id = config.audio_token_index
         self.secondary_weights = []
         self.audio_tower = ModifiedWhisperEncoder(config.audio_config)
         if config.audio_model_id is not None:
