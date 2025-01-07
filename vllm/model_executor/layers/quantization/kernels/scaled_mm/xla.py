@@ -79,4 +79,6 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
                                              block_size=-1,
                                              int4_weight=False,
                                              quantize_activation=True)
-        return out + bias
+        if bias:
+            return out + bias
+        return out

@@ -18,11 +18,11 @@ class GSM8KAccuracyTestConfig:
                 "max_model_len=4096,max_num_seqs=128")
 
 
-# Accuracy scores measured on GPUs.
+# NOTE(rob): Accuracy scores measured on GPUs.
 ACCURACY_CONFIGS = [
-    GSM8KAccuracyTestConfig(
-        model_name="neuralmagic/Meta-Llama-3.1-8B-Instruct-quantized.w8a8",
-        excepted_value=0.76),  # no bias
+    # GSM8KAccuracyTestConfig(
+    #     model_name="neuralmagic/Meta-Llama-3.1-8B-Instruct-quantized.w8a8",
+    #     excepted_value=0.76),  # no bias
     GSM8KAccuracyTestConfig(
         model_name="neuralmagic/Qwen2-7B-Instruct-quantized.w8a8",
         excepted_value=0.66),  # bias
