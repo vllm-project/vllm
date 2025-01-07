@@ -1,6 +1,5 @@
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
-
 import math
 from functools import cached_property
 from typing import (Any, Iterable, List, Literal, Mapping, Optional, Set,
@@ -14,6 +13,7 @@ from transformers import BatchFeature, ProcessorMixin
 from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
+from vllm import envs
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
@@ -35,8 +35,11 @@ from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings,
                     merge_multimodal_embeddings_from_map)
 
+_AUDIO_PLACEHOLDER_OVERRIDE = "<|reserved_special_token_0|>"
+_AUDIO_PLACEHOLDER_TOKEN = 128002
 _AUDIO_TOKENS_PER_SECOND = 6.25
 
 
@@ -64,7 +67,14 @@ class UltravoxProcessingMixin(ProcessingMixin):
         # Ignored in initialization
         sampling_rate: Optional[int] = None,
     ) -> ProcessorMixin:
-        return self.ctx.get_hf_processor()
+        hf_processor = self.ctx.get_hf_processor()
+
+        # NOTE: Ultravox processing definition uses '<|eot_id|>' as the
+        # placeholder that will cause confusion with the actual end of turn
+        # token, thus we override placeholder with a reserved special
+        # token.
+        hf_processor.audio_token_replacement = _AUDIO_PLACEHOLDER_OVERRIDE
+        return hf_processor
 
     def _get_feature_extractor(
         self,
@@ -465,11 +475,15 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
 
-            # TODO(ywang96): use merge_multimodal_embeddings after
-            # v0 is deprecated
-            merge_multimodal_embeddings_from_map(
-                inputs_embeds, multimodal_embeddings,
-                attn_metadata.multi_modal_placeholder_index_maps["audio"])
+            # TODO(ywang96): remove this block after v0 is deprecated.
+            if not envs.VLLM_USE_V1:
+                merge_multimodal_embeddings_from_map(
+                    inputs_embeds, multimodal_embeddings,
+                    attn_metadata.multi_modal_placeholder_index_maps["audio"])
+            else:
+                inputs_embeds = merge_multimodal_embeddings(
+                    input_ids, inputs_embeds, multimodal_embeddings,
+                    _AUDIO_PLACEHOLDER_TOKEN)
         return inputs_embeds
 
     def forward(self,
