@@ -1019,7 +1019,7 @@ class CacheConfig:
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
             pass
-        elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
+        elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"):
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
@@ -1164,6 +1164,7 @@ class LoadConfig:
         ignore_patterns: The list of patterns to ignore when loading the model.
             Default to "original/**/*" to avoid repeated loading of llama's
             checkpoints.
+        device: Device on which weights are loaded.
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
@@ -1171,6 +1172,7 @@ class LoadConfig:
     model_loader_extra_config: Optional[Union[str, dict]] = field(
         default_factory=dict)
     ignore_patterns: Optional[Union[List[str], str]] = None
+    device: Optional[str] = None
 
     def compute_hash(self) -> str:
         """

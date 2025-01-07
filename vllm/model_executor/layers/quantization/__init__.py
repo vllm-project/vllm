@@ -26,6 +26,7 @@ QUANTIZATION_METHODS: List[str] = [
     "experts_int8",
     "neuron_quant",
     "ipex",
+    "inc",
 ]
 
 
@@ -49,6 +50,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .gptq_marlin import GPTQMarlinConfig
     from .gptq_marlin_24 import GPTQMarlin24Config
     from .hqq_marlin import HQQMarlinConfig
+    from .inc import INCConfig
     from .ipex_quant import IPEXConfig
     from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config
@@ -79,6 +81,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "experts_int8": ExpertsInt8Config,
         "neuron_quant": NeuronQuantConfig,
         "ipex": IPEXConfig,
+        "inc": INCConfig,
     }
 
     return method_to_config[quantization]

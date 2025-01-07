@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 import vllm_hpu_extension.ops as ops
-from vllm_hpu_extension.utils import Matmul, Softmax, VLLMKVCache
+from vllm_hpu_extension.utils import (Matmul, ModuleFusedSDPA, Softmax,
+                                      VLLMKVCache)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
@@ -19,6 +20,13 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+HPUFusedSDPA = None
+try:
+    from habana_frameworks.torch.hpex.kernels import FusedSDPA
+    HPUFusedSDPA = FusedSDPA
+except ImportError:
+    logger.warning("Could not import HPU FusedSDPA kernel. "
+                   "vLLM will use native implementation.")
 
 class HPUAttentionBackend(AttentionBackend):
 
@@ -118,6 +126,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.k_cache.use_contiguous_pa = False
         self.v_cache = VLLMKVCache()
         self.v_cache.use_contiguous_pa = False
+        self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
+            else ModuleFusedSDPA(HPUFusedSDPA)
         # NOTE(kzawora): Pipelined PA is off until model runner supports it
         ops.pa_impl = ops.pa
 
@@ -224,6 +234,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 matmul_qk_op=self.matmul_qk,
                 softmax_op=self.softmax,
                 matmul_av_op=self.matmul_av,
+                valid_seq_lengths=attn_metadata.seq_lens_tensor,
+                fsdpa_op=self.fused_scaled_dot_product_attention,
             )
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
