@@ -91,7 +91,7 @@ $ uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly
 If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
 
 ```console
-$ export VLLM_COMMIT=eb881ed006ca458b052905e33f0d16dbb428063a # use full commit hash from the main branch
+$ export VLLM_COMMIT=72d9c316d3f6ede485146fe5aabd4e61dbc59069 # use full commit hash from the main branch
 $ uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
 ```
 
