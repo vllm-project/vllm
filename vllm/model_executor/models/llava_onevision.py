@@ -19,8 +19,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
-from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
-                                   VideoEmbeddingItems, VideoProcessorItems)
+from vllm.multimodal.parse import (MultiModalDataItems, VideoEmbeddingItems,
+                                   VideoProcessorItems)
 from vllm.multimodal.processing import PromptReplacement
 from vllm.multimodal.profiling import ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -109,7 +109,7 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
 
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L86
     # with additional logic afterwards taken from LlavaOnevisionProcessor
-    def get_num_unpadded_features(
+    def _get_num_unpadded_features(
         self,
         *,
         original_height: int,
@@ -145,23 +145,7 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
 
         return (unpadded_features, newline_features)
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        hf_config = self.get_hf_config()
-        largest_feature_size, largest_feature_pinpoint = 0, None
-        for (height, width) in hf_config.image_grid_pinpoints:
-            feat_size = self.get_num_image_tokens(image_width=width,
-                                                  image_height=height)
-            if feat_size > largest_feature_size:
-                largest_feature_size = feat_size
-                largest_feature_pinpoint = ImageSize(width=width,
-                                                     height=height)
-
-        if largest_feature_size == 0 or largest_feature_pinpoint is None:
-            raise ValueError("Cannot have a largest feature size of 0!")
-
-        return largest_feature_pinpoint
-
-    def get_num_frame_tokens(
+    def _get_num_frame_tokens(
         self,
         *,
         image_width: int,
@@ -183,14 +167,14 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
         image_height: int,
         num_frames: int,
     ) -> int:
-        num_frame_tokens = self.get_num_frame_tokens(
+        num_frame_tokens = self._get_num_frame_tokens(
             image_width=image_width,
             image_height=image_height,
         )
 
         return num_frame_tokens * num_frames + 1  # Newline token
 
-    def get_max_video_frames(self, max_tokens: int) -> int:
+    def _get_max_video_frames(self, max_tokens: int) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
         num_frames = 0
@@ -210,14 +194,14 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
 
         return num_frames
 
-    def get_max_num_frames(self, seq_len: int) -> int:
+    def get_num_frames_with_most_features(self, seq_len: int) -> int:
         mm_config = self.ctx.get_mm_config()
         max_images = mm_config.limit_per_prompt.get("image", 1)
         max_videos = mm_config.limit_per_prompt.get("video", 1)
 
         max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = self.get_max_video_frames(seq_len -
-                                                     max_image_tokens)
+        max_total_frames = self._get_max_video_frames(seq_len -
+                                                      max_image_tokens)
         max_frames_per_video = min(max_total_frames // max(max_videos, 1),
                                    _MAX_FRAMES_PER_VIDEO)
 
@@ -229,7 +213,7 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
         return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
-            num_frames=self.get_max_num_frames(seq_len),
+            num_frames=self.get_num_frames_with_most_features(seq_len),
         )
 
 
@@ -247,8 +231,11 @@ class LlavaOnevisionDummyInputsBuilder(
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
         video_token = processor.video_token
+
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
+        target_num_frames = \
+            self.info.get_num_frames_with_most_features(seq_len)
 
         mm_data = {
             "image":
@@ -259,7 +246,7 @@ class LlavaOnevisionDummyInputsBuilder(
             self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
-                num_frames=self.info.get_max_num_frames(seq_len),
+                num_frames=target_num_frames,
                 num_videos=num_videos,
             )
         }

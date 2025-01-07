@@ -123,7 +123,7 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         return {"image": self.get_max_image_tokens()}
 
-    def apply_feature_select_strategy(
+    def _apply_feature_select_strategy(
         self,
         strategy: str,
         encoder_num_image_tokens: int,
@@ -145,7 +145,7 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
         hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
 
-        return self.apply_feature_select_strategy(
+        return self._apply_feature_select_strategy(
             hf_config.vision_feature_select_strategy,
             vision_encoder_info.get_num_image_tokens(
                 image_width=image_width,

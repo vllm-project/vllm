@@ -836,7 +836,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             image_height=target_height,
         )
 
-    def get_max_video_frames(self, max_tokens: int) -> int:
+    def _get_max_video_frames(self, max_tokens: int) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
         num_frames = 0
@@ -856,14 +856,14 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
 
         return num_frames
 
-    def get_max_num_frames(self, seq_len: int) -> int:
+    def get_num_frames_with_most_features(self, seq_len: int) -> int:
         mm_config = self.ctx.get_mm_config()
         max_images = mm_config.limit_per_prompt.get("image", 1)
         max_videos = mm_config.limit_per_prompt.get("video", 1)
 
         max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = self.get_max_video_frames(seq_len -
-                                                     max_image_tokens)
+        max_total_frames = self._get_max_video_frames(seq_len -
+                                                      max_image_tokens)
 
         num_frames = max(max_total_frames // max(max_videos, 1), 1)
 
@@ -879,7 +879,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
-            num_frames=self.get_max_num_frames(seq_len),
+            num_frames=self.get_num_frames_with_most_features(seq_len),
         )
 
 
@@ -896,8 +896,11 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         hf_processor = self.info.get_hf_processor()
         image_token: str = hf_processor.image_token
         video_token: str = hf_processor.video_token
+
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
+        target_num_frames = \
+            self.info.get_num_frames_with_most_features(seq_len)
 
         mm_data = {
             "image":
@@ -908,7 +911,7 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
             self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
-                num_frames=self.info.get_max_num_frames(seq_len),
+                num_frames=target_num_frames,
                 num_videos=num_videos,
             )
         }

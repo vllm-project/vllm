@@ -1,3 +1,4 @@
+from abc import abstractmethod
 from functools import cached_property
 from typing import (Final, Iterable, List, Literal, Mapping, Optional,
                     Protocol, Set, Tuple, TypedDict, TypeVar, Union)
@@ -82,7 +83,7 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
 
-        base_feature_size = self.apply_feature_select_strategy(
+        base_feature_size = self._apply_feature_select_strategy(
             hf_config.vision_feature_select_strategy,
             vision_encoder_info.get_num_image_tokens(
                 image_width=image_width,
@@ -99,7 +100,7 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         (
             unpadded_feature_size,
             newline_feature_size,
-        ) = self.get_num_unpadded_features(
+        ) = self._get_num_unpadded_features(
             original_height=image_height,
             original_width=image_width,
             npatches=vision_encoder_info.get_patch_grid_length(),
@@ -110,7 +111,7 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         return unpadded_feature_size + newline_feature_size + base_feature_size
 
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L86
-    def get_num_unpadded_features(
+    def _get_num_unpadded_features(
         self,
         *,
         original_height: int,
@@ -162,6 +163,19 @@ _I = TypeVar("_I", bound=LlavaNextProcessingInfo)
 
 class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
 
+    # Copied from BaseMultiModalProcessor
+    @abstractmethod
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        raise NotImplementedError
+
+
+class LlavaNextMultiModalProcessor(
+        BaseLlavaNextMultiModalProcessor[LlavaNextProcessingInfo]):
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -172,11 +186,6 @@ class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
             image_sizes=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
-
-
-class LlavaNextMultiModalProcessor(
-        BaseLlavaNextMultiModalProcessor[LlavaNextProcessingInfo]):
-    pass
 
 
 @MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor,

@@ -66,7 +66,7 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
         max_video_tokens = self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
-            num_frames=self.get_max_num_frames(seq_len),
+            num_frames=self.get_num_frames_with_most_features(seq_len),
         )
 
         return {"video": max_video_tokens}
@@ -76,7 +76,7 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
         width = height = vision_encoder_info.get_image_size()
         return ImageSize(width=width, height=height)
 
-    def get_num_frame_tokens(
+    def _get_num_frame_tokens(
         self,
         *,
         image_width: int,
@@ -98,14 +98,14 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int,
     ) -> int:
-        num_frame_tokens = self.get_num_frame_tokens(
+        num_frame_tokens = self._get_num_frame_tokens(
             image_width=image_width,
             image_height=image_height,
         )
 
         return num_frame_tokens * num_frames
 
-    def get_max_video_frames(self, max_tokens: int) -> int:
+    def _get_max_video_frames(self, max_tokens: int) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
         num_frames = 0
@@ -125,11 +125,11 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
 
         return num_frames
 
-    def get_max_num_frames(self, seq_len: int) -> int:
+    def get_num_frames_with_most_features(self, seq_len: int) -> int:
         mm_config = self.ctx.get_mm_config()
         max_videos = mm_config.limit_per_prompt.get("video", 1)
 
-        max_total_frames = self.get_max_video_frames(seq_len)
+        max_total_frames = self._get_max_video_frames(seq_len)
 
         return max(max_total_frames // max(max_videos, 1), 1)
 
@@ -146,15 +146,18 @@ class LlavaNextVideoDummyInputsBuilder(
 
         processor = self.info.get_hf_processor()
         video_token = processor.video_token
+
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
+        target_num_frames = \
+            self.info.get_num_frames_with_most_features(seq_len)
 
         mm_data = {
             "video":
             self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
-                num_frames=self.info.get_max_num_frames(seq_len),
+                num_frames=target_num_frames,
                 num_videos=num_videos,
             )
         }
