@@ -1,6 +1,6 @@
-(deploying-with-lws)=
+(deployment-lws)=
 
-# Deploying with LWS
+# LWS
 
 LeaderWorkerSet (LWS) is a Kubernetes API that aims to address common deployment patterns of AI/ML inference workloads.
 A major use case is for multi-host/multi-node distributed inference.

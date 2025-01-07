@@ -1,6 +1,6 @@
-(deploying-with-helm)=
+(deployment-helm)=
 
-# Deploying with Helm
+# Helm
 
 A Helm chart to deploy vLLM for Kubernetes
 
@@ -38,7 +38,7 @@ chart **including persistent volumes** and deletes the release.
 
 ## Architecture
 
-```{image} architecture_helm_deployment.png
+```{image} /assets/deployment/architecture_helm_deployment.png
 ```
 
 ## Values

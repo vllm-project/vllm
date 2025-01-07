@@ -1,6 +1,6 @@
-(deploying-with-k8s)=
+(deployment-k8s)=
 
-# Deploying with Kubernetes
+# Using Kubernetes
 
 Using Kubernetes to deploy vLLM is a scalable and efficient way to serve machine learning models. This guide will walk you through the process of deploying vLLM with Kubernetes, including the necessary prerequisites, steps for deployment, and testing.
 
