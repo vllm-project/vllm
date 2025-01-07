@@ -132,11 +132,13 @@ class Example:
             ROOT_DIR)
 
         content = f"Source <gh-file:{self.path.relative_to(ROOT_DIR)}>.\n\n"
-        if self.main_file.suffix == ".py":
+        include = "include" if self.main_file.suffix == ".md" else "literalinclude"
+        if include == "literalinclude":
             content += f"# {self.title}\n\n"
-        include = "include" if self.main_file.suffix == ".md" else \
-            "literalinclude"
-        content += f":::{{{include}}} {make_relative(self.main_file)}\n:::\n\n"
+        content += f":::{{{include}}} {make_relative(self.main_file)}\n"
+        if include == "literalinclude":
+            content += f":language: {self.main_file.suffix[1:]}\n"
+        content += ":::\n\n"
 
         if not self.other_files:
             return content
@@ -195,20 +197,19 @@ def generate_examples():
     }
 
     examples = []
+    glob_patterns = ["*.py", "*.md", "*.sh"]
     # Find categorised examples
     for category in category_indices:
         category_dir = EXAMPLE_DIR / category
-        py = category_dir.glob("*.py")
-        md = category_dir.glob("*.md")
-        for path in itertools.chain(py, md):
+        globs = [category_dir.glob(pattern) for pattern in glob_patterns]
+        for path in itertools.chain(*globs):
             examples.append(Example(path, category))
         # Find examples in subdirectories
         for path in category_dir.glob("*/*.md"):
             examples.append(Example(path.parent, category))
     # Find uncategorised examples
-    py = EXAMPLE_DIR.glob("*.py")
-    md = EXAMPLE_DIR.glob("*.md")
-    for path in itertools.chain(py, md):
+    globs = [EXAMPLE_DIR.glob(pattern) for pattern in glob_patterns]
+    for path in itertools.chain(*globs):
         examples.append(Example(path))
     # Find examples in subdirectories
     for path in EXAMPLE_DIR.glob("*/*.md"):
