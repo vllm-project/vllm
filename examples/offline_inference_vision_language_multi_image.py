@@ -378,7 +378,7 @@ model_example_map = {
     "mllama": load_mllama,
     "NVLM_D": load_nvlm_d,
     "phi3_v": load_phi3v,
-    "pixtral_hf": load_phi3v,
+    "pixtral_hf": load_pixtral_hf,
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
 }
