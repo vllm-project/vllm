@@ -1,4 +1,4 @@
-# vLLM + Prometheus/Grafana 
+# Prometheus and Grafana 
 
 This is a simple example that shows you how to connect vLLM metric logging to the Prometheus/Grafana stack. For this example, we launch Prometheus and Grafana via Docker. You can checkout other methods through [Prometheus](https://prometheus.io/) and [Grafana](https://grafana.com/) websites. 
 
