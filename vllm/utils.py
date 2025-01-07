@@ -1742,10 +1742,8 @@ class MemorySnapshot:
     timestamp: float = 0.0
 
     def measure(self):
-        self.torch_peak_in_bytes = torch.cuda.memory_stats(
-        )["allocated_bytes.all.peak"]
-        self.torch_memory_in_bytes = torch.cuda.memory_stats(
-        )["allocated_bytes.all.current"]
+        self.torch_peak_in_bytes = torch.cuda.max_memory_reserved()
+        self.torch_memory_in_bytes = torch.cuda.memory_reserved()
         self.timestamp = time.time()
 
     def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
@@ -1827,6 +1825,8 @@ def memory_profiling(
     (c.) is tricky. We measure the total memory used in this GPU (`torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]`),
     subtract the baseline memory, the memory used by the model weights, and diff of `torch.cuda.memory_stats()["allocated_bytes.all.current"]`.
     """ # noqa
+    gc.collect()
+    torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
 
     result = MemoryProfilingResult()
