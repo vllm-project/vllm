@@ -155,7 +155,7 @@ class TensorizerArgs:
       encryption_keyfile: File path to a binary file containing a  
           binary key to use for decryption. `None` (the default) means 
           no decryption. See the example script in 
-          examples/tensorize_vllm_model.py. 
+          examples/offline_inference/tensorize_vllm_model.py. 
       s3_access_key_id: The access key for the S3 bucket. Can also be set via
           the S3_ACCESS_KEY_ID environment variable.
       s3_secret_access_key: The secret access key for the S3 bucket. Can also
@@ -367,8 +367,9 @@ def tensorizer_weights_iterator(
         "Deserializing HuggingFace models is not optimized for "
         "loading on vLLM, as tensorizer is forced to load to CPU. "
         "Consider deserializing a vLLM model instead for faster "
-        "load times. See the examples/tensorize_vllm_model.py example "
-        "script for serializing vLLM models.")
+        "load times. See the "
+        "examples/offline_inference/tensorize_vllm_model.py example script "
+        "for serializing vLLM models.")
 
     deserializer_args = tensorizer_args.deserializer_params
     stream_params = tensorizer_args.stream_params

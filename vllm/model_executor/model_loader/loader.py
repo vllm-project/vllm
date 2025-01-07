@@ -452,9 +452,9 @@ class TensorizerLoader(BaseModelLoader):
         """Load a serialized model with tensorizer to the CPU.
 
         This is only necessary when the model isn't vLLM-tensorized (see
-        examples/tensorize_vllm_model.py) This should still be faster than
-        default HuggingFace loading, but will be slower than loading a
-        vLLM-tensorized model.
+        examples/offline_inference/tensorize_vllm_model.py) This should still
+        be faster than default HuggingFace loading, but will be slower than
+        loading a vLLM-tensorized model.
         """
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
@@ -472,7 +472,7 @@ class TensorizerLoader(BaseModelLoader):
         """Load a serialized model with tensorizer.
 
         Expects a vLLM-tensorized model. See the
-        examples/tensorize_vllm_model.py example script
+        examples/offline_inference/tensorize_vllm_model.py example script
         for serializing vLLM models."""
 
         device_config = vllm_config.device_config
