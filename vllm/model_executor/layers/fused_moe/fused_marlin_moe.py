@@ -4,7 +4,6 @@ from typing import Optional
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, moe_align_block_size, try_get_optimal_moe_config)
 from vllm.scalar_type import scalar_types
@@ -301,7 +300,8 @@ def fused_marlin_moe(
         False,
     )
 
-    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, 2 * N))
+    torch.ops._C.silu_and_mul(intermediate_cache2,
+                              intermediate_cache1.view(-1, 2 * N))
 
     intermediate_cache3 = torch.ops._moe_C.marlin_gemm_moe(
         intermediate_cache2,
