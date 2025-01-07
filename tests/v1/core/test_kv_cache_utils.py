@@ -1,6 +1,6 @@
 import pytest
 
-from vllm.inputs import token_inputs
+from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock,
@@ -14,14 +14,18 @@ def make_request(request_id,
                  prompt_token_ids,
                  mm_positions=None,
                  mm_hashes=None):
+    if mm_positions is None:
+        multi_modal_inputs = None
+    else:
+        multi_modal_inputs = [MultiModalKwargs({})] * len(mm_positions)
+
     return Request(
         request_id=request_id,
-        inputs=token_inputs(
-            prompt_token_ids=prompt_token_ids,
-            multi_modal_placeholders={"image": mm_positions}
-            if mm_positions else None,
-            multi_modal_hashes=mm_hashes,
-        ),
+        prompt=None,
+        prompt_token_ids=prompt_token_ids,
+        multi_modal_inputs=multi_modal_inputs,
+        multi_modal_hashes=mm_hashes,
+        multi_modal_placeholders=mm_positions,
         sampling_params=SamplingParams(max_tokens=17),
         eos_token_id=100,
         arrival_time=0,
@@ -147,12 +151,12 @@ def test_generate_block_hash_extra_keys():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 5, 0)
-    assert extra_keys == (("hash1", 0), )
+    assert extra_keys == ("hash1", )
     assert next_mm_idx == 1
 
     # Test with partial overlap
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 3, 8, 0)
-    assert extra_keys == (("hash1", 3), )
+    assert extra_keys == ("hash1", )
     assert next_mm_idx == 1
 
     # Test with no overlap
@@ -162,7 +166,7 @@ def test_generate_block_hash_extra_keys():
 
     # Test with multiple extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 15, 0)
-    assert extra_keys == (("hash1", 0), ("hash2", 0))
+    assert extra_keys == ('hash1', 'hash2')
     assert next_mm_idx == 2
 
 
@@ -216,11 +220,11 @@ def test_hash_request_tokens():
 
     # Check the first block
     assert block_hashes[0].token_ids == (0, 1, 2)
-    assert block_hashes[0].extra_keys == (("hash1", 0), )
+    assert block_hashes[0].extra_keys == ("hash1", )
 
     # Check the second block
     assert block_hashes[1].token_ids == (3, 4, 5)
-    assert block_hashes[1].extra_keys == (("hash2", 0), )
+    assert block_hashes[1].extra_keys == ("hash2", )
 
 
 def test_hash_request_tokens_no_mm_inputs():
