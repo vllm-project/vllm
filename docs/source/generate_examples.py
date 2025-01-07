@@ -56,7 +56,7 @@ class Index:
 
     def generate(self) -> str:
         content = f"# {self.title}\n\n{self.description}\n\n"
-        content += "```{{toctree}}\n"
+        content += "```{toctree}\n"
         content += f":caption: {self.caption}\n:maxdepth: {self.maxdepth}\n"
         content += "\n".join(self.documents) + "\n```\n"
         return content
