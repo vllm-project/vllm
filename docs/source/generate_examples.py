@@ -58,7 +58,7 @@ class Index:
         content = f"# {self.title}\n\n{self.description}\n\n"
         content += "```{toctree}\n"
         content += f":caption: {self.caption}\n:maxdepth: {self.maxdepth}\n"
-        content += "\n".join(sorted(self.documents)) + "\n```\n"
+        content += "\n".join(self.documents) + "\n```\n"
         return content
 
 
@@ -215,7 +215,7 @@ def generate_examples():
         examples.append(Example(path.parent))
 
     # Generate the example documentation
-    for example in examples:
+    for example in sorted(examples, key=lambda e: e.path.stem):
         doc_path = EXAMPLE_DOC_DIR / f"{example.path.stem}.md"
         with open(doc_path, "w+") as f:
             f.write(example.generate())
