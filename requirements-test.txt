@@ -48,6 +48,8 @@ botocore==1.35.57
     #   awscli
     #   boto3
     #   s3transfer
+bounded-pool-executor==0.0.3
+    # via pqdm
 buildkite-test-collector==0.1.9
     # via -r requirements-test.in
 certifi==2024.8.30
@@ -342,6 +344,8 @@ pooch==1.8.2
     # via librosa
 portalocker==2.10.1
     # via sacrebleu
+pqdm==0.2.0
+    # via -r requirements-test.in
 propcache==0.2.0
     # via yarl
 protobuf==5.28.3

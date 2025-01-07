@@ -15,8 +15,8 @@ RUN apt-get update && \
         ffmpeg libsm6 libxext6 libgl1
 
 ### Mount Point ###
-# When launching the container, mount the code directory to /app
-ARG APP_MOUNT=/app
+# When launching the container, mount the code directory to /workspace
+ARG APP_MOUNT=/workspace
 VOLUME [ ${APP_MOUNT} ]
 WORKDIR ${APP_MOUNT}/vllm
 
@@ -25,6 +25,7 @@ RUN python3 -m pip install --no-cache-dir fastapi ninja tokenizers pandas
 RUN python3 -m pip install sentencepiece transformers==4.45.2 -U
 RUN python3 -m pip install transformers-neuronx --extra-index-url=https://pip.repos.neuron.amazonaws.com -U
 RUN python3 -m pip install neuronx-cc==2.16.345.0 --extra-index-url=https://pip.repos.neuron.amazonaws.com -U
+RUN python3 -m pip install pytest
 
 COPY . .
 ARG GIT_REPO_CHECK=0
@@ -41,5 +42,8 @@ RUN --mount=type=bind,source=.git,target=.git \
 
 # install development dependencies (for testing)
 RUN python3 -m pip install -e tests/vllm_test_utils
+
+# overwrite entrypoint to run bash script
+RUN echo "import subprocess; import sys; subprocess.check_call(sys.argv[1:])" > /usr/local/bin/dockerd-entrypoint.py
 
 CMD ["/bin/bash"]

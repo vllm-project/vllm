@@ -247,7 +247,8 @@ class MessageQueue:
         self.handle = Handle(
             connect_ip=connect_ip,
             local_reader_ranks=local_reader_ranks,
-            buffer_handle=self.buffer.handle(),
+            buffer_handle=self.buffer.handle()
+            if self.buffer is not None else None,
             local_subscribe_port=local_subscribe_port,
             remote_subscribe_port=remote_subscribe_port,
         )
