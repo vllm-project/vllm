@@ -155,7 +155,7 @@ class Attention(nn.Module):
             return output.view(-1, hidden_size)
         else:
             return torch.ops.vllm.unified_attention(query, key, value,
-                                                    kv_cache, self.layer_name)
+                                                    self.layer_name)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
