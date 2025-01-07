@@ -9,7 +9,6 @@ import openai
 import pytest
 import torch
 from huggingface_hub import snapshot_download
-from tensorizer import EncryptionParams
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
@@ -23,11 +22,17 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          serialize_vllm_model,
                                                          tensorize_vllm_model)
 # yapf: enable
-from vllm.utils import import_from_path
+from vllm.utils import PlaceholderModule, import_from_path
 
 from ..conftest import VllmRunner
 from ..utils import VLLM_PATH, RemoteOpenAIServer
 from .conftest import retry_until_skip
+
+try:
+    from tensorizer import EncryptionParams
+except ImportError:
+    tensorizer = PlaceholderModule("tensorizer")  # type: ignore[assignment]
+    EncryptionParams = tensorizer.placeholder_attr("EncryptionParams")
 
 EXAMPLES_PATH = VLLM_PATH / "examples"
 

@@ -9,6 +9,7 @@ from enum import Enum, auto
 from multiprocessing.process import BaseProcess
 from typing import Any, Dict, List, Optional, Tuple
 
+import psutil
 import zmq
 
 from vllm.config import VllmConfig
@@ -17,13 +18,12 @@ from vllm.distributed import (destroy_distributed_environment,
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
 from vllm.executor.multiproc_worker_utils import (
-    _add_prefix, get_mp_context, set_multiprocessing_worker_envs)
+    _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
-from vllm.utils import (get_distributed_init_method, get_open_port,
-                        get_open_zmq_ipc_path)
+from vllm.utils import (get_distributed_init_method, get_mp_context,
+                        get_open_port, get_open_zmq_ipc_path, zmq_socket_ctx)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.utils import make_zmq_socket
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -38,6 +38,19 @@ class MultiprocExecutor(Executor):
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
+
+        # The child processes will send SIGUSR1 when unrecoverable
+        # errors happen.
+        def sigusr1_handler(signum, frame):
+            logger.fatal(
+                "MulitprocExecutor got fatal signal from worker processes, "
+                "shutting down. See stack trace above for root cause issue.")
+            # Propagate error up to parent process.
+            parent_process = psutil.Process().parent()
+            parent_process.send_signal(signal.SIGUSR1)
+            self.shutdown()
+
+        signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         self.vllm_config = vllm_config
         self.parallel_config = vllm_config.parallel_config
@@ -82,6 +95,7 @@ class MultiprocExecutor(Executor):
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
+        logger.info("# GPU blocks: %d", num_gpu_blocks)
         self.collective_rpc("initialize_cache", args=(num_gpu_blocks, ))
         self.collective_rpc("compile_or_warm_up_model")
 
@@ -250,7 +264,7 @@ class WorkerProc:
         worker_response_mq_handle = self.worker_response_mq.export_handle()
 
         # Send Readiness signal to EngineCore process.
-        with make_zmq_socket(ready_path, zmq.constants.PUSH) as ready_socket:
+        with zmq_socket_ctx(ready_path, zmq.constants.PUSH) as ready_socket:
             payload = pickle.dumps(worker_response_mq_handle,
                                    protocol=pickle.HIGHEST_PROTOCOL)
             ready_socket.send_string(WorkerProc.READY_STR)
@@ -336,8 +350,11 @@ class WorkerProc:
         except SystemExit:
             logger.debug("Worker interrupted.")
 
-        except BaseException as e:
-            logger.exception(e)
+        except Exception:
+            # worker_busy_loop sends exceptions exceptons to Executor
+            # for shutdown, but if there is an error in startup or an
+            # error with IPC itself, we need to alert the parent.
+            psutil.Process().parent().send_signal(signal.SIGUSR1)
             raise
 
         finally:
@@ -352,7 +369,7 @@ class WorkerProc:
         ready_path: str,
     ) -> Optional[Handle]:
         """Wait until the Worker is ready."""
-        with make_zmq_socket(ready_path, zmq.constants.PULL) as socket:
+        with zmq_socket_ctx(ready_path, zmq.constants.PULL) as socket:
 
             # Wait for Worker to send READY.
             while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
@@ -378,9 +395,10 @@ class WorkerProc:
 
             try:
                 output = getattr(self.worker, method)(*args, **kwargs)
-            except BaseException as e:
+            except Exception as e:
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.FAILURE, e))
+                logger.exception("WorkerProc hit an exception: %s", exc_info=e)
                 continue
 
             self.worker_response_mq.enqueue(

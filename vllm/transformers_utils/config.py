@@ -22,9 +22,9 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
-                                             EAGLEConfig, ExaoneConfig,
-                                             H2OVLChatConfig,
+from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
+                                             DbrxConfig, EAGLEConfig,
+                                             ExaoneConfig, H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
@@ -52,6 +52,7 @@ _CONFIG_REGISTRY_OVERRIDE_HF: Dict[str, Type[PretrainedConfig]] = {
 
 _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
+    "cohere2": Cohere2Config,
     "dbrx": DbrxConfig,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)

@@ -13,6 +13,7 @@ einops # required for MPT, qwen-vl and Mamba
 httpx
 librosa # required for audio tests
 peft
+pqdm
 ray[adag]==2.40.0
 sentence-transformers # required for embedding tests
 soundfile # required for audio tests

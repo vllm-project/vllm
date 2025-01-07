@@ -24,11 +24,14 @@ def run_aria(question: str, modality: str):
     assert modality == "image"
     model_name = "rhymes-ai/Aria"
 
+    # NOTE: Need L40 (or equivalent) to avoid OOM
     llm = LLM(model=model_name,
               tokenizer_mode="slow",
-              trust_remote_code=True,
               dtype="bfloat16",
-              mm_cache_preprocessor=args.mm_cache_preprocessor)
+              max_model_len=4096,
+              max_num_seqs=2,
+              trust_remote_code=True,
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
 
     prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>\n{question}"
               "<|im_end|>\n<|im_start|>assistant\n")
@@ -45,7 +48,7 @@ def run_blip2(question: str, modality: str):
     # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
     prompt = f"Question: {question} Answer:"
     llm = LLM(model="Salesforce/blip2-opt-2.7b",
-              mm_cache_preprocessor=args.mm_cache_preprocessor)
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -57,7 +60,8 @@ def run_chameleon(question: str, modality: str):
     prompt = f"{question}<image>"
     llm = LLM(model="facebook/chameleon-7b",
               max_model_len=4096,
-              mm_cache_preprocessor=args.mm_cache_preprocessor)
+              max_num_seqs=2,
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -70,7 +74,7 @@ def run_fuyu(question: str, modality: str):
     llm = LLM(model="adept/fuyu-8b",
               max_model_len=2048,
               max_num_seqs=2,
-              mm_cache_preprocessor=args.mm_cache_preprocessor)
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -85,7 +89,7 @@ def run_glm4v(question: str, modality: str):
               max_num_seqs=2,
               trust_remote_code=True,
               enforce_eager=True,
-              mm_cache_preprocessor=args.mm_cache_preprocessor)
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     prompt = question
     stop_token_ids = [151329, 151336, 151338]
     return llm, prompt, stop_token_ids
@@ -101,7 +105,7 @@ def run_h2ovl(question: str, modality: str):
         model=model_name,
         trust_remote_code=True,
         max_model_len=8192,
-        mm_cache_preprocessor=args.mm_cache_preprocessor,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
@@ -134,7 +138,7 @@ def run_idefics3(question: str, modality: str):
                 "longest_edge": 3 * 364
             },
         },
-        mm_cache_preprocessor=args.mm_cache_preprocessor,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
     prompt = (
         f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:"
@@ -153,7 +157,7 @@ def run_internvl(question: str, modality: str):
         model=model_name,
         trust_remote_code=True,
         max_model_len=4096,
-        mm_cache_preprocessor=args.mm_cache_preprocessor,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
@@ -180,7 +184,7 @@ def run_llava(question: str, modality: str):
 
     llm = LLM(model="llava-hf/llava-1.5-7b-hf",
               max_model_len=4096,
-              mm_cache_preprocessor=args.mm_cache_preprocessor)
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -192,7 +196,7 @@ def run_llava_next(question: str, modality: str):
     prompt = f"[INST] <image>\n{question} [/INST]"
     llm = LLM(model="llava-hf/llava-v1.6-mistral-7b-hf",
               max_model_len=8192,
-              mm_cache_preprocessor=args.mm_cache_preprocessor)
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -205,7 +209,7 @@ def run_llava_next_video(question: str, modality: str):
     prompt = f"USER: <video>\n{question} ASSISTANT:"
     llm = LLM(model="llava-hf/LLaVA-NeXT-Video-7B-hf",
               max_model_len=8192,
-              mm_cache_preprocessor=args.mm_cache_preprocessor)
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -223,7 +227,7 @@ def run_llava_onevision(question: str, modality: str):
 
     llm = LLM(model="llava-hf/llava-onevision-qwen2-7b-ov-hf",
               max_model_len=16384,
-              mm_cache_preprocessor=args.mm_cache_preprocessor)
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -239,7 +243,7 @@ def run_mantis(question: str, modality: str):
         model="TIGER-Lab/Mantis-8B-siglip-llama3",
         max_model_len=4096,
         hf_overrides={"architectures": ["MantisForConditionalGeneration"]},
-        mm_cache_preprocessor=args.mm_cache_preprocessor,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
     stop_token_ids = [128009]
     return llm, prompt, stop_token_ids
@@ -257,7 +261,7 @@ def run_minicpmv(question: str, modality: str):
     # 2.5
     # model_name = "openbmb/MiniCPM-Llama3-V-2_5"
 
-    #2.6
+    # 2.6
     model_name = "openbmb/MiniCPM-V-2_6"
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
@@ -266,7 +270,7 @@ def run_minicpmv(question: str, modality: str):
         max_model_len=4096,
         max_num_seqs=2,
         trust_remote_code=True,
-        mm_cache_preprocessor=args.mm_cache_preprocessor,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
     # NOTE The stop_token_ids are different for various versions of MiniCPM-V
     # 2.0
@@ -305,10 +309,23 @@ def run_mllama(question: str, modality: str):
         max_model_len=4096,
         max_num_seqs=16,
         enforce_eager=True,
-        mm_cache_preprocessor=args.mm_cache_preprocessor,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
-    prompt = f"<|image|><|begin_of_text|>{question}"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    messages = [{
+        "role":
+        "user",
+        "content": [{
+            "type": "image"
+        }, {
+            "type": "text",
+            "text": f"{question}"
+        }]
+    }]
+    prompt = tokenizer.apply_chat_template(messages,
+                                           add_generation_prompt=True,
+                                           tokenize=False)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -323,7 +340,7 @@ def run_molmo(question, modality):
         model=model_name,
         trust_remote_code=True,
         dtype="bfloat16",
-        mm_cache_preprocessor=args.mm_cache_preprocessor,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
     prompt = question
@@ -343,7 +360,7 @@ def run_nvlm_d(question: str, modality: str):
         trust_remote_code=True,
         max_model_len=4096,
         tensor_parallel_size=4,
-        mm_cache_preprocessor=args.mm_cache_preprocessor,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
@@ -363,7 +380,7 @@ def run_paligemma(question: str, modality: str):
     # PaliGemma has special prompt format for VQA
     prompt = "caption en"
     llm = LLM(model="google/paligemma-3b-mix-224",
-              mm_cache_preprocessor=args.mm_cache_preprocessor)
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -375,7 +392,7 @@ def run_paligemma2(question: str, modality: str):
     # PaliGemma 2 has special prompt format for VQA
     prompt = "caption en"
     llm = LLM(model="google/paligemma2-3b-ft-docci-448",
-              mm_cache_preprocessor=args.mm_cache_preprocessor)
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -405,7 +422,7 @@ def run_phi3v(question: str, modality: str):
         max_num_seqs=2,
         # Note - mm_processor_kwargs can also be passed to generate/chat calls
         mm_processor_kwargs={"num_crops": 16},
-        mm_cache_preprocessor=args.mm_cache_preprocessor,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
     stop_token_ids = None
     return llm, prompt, stop_token_ids
@@ -417,10 +434,12 @@ def run_pixtral_hf(question: str, modality: str):
 
     model_name = "mistral-community/pixtral-12b"
 
+    # NOTE: Need L40 (or equivalent) to avoid OOM
     llm = LLM(
         model=model_name,
         max_model_len=8192,
-        mm_cache_preprocessor=args.mm_cache_preprocessor,
+        max_num_seqs=2,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
     prompt = f"<s>[INST]{question}\n[IMG][/INST]"
@@ -437,7 +456,7 @@ def run_qwen_vl(question: str, modality: str):
         trust_remote_code=True,
         max_model_len=1024,
         max_num_seqs=2,
-        mm_cache_preprocessor=args.mm_cache_preprocessor,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
     prompt = f"{question}Picture 1: <img></img>\n"
@@ -447,7 +466,6 @@ def run_qwen_vl(question: str, modality: str):
 
 # Qwen2-VL
 def run_qwen2_vl(question: str, modality: str):
-    assert modality == "image"
 
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
 
@@ -460,11 +478,16 @@ def run_qwen2_vl(question: str, modality: str):
             "min_pixels": 28 * 28,
             "max_pixels": 1280 * 28 * 28,
         },
-        mm_cache_preprocessor=args.mm_cache_preprocessor,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
     prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-              "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+              f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
               f"{question}<|im_end|>\n"
               "<|im_start|>assistant\n")
     stop_token_ids = None
@@ -651,9 +674,9 @@ if __name__ == "__main__":
         ' (if enabled)')
 
     parser.add_argument(
-        '--mm-cache-preprocessor',
+        '--disable-mm-preprocessor-cache',
         action='store_true',
-        help='If True, enable caching of multi-modal preprocessor/mapper.')
+        help='If True, disables caching of multi-modal preprocessor/mapper.')
 
     parser.add_argument(
         '--time-generate',

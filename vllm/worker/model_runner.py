@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
@@ -20,7 +21,8 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_kv_transfer_group, get_pp_group
-from vllm.distributed.parallel_state import graph_capture
+from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
+                                             graph_capture)
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
@@ -1390,8 +1392,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         logger.info("Capturing cudagraphs for decoding. This may lead to "
                     "unexpected consequences if the model is not static. To "
                     "run the model in eager mode, set 'enforce_eager=True' or "
-                    "use '--enforce-eager' in the CLI.")
-        logger.info("If out-of-memory error occurs during cudagraph capture,"
+                    "use '--enforce-eager' in the CLI. "
+                    "If out-of-memory error occurs during cudagraph capture,"
                     " consider decreasing `gpu_memory_utilization` or "
                     "switching to eager mode. You can also reduce the "
                     "`max_num_seqs` as needed to decrease memory usage.")
@@ -1400,10 +1402,15 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = self.max_batchsize_to_capture
-        input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-        input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
+        input_tokens = torch.zeros(max_batch_size,
+                                   dtype=torch.long,
+                                   device=self.device)
+        input_positions = torch.zeros(max_batch_size,
+                                      dtype=torch.long,
+                                      device=self.device)
         if self.model_config.uses_mrope:
-            input_positions = torch.tile(input_positions, (3, 1))
+            input_positions = torch.tile(input_positions,
+                                         (3, 1)).cuda(device=self.device)
         # Prepare dummy previous_hidden_states only if needed by the model.
         # This is used by draft models such as EAGLE.
         previous_hidden_states = None
@@ -1422,14 +1429,20 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=self.model_config.dtype,
                 device=self.device)
 
-        with self.attn_state.graph_capture(
-                max_batch_size), graph_capture() as graph_capture_context:
+        with self.attn_state.graph_capture(max_batch_size), graph_capture(
+                self.device) as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for virtual_engine in range(
                     self.parallel_config.pipeline_parallel_size):
-                for batch_size in \
-                    self.vllm_config.compilation_config.capture_sizes:
+                # Only rank 0 should print progress bar during capture
+                capture_sizes = (
+                    tqdm(
+                        self.vllm_config.compilation_config.capture_sizes,
+                        desc="Capturing CUDA graph shapes",
+                    ) if get_tensor_model_parallel_rank() == 0 else
+                    self.vllm_config.compilation_config.capture_sizes)
+                for batch_size in capture_sizes:
                     attn_metadata = (
                         self.attn_state.graph_capture_get_metadata_for_batch(
                             batch_size,
@@ -1518,10 +1531,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         """
         # During the decode phase encoder_input_ids and encoder_positions are
         # unset. Do the same thing for graph capture.
-        capture_inputs["encoder_input_ids"] = torch.tensor(
-            [], dtype=torch.long).cuda()
-        capture_inputs["encoder_positions"] = torch.tensor(
-            [], dtype=torch.long).cuda()
+        capture_inputs["encoder_input_ids"] = torch.tensor([],
+                                                           dtype=torch.long,
+                                                           device=self.device)
+        capture_inputs["encoder_positions"] = torch.tensor([],
+                                                           dtype=torch.long,
+                                                           device=self.device)
 
     @property
     def vocab_size(self) -> int:

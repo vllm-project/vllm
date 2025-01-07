@@ -17,6 +17,7 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -24,8 +25,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
+from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.utils import LayerBlockType
 
 from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP
@@ -105,9 +107,11 @@ class JambaMambaDecoderLayer(nn.Module):
                  layer_idx: int,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = "") -> None:
+                 is_lora_enabled: Optional[bool] = False,
+                 **kwargs) -> None:
         super().__init__()
         self.config = config
+        self.is_lora_enabled = is_lora_enabled
         self.mamba = MambaMixer(hidden_size= config.hidden_size,
                                 ssm_state_size = config.mamba_d_state,
                                 conv_kernel_size = config.mamba_d_conv,
@@ -118,7 +122,9 @@ class JambaMambaDecoderLayer(nn.Module):
                                 use_bias = config.mamba_proj_bias,
                                 use_rms_norm=True,
                                 rms_norm_eps=config.rms_norm_eps,
-                                activation=config.hidden_act)
+                                activation=config.hidden_act,
+                                is_lora_enabled = self.is_lora_enabled
+                                )
 
         num_experts = config.layers_num_experts[layer_idx]
         ffn_layer_class = JambaMoE if num_experts > 1 else JambaMLP
@@ -154,14 +160,13 @@ class JambaMambaDecoderLayer(nn.Module):
 
 class JambaAttentionDecoderLayer(nn.Module):
 
-    def __init__(
-        self,
-        config: JambaConfig,
-        layer_idx: int,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self,
+                 config: JambaConfig,
+                 layer_idx: int,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "",
+                 **kwargs) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -285,17 +290,18 @@ class JambaModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
 
+        extra_kwargs = {"is_lora_enabled": bool(vllm_config.lora_config)}
+
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
             layer_class = ALL_DECODER_LAYER_TYPES[
                 config.layers_block_type[layer_idx]]
-            return layer_class(
-                config,
-                layer_idx,
-                cache_config,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
+            return layer_class(config,
+                               layer_idx,
+                               cache_config,
+                               quant_config=quant_config,
+                               prefix=prefix,
+                               **extra_kwargs)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers")
@@ -369,14 +375,13 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             "k_proj",
             "v_proj",
         ],
+        "in_proj": ["in_proj"],
     }
 
     # LoRA specific attributes
     supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "embed_tokens",
-        "lm_head",
+        "qkv_proj", "o_proj", "embed_tokens", "lm_head", "up_proj",
+        "down_proj", "gate_proj", "out_proj", "in_proj", "x_proj"
     ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
@@ -421,9 +426,9 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
         if self.scheduler_config is not None and \
-            not self.model_config.enforce_eager:
+                not self.model_config.enforce_eager:
             if self.scheduler_config.max_num_seqs > \
-                vllm_config.compilation_config.max_capture_size:
+                    vllm_config.compilation_config.max_capture_size:
                 self.max_batch_size = \
                     vllm_config.compilation_config.max_capture_size
             else:
@@ -444,7 +449,6 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
         if self.mamba_cache is None:
-
             num_mamba_layers = self.model_config.get_num_layers_by_block_type(
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
             self.mamba_cache = MambaCacheManager(
@@ -593,3 +597,35 @@ def _is_moe_layer(name: str):
             "experts",
             "router",
         ]])
+
+
+class JambaForSequenceClassification(JambaForCausalLM):
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        config = vllm_config.model_config.hf_config
+        num_labels: int = config.num_labels
+        score_bias: bool = getattr(config, 'score_bias', False)
+        self.score = nn.Linear(config.hidden_size, num_labels, bias=score_bias)
+
+        pooler_config = vllm_config.model_config.pooler_config
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=False,
+            softmax=False)
+
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        hidden_states = hidden_states.float()
+        logits = self.score(hidden_states)
+        return self._pooler(logits, pooling_metadata)
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        # TODO: The reward weights themselves have float32 accuracy data, we
+        # would like to load them in fp32 to get that extra precision.
+        super().load_weights(weights)
+        self.score = self.score.float()

@@ -5,6 +5,7 @@ import pytest
 import pytest_asyncio
 from transformers import AutoModel, AutoTokenizer, BatchEncoding
 
+from vllm.multimodal.audio import resample_audio
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
@@ -130,16 +131,14 @@ def run_test(
                    dtype=dtype,
                    postprocess_inputs=process,
                    auto_cls=AutoModel) as hf_model:
-        import librosa
-
         hf_outputs_per_audio = [
             hf_model.generate_greedy_logprobs_limit(
                 [hf_prompt],
                 max_tokens,
                 num_logprobs=num_logprobs,
-                audios=[(librosa.resample(audio[0],
-                                          orig_sr=audio[1],
-                                          target_sr=16000), 16000)])
+                audios=[(resample_audio(audio[0],
+                                        orig_sr=audio[1],
+                                        target_sr=16000), 16000)])
             for _, hf_prompt, audio in prompts_and_audios
         ]
 

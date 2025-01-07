@@ -172,16 +172,18 @@ class CohereAttention(nn.Module):
             is_neox_style=False,
         )
 
-        sliding_window = getattr(config, "sliding_window", None)
-        # Model v2 has sliding windows, v1 does not
-        self.v1 = sliding_window is None
+        # Model v2 has interleaved sliding windows, v1 does not
+        interleaved_sliding_window = getattr(config,
+                                             "interleaved_sliding_window",
+                                             None)
+        self.v1 = interleaved_sliding_window is None
 
         layer_idx = extract_layer_index(prefix)
         layer_has_sliding_window = (
             getattr(config, "sliding_window_pattern", False)
             and (layer_idx + 1) % self.config.sliding_window_pattern != 0)
 
-        self.sliding_window = (sliding_window
+        self.sliding_window = (interleaved_sliding_window
                                if layer_has_sliding_window else None)
 
         self.attn = Attention(self.num_heads,
