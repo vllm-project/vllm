@@ -88,11 +88,11 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         # For more details, see csrc/quantization/cutlass_w8a8/Epilogues.md
         # https://github.com/vllm-project/vllm/blob/8d59dbb00044a588cab96bcdc028006ed922eb06/csrc/quantization/cutlass_w8a8/Epilogues.md
         if not self.config.input_symmetric:
-            layer.azp_adj = layer.weight.sum(dim=0,
-                                             keepdim=True,
-                                             dtype=torch.int32)
+            azp_adj = layer.weight.sum(dim=0, keepdim=True, dtype=torch.int32)
+            setattr(layer, self.azp_adj_name, 
+                    torch.nn.Parameter(azp_adj, requires_grad=False))
         else:
-            layer.azp_adj = None
+            setattr(layer, self.azp_adj_name, None)
 
     def apply_weights(self,
                       layer: torch.nn.Module,
