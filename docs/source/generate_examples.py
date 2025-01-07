@@ -1,4 +1,5 @@
 import re
+import itertools
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -6,38 +7,6 @@ ROOT_DIR = Path(__file__).parent.parent.parent.resolve()
 ROOT_DIR_RELATIVE = '../../../..'
 EXAMPLE_DIR = ROOT_DIR / "examples"
 EXAMPLE_DOC_DIR = ROOT_DIR / "docs/source/getting_started/examples"
-
-CATEGORIES = {
-    "Online Inference": {
-        "keywords": ["openai"],
-        "index_file_name":
-        "examples_online_inference_index.md",
-        "description":
-        "Online inference examples demonstrate how to use vLLM in an online setting, where the model is queried for predictions in real-time.",  # noqa: E501
-    },
-    "Offline Inference": {
-        "keywords": ["offline"],
-        "index_file_name":
-        "examples_offline_inference_index.md",
-        "description":
-        "Offline inference examples demonstrate how to use vLLM in an offline setting, where the model is queried for predictions in batches.",  # noqa: E501
-    },
-    "Other": {
-        "keywords": [],
-        "index_file_name":
-        "examples_other_index.md",
-        "description":
-        "Other examples that don't strongly fit into the online or offline inference categories.",  # noqa: E501
-    },
-}
-
-
-def is_example(path: Path) -> bool:
-    if path.suffix in (".py", ".md"):
-        return True
-    if path.is_dir():
-        return any(file.suffix == ".md" for file in path.iterdir())
-    return False
 
 
 def fix_case(text: str) -> str:
@@ -67,28 +36,28 @@ class Index:
     Index class to generate a structured document index.
 
     Attributes:
+        path (Path): The path save the index file to.
         title (str): The title of the index.
-        description (str): A brief description of the index. Defaults to an empty string.
+        description (str): A brief description of the index.
+        caption (str): An optional caption for the table of contents.
         maxdepth (int): The maximum depth of the table of contents. Defaults to 1.
-        caption (str): An optional caption for the table of contents. Defaults to an empty string.
         documents (list[str]): A list of document paths to include in the index. Defaults to an empty list.
 
     Methods:
         generate() -> str:
             Generates the index content as a string in the specified format.
     """ # noqa: E501
+    path: Path
     title: str
-    description: str = field(default="")
+    description: str
+    caption: str
     maxdepth: int = 1
-    caption: str = field(default="")
     documents: list[str] = field(default_factory=list)
 
     def generate(self) -> str:
-        content = f"# {self.title}\n\n"
-        content += f"{self.description}\n\n"
-        content += f"```{{toctree}}\n:maxdepth: {self.maxdepth}\n"
-        if self.caption:
-            content += f":caption: {self.caption}\n"
+        content = f"# {self.title}\n\n{self.description}\n\n"
+        content += f"```{{toctree}}\n"
+        content += f":caption: {self.caption}\n:maxdepth: {self.maxdepth}\n"
         content += "\n".join(self.documents) + "\n```\n"
         return content
 
@@ -100,34 +69,28 @@ class Example:
 
     Attributes:
         path (Path): The path to the main directory or file.
+        category (str): The category of the document.
         main_file (Path): The main file in the directory.
         other_files (list[Path]): List of other files in the directory.
         title (str): The title of the document.
-        url (str): The URL to the document on GitHub.
-        category (str): The category of the document.
 
     Methods:
-        __post_init__(): Initializes the main_file, other_files, title, url, and category attributes.
+        __post_init__(): Initializes the main_file, other_files, and title attributes.
         determine_main_file() -> Path: Determines the main file in the given path.
         determine_other_files() -> list[Path]: Determines other files in the directory excluding the main file.
         determine_title() -> str: Determines the title of the document.
-        determine_url() -> str: Determines the URL to the document on GitHub.
-        determine_category() -> str: Determines the category of the document based on its title and content.
         generate() -> str: Generates the documentation content.
     """ # noqa: E501
     path: Path
+    category: str = None
     main_file: Path = field(init=False)
     other_files: list[Path] = field(init=False)
     title: str = field(init=False)
-    url: str = field(init=False)
-    category: str = field(init=False)
 
     def __post_init__(self):
         self.main_file = self.determine_main_file()
         self.other_files = self.determine_other_files()
         self.title = self.determine_title()
-        self.url = self.determine_url()
-        self.category = self.determine_category()
 
     def determine_main_file(self) -> Path:
         """
@@ -162,37 +125,12 @@ class Example:
     def determine_title(self) -> str:
         return fix_case(self.path.stem.replace("_", " ").title())
 
-    def determine_url(self) -> str:
-        return f"https://github.com/vllm-project/vllm/blob/main/examples/{self.path.relative_to(EXAMPLE_DIR)}"
-
-    def determine_category(self) -> str:
-        """
-        Determines the category of the document based on its title and content.
-
-        The method reads the content of the main file associated with the document,
-        converts both the title and content to lowercase, and checks for the presence
-        of any keywords defined in the CATEGORIES dictionary. If a keyword is found
-        in either the title or the content, the corresponding category is returned.
-
-        Returns:
-            str: The category of the document.
-        """  # noqa: E501
-        title = self.title.lower()
-        with open(self.main_file) as f:
-            content = f.read().lower()
-        final_category = "Other"
-        for category, category_info in CATEGORIES.items():
-            if any(indicator in content or indicator in title
-                   for indicator in category_info["keywords"]):
-                final_category = category
-        return final_category
-
     def generate(self) -> str:
         # Convert the path to a relative path from __file__
         make_relative = lambda path: ROOT_DIR_RELATIVE / path.relative_to(
             ROOT_DIR)
 
-        content = f"Source <{self.url}>.\n\n"
+        content = f"Source <gh-file:{self.path.relative_to(ROOT_DIR)}>.\n\n"
         if self.main_file.suffix == ".py":
             content += f"# {self.title}\n\n"
         include = "include" if self.main_file.suffix == ".md" else \
@@ -218,36 +156,72 @@ def generate_examples():
     if not EXAMPLE_DOC_DIR.exists():
         EXAMPLE_DOC_DIR.mkdir(parents=True)
 
-    # Generate examples_index and examples_{category}_index files
+    # Create empty indices
     examples_index = Index(
+        path=EXAMPLE_DOC_DIR / "examples_index.md",
         title="Examples",
-        description=
-        "A collection of examples demonstrating usage of vLLM.\n\nAll documented examples are autogenerated from examples found in [vllm/examples](https://github.com/vllm-project/vllm/tree/main/examples).",  # noqa: E501
-        maxdepth=2,
-        caption="Categories")
+        description="A collection of examples demonstrating usage of vLLM.\nAll documented examples are autogenerated using <gh-file:docs/source/generate_examples.py> from examples found in <gh-file:examples>.",  # noqa: E501
+        caption="Examples",
+        maxdepth=1) # TODO change to 2 when examples start being categorised
     category_indices = {
-        category: Index(title=category,
-                        description=category_info["description"])
-        for category, category_info in CATEGORIES.items()
+        "offline_inference": Index(
+            path=EXAMPLE_DOC_DIR / "examples_offline_inference_index.md",
+            title="Offline Inference",
+            description="Offline inference examples demonstrate how to use vLLM in an offline setting, where the model is queried for predictions in batches.",  # noqa: E501
+            caption="Examples",
+        ),
+        "online_serving": Index(
+            path=EXAMPLE_DOC_DIR / "examples_online_serving_index.md",
+            title="Online Serving",
+            description="Online serving examples demonstrate how to use vLLM in an online setting, where the model is queried for predictions in real-time.",  # noqa: E501
+            caption="Examples",
+        ),
+        "other": Index(
+            path=EXAMPLE_DOC_DIR / "examples_other_index.md",
+            title="Other",
+            description="Other examples that don't strongly fit into the online or offline serving categories.",  # noqa: E501
+            caption="Examples",
+        ),
     }
 
-    examples = [
-        Example(path) for path in sorted(EXAMPLE_DIR.iterdir())
-        if is_example(path)
-    ]
+    examples = []
+    # Find categorised examples
+    for category in category_indices:
+        category_dir = EXAMPLE_DIR / category
+        py =  category_dir.glob("*.py")
+        md = category_dir.glob("*.md")
+        for path in itertools.chain(py, md):
+            examples.append(Example(path, category))
+        # Find examples in subdirectories
+        for path in category_dir.glob("*/*.md"):
+            examples.append(Example(path.parent, category))
+    # Find uncategorised examples
+    py = EXAMPLE_DIR.glob("*.py")
+    md = EXAMPLE_DIR.glob("*.md")
+    for path in itertools.chain(py, md):
+        examples.append(Example(path))
+    # Find examples in subdirectories
+    for path in EXAMPLE_DIR.glob("*/*.md"):
+        # Skip categorised examples
+        if path.parent.name in category_indices:
+            continue
+        examples.append(Example(path.parent))
+    
+    # Generate the example documentation
     for example in examples:
-        category_indices[example.category].documents.append(example.path.stem)
         doc_path = EXAMPLE_DOC_DIR / f"{example.path.stem}.md"
         with open(doc_path, "w+") as f:
             f.write(example.generate())
+        # Add the example to the appropriate index
+        index = category_indices.get(example.category, examples_index)
+        index.documents.append(example.path.stem)
 
-    # Generate the toctree for the example scripts
-    for category, category_index in category_indices.items():
-        category_index_name = CATEGORIES[category]["index_file_name"]
-        category_index_path = EXAMPLE_DOC_DIR / category_index_name
-        examples_index.documents.append(category_index_path.stem)
-        with open(category_index_path, "w+") as f:
-            f.write(category_index.generate())
+    # Generate the index files
+    for category_index in category_indices.values():
+        if category_index.documents:
+            examples_index.documents.append(category_index.path.name)
+            with open(category_index.path, "w+") as f:
+                f.write(category_index.generate())
 
-    with open(EXAMPLE_DOC_DIR / "examples_index.md", "w+") as f:
+    with open(examples_index.path, "w+") as f:
         f.write(examples_index.generate())
