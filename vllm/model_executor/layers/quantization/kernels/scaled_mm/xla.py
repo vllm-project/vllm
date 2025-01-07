@@ -1,3 +1,4 @@
+import warnings
 from typing import Optional, Tuple
 
 import torch
@@ -66,6 +67,14 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         setattr(layer, self.i_zp_name, None)
         setattr(layer, self.azp_adj_name, None)
 
+        # Filter warning for cond usage in apply_weights. It is okay to
+        # specialize the graph since bias is not dynamic.
+        warnings.filterwarnings(
+            "ignore",
+            message=
+            "Pred is a Python constant. When used with torch.cond, it specializes on one of the branches."  # noqa: E501
+        )
+
     def no_add_bias(self, x: torch.Tensor, bias: Optional[torch.Tensor]):
         return x
 
@@ -89,4 +98,5 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
 
         # Explicitly capture control flow to make dynamo happy.
         # https://pytorch.org/docs/main/generated/exportdb/index.html#cond-branch-class-method # noqa: E501
+        # This throws a lot of warnings.
         return cond(bias is None, self.no_add_bias, self.add_bias, [out, bias])
