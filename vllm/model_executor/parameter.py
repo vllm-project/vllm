@@ -47,7 +47,6 @@ class BasevLLMParameter(Parameter):
         # tensor, which is param.data, leading to the redundant memory usage.
         # This sometimes causes OOM errors during model loading. To avoid this,
         # we sync the param tensor after its weight loader is called.
-        # TODO(woosuk): Remove this hack once we have a better solution.
         if current_platform.is_tpu():
             weight_loader = _make_synced_weight_loader(weight_loader)
 
