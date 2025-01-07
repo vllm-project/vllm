@@ -25,7 +25,7 @@ question_per_audio_count = {
 
 # Ultravox 0.3
 def run_ultravox(question: str, audio_count: int):
-    model_name = "fixie-ai/ultravox-v0_3"
+    model_name = "fixie-ai/ultravox-v0_4"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     messages = [{
