@@ -194,18 +194,17 @@ A few important things to consider when using the EAGLE based draft models:
    used directly with vLLM due to differences in the expected layer names and model definition.
    To use these models with vLLM, use the [following script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d) 
    to convert them. Note that this script does not modify the model's weights.
-   In the example above, use the script to first convert
+
+   In the above example, use the script to first convert
    the [yuhuili/EAGLE-LLaMA3-Instruct-70B](https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-70B) model 
    and then use the converted checkpoint as the draft model in vLLM.
 
-2. The EAGLE based draft models currently need to be run without tensor parallelism
+2. The EAGLE based draft models need to be run without tensor parallelism
    (i.e. speculative_draft_tensor_parallel_size is set to 1), although
-   it is possible to run the main model using tensor parallelism (see example above). Since the
-   speculative models are relatively small, we still see significant speedups. However, this
-   limitation will be fixed in a future release.
+   it is possible to run the main model using tensor parallelism (see example above).
 
 3. When using EAGLE-based speculators with vLLM, the observed speedup is lower than what is
-   expected when using EAGLE-based draft models for speculative decoding. This issue is under
+   reported in the reference implementation [here](https://github.com/SafeAILab/EAGLE). This issue is under
    investigation and tracked here: [https://github.com/vllm-project/vllm/issues/9565](https://github.com/vllm-project/vllm/issues/9565).
 
 
