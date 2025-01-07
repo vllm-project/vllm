@@ -11,6 +11,7 @@ from vllm.utils import (FlexibleArgumentParser, StoreBoolean, deprecate_kwargs,
                         supports_kw)
 
 from .utils import error_on_warning, fork_new_process_for_each_test
+from vllm_test_utils import monitor
 
 
 @pytest.mark.asyncio
@@ -289,14 +290,27 @@ def test_memory_profiling():
 
     weights_memory_in_bytes = 128 * 1024 * 1024 * 4 # 512 MiB
 
+    def measure_current_non_torch():
+        free, total = torch.cuda.mem_get_info()
+        current_used = total - free
+        current_torch = torch.cuda.memory_reserved()
+        current_non_torch = current_used - current_torch
+        return current_non_torch
+
     with memory_profiling(baseline_memory_in_bytes=baseline_memory_in_bytes,
-    weights_memory_in_bytes=weights_memory_in_bytes) as result:
+    weights_memory_in_bytes=weights_memory_in_bytes) as result, \
+        monitor(measure_current_non_torch) as monitored_values:
         # make a memory spike, 1 GiB
         spike = torch.randn(256, 1024, 1024, device='cuda', dtype=torch.float32)
         del spike
 
         # Add some extra non-torch memory 256 MiB (simulate NCCL)
         handle2 = lib.cudaMalloc(256 * 1024 * 1024)
+
+    for value, stack in zip(monitored_values.values, \
+        monitored_values.trace_stacks):
+        print(f"non_torch memory changed to {value / 1024 / 1024} MiB in")
+        print(stack)
 
     # Check that the memory usage is within 5% of the expected values
     non_torch_ratio = result.non_torch_increase_in_bytes / (256 * 1024 * 1024) # noqa
