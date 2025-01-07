@@ -257,6 +257,11 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         action='store_true',
         default=False,
         help="If set to True, enable prompt_tokens_details in usage.")
+    
+    parser.add_argument('--zmq-server-port',
+        type=int,
+        default=5555,
+        help='The port to serve the zmq server on.\n\nDefault: 5555')
 
     return parser
 

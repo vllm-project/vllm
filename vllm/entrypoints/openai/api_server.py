@@ -36,7 +36,7 @@ from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
-from vllm.entrypoints.launcher import serve_http
+from vllm.entrypoints.launcher import serve_http, serve_zmq
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
@@ -957,6 +957,11 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
         logger.info("Starting vLLM API server on http://%s:%d",
                     _listen_addr(sock_addr[0]), sock_addr[1])
+
+        zmq_server_port = args.zmq_server_port
+        if zmq_server_port is not None:
+            logger.info("asyncio.create_task Starting ZMQ server at port %d", zmq_server_port)
+            asyncio.create_task(serve_zmq(args, zmq_server_port, app))
 
         shutdown_task = await serve_http(
             app,
