@@ -173,7 +173,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
-        assert k_scale == 1.0 and v_scale == 1.0
         batch_size, seq_len, hidden_size = query.shape
         query = query.view(batch_size, seq_len, self.num_heads, self.head_size)
         key = key.view(batch_size, seq_len, self.num_kv_heads, self.head_size)

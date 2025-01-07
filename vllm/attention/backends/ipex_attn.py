@@ -193,7 +193,6 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert k_scale == 1.0 and v_scale == 1.0
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)

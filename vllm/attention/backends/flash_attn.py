@@ -657,10 +657,6 @@ class FlashAttentionImpl(AttentionImpl):
             attn_metadata: Metadata for attention.
         NOTE: It in-place updates the output tensor.
         """
-        # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
-        assert k_scale == 1.0 and v_scale == 1.0, (
-            "key/v_scale is not supported in FlashAttention.")
-
         assert output is not None, "Output tensor must be provided."
 
         attn_type = self.attn_type
