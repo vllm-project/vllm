@@ -3,7 +3,7 @@ import torch
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.platforms import current_platform
-from vllm.utils import is_navi, print_warning_once
+from vllm.utils import print_warning_once
 
 
 class BaseKVCacheMethod(QuantizeMethodBase):
@@ -46,7 +46,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 # We prefer to use separate k_scale and v_scale if present
                 k_scale = layer.k_scale.to("cpu").tolist()
                 v_scale = layer.v_scale.to("cpu").tolist()
-                if current_platform.is_rocm() and not is_navi():
+                if current_platform.is_rocm():
                     k_scale *= 2
                     v_scale *= 2
             elif layer.k_scale < 0.0 and layer.v_scale < 0.0:
@@ -62,7 +62,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 scale_to_duplicate = max(layer.k_scale, layer.v_scale)
                 k_scale = scale_to_duplicate.to("cpu").tolist()
                 v_scale = scale_to_duplicate.to("cpu").tolist()
-                if current_platform.is_rocm() and not is_navi():
+                if current_platform.is_rocm():
                     k_scale *= 2
                     v_scale *= 2
 
