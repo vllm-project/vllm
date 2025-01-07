@@ -57,11 +57,10 @@ from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors, VideoItem)
 from vllm.multimodal.parse import (ImageSize, ModalityDataItems,
-                                   MultiModalDataParser)
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataItems, ProcessingMixin,
-                                        PromptReplacement)
-from vllm.multimodal.profiling import BaseProfilingInfo, ProcessorInputs
+                                   MultiModalDataItems, MultiModalDataParser)
+from vllm.multimodal.processing import BaseProcessingInfo, PromptReplacement
+from vllm.multimodal.processor import BaseMultiModalProcessor
+from vllm.multimodal.profiling import BaseDummyDataBuilder, ProcessorInputs
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
@@ -709,12 +708,12 @@ class Qwen2MultiModalDataParser(MultiModalDataParser):
         return super()._parse_video_data(data)
 
 
-class Qwen2VLProcessingMixin(ProcessingMixin):
+class Qwen2VLProcessingInfo(BaseProcessingInfo):
 
-    def _get_hf_config(self):
+    def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2VLConfig)
 
-    def _get_hf_processor(
+    def get_hf_processor(
         self,
         *,
         min_pixels: Optional[int] = None,
@@ -736,17 +735,26 @@ class Qwen2VLProcessingMixin(ProcessingMixin):
 
         return hf_processor
 
-    def _get_image_processor(
+    def get_image_processor(
         self,
         *,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
     ):
-        hf_processor = self._get_hf_processor(min_pixels=min_pixels,
-                                              max_pixels=max_pixels)
+        hf_processor = self.get_hf_processor(min_pixels=min_pixels,
+                                             max_pixels=max_pixels)
         image_processor = hf_processor.image_processor  # type: ignore
         assert isinstance(image_processor, Qwen2VLImageProcessor)
         return image_processor
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None, "video": None}
+
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        return {
+            "image": self.get_max_image_tokens(),
+            "video": self.get_max_video_tokens(seq_len),
+        }
 
     def _get_vision_info(
         self,
@@ -756,13 +764,13 @@ class Qwen2VLProcessingMixin(ProcessingMixin):
         num_frames: int = 1,
         do_resize: bool = True,
     ) -> tuple[ImageSize, int]:
-        hf_config = self._get_hf_config()
+        hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = vision_config.temporal_patch_size
 
-        image_processor = self._get_image_processor()
+        image_processor = self.get_image_processor()
 
         if do_resize:
             resized_height, resized_width = smart_resize(
@@ -787,7 +795,7 @@ class Qwen2VLProcessingMixin(ProcessingMixin):
 
         return preprocessed_size, num_vision_tokens
 
-    def _get_num_image_tokens(
+    def get_num_image_tokens(
         self,
         *,
         image_width: int,
@@ -799,7 +807,7 @@ class Qwen2VLProcessingMixin(ProcessingMixin):
         )
         return num_image_tokens
 
-    def _get_num_video_tokens(
+    def get_num_video_tokens(
         self,
         *,
         image_width: int,
@@ -813,41 +821,29 @@ class Qwen2VLProcessingMixin(ProcessingMixin):
         )
         return num_video_tokens
 
-
-class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
-
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None, "video": None}
-
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        return {
-            "image": self._get_max_image_tokens(),
-            "video": self._get_max_video_tokens(seq_len),
-        }
-
-    def _get_image_size_with_most_features(self) -> ImageSize:
+    def get_image_size_with_most_features(self) -> ImageSize:
         max_image_size, _ = self._get_vision_info(
             image_width=9999999,
             image_height=9999999,
         )
         return max_image_size
 
-    def _get_max_image_tokens(self) -> int:
-        target_width, target_height = self._get_image_size_with_most_features()
+    def get_max_image_tokens(self) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
 
-        return self._get_num_image_tokens(
+        return self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
         )
 
-    def _get_max_video_frames(self, max_tokens: int) -> int:
-        target_width, target_height = self._get_image_size_with_most_features()
+    def get_max_video_frames(self, max_tokens: int) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
 
         num_frames = 0
 
         while True:
             next_num_frames = num_frames + 1
-            next_max_tokens = self._get_num_video_tokens(
+            next_max_tokens = self.get_num_video_tokens(
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
@@ -860,14 +856,14 @@ class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
 
         return num_frames
 
-    def _get_dummy_num_frames(self, seq_len: int) -> int:
+    def get_max_num_frames(self, seq_len: int) -> int:
         mm_config = self.ctx.get_mm_config()
         max_images = mm_config.limit_per_prompt.get("image", 1)
         max_videos = mm_config.limit_per_prompt.get("video", 1)
 
-        max_image_tokens = self._get_max_image_tokens() * max_images
-        max_total_frames = self._get_max_video_frames(seq_len -
-                                                      max_image_tokens)
+        max_image_tokens = self.get_max_image_tokens() * max_images
+        max_total_frames = self.get_max_video_frames(seq_len -
+                                                     max_image_tokens)
 
         num_frames = max(max_total_frames // max(max_videos, 1), 1)
 
@@ -877,14 +873,17 @@ class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
 
         return num_frames
 
-    def _get_max_video_tokens(self, seq_len: int) -> int:
-        target_width, target_height = self._get_image_size_with_most_features()
+    def get_max_video_tokens(self, seq_len: int) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
 
-        return self._get_num_video_tokens(
+        return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
-            num_frames=self._get_dummy_num_frames(seq_len),
+            num_frames=self.get_max_num_frames(seq_len),
         )
+
+
+class Qwen2VLDummyDataBuilder(BaseDummyDataBuilder[Qwen2VLProcessingInfo]):
 
     def get_dummy_processor_inputs(
         self,
@@ -894,10 +893,11 @@ class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        hf_processor = self._get_hf_processor()
+        hf_processor = self.info.get_hf_processor()
         image_token: str = hf_processor.image_token
         video_token: str = hf_processor.video_token
-        target_width, target_height = self._get_image_size_with_most_features()
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
 
         mm_data = {
             "image":
@@ -908,7 +908,7 @@ class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
             self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
-                num_frames=self._get_dummy_num_frames(seq_len),
+                num_frames=self.info.get_max_num_frames(seq_len),
                 num_videos=num_videos,
             )
         }
@@ -919,11 +919,8 @@ class Qwen2VLProfilingInfo(Qwen2VLProcessingMixin, BaseProfilingInfo):
         )
 
 
-class Qwen2VLMultiModalProcessor(Qwen2VLProcessingMixin,
-                                 BaseMultiModalProcessor):
-
-    def _get_profiling_info(self) -> BaseProfilingInfo:
-        return Qwen2VLProfilingInfo(self.ctx)
+class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
+                                 ):
 
     def _get_data_parser(self) -> MultiModalDataParser:
         return Qwen2MultiModalDataParser()
@@ -934,8 +931,9 @@ class Qwen2VLMultiModalProcessor(Qwen2VLProcessingMixin,
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_processor = self._get_hf_processor(**hf_processor_mm_kwargs)
-        image_processor = self._get_image_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        image_processor = self.info.get_image_processor(
+            **hf_processor_mm_kwargs)
 
         # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
         # image_token and video_token registered
@@ -991,7 +989,9 @@ class Qwen2VLMultiModalProcessor(Qwen2VLProcessingMixin,
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor)
+@MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor,
+                                        info=Qwen2VLProcessingInfo,
+                                        dummy_data=Qwen2VLDummyDataBuilder)
 class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                       SupportsLoRA, SupportsPP):
     packed_modules_mapping = {

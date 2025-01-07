@@ -1,7 +1,8 @@
 import functools
 from collections import UserDict
-from typing import (TYPE_CHECKING, Any, Dict, Mapping, Optional, Protocol,
-                    Sequence, Type, TypeVar)
+from dataclasses import dataclass
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Mapping, Optional,
+                    Protocol, Sequence, Type, TypeVar)
 
 import torch.nn as nn
 
@@ -14,7 +15,9 @@ from .audio import AudioPlugin
 from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
 from .image import ImagePlugin
 from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
-from .processing import BaseMultiModalProcessor, ProcessingCache
+from .processing import ProcessingCache
+from .processor import BaseMultiModalProcessor, BaseProcessingInfo
+from .profiling import BaseDummyDataBuilder
 from .utils import cached_get_tokenizer
 from .video import VideoPlugin
 
@@ -27,18 +30,55 @@ logger = init_logger(__name__)
 MM_CACHE_SIZE = 256
 
 N = TypeVar("N", bound=Type[nn.Module])
+_I = TypeVar("_I", bound=BaseProcessingInfo)
+_I_co = TypeVar("_I_co", bound=BaseProcessingInfo, covariant=True)
 
 
-class MultiModalProcessorFactory(Protocol):
+class ProcessingInfoFactory(Protocol[_I_co]):
     """Constructs a :class:`MultiModalProcessor` instance from the context."""
 
     def __call__(
         self,
         ctx: InputProcessingContext,
+    ) -> _I_co:
+        ...
+
+
+class DummyDataBuilderFactory(Protocol[_I]):
+    """Constructs a :class:`BaseDummyDataBuilder` instance from the context."""
+
+    def __call__(self, info: _I) -> BaseDummyDataBuilder[_I]:
+        ...
+
+
+class MultiModalProcessorFactory(Protocol[_I]):
+    """Constructs a :class:`MultiModalProcessor` instance from the context."""
+
+    def __call__(
+        self,
+        info: _I,
+        dummy_data_builder: BaseDummyDataBuilder[_I],
         *,
         cache: Optional[ProcessingCache] = None,
-    ) -> BaseMultiModalProcessor:
+    ) -> BaseMultiModalProcessor[_I]:
         ...
+
+
+@dataclass(frozen=True)
+class _ProcessorFactories(Generic[_I]):
+    info: ProcessingInfoFactory[_I]
+    processor: MultiModalProcessorFactory[_I]
+    dummy_data: DummyDataBuilderFactory[_I]
+
+    def build_processor(
+        self,
+        ctx: InputProcessingContext,
+        *,
+        cache: Optional[ProcessingCache] = None,
+    ):
+        info = self.info(ctx)
+        dummy_data_builder = self.dummy_data(info)
+        return self.processor(info, dummy_data_builder, cache=cache)
 
 
 class _MultiModalLimits(UserDict["ModelConfig", Dict[str, int]]):
@@ -71,7 +111,7 @@ class MultiModalRegistry:
         self._plugins = {p.get_data_key(): p for p in plugins}
 
         self._processor_factories = ClassRegistry[nn.Module,
-                                                  MultiModalProcessorFactory]()
+                                                  _ProcessorFactories]()
 
         # This is used for non-multimodal models
         self._disabled_limits_per_plugin = {k: 0 for k in self._plugins}
@@ -224,7 +264,7 @@ class MultiModalRegistry:
             tokenizer = cached_get_tokenizer(model_config.tokenizer)
             processor = self.create_processor(model_config, tokenizer)
             seq_len = model_config.max_model_len
-            return processor.profiling_info.get_mm_max_tokens_per_item(seq_len)
+            return processor.info.get_mm_max_tokens_per_item(seq_len)
 
         return {
             key: plugin.get_max_multimodal_tokens(model_config)
@@ -315,7 +355,10 @@ class MultiModalRegistry:
 
     def register_processor(
         self,
-        factory: MultiModalProcessorFactory,
+        processor: MultiModalProcessorFactory[_I],
+        *,
+        info: ProcessingInfoFactory[_I],
+        dummy_data: DummyDataBuilderFactory[_I],
     ):
         """
         Register a multi-modal processor to a model class. The processor
@@ -336,7 +379,11 @@ class MultiModalRegistry:
                     "registered to %s. It is overwritten by the new one.",
                     model_cls, self)
 
-            self._processor_factories[model_cls] = factory
+            self._processor_factories[model_cls] = _ProcessorFactories(
+                info=info,
+                dummy_data=dummy_data,
+                processor=processor,
+            )
 
             return model_cls
 
@@ -359,15 +406,15 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         tokenizer: AnyTokenizer,
-    ) -> BaseMultiModalProcessor:
+    ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
         Create a multi-modal processor for a specific model and tokenizer.
         """
         model_cls = self._get_model_cls(model_config)
-        processor_factory = self._processor_factories[model_cls]
+        factories = self._processor_factories[model_cls]
 
         ctx = InputProcessingContext(model_config, tokenizer)
         cache = (None if model_config.disable_mm_preprocessor_cache else
                  self._processing_cache)
 
-        return processor_factory(ctx, cache=cache)
+        return factories.build_processor(ctx, cache=cache)
