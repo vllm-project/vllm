@@ -1,6 +1,6 @@
-(deploying-with-dstack)=
+(deployment-dstack)=
 
-# Deploying with dstack
+# dstack
 
 ```{raw} html
 <p align="center">

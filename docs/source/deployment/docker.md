@@ -1,6 +1,6 @@
-(deploying-with-docker)=
+(deployment-docker)=
 
-# Deploying with Docker
+# Using Docker
 
 ## Use vLLM's Official Docker Image
 

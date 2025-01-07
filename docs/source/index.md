@@ -66,31 +66,13 @@ getting_started/faq
 ```
 
 ```{toctree}
-:caption: Serving
-:maxdepth: 1
-
-serving/openai_compatible_server
-serving/deploying_with_docker
-serving/deploying_with_k8s
-serving/deploying_with_helm
-serving/deploying_with_nginx
-serving/distributed_serving
-serving/metrics
-serving/integrations
-serving/tensorizer
-serving/runai_model_streamer
-serving/engine_args
-serving/env_vars
-serving/usage_stats
-```
-
-```{toctree}
 :caption: Models
 :maxdepth: 1
 
-models/supported_models
 models/generative_models
 models/pooling_models
+models/supported_models
+models/extensions/index
 ```
 
 ```{toctree}
@@ -99,13 +81,38 @@ models/pooling_models
 
 features/quantization/index
 features/lora
-features/multimodal_inputs
 features/tool_calling
 features/structured_outputs
 features/automatic_prefix_caching
 features/disagg_prefill
 features/spec_decode
 features/compatibility_matrix
+```
+
+```{toctree}
+:caption: Inference and Serving
+:maxdepth: 1
+
+serving/offline_inference
+serving/openai_compatible_server
+serving/multimodal_inputs
+serving/distributed_serving
+serving/metrics
+serving/engine_args
+serving/env_vars
+serving/usage_stats
+serving/integrations/index
+```
+
+```{toctree}
+:caption: Deployment
+:maxdepth: 1
+
+deployment/docker
+deployment/k8s
+deployment/nginx
+deployment/frameworks/index
+deployment/integrations/index
 ```
 
 ```{toctree}
@@ -162,6 +169,7 @@ contributing/overview
 contributing/profiling/profiling_index
 contributing/dockerfile/dockerfile
 contributing/model/index
+contributing/vulnerability_management
 ```
 
 # Indices and tables

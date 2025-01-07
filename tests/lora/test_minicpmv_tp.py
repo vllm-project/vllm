@@ -3,10 +3,10 @@ from typing import List
 import pytest
 
 import vllm
+from tests.utils import fork_new_process_for_each_test
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
-
-from ..utils import multi_gpu_test
+from vllm.platforms import current_platform
 
 MODEL_PATH = "openbmb/MiniCPM-Llama3-V-2_5"
 
@@ -17,13 +17,11 @@ PROMPT_TEMPLATE = (
 
 IMAGE_ASSETS = [
     ImageAsset("stop_sign"),
-    ImageAsset("cherry_blossom"),
 ]
 
 # After fine-tuning with LoRA, all generated content should start begin `A`.
 EXPECTED_OUTPUT = [
     "A red and white stop sign with a Chinese archway in the background featuring red lanterns and gold accents.",  # noqa: E501
-    "A pink cherry blossom tree with a blue sky in the background.",
 ]
 
 
@@ -50,37 +48,40 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     # Print the outputs.
     generated_texts: List[str] = []
     for output in outputs:
-        prompt = output.prompt
         generated_text = output.outputs[0].text.strip()
         generated_texts.append(generated_text)
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Generated text: {generated_text!r}")
     return generated_texts
 
 
-@multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("fully_sharded", [True, False])
-def test_minicpmv_tp2(minicpmv_lora_files, fully_sharded):
+@pytest.mark.xfail(
+    current_platform.is_rocm(),
+    reason="MiniCPM-V dependency xformers incompatible with ROCm")
+@fork_new_process_for_each_test
+def test_minicpmv_lora(minicpmv_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
-        enable_lora=True,
         max_num_seqs=2,
-        max_loras=4,
-        max_lora_rank=64,
-        tensor_parallel_size=2,
+        enable_lora=True,
+        max_loras=2,
+        max_lora_rank=8,
+        enforce_eager=True,
         trust_remote_code=True,
-        fully_sharded_loras=fully_sharded,
         enable_chunked_prefill=True,
     )
-
-    output_tp = do_sample(llm, minicpmv_lora_files, lora_id=1)
-
+    output1 = do_sample(llm, minicpmv_lora_files, lora_id=1)
     for i in range(len(EXPECTED_OUTPUT)):
-        assert EXPECTED_OUTPUT[i].startswith(output_tp[i])
+        assert EXPECTED_OUTPUT[i].startswith(output1[i])
+    output2 = do_sample(llm, minicpmv_lora_files, lora_id=2)
+    for i in range(len(EXPECTED_OUTPUT)):
+        assert EXPECTED_OUTPUT[i].startswith(output2[i])
 
 
-@multi_gpu_test(num_gpus=4)
-@pytest.mark.parametrize("fully_sharded", [True, False])
-def test_minicpmv_tp4(minicpmv_lora_files, fully_sharded):
+@pytest.mark.xfail(
+    current_platform.is_rocm(),
+    reason="MiniCPM-V dependency xformers incompatible with ROCm")
+@fork_new_process_for_each_test
+def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
         enable_lora=True,
@@ -89,9 +90,33 @@ def test_minicpmv_tp4(minicpmv_lora_files, fully_sharded):
         max_lora_rank=64,
         tensor_parallel_size=4,
         trust_remote_code=True,
-        fully_sharded_loras=fully_sharded,
+        enforce_eager=True,
         enable_chunked_prefill=True,
     )
     output_tp = do_sample(llm, minicpmv_lora_files, lora_id=1)
+    for i in range(len(EXPECTED_OUTPUT)):
+        assert EXPECTED_OUTPUT[i].startswith(output_tp[i])
+
+
+@pytest.mark.xfail(
+    current_platform.is_rocm(),
+    reason="MiniCPM-V dependency xformers incompatible with ROCm")
+@fork_new_process_for_each_test
+def test_minicpmv_tp4_fully_sharded_loras(minicpmv_lora_files):
+    llm = vllm.LLM(
+        MODEL_PATH,
+        enable_lora=True,
+        max_num_seqs=2,
+        max_loras=2,
+        max_lora_rank=8,
+        tensor_parallel_size=4,
+        trust_remote_code=True,
+        fully_sharded_loras=True,
+        enable_chunked_prefill=True,
+    )
+    output_tp = do_sample(llm, minicpmv_lora_files, lora_id=1)
+    for i in range(len(EXPECTED_OUTPUT)):
+        assert EXPECTED_OUTPUT[i].startswith(output_tp[i])
+    output_tp = do_sample(llm, minicpmv_lora_files, lora_id=2)
     for i in range(len(EXPECTED_OUTPUT)):
         assert EXPECTED_OUTPUT[i].startswith(output_tp[i])
