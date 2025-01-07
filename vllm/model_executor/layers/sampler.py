@@ -528,7 +528,7 @@ def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
         output_tokens_tensor, vocab_size, num_seqs)
 
     repetition_penalties = repetition_penalties[:, None].repeat(1, vocab_size)
-    repetition_penalties[~(prompt_mask | output_mask)] = 1.0
+    repetition_penalties.masked_fill_(~(prompt_mask | output_mask), 1.0)
     logits = torch.where(logits > 0, logits / repetition_penalties,
                          logits * repetition_penalties)
 

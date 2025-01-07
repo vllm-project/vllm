@@ -9,6 +9,7 @@ import getpass
 import importlib.util
 import inspect
 import ipaddress
+import math
 import os
 import signal
 import socket
@@ -822,6 +823,30 @@ def make_ndarray_with_pad(
     return padded_x
 
 
+def make_ndarray_with_pad_align(
+    x: List[List[T]],
+    pad: T,
+    dtype: npt.DTypeLike,
+    *,
+    max_len_align: int = 1024,
+) -> npt.NDArray:
+    """
+    Make a padded array from 2D inputs.
+    The padding is applied to the end of each inner list until it reaches
+    `max_len`.
+    """
+    # Unlike for most functions, map is faster than a genexpr over `len`
+    max_len = max(map(len, x), default=0)
+    max_len_aligned = math.ceil(max_len / max_len_align) * max_len_align
+    padded_x = np.full((len(x), max_len_aligned), pad, dtype=dtype)
+
+    for ind, blocktb in enumerate(x):
+        assert len(blocktb) <= max_len_aligned
+        padded_x[ind, :len(blocktb)] = blocktb
+
+    return padded_x
+
+
 def make_tensor_with_pad(
     x: List[List[T]],
     pad: T,
@@ -839,6 +864,34 @@ def make_tensor_with_pad(
     """
     np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
     padded_x = make_ndarray_with_pad(x, pad, np_dtype, max_len=max_len)
+
+    tensor = torch.from_numpy(padded_x).to(device)
+    if pin_memory:
+        tensor = tensor.pin_memory()
+
+    return tensor
+
+
+def make_tensor_with_pad_align(
+    x: List[List[T]],
+    pad: T,
+    dtype: torch.dtype,
+    *,
+    max_len_align: int = 1024,
+    device: Optional[Union[str, torch.device]] = None,
+    pin_memory: bool = False,
+) -> torch.Tensor:
+    """
+    Make a padded tensor from 2D inputs.
+    The padding is applied to the end of each inner list until it reaches
+    max_len_aligned, max_len_aligned is max_len rounding to the nearest 
+    `max_len_align`.
+    """
+    np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
+    padded_x = make_ndarray_with_pad_align(x,
+                                           pad,
+                                           np_dtype,
+                                           max_len_align=max_len_align)
 
     tensor = torch.from_numpy(padded_x).to(device)
     if pin_memory:
