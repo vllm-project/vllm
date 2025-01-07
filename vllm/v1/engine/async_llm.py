@@ -41,7 +41,6 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
     ) -> None:
 
-        self.engine_core_errored = False
         self.log_requests = log_requests
         self.log_stats = log_stats
         self.stat_loggers = stat_loggers
@@ -154,7 +153,7 @@ class AsyncLLM(EngineClient):
     ) -> asyncio.Queue[RequestOutput]:
         """Add new request to the AsyncLLM."""
 
-        if self.engine_core_errored:
+        if self.errored:
             raise EngineDeadError()
 
         # 1) Create a new output queue for the request.
@@ -298,11 +297,10 @@ class AsyncLLM(EngineClient):
         except Exception as e:
             logger.error("AsyncLLM output_handler got an Exception:",
                          exc_info=e)
-            self._set_errored_and_propagate()
+            self._propagate_error()
 
-    def _set_errored_and_propagate(self):
+    def _propagate_error(self):
         """Propagate to all generate() tasks."""
-        self.engine_core_errored = True
 
         # Put EngineDeadError() into each generate() task's queue,
         # each of which will raise it in their own context.
@@ -377,7 +375,7 @@ class AsyncLLM(EngineClient):
 
     @property
     def errored(self) -> bool:
-        return self.engine_core_errored
+        return self.engine_core.engine_core_errored
 
     @property
     def dead_error(self) -> BaseException:

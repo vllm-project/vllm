@@ -252,19 +252,14 @@ class AsyncMPClient(MPClient):
                  log_stats: bool = False):
 
         # EngineCore sends SIGUSR1 when it gets an Exception.
-        def sigusr1_handler_asyncio():
-            self._sigusr1_handler()
-
-        asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1,
-                                                      sigusr1_handler_asyncio)
-
-        # super().__init__ blocks the event loop until background
-        # procs are setup. This handler allows us to catch issues
-        # during startup.
+        # NOTE: super().__init__ blocks the event loop until 
+        # background procs are setup. This handler allows us
+        # to catch  issues during startup (e.g. OOM). We switch 
+        # to a signal handler in the event loop __init__.
         def sigusr1_handler(signum, frame):
             self._sigusr1_handler()
 
-        signal.signal(signal.SIGUSR1, sigusr1_handler)
+        # signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         # Initialize EngineCore + all background processes.
         super().__init__(
@@ -274,8 +269,17 @@ class AsyncMPClient(MPClient):
             log_stats=log_stats,
         )
 
-        # Remove the non-asyncio handler.
-        signal.signal(signal.SIGUSR1, signal.SIG_DFL)
+        # Unregister the hander in the main trhead, 
+        # signal.signal(signal.SIGUSR1, signal.SIG_DFL)
+
+        # NOTE TO SELF: putting this in AsyncMPClient is causing issues
+        # where the AsyncLLM is not triggering shutdown since the Excpections
+        # are not being raised. TODO: move it back to AsyncLLM.
+        def sigusr1_handler_asyncio():
+            self._sigusr1_handler()
+
+        asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1,
+                                                      sigusr1_handler_asyncio)
 
     async def get_output_async(self) -> List[EngineCoreOutput]:
         try:
