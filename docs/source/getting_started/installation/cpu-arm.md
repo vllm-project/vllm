@@ -2,7 +2,7 @@
 
 # Installation for ARM CPUs
 
-vLLM has been adapted to work on ARM64 CPUs with NEON support, leveraging the CPU backend initially developed for the x86 platform. This guide provides installation instructions specific to ARM (including Apple Silicon). For additional details on supported features, refer to the [x86 CPU documentation](#installation-x86) covering:
+vLLM has been adapted to work on ARM64 CPUs with NEON support, leveraging the CPU backend initially developed for the x86 platform. This guide provides installation instructions specific to ARM (which also apply to Apple Silicon, see [Installation for macOS](#installation-apple) for more). For additional details on supported features, refer to the [x86 CPU documentation](#installation-x86) covering:
 
 - CPU backend inference capabilities
 - Relevant runtime environment variables
