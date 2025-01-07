@@ -295,7 +295,8 @@ class FusedMoE(torch.nn.Module):
             hidden_size=hidden_size,
             intermediate_size=self.intermediate_size_per_partition,
             params_dtype=params_dtype,
-            weight_loader=self.weight_loader)
+            weight_loader=self.weight_loader,
+            intermediate_full=intermediate_size)
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
                                       param: torch.nn.Parameter,
@@ -312,19 +313,19 @@ class FusedMoE(torch.nn.Module):
         elif shard_id == "w2":
             param_data[expert_id] = loaded_weight
 
-    def _load_model_weight_or_group_weight_scale(self, shard_dim: int,
-                                                 expert_data: torch.Tensor,
-                                                 shard_id: str,
-                                                 loaded_weight: torch.Tensor,
-                                                 tp_rank: int):
+    def _load_model_weight_or_group_weight_scale(
+            self, shard_dim: int, expert_data: torch.Tensor, shard_id: str,
+            loaded_weight: torch.Tensor, tp_rank: int, load_full_w2: bool):
         # Load grouped weight scales for group quantization
         # or model weights
+        # In act_order scenario, we need to load full w2 scales
         if shard_id == "w2":
             self._load_w2(shard_id=shard_id,
                           shard_dim=shard_dim,
                           loaded_weight=loaded_weight,
                           expert_data=expert_data,
-                          tp_rank=tp_rank)
+                          tp_rank=tp_rank,
+                          load_full=load_full_w2)
         elif shard_id in ("w1", "w3"):
             self._load_w13(shard_id=shard_id,
                            shard_dim=shard_dim,
@@ -365,14 +366,17 @@ class FusedMoE(torch.nn.Module):
         expert_data.copy_(loaded_weight)
 
     def _load_w2(self, expert_data: torch.Tensor, shard_dim: int,
-                 shard_id: str, loaded_weight: torch.Tensor, tp_rank: int):
+                 shard_id: str, loaded_weight: torch.Tensor, tp_rank: int,
+                 load_full: bool):
 
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim
         # Narrow parameter and load.
         shard_size = expert_data.shape[shard_dim]
-        loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
-                                             shard_size)
+        if not load_full:
+            loaded_weight = loaded_weight.narrow(shard_dim,
+                                                 shard_size * tp_rank,
+                                                 shard_size)
         # w2, down_proj: Load into only logical weight of w2.
         expert_data.copy_(loaded_weight)
 
@@ -391,7 +395,8 @@ class FusedMoE(torch.nn.Module):
                           shard_dim=shard_dim,
                           loaded_weight=loaded_weight,
                           expert_data=expert_data,
-                          tp_rank=tp_rank)
+                          tp_rank=tp_rank,
+                          load_full=False)
         else:
             assert shard_id in ("w1", "w3")
             expert_data.copy_(loaded_weight)
@@ -480,7 +485,8 @@ class FusedMoE(torch.nn.Module):
                     shard_dim=shard_dim,
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
-                    tp_rank=tp_rank)
+                    tp_rank=tp_rank,
+                    load_full_w2=True)
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 self._load_per_tensor_weight_scale(shard_id=shard_id,
                                                    param=param,
@@ -506,7 +512,8 @@ class FusedMoE(torch.nn.Module):
                 shard_dim=shard_dim,
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
-                tp_rank=tp_rank)
+                tp_rank=tp_rank,
+                load_full_w2=False)
             return
 
     @staticmethod

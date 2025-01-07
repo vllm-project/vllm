@@ -269,7 +269,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size: int,
-                       params_dtype: torch.dtype, **extra_weight_attrs):
+                       intermediate_full: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
 
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
@@ -296,11 +297,15 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w2_weight_packed", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
+        self.is_k_full = (intermediate_full == intermediate_size)
+        scales_size = (intermediate_full if self.actorder
+                       and self.group_size != -1 else intermediate_size)
+
         if self.strategy == "channel":
             num_groups_w2 = num_groups_w13 = 1
             self.group_size = -1
         else:
-            num_groups_w2 = intermediate_size // self.group_size
+            num_groups_w2 = scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 
         w13_scale = torch.nn.Parameter(torch.ones(num_experts,
@@ -547,4 +552,5 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             sort_indices1=layer.w13_g_idx_sort_indices,
             sort_indices2=layer.w2_g_idx_sort_indices,
             num_bits=self.num_bits,
+            is_k_full=self.is_k_full,
         )
