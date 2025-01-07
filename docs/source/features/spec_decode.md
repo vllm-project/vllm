@@ -173,7 +173,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 llm = LLM(
-    model="meta-llama/Meta-Llama-3.1-70B-Instruct",
+    model="meta-llama/Meta-Llama-3-8B-Instruct",
     tensor_parallel_size=4,
     speculative_model="path/to/modified/eagle/model",
     speculative_draft_tensor_parallel_size=1,
@@ -196,7 +196,7 @@ A few important things to consider when using the EAGLE based draft models:
    to convert them. Note that this script does not modify the model's weights.
 
    In the above example, use the script to first convert
-   the [yuhuili/EAGLE-LLaMA3-Instruct-70B](https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-70B) model 
+   the [yuhuili/EAGLE-LLaMA3-Instruct-8B](https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-8B) model 
    and then use the converted checkpoint as the draft model in vLLM.
 
 2. The EAGLE based draft models need to be run without tensor parallelism
