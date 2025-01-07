@@ -132,7 +132,8 @@ class Example:
             ROOT_DIR)
 
         content = f"Source <gh-file:{self.path.relative_to(ROOT_DIR)}>.\n\n"
-        include = "include" if self.main_file.suffix == ".md" else "literalinclude"
+        include = "include" if self.main_file.suffix == ".md" else \
+            "literalinclude"
         if include == "literalinclude":
             content += f"# {self.title}\n\n"
         content += f":::{{{include}}} {make_relative(self.main_file)}\n"

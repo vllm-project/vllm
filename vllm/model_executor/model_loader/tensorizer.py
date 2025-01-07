@@ -363,13 +363,12 @@ class TensorizerAgent:
 def tensorizer_weights_iterator(
     tensorizer_args: "TensorizerArgs"
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
-    logger.warning(
-        "Deserializing HuggingFace models is not optimized for "
-        "loading on vLLM, as tensorizer is forced to load to CPU. "
-        "Consider deserializing a vLLM model instead for faster "
-        "load times. See the "
-        "examples/other/tensorize_vllm_model.py example script "
-        "for serializing vLLM models.")
+    logger.warning("Deserializing HuggingFace models is not optimized for "
+                   "loading on vLLM, as tensorizer is forced to load to CPU. "
+                   "Consider deserializing a vLLM model instead for faster "
+                   "load times. See the "
+                   "examples/other/tensorize_vllm_model.py example script "
+                   "for serializing vLLM models.")
 
     deserializer_args = tensorizer_args.deserializer_params
     stream_params = tensorizer_args.stream_params
