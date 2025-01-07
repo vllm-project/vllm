@@ -15,7 +15,9 @@ from vllm.platforms import PlatformEnum, current_platform
 _POSSIBLE_KERNELS: Dict[PlatformEnum, List[Type[ScaledMMLinearKernel]]] = {
     PlatformEnum.CPU: [CutlassScaledMMLinearKernel],
     PlatformEnum.CUDA: [CutlassScaledMMLinearKernel],
-    # PlatformEnum.ROCM: [TritonScaledMMLinearKernel],
+    # TODO(rob): Create TritonScaledMMLinear kernel. ROCM will
+    # incorrectly attempt to run AZP models if prompted to.
+    PlatformEnum.ROCM: [CutlassScaledMMLinearKernel],
     PlatformEnum.TPU: [XLAScaledMMLinearKernel],
 }
 
