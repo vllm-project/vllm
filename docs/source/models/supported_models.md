@@ -430,6 +430,9 @@ You can set `--hf-overrides '{"is_causal": false}'` to change the attention mask
 
 On the other hand, its 1.5B variant (`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
 despite being described otherwise on its model card.
+
+Regardless of the variant, you need to enable `--trust-remote-code` for the correct tokenizer to be
+loaded. See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
