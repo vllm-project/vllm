@@ -1,7 +1,7 @@
 from typing import Optional, Tuple
 
-from functorch.experimental.control_flow import cond  # noqa: F401
 import torch
+from functorch.experimental.control_flow import cond  # noqa: F401
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -66,13 +66,12 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         setattr(layer, self.i_zp_name, None)
         setattr(layer, self.azp_adj_name, None)
 
-    def _no_add_bias(self, x: torch.Tensor, bias: Optional[torch.Tensor]):
+    def no_add_bias(self, x: torch.Tensor, bias: Optional[torch.Tensor]):
         return x
 
-    def _add_bias(self, x: torch.Tensor, bias: Optional[torch.Tensor]):
+    def add_bias(self, x: torch.Tensor, bias: Optional[torch.Tensor]):
         return x + bias
 
-        
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
@@ -90,4 +89,4 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
 
         # Explicitly capture control flow to make dynamo happy.
         # https://pytorch.org/docs/main/generated/exportdb/index.html#cond-branch-class-method # noqa: E501
-        return cond(bias, self._add_bias, self._no_add_bias, [out, bias])
+        return cond(bias is None, self.no_add_bias, self.add_bias, [out, bias])

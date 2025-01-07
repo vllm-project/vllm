@@ -15,7 +15,7 @@ class GSM8KAccuracyTestConfig:
 
     def get_model_args(self) -> str:
         return (f"pretrained={self.model_name},"
-                "max_model_len=4096,max_num_seqs=128")
+                "max_model_len=4096,max_num_seqs=128,tensor_parallel_size=4")
 
 
 # NOTE: Accuracy scores measured on GPUs.
@@ -28,7 +28,7 @@ ACCURACY_CONFIGS = [
     # a follow up, move this into the LM-EVAL section of the CI.
     # GSM8KAccuracyTestConfig(
     #     model_name="neuralmagic/Qwen2-7B-Instruct-quantized.w8a8",
-        # excepted_value=0.66), # bias in QKV layers
+    # excepted_value=0.66), # bias in QKV layers
 ]
 
 
