@@ -40,6 +40,7 @@ fi
 # Run the docker command with the user specified parameters and additional arguments
 docker run \
     --entrypoint /bin/bash \
+    --userns host \
     --network host \
     --name node \
     --shm-size 10.24g \
