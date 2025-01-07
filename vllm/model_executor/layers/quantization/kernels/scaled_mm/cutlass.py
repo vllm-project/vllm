@@ -89,7 +89,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         # https://github.com/vllm-project/vllm/blob/8d59dbb00044a588cab96bcdc028006ed922eb06/csrc/quantization/cutlass_w8a8/Epilogues.md
         if not self.config.input_symmetric:
             weight = getattr(layer, self.w_q_name)
-            azp_adj = layer.weight.sum(dim=0, keepdim=True, dtype=torch.int32)
+            azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.int32)
             if self.config.is_static_input_scheme:
                 # cutlass_w8a8 requires azp to be folded into azp_adj
                 # in the per-tensor case
