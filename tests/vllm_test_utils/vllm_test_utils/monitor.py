@@ -37,8 +37,10 @@ def monitor(
 
     def _trace_calls(frame, event, arg=None):
         nonlocal monitored_values
-        if event in ['call', 'return']:
-            # for every function call or return
+        if event in ['line']:
+            # triggered by every line of Python code.
+            # only Python functions will trigger it,
+            # c/cpp functions will not trigger it.
             try:
                 # Temporarily disable the trace function
                 sys.settrace(None)
