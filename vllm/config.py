@@ -2613,12 +2613,6 @@ class CompilationLevel:
     PIECEWISE = 3
 
 
-@dataclass
-class LayerForwardContext:
-    attn_module: Any  # vllm.attention.layer.Attention
-    kv_cache: Any  # torch.Tensor
-
-
 class CompilationConfig(BaseModel):
     """
     Configuration for compilation.

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.config import LayerForwardContext, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -25,7 +25,7 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 @dataclass
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
-    layers: Dict[str, LayerForwardContext]
+    layers: Dict[str, Any]
     # TODO: extend to support per-layer dynamic forward context
     attn_metadata: "AttentionMetadata"  # set dynamically for each forward pass
 
