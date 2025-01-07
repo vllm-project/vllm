@@ -227,12 +227,14 @@ class Qwen2AudioMultiModalProcessor(Qwen2AudioProcessingMixin,
         ]
 
     def _always_apply_prompt_replacements(self) -> bool:
-        # HF never applies prompt replacements, so we have to do it ourselves.
+        # Qwen2-Audio processor will start inserting placeholder tokens
+        # in an upcoming release:
+        # https://github.com/huggingface/transformers/pull/35534
         # NOTE: `_find_placeholders_by_modality` may incorrectly think that HF
         # has already performed processing for multi-audio input when the input
         # audios are short (the corresponding placeholders may take up fewer
         # tokens than the number of audio items)
-        return True
+        return not hasattr(self._get_hf_processor(), "audio_token")
 
 
 @MULTIMODAL_REGISTRY.register_processor(Qwen2AudioMultiModalProcessor)
