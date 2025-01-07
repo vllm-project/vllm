@@ -67,8 +67,8 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         setattr(layer, self.i_zp_name, None)
         setattr(layer, self.azp_adj_name, None)
 
-        # Filter warning for cond usage in apply_weights. It is okay to
-        # specialize the graph since bias is not dynamic.
+        # Filter warning for cond usage in apply_weights. It is okay 
+        # to specialize the graph since bias is not dynamic.
         warnings.filterwarnings(
             "ignore",
             message=
