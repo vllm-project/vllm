@@ -22,11 +22,16 @@ $ conda create -n myenv python=3.12 -y
 $ conda activate myenv
 ```
 
+```{note}
+[PyTorch has deprecated the conda release channel](https://github.com/pytorch/pytorch/issues/138506). If you use `conda`, please only use it to create Python environment rather than installing packages. In particular, the PyTorch installed via `conda` will statically linked `NCCL` library, which can cause issues when vLLM tries to use `NCCL`. See <gh-issue:8420> for more details.
+```
+
 Or you can create a new Python environment using [uv](https://docs.astral.sh/uv/), a very fast Python environment manager. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment using the following command:
 
 ```console
 $ # (Recommended) Create a new uv environment. Use `--seed` to install `pip` and `setuptools` in the environment.
 $ uv venv myenv --python 3.12 --seed
+$ source myenv/bin/activate
 ```
 
 In order to be performant, vLLM has to compile many cuda kernels. The compilation unfortunately introduces binary incompatibility with other CUDA versions and PyTorch versions, even for the same PyTorch version with different building configurations.
@@ -35,16 +40,12 @@ Therefore, it is recommended to install vLLM with a **fresh new** environment. I
 
 ### Install vLLM
 
-You can install vLLM using `pip` or `uv pip`:
+You can install vLLM using either `pip` or `uv pip`:
 
 ```console
 $ # Install vLLM with CUDA 12.1.
 $ pip install vllm # If you are using pip.
 $ uv pip install vllm # If you are using uv.
-```
-
-```{note}
-Please do not use `conda` to install `vllm`. `conda` installs `torch` with statically linked `NCCL`. This can cause issues when vLLM tries to use `NCCL`. See <gh-issue:8420> for more details.
 ```
 
 ````{note}
@@ -79,7 +80,7 @@ $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm
 
 Note that the wheels are built with Python 3.8 ABI (see [PEP 425](https://peps.python.org/pep-0425/) for more details about ABI), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (`1.0.0.dev`) is just a placeholder to have a unified URL for the wheels. The actual versions of wheels are contained in the wheel metadata. Although we don't support Python 3.8 any more (because PyTorch 2.5 dropped support for Python 3.8), the wheels are still built with Python 3.8 ABI to keep the same wheel name as before.
 
-Due to the limitation of `pip`, you have to specify the full URL of the wheel file
+Due to the limitation of `pip`, you have to specify the full URL of the wheel file.
 
 ### Install the latest code using `uv`
 
@@ -92,11 +93,11 @@ $ uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly
 If you want to access the wheels for previous commits, you can specify the commit hash in the URL:
 
 ```console
-$ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
+$ export VLLM_COMMIT=eb881ed006ca458b052905e33f0d16dbb428063a # use full commit hash from the main branch
 $ uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
 ```
 
-The `uv` approach works for vLLM `v0.6.6` and later.
+The `uv` approach works for vLLM `v0.6.6` and later. What's unique about `uv`, is that packages in `--extra-index-url` has [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes), while `pip` will combine packages from `--extra-index-url` and the default index, and only choose the latest version, which makes it impossible to easily install a developing version before the released version.
 
 ### Install the latest code using docker
 
