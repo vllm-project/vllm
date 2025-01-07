@@ -45,7 +45,7 @@ You can preview the collected data by running the following command:
 tail ~/.config/vllm/usage_stats.json
 ```
 
-## Opt-out of Usage Stats Collection
+## Opting out
 
 You can opt-out of usage stats collection by setting the `VLLM_NO_USAGE_STATS` or `DO_NOT_TRACK` environment variable, or by creating a `~/.config/vllm/do_not_track` file:
 

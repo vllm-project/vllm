@@ -18,7 +18,7 @@ To input multi-modal data, follow this schema in {class}`vllm.inputs.PromptType`
 
 ### Image
 
-You can pass a single image to the {code}`'image'` field of the multi-modal dictionary, as shown in the following examples:
+You can pass a single image to the `'image'` field of the multi-modal dictionary, as shown in the following examples:
 
 ```python
 llm = LLM(model="llava-hf/llava-1.5-7b-hf")
@@ -122,21 +122,21 @@ for o in outputs:
 
 ### Video
 
-You can pass a list of NumPy arrays directly to the {code}`'video'` field of the multi-modal dictionary
+You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
 instead of using multi-image input.
 
 Full example: <gh-file:examples/offline_inference_vision_language.py>
 
 ### Audio
 
-You can pass a tuple {code}`(array, sampling_rate)` to the {code}`'audio'` field of the multi-modal dictionary.
+You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
 
 Full example: <gh-file:examples/offline_inference_audio_language.py>
 
 ### Embedding
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
-pass a tensor of shape {code}`(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
+pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
 
 ```python
 # Inference with image embeddings as input
@@ -294,7 +294,7 @@ $ export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
 ### Video
 
-Instead of {code}`image_url`, you can pass a video file via {code}`video_url`. Here is a simple example using [LLaVA-OneVision](https://huggingface.co/llava-hf/llava-onevision-qwen2-0.5b-ov-hf).
+Instead of `image_url`, you can pass a video file via `video_url`. Here is a simple example using [LLaVA-OneVision](https://huggingface.co/llava-hf/llava-onevision-qwen2-0.5b-ov-hf).
 
 First, launch the OpenAI-compatible server:
 
@@ -418,7 +418,7 @@ result = chat_completion_from_base64.choices[0].message.content
 print("Chat completion output from input audio:", result)
 ```
 
-Alternatively, you can pass {code}`audio_url`, which is the audio counterpart of {code}`image_url` for image input:
+Alternatively, you can pass `audio_url`, which is the audio counterpart of `image_url` for image input:
 
 ```python
 chat_completion_from_url = client.chat.completions.create(

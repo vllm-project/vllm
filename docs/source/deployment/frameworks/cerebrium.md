@@ -1,6 +1,6 @@
-(deploying-with-cerebrium)=
+(deployment-cerebrium)=
 
-# Deploying with Cerebrium
+# Cerebrium
 
 ```{raw} html
 <p align="center">

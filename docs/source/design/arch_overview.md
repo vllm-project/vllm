@@ -57,7 +57,7 @@ More API details can be found in the {doc}`Offline Inference
 
 The code for the `LLM` class can be found in <gh-file:vllm/entrypoints/llm.py>.
 
-### OpenAI-compatible API server
+### OpenAI-Compatible API Server
 
 The second primary interface to vLLM is via its OpenAI-compatible API server.
 This server can be started using the `vllm serve` command.

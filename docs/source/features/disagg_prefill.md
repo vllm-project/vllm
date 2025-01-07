@@ -1,8 +1,12 @@
 (disagg-prefill)=
 
-# Disaggregated prefilling (experimental)
+# Disaggregated Prefilling (experimental)
 
-This page introduces you the disaggregated prefilling feature in vLLM. This feature is experimental and subject to change.
+This page introduces you the disaggregated prefilling feature in vLLM.
+
+```{note}
+This feature is experimental and subject to change.
+```
 
 ## Why disaggregated prefilling?
 

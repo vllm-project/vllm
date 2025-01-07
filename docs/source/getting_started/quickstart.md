@@ -2,20 +2,20 @@
 
 # Quickstart
 
-This guide will help you quickly get started with vLLM to:
+This guide will help you quickly get started with vLLM to perform:
 
-- [Run offline batched inference](#offline-batched-inference)
-- [Run OpenAI-compatible inference](#openai-compatible-server)
+- [Offline batched inference](#quickstart-offline)
+- [Online inference using OpenAI-compatible server](#quickstart-online)
 
 ## Prerequisites
 
 - OS: Linux
 - Python: 3.9 -- 3.12
-- GPU: compute capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
 
 ## Installation
 
-You can install vLLM using pip. It's recommended to use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments.
+If you are using NVIDIA GPUs, you can install vLLM using [pip](https://pypi.org/project/vllm/) directly.
+It's recommended to use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments.
 
 ```console
 $ conda create -n myenv python=3.10 -y
@@ -23,9 +23,11 @@ $ conda activate myenv
 $ pip install vllm
 ```
 
-Please refer to the [installation documentation](#installation-index) for more details on installing vLLM.
+```{note}
+For non-CUDA platforms, please refer [here](#installation-index) for specific instructions on how to install vLLM.
+```
 
-(offline-batched-inference)=
+(quickstart-offline)=
 
 ## Offline Batched Inference
 
@@ -73,7 +75,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-(openai-compatible-server)=
+(quickstart-online)=
 
 ## OpenAI-Compatible Server
 

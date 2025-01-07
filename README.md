@@ -77,7 +77,7 @@ pip install vllm
 Visit our [documentation](https://vllm.readthedocs.io/en/latest/) to learn more.
 - [Installation](https://vllm.readthedocs.io/en/latest/getting_started/installation.html)
 - [Quickstart](https://vllm.readthedocs.io/en/latest/getting_started/quickstart.html)
-- [Supported Models](https://vllm.readthedocs.io/en/latest/models/supported_models.html)
+- [List of Supported Models](https://vllm.readthedocs.io/en/latest/models/supported_models.html)
 
 ## Contributing
 
