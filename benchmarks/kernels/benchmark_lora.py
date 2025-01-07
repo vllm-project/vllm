@@ -722,6 +722,10 @@ def bench_torch_mm(ctx: BenchmarkContext,
                    cuda_graph_nops: Optional[int] = None) -> TMeasurement:
     """
     Benchmark basic torch.mm as a roofline.
+
+    When all the input tokens have the same LoRA ID, the LoRA kernels are just
+    a matmul. This torch.mm benchmark serves as a roofline for that case. 
+
     input op_type is used in determining the m, k, n dimensions for the matmul.
     """
 
@@ -746,9 +750,10 @@ def bench_torch_mm(ctx: BenchmarkContext,
     # Make torch.mm kwargs
     mm_kwargs = {'input': ArgPool(As), 'mat2': ArgPool(Bs), 'out': ArgPool(Cs)}
 
-    description = (f"torch.mm({dtype_to_str(dtype)}"
-                   f"x{dtype_to_str(dtype)}"
-                   f"=>{dtype_to_str(dtype)})")
+    description = (
+        f"single-lora roofline using torch.mm ({dtype_to_str(dtype)}"
+        f"x{dtype_to_str(dtype)}"
+        f"=>{dtype_to_str(dtype)})")
     cuda_graph_params = None
     if cuda_graph_nops:
         cuda_graph_params = CudaGraphBenchParams(cuda_graph_nops)
@@ -777,10 +782,18 @@ def print_timers(timers: List[TMeasurement],
     compare.print()
 
     if args and args.cuda_graph_nops:
-        print(f"The timings reported above is for {args.cuda_graph_nops} "
-              "consecutive invocations of the benchmarking functions. "
-              f"Please divide by {args.cuda_graph_nops} for single invocation "
-              "timings ")
+        print(
+            f"Note : The timings reported above is for {args.cuda_graph_nops} "
+            "consecutive invocations of the benchmarking functions. "
+            f"Please divide by {args.cuda_graph_nops} for single invocation "
+            "timings.")
+
+    print("Note on Comparison with torch.mm : The torch.mm numbers are "
+          "benchmark numbers of a simple matmul emulating the single lora "
+          "case. It is provided as a roofline for comparing our LoRA Kernel "
+          "implementations. It is expected that the LoRA kernels will be "
+          "slower than torch.mm in cases where num_loras is big. But for "
+          "small num_loras the goal should be to match the torch.mm numbers.")
 
 
 def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
