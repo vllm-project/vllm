@@ -520,18 +520,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         return get_sampler()
 
-    def _validate_pixel_values(
-        self,
-        data: Union[torch.Tensor, List[torch.Tensor]],
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
-        # Only the longest edge is equal to image_size for Pixtral-HF
-        if self.config.vision_config.model_type == "pixtral":
-            return data
-
-        if not isinstance(data, torch.Tensor):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(data)}")
-
+    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
         actual_dims = tuple(data.shape[1:])
@@ -557,9 +546,16 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
+            if self.config.vision_config.model_type == "pixtral":
+                return LlavaImagePixelInputs(
+                    type="pixel_values",
+                    data=flatten_bn(pixel_values),
+                )
+
             return LlavaImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(flatten_bn(pixel_values)),
+                data=self._validate_pixel_values(
+                    flatten_bn(pixel_values, concat=True)),
             )
 
         if image_embeds is not None:
