@@ -1157,6 +1157,12 @@ class EngineArgs:
             if self.enable_chunked_prefill and self.pipeline_parallel_size > 1:
                 raise ValueError("Multi-Step Chunked-Prefill is not supported "
                                  "for pipeline-parallel-size > 1")
+            from vllm.platforms import current_platform
+            if current_platform.is_cpu():
+                logger.warning("Multi-Step (--num-scheduler-steps > 1) is "
+                               "currently not supported for CPUs and has been "
+                               "disabled.")
+                self.num_scheduler_steps = 1
 
         # make sure num_lookahead_slots is set the higher value depending on
         # if we are using speculative decoding or multi-step
