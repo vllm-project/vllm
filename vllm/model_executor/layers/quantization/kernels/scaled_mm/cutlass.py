@@ -99,7 +99,6 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         else:
             setattr(layer, self.azp_adj_name, None)
 
-
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
