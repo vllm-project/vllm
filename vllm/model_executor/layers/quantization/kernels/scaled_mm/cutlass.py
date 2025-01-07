@@ -96,8 +96,6 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
                 azp_adj = getattr(layer, self.i_zp_name) * azp_adj
             setattr(layer, self.azp_adj_name,
                     torch.nn.Parameter(azp_adj, requires_grad=False))
-            print(f"{weight.shape=}")
-            print(f"{azp_adj.shape=}")
         else:
             setattr(layer, self.azp_adj_name, None)
 
@@ -118,13 +116,16 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
                                                symmetric=symmetric)
 
         if x_zp is not None:
+            # Currently, static is always per-tensor and dynamic is per-token
+            static = i_zp is not None
+            azp = None if static else x_zp
             return ops.cutlass_scaled_mm_azp(x_q,
                                              w_q,
                                              scale_a=x_s,
                                              scale_b=w_s,
                                              out_dtype=x.dtype,
                                              azp_adj=azp_adj,
-                                             azp=x_zp,
+                                             azp=azp,
                                              bias=bias)
         return ops.cutlass_scaled_mm(x_q,
                                      w_q,
