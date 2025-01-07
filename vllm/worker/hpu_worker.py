@@ -78,9 +78,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
 
         is_encoder_decoder_model = self._is_encoder_decoder_model()
         ModelRunnerClass: Type[HPUModelRunnerBase] = HPUModelRunner
-        if model_runner_cls is not None:
-            ModelRunnerClass = model_runner_cls
-        elif is_encoder_decoder_model:
+        if is_encoder_decoder_model:
             ModelRunnerClass = HPUEncoderDecoderModelRunner
         self.model_runner: HPUModelRunnerBase = ModelRunnerClass(
             vllm_config=vllm_config,
