@@ -18,13 +18,13 @@ After adding enough GPUs and nodes to hold the model, you can run vLLM first, wh
 There is one edge case: if the model fits in a single node with multiple GPUs, but the number of GPUs cannot divide the model size evenly, you can use pipeline parallelism, which splits the model along layers and supports uneven splits. In this case, the tensor parallel size should be 1 and the pipeline parallel size should be the number of GPUs.
 ```
 
-## Details for Distributed Inference and Serving
+## Running vLLM on a single node
 
 vLLM supports distributed tensor-parallel and pipeline-parallel inference and serving. Currently, we support [Megatron-LM's tensor parallel algorithm](https://arxiv.org/pdf/1909.08053.pdf). We manage the distributed runtime with either [Ray](https://github.com/ray-project/ray) or python native multiprocessing. Multiprocessing can be used when deploying on a single node, multi-node inferencing currently requires Ray.
 
-Multiprocessing will be used by default when not running in a Ray placement group and if there are sufficient GPUs available on the same node for the configured {code}`tensor_parallel_size`, otherwise Ray will be used. This default can be overridden via the {code}`LLM` class {code}`distributed_executor_backend` argument or {code}`--distributed-executor-backend` API server argument. Set it to {code}`mp` for multiprocessing or {code}`ray` for Ray. It's not required for Ray to be installed for the multiprocessing case.
+Multiprocessing will be used by default when not running in a Ray placement group and if there are sufficient GPUs available on the same node for the configured `tensor_parallel_size`, otherwise Ray will be used. This default can be overridden via the `LLM` class `distributed_executor_backend` argument or `--distributed-executor-backend` API server argument. Set it to `mp` for multiprocessing or `ray` for Ray. It's not required for Ray to be installed for the multiprocessing case.
 
-To run multi-GPU inference with the {code}`LLM` class, set the {code}`tensor_parallel_size` argument to the number of GPUs you want to use. For example, to run inference on 4 GPUs:
+To run multi-GPU inference with the `LLM` class, set the `tensor_parallel_size` argument to the number of GPUs you want to use. For example, to run inference on 4 GPUs:
 
 ```python
 from vllm import LLM
@@ -32,14 +32,14 @@ llm = LLM("facebook/opt-13b", tensor_parallel_size=4)
 output = llm.generate("San Franciso is a")
 ```
 
-To run multi-GPU serving, pass in the {code}`--tensor-parallel-size` argument when starting the server. For example, to run API server on 4 GPUs:
+To run multi-GPU serving, pass in the `--tensor-parallel-size` argument when starting the server. For example, to run API server on 4 GPUs:
 
 ```console
 $ vllm serve facebook/opt-13b \
 $     --tensor-parallel-size 4
 ```
 
-You can also additionally specify {code}`--pipeline-parallel-size` to enable pipeline parallelism. For example, to run API server on 8 GPUs with pipeline parallelism and tensor parallelism:
+You can also additionally specify `--pipeline-parallel-size` to enable pipeline parallelism. For example, to run API server on 8 GPUs with pipeline parallelism and tensor parallelism:
 
 ```console
 $ vllm serve gpt2 \
@@ -47,11 +47,11 @@ $     --tensor-parallel-size 4 \
 $     --pipeline-parallel-size 2
 ```
 
-## Multi-Node Inference and Serving
+## Running vLLM on multiple nodes
 
 If a single node does not have enough GPUs to hold the model, you can run the model using multiple nodes. It is important to make sure the execution environment is the same on all nodes, including the model path, the Python environment. The recommended way is to use docker images to ensure the same environment, and hide the heterogeneity of the host machines via mapping them into the same docker configuration.
 
-The first step, is to start containers and organize them into a cluster. We have provided the helper script <gh-file:examples/run_cluster.sh> to start the cluster. Please note, this script launches docker without administrative privileges that would be required to access GPU performance counters when running profiling and tracing tools. For that purpose, the script can have `CAP_SYS_ADMIN` to the docker container by using the `--cap-add` option in the docker run command.
+The first step, is to start containers and organize them into a cluster. We have provided the helper script <gh-file:examples/online_serving/run_cluster.sh> to start the cluster. Please note, this script launches docker without administrative privileges that would be required to access GPU performance counters when running profiling and tracing tools. For that purpose, the script can have `CAP_SYS_ADMIN` to the docker container by using the `--cap-add` option in the docker run command.
 
 Pick a node as the head node, and run the following command:
 

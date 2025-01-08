@@ -2,8 +2,8 @@ from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import (Any, Literal, Optional, TypedDict, TypeVar, Union, cast,
-                    final)
+from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, TypeVar,
+                    Union, cast, final)
 
 import numpy as np
 import torch
@@ -13,6 +13,9 @@ from transformers import BatchFeature
 from typing_extensions import NotRequired, TypeAlias
 
 from vllm.utils import JSONTree, full_groupby, is_list_of, json_map_leaves
+
+if TYPE_CHECKING:
+    from .hasher import MultiModalHashDict
 
 _T = TypeVar("_T")
 
@@ -96,12 +99,6 @@ class MultiModalDataBuiltins(TypedDict, total=False):
 MultiModalDataDict: TypeAlias = Mapping[str, ModalityData[Any]]
 """
 A dictionary containing an entry for each modality type to input.
-
-Note:
-    This dictionary also accepts modality keys defined outside
-    :class:`MultiModalDataBuiltins` as long as a customized plugin
-    is registered through the :class:`~vllm.multimodal.MULTIMODAL_REGISTRY`.
-    Read more on that :ref:`here <adding-multimodal-plugin>`.
 """
 
 
@@ -513,7 +510,7 @@ class MultiModalInputsV2(TypedDict):
     mm_kwargs: MultiModalKwargs
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: NotRequired[list[str]]
+    mm_hashes: NotRequired[Optional["MultiModalHashDict"]]
     """The hashes of the multi-modal data."""
 
     mm_placeholders: MultiModalPlaceholderDict

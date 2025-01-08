@@ -1,8 +1,10 @@
-# OpenAI Compatible Server
+(openai-compatible-server)=
 
-vLLM provides an HTTP server that implements OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API, and more!
+# OpenAI-Compatible Server
 
-You can start the server via the [`vllm serve`](#vllm-serve) command, or through [Docker](deploying_with_docker.md):
+vLLM provides an HTTP server that implements OpenAI's [Completions API](https://platform.openai.com/docs/api-reference/completions), [Chat API](https://platform.openai.com/docs/api-reference/chat), and more!
+
+You can start the server via the [`vllm serve`](#vllm-serve) command, or through [Docker](#deployment-docker):
 ```bash
 vllm serve NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
 ```
@@ -189,11 +191,11 @@ The order of priorities is `command line > config file values > defaults`.
 Our Completions API is compatible with [OpenAI's Completions API](https://platform.openai.com/docs/api-reference/completions);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-Code example: <gh-file:examples/openai_completion_client.py>
+Code example: <gh-file:examples/online_serving/openai_completion_client.py>
 
 #### Extra parameters
 
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.md) are supported.
+The following [sampling parameters](#sampling-params) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -220,11 +222,11 @@ We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 see our [Multimodal Inputs](#multimodal-inputs) guide for more information.
 - *Note: `image_url.detail` parameter is not supported.*
 
-Code example: <gh-file:examples/openai_chat_completion_client.py>
+Code example: <gh-file:examples/online_serving/openai_chat_completion_client.py>
 
 #### Extra parameters
 
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.md) are supported.
+The following [sampling parameters](#sampling-params) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -253,11 +255,11 @@ which will be treated as a single prompt to the model.
 This enables multi-modal inputs to be passed to embedding models, see [this page](#multimodal-inputs) for details.
 ```
 
-Code example: <gh-file:examples/openai_embedding_client.py>
+Code example: <gh-file:examples/online_serving/openai_embedding_client.py>
 
 #### Extra parameters
 
-The following [pooling parameters (click through to see documentation)](../dev/pooling_params.md) are supported.
+The following [pooling parameters](#pooling-params) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -297,7 +299,7 @@ Our Pooling API encodes input prompts using a [pooling model](../models/pooling_
 
 The input format is the same as [Embeddings API](#embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
-Code example: <gh-file:examples/openai_pooling_client.py>
+Code example: <gh-file:examples/online_serving/openai_pooling_client.py>
 
 (score-api)=
 ### Score API
@@ -307,7 +309,7 @@ Usually, the score for a sentence pair refers to the similarity between two sent
 
 You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
-Code example: <gh-file:examples/openai_cross_encoder_score.py>
+Code example: <gh-file:examples/online_serving/openai_cross_encoder_score.py>
 
 #### Single inference
 
@@ -445,7 +447,7 @@ Response:
 
 #### Extra parameters
 
-The following [pooling parameters (click through to see documentation)](../dev/pooling_params.md) are supported.
+The following [pooling parameters](#pooling-params) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python

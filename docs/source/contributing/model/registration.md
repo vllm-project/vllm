@@ -3,7 +3,7 @@
 # Model Registration
 
 vLLM relies on a model registry to determine how to run each model.
-A list of pre-registered architectures can be found on the [Supported Models](#supported-models) page.
+A list of pre-registered architectures can be found [here](#supported-models).
 
 If your model is not on this list, you must register it to vLLM.
 This page provides detailed instructions on how to do so.
@@ -16,7 +16,7 @@ This gives you the ability to modify the codebase and test your model.
 After you have implemented your model (see [tutorial](#new-model-basic)), put it into the <gh-dir:vllm/model_executor/models> directory.
 Then, add your model class to `_VLLM_MODELS` in <gh-file:vllm/model_executor/models/registry.py> so that it is automatically registered upon importing vLLM.
 You should also include an example HuggingFace repository for this model in <gh-file:tests/models/registry.py> to run the unit tests.
-Finally, update the [Supported Models](#supported-models) documentation page to promote your model!
+Finally, update our [list of supported models](#supported-models) to promote your model!
 
 ```{important}
 The list of models in each section should be maintained in alphabetical order.

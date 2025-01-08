@@ -281,6 +281,15 @@ def flatten_bn(
     ...
 
 
+@overload
+def flatten_bn(
+    x: Union[List[torch.Tensor], torch.Tensor],
+    *,
+    concat: bool = False,
+) -> Union[List[torch.Tensor], torch.Tensor]:
+    ...
+
+
 def flatten_bn(
     x: Union[List[torch.Tensor], torch.Tensor],
     *,

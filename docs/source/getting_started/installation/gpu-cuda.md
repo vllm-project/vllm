@@ -12,24 +12,43 @@ vLLM is a Python library that also contains pre-compiled C++ and CUDA (12.1) bin
 
 ## Install released versions
 
-You can install vLLM using pip:
+### Create a new Python environment
+
+You can create a new Python environment using `conda`:
 
 ```console
 $ # (Recommended) Create a new conda environment.
 $ conda create -n myenv python=3.12 -y
 $ conda activate myenv
-
-$ # Install vLLM with CUDA 12.1.
-$ pip install vllm
 ```
 
 ```{note}
-Although we recommend using `conda` to create and manage Python environments, it is highly recommended to use `pip` to install vLLM. This is because `pip` can install `torch` with separate library packages like `NCCL`, while `conda` installs `torch` with statically linked `NCCL`. This can cause issues when vLLM tries to use `NCCL`. See <gh-issue:8420> for more details.
+[PyTorch has deprecated the conda release channel](https://github.com/pytorch/pytorch/issues/138506). If you use `conda`, please only use it to create Python environment rather than installing packages. In particular, the PyTorch installed via `conda` will statically link `NCCL` library, which can cause issues when vLLM tries to use `NCCL`. See <gh-issue:8420> for more details.
 ```
 
-````{note}
-As of now, vLLM's binaries are compiled with CUDA 12.1 and public PyTorch release versions by default.
-We also provide vLLM binaries compiled with CUDA 11.8 and public PyTorch release versions:
+Or you can create a new Python environment using [uv](https://docs.astral.sh/uv/), a very fast Python environment manager. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment using the following command:
+
+```console
+$ # (Recommended) Create a new uv environment. Use `--seed` to install `pip` and `setuptools` in the environment.
+$ uv venv myenv --python 3.12 --seed
+$ source myenv/bin/activate
+```
+
+In order to be performant, vLLM has to compile many cuda kernels. The compilation unfortunately introduces binary incompatibility with other CUDA versions and PyTorch versions, even for the same PyTorch version with different building configurations.
+
+Therefore, it is recommended to install vLLM with a **fresh new** environment. If either you have a different CUDA version or you want to use an existing PyTorch installation, you need to build vLLM from source. See [below](#build-from-source) for more details.
+
+### Install vLLM
+
+You can install vLLM using either `pip` or `uv pip`:
+
+```console
+$ # Install vLLM with CUDA 12.1.
+$ pip install vllm # If you are using pip.
+$ uv pip install vllm # If you are using uv.
+```
+
+As of now, vLLM's binaries are compiled with CUDA 12.1 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 11.8 and public PyTorch release versions:
 
 ```console
 $ # Install vLLM with CUDA 11.8.
@@ -38,29 +57,47 @@ $ export PYTHON_VERSION=310
 $ pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu118
 ```
 
-In order to be performant, vLLM has to compile many cuda kernels. The compilation unfortunately introduces binary incompatibility with other CUDA versions and PyTorch versions, even for the same PyTorch version with different building configurations.
-
-Therefore, it is recommended to install vLLM with a **fresh new** conda environment. If either you have a different CUDA version or you want to use an existing PyTorch installation, you need to build vLLM from source. See below for instructions.
-````
-
 (install-the-latest-code)=
 
 ## Install the latest code
 
-LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for Linux running on a x86 platform with CUDA 12 for every commit since `v0.5.3`. You can download and install it with the following command:
+LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for Linux running on a x86 platform with CUDA 12 for every commit since `v0.5.3`.
+
+### Install the latest code using `pip`
 
 ```console
-$ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+$ pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 ```
 
-If you want to access the wheels for previous commits, you can specify the commit hash in the URL:
+`--pre` is required for `pip` to consider pre-released versions.
+
+If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), due to the limitation of `pip`, you have to specify the full URL of the wheel file by embedding the commit hash in the URL:
 
 ```console
 $ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
-$ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+$ pip install https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 ```
 
-Note that the wheels are built with Python 3.8 ABI (see [PEP 425](https://peps.python.org/pep-0425/) for more details about ABI), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (`1.0.0.dev`) is just a placeholder to have a unified URL for the wheels. The actual versions of wheels are contained in the wheel metadata. Although we don't support Python 3.8 any more (because PyTorch 2.5 dropped support for Python 3.8), the wheels are still built with Python 3.8 ABI to keep the same wheel name as before.
+Note that the wheels are built with Python 3.8 ABI (see [PEP 425](https://peps.python.org/pep-0425/) for more details about ABI), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (`1.0.0.dev`) is just a placeholder to have a unified URL for the wheels, the actual versions of wheels are contained in the wheel metadata (the wheels listed in the extra index url have correct versions). Although we don't support Python 3.8 any more (because PyTorch 2.5 dropped support for Python 3.8), the wheels are still built with Python 3.8 ABI to keep the same wheel name as before.
+
+### Install the latest code using `uv`
+
+Another way to install the latest code is to use `uv`:
+
+```console
+$ uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly
+```
+
+If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
+
+```console
+$ export VLLM_COMMIT=72d9c316d3f6ede485146fe5aabd4e61dbc59069 # use full commit hash from the main branch
+$ uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
+```
+
+The `uv` approach works for vLLM `v0.6.6` and later and offers an easy-to-remember command. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
+
+### Install the latest code using `docker`
 
 Another way to access the latest code is to use the docker images:
 
@@ -89,7 +126,7 @@ $ cd vllm
 $ VLLM_USE_PRECOMPILED=1 pip install --editable .
 ```
 
-This will download the latest nightly wheel and use the compiled libraries from there in the install.
+This will download the latest nightly wheel from https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl and use the compiled libraries from there in the installation.
 
 The `VLLM_PRECOMPILED_WHEEL_LOCATION` environment variable can be used instead of `VLLM_USE_PRECOMPILED` to specify a custom path or URL to the wheel file. For example, to use the [0.6.1.post1 PyPi wheel](https://pypi.org/project/vllm/#files):
 
