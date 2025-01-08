@@ -960,7 +960,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
         zmq_server_port = args.zmq_server_port
         if zmq_server_port is not None:
-            logger.info("asyncio.create_task Starting ZMQ server at port %d", zmq_server_port)
+            logger.info("asyncio.create_task Starting ZMQ server at port %d",
+                        zmq_server_port)
             asyncio.create_task(serve_zmq(args, zmq_server_port, app))
 
         shutdown_task = await serve_http(
