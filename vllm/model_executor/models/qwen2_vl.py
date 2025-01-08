@@ -329,9 +329,10 @@ class Qwen2VisionAttention(nn.Module):
         import math
         if use_sdp_non_causal(head_dim, q.device, q.dtype):
             import xe_addons
+            scale = 1 / math.sqrt(head_dim)
             if attention_mask is not None:
                 attention_mask = attention_mask.unsqueeze(0)
-            attn_output = xe_addons.sdp_non_causal(query, key.contiguous(), value.contiguous(), attention_mask)
+            attn_output = xe_addons.sdp_non_causal(query, key.contiguous(), value.contiguous(), attention_mask, scale)
             attn_output = attn_output.squeeze(0).transpose(0, 1)
         else:
             seq_lens = []
