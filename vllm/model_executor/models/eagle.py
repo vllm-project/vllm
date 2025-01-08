@@ -26,7 +26,8 @@ class DummyInputLayerNorm(nn.Module):
 class DummyOutputNorm(nn.Module):
 
     def forward(self, x, residual):
-        x = x + residual
+        if residual is not None:
+            x = x + residual
         return x, residual
 
 
