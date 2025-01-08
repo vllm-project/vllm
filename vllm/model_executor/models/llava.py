@@ -546,6 +546,12 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
+            if self.config.vision_config.model_type == "pixtral":
+                return LlavaImagePixelInputs(
+                    type="pixel_values",
+                    data=flatten_bn(pixel_values),
+                )
+
             return LlavaImagePixelInputs(
                 type="pixel_values",
                 data=self._validate_pixel_values(
