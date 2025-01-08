@@ -25,7 +25,7 @@ WORKDIR ${COMMON_WORKDIR}
 FROM base AS fetch_vllm_0
 ONBUILD COPY ./ vllm/
 FROM base AS fetch_vllm_1
-ARG VLLM_REPO="https://github.com/ROCm/vllm.git"
+ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
 ARG VLLM_BRANCH="main"
 ONBUILD RUN git clone ${VLLM_REPO} \
 	    && cd vllm \
@@ -74,8 +74,6 @@ RUN if [ ${BUILD_RPD} -eq "1" ]; then \
     && cd hipMarker && python3 setup.py install ; fi
 
 # Install vLLM
-# Make sure punica kernels are built (for LoRA)
-ENV VLLM_INSTALL_PUNICA_KERNELS=1
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     cd /install \
     && pip install -U -r requirements-rocm.txt \
