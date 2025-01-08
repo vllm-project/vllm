@@ -3,8 +3,6 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
                     Tuple, Union)
 
-import torch
-
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -13,6 +11,8 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+
+# import torch
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalKwargs
@@ -403,9 +403,9 @@ class Scheduler:
     ) -> List[EngineCoreOutput]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
-        logprobs_token_ids_cpu = model_runner_output.logprob_token_ids_cpu
-        logprobs_cpu = model_runner_output.logprobs_cpu
-        prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
+        # logprobs_token_ids_cpu = model_runner_output.logprob_token_ids_cpu
+        # logprobs_cpu = model_runner_output.logprobs_cpu
+        # prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
         engine_core_outputs: List[EngineCoreOutput] = []
@@ -427,9 +427,9 @@ class Scheduler:
                     # in the decoder's KV cache.
                     self.encoder_cache_manager.free(request, input_id)
 
-            # Extract prompt logprobs for this req if needed.
-            prompt_logprobs, prompt_logprobs_token_ids = (
-                prompt_logprobs_dict.get(req_id, (None, None)))
+            # # Extract prompt logprobs for this req if needed.
+            # prompt_logprobs, prompt_logprobs_token_ids = (
+            #     prompt_logprobs_dict.get(req_id, (None, None)))
 
             if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
@@ -444,15 +444,15 @@ class Scheduler:
                 # This must be called before me make the EngineCoreOutput.
                 stopped = self._check_stop(request)
 
-                # Extract sample logprobs if needed.
-                logprobs_token_ids: List[torch.Tensor] = []
-                logprobs: List[torch.Tensor] = []
-                if request.sampling_params.logprobs:
-                    assert logprobs_token_ids_cpu is not None
-                    assert logprobs_cpu is not None
-                    # Here we assume there is 1 generated token per step.
-                    logprobs_token_ids = [logprobs_token_ids_cpu[req_index]]
-                    logprobs = [logprobs_cpu[req_index]]
+                # # Extract sample logprobs if needed.
+                # logprobs_token_ids: List[torch.Tensor] = []
+                # logprobs: List[torch.Tensor] = []
+                # if request.sampling_params.logprobs:
+                #     assert logprobs_token_ids_cpu is not None
+                #     assert logprobs_cpu is not None
+                #     # Here we assume there is 1 generated token per step.
+                #     logprobs_token_ids = [logprobs_token_ids_cpu[req_index]]
+                #     logprobs = [logprobs_cpu[req_index]]
 
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
@@ -461,31 +461,32 @@ class Scheduler:
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
                     stop_reason=request.stop_reason,
-                    logprobs_token_ids=logprobs_token_ids,
-                    logprobs=logprobs,
-                    prompt_logprobs_token_ids=prompt_logprobs_token_ids,
-                    prompt_logprobs=prompt_logprobs)
+                    logprobs_token_ids=[],
+                    logprobs=[],
+                    prompt_logprobs_token_ids=None,
+                    prompt_logprobs=None)
                 engine_core_outputs.append(output)
 
                 # Breakout of the loop.
                 if stopped:
                     continue
 
-            elif prompt_logprobs is not None:
-                # Chunked prefill & prompt logprobs is enabled; transmit partial
-                # logprobs via EngineCoreOutput
-                # Add EngineCoreOutput for this Request.
-                output = EngineCoreOutput(
-                    request_id=req_id,
-                    new_token_ids=[],
-                    finished=request.is_finished(),
-                    finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason,
-                    logprobs_token_ids=[],
-                    logprobs=[],
-                    prompt_logprobs_token_ids=prompt_logprobs_token_ids,
-                    prompt_logprobs=prompt_logprobs)
-                engine_core_outputs.append(output)
+            # elif prompt_logprobs is not None:
+            #     # Chunked prefill & prompt logprobs is enabled;
+            #       transmit partial
+            #     # logprobs via EngineCoreOutput
+            #     # Add EngineCoreOutput for this Request.
+            #     output = EngineCoreOutput(
+            #         request_id=req_id,
+            #         new_token_ids=[],
+            #         finished=request.is_finished(),
+            #         finish_reason=request.get_finished_reason(),
+            #         stop_reason=request.stop_reason,
+            #         logprobs_token_ids=[],
+            #         logprobs=[],
+            #         prompt_logprobs_token_ids=prompt_logprobs_token_ids,
+            #         prompt_logprobs=prompt_logprobs)
+            #     engine_core_outputs.append(output)
 
             new_running.append(request)
         self.running = new_running
