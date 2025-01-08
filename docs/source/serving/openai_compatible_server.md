@@ -195,7 +195,7 @@ Code example: <gh-file:examples/openai_completion_client.py>
 
 #### Extra parameters
 
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.md) are supported.
+The following [sampling parameters](#sampling-params) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -226,7 +226,7 @@ Code example: <gh-file:examples/openai_chat_completion_client.py>
 
 #### Extra parameters
 
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.md) are supported.
+The following [sampling parameters](#sampling-params) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -259,7 +259,7 @@ Code example: <gh-file:examples/openai_embedding_client.py>
 
 #### Extra parameters
 
-The following [pooling parameters (click through to see documentation)](../dev/pooling_params.md) are supported.
+The following [pooling parameters](#pooling-params) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -447,7 +447,7 @@ Response:
 
 #### Extra parameters
 
-The following [pooling parameters (click through to see documentation)](../dev/pooling_params.md) are supported.
+The following [pooling parameters](#pooling-params) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python

@@ -2,8 +2,8 @@
 # to run the OpenAI compatible server.
 
 # Please update any changes made here to
-# docs/source/dev/dockerfile/dockerfile.md and
-# docs/source/assets/dev/dockerfile-stages-dependency.png
+# docs/source/contributing/dockerfile/dockerfile.md and
+# docs/source/assets/contributing/dockerfile-stages-dependency.png
 
 ARG CUDA_VERSION=12.4.1
 #################### BASE BUILD IMAGE ####################
