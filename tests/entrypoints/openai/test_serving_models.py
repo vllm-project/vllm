@@ -31,6 +31,7 @@ async def _async_serving_models_init() -> OpenAIServingModels:
                                          model_config=mock_model_config,
                                          lora_modules=None,
                                          prompt_adapters=None)
+    await serving_models.init_static_loras()
 
     return serving_models
 

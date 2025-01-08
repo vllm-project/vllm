@@ -603,7 +603,7 @@ def build_app(args: Namespace) -> FastAPI:
     return app
 
 
-def init_app_state(
+async def init_app_state(
     engine_client: EngineClient,
     model_config: ModelConfig,
     state: State,
@@ -637,6 +637,7 @@ def init_app_state(
         lora_modules=args.lora_modules,
         prompt_adapters=args.prompt_adapters,
     )
+    await state.openai_serving_models.init_static_loras()
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
@@ -734,7 +735,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         app = build_app(args)
 
         model_config = await engine_client.get_model_config()
-        init_app_state(engine_client, model_config, app.state, args)
+        await init_app_state(engine_client, model_config, app.state, args)
 
         shutdown_task = await serve_http(
             app,

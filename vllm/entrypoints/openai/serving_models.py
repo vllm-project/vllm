@@ -62,19 +62,9 @@ class OpenAIServingModels:
         self.max_model_len = model_config.max_model_len
         self.engine_client = engine_client
 
-        self.lora_requests = []
-        if lora_modules is not None:
-            self.lora_requests = [
-                LoRARequest(lora_name=lora.name,
-                            lora_int_id=i,
-                            lora_path=lora.path,
-                            base_model_name=lora.base_model_name
-                            if lora.base_model_name
-                            and self.is_base_model(lora.base_model_name) else
-                            self.base_model_paths[0].name)
-                for i, lora in enumerate(lora_modules, start=1)
-            ]
-        self.lora_id_counter = AtomicCounter(len(self.lora_requests))
+        self.static_lora_modules = lora_modules
+        self.lora_requests: List[LoRARequest] = []
+        self.lora_id_counter = AtomicCounter(0)
 
         self.prompt_adapter_requests = []
         if prompt_adapters is not None:
@@ -89,6 +79,19 @@ class OpenAIServingModels:
                         prompt_adapter_id=i,
                         prompt_adapter_local_path=prompt_adapter.local_path,
                         prompt_adapter_num_virtual_tokens=num_virtual_tokens))
+
+    async def init_static_loras(self):
+        """Loads all static LoRA modules.
+        Raises if any fail to load"""
+        if self.static_lora_modules is None:
+            return
+        for lora in self.static_lora_modules:
+            load_request = LoadLoraAdapterRequest(lora_path=lora.path,
+                                                  lora_name=lora.name)
+            load_result = await self.load_lora_adapter(
+                request=load_request, base_model_name=lora.base_model_name)
+            if isinstance(load_result, ErrorResponse):
+                raise ValueError(load_result.message)
 
     def is_base_model(self, model_name):
         return any(model.name == model_name for model in self.base_model_paths)
@@ -135,7 +138,9 @@ class OpenAIServingModels:
 
     async def load_lora_adapter(
             self,
-            request: LoadLoraAdapterRequest) -> Union[ErrorResponse, str]:
+            request: LoadLoraAdapterRequest,
+            base_model_name: Optional[str] = None
+    ) -> Union[ErrorResponse, str]:
         error_check_ret = await self._check_load_lora_adapter_request(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -145,6 +150,8 @@ class OpenAIServingModels:
         lora_request = LoRARequest(lora_name=lora_name,
                                    lora_int_id=unique_id,
                                    lora_path=lora_path)
+        if base_model_name is not None and self.is_base_model(base_model_name):
+            lora_request.base_model_name = base_model_name
 
         # Validate that the adapter can be loaded into the engine
         # This will also pre-load it for incoming requests
