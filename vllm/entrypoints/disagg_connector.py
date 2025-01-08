@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import json
 import uvicorn
 import zmq
@@ -86,7 +87,7 @@ async def chat_completions(request: Request):
         prefill_request['max_tokens'] = 1
         route = "/v1/completions"
         # finish prefill
-        async for x in execute_task_async(route, header, prefill_request, app.state.sockets_prefill):
+        async for _ in execute_task_async(route, header, prefill_request, app.state.sockets_prefill):
             continue
 
         # return decode
@@ -101,15 +102,13 @@ async def chat_completions(request: Request):
         logger.error("".join(traceback.format_exception(*exc_info)))
         
 
-async def run_connect(args, **uvicorn_kwargs) -> None:
-    logger.info("vLLM Connect start %s", args)
-    logger.info(f"start connect {args} {uvicorn_kwargs}")
+async def run_disagg_connector(args, **uvicorn_kwargs) -> None:
+    logger.info(f"vLLM Disaggregate Connector start {args} {uvicorn_kwargs}")
     logger.info(args.prefill_addr)
 
     app.state.prefill_addr = f"tcp://{args.prefill_addr}" if args.prefill_addr is not None else url_prefill
     app.state.decode_addr =  f"tcp://{args.decode_addr}" if args.decode_addr is not None else url_decode
     logger.info(f"start connect url_prefill: {app.state.prefill_addr} url_decode: {app.state.decode_addr}")
-    
     
     def signal_handler(*_) -> None:
         # Interrupt server on sigterm while initializing
