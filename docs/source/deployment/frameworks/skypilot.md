@@ -61,7 +61,7 @@ run: |
 
   echo 'Starting gradio server...'
   git clone https://github.com/vllm-project/vllm.git || true
-  python vllm/examples/gradio_openai_chatbot_webserver.py \
+  python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
     -m $MODEL_NAME \
     --port 8811 \
     --model-url http://localhost:8081/v1 \
@@ -321,7 +321,7 @@ run: |
 
   echo 'Starting gradio server...'
   git clone https://github.com/vllm-project/vllm.git || true
-  python vllm/examples/gradio_openai_chatbot_webserver.py \
+  python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
     -m $MODEL_NAME \
     --port 8811 \
     --model-url http://$ENDPOINT/v1 \

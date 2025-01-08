@@ -23,7 +23,7 @@ IMAGE_URLS = [
 class ModelRequestData(NamedTuple):
     llm: LLM
     prompt: str
-    stop_token_ids: Optional[List[str]]
+    stop_token_ids: Optional[List[int]]
     image_data: List[Image]
     chat_template: Optional[str]
 
@@ -44,12 +44,14 @@ def load_aria(question, image_urls: List[str]) -> ModelRequestData:
     prompt = (f"<|im_start|>user\n{placeholders}{question}<|im_end|>\n"
               "<|im_start|>assistant\n")
     stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]
+
     return ModelRequestData(
         llm=llm,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None)
+        chat_template=None,
+    )
 
 
 def load_h2onvl(question: str, image_urls: List[str]) -> ModelRequestData:
@@ -166,7 +168,8 @@ def load_mllama(question, image_urls: List[str]) -> ModelRequestData:
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
-    prompt = f"<|image|><|image|><|begin_of_text|>{question}"
+    placeholders = "<|image|>" * len(image_urls)
+    prompt = f"{placeholders}<|begin_of_text|>{question}"
     return ModelRequestData(
         llm=llm,
         prompt=prompt,
@@ -198,6 +201,31 @@ def load_nvlm_d(question: str, image_urls: List[str]):
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
                                            add_generation_prompt=True)
+    stop_token_ids = None
+
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
+def load_pixtral_hf(question: str, image_urls: List[str]) -> ModelRequestData:
+    model_name = "mistral-community/pixtral-12b"
+
+    # Adjust this as necessary to fit in GPU
+    llm = LLM(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        tensor_parallel_size=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = "[IMG]" * len(image_urls)
+    prompt = f"<s>[INST]{question}\n{placeholders}[/INST]"
     stop_token_ids = None
 
     return ModelRequestData(
@@ -244,7 +272,8 @@ def load_phi3v(question: str, image_urls: List[str]) -> ModelRequestData:
     )
 
 
-def load_qwenvl_chat(question: str, image_urls: List[str]) -> ModelRequestData:
+def load_qwen_vl_chat(question: str,
+                      image_urls: List[str]) -> ModelRequestData:
     model_name = "Qwen/Qwen-VL-Chat"
     llm = LLM(
         model=model_name,
@@ -274,6 +303,7 @@ def load_qwenvl_chat(question: str, image_urls: List[str]) -> ModelRequestData:
 
     stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+
     return ModelRequestData(
         llm=llm,
         prompt=prompt,
@@ -348,7 +378,8 @@ model_example_map = {
     "mllama": load_mllama,
     "NVLM_D": load_nvlm_d,
     "phi3_v": load_phi3v,
-    "qwen_vl_chat": load_qwenvl_chat,
+    "pixtral_hf": load_pixtral_hf,
+    "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
 }
 

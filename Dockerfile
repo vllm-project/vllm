@@ -2,8 +2,8 @@
 # to run the OpenAI compatible server.
 
 # Please update any changes made here to
-# docs/source/dev/dockerfile/dockerfile.md and
-# docs/source/assets/dev/dockerfile-stages-dependency.png
+# docs/source/contributing/dockerfile/dockerfile.md and
+# docs/source/assets/contributing/dockerfile-stages-dependency.png
 
 ARG CUDA_VERSION=12.4.1
 #################### BASE BUILD IMAGE ####################
@@ -250,7 +250,7 @@ ENV VLLM_USAGE_SOURCE production-docker-image
 # define sagemaker first, so it is not default from `docker build`
 FROM vllm-openai-base AS vllm-sagemaker
 
-COPY examples/sagemaker-entrypoint.sh .
+COPY examples/online_serving/sagemaker-entrypoint.sh .
 RUN chmod +x sagemaker-entrypoint.sh
 ENTRYPOINT ["./sagemaker-entrypoint.sh"]
 

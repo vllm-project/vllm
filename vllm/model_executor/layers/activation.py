@@ -10,6 +10,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.utils import LazyDict
 
 
@@ -58,27 +59,31 @@ class SiluAndMul(CustomOp):
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
+    def __init__(self):
+        super().__init__()
+        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+            self.op = torch.ops._C.silu_and_mul
+        elif current_platform.is_xpu():
+            from vllm._ipex_ops import ipex_ops
+            self.op = ipex_ops.silu_and_mul
+
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        from vllm import _custom_ops as ops
-
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        ops.silu_and_mul(out, x)
+        self.op(out, x)
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        from vllm._ipex_ops import ipex_ops as ops
-
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        ops.silu_and_mul(out, x)
+        self.op(out, x)
         return out
 
 
