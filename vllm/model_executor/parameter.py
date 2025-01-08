@@ -7,7 +7,6 @@ from torch.nn import Parameter
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.utils import _make_synced_weight_loader
-from vllm.platforms import current_platform
 
 __all__ = [
     "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
@@ -47,6 +46,7 @@ class BasevLLMParameter(Parameter):
         # tensor, which is param.data, leading to the redundant memory usage.
         # This sometimes causes OOM errors during model loading. To avoid this,
         # we sync the param tensor after its weight loader is called.
+        from vllm.platforms import current_platform
         if current_platform.is_tpu():
             weight_loader = _make_synced_weight_loader(weight_loader)
 
