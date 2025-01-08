@@ -107,7 +107,7 @@ Compute Resources:
 - Google Cloud
 - Lambda Lab
 - Nebius
-- Novita
+- Novita AI
 - NVIDIA
 - Replicate
 - Roblox
