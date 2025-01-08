@@ -63,8 +63,8 @@ def load_general_plugins():
     from vllm.platforms import current_platform
 
     if current_platform.is_xpu():
-        # see https://github.com/pytorch/pytorch/blob/8cada5cbe5450e17c26fb8b358116785324537b2/torch/_dynamo/config.py#L158  # noqa
-        os.environ['TORCH_COMPILE_DISABLE'] = 'True'
+        # see https://github.com/pytorch/pytorch/blob/43c5f59/torch/_dynamo/config.py#L158
+        torch._dynamo.config.disable = True
     if current_platform.is_hpu():
         # NOTE(kzawora): PT HPU lazy backend (PT_HPU_LAZY_MODE = 1)
         # does not support torch.compile
@@ -72,7 +72,6 @@ def load_general_plugins():
         # torch.compile support
         is_lazy = os.environ.get('PT_HPU_LAZY_MODE', '1') == '1'
         if is_lazy:
-            # see https://github.com/pytorch/pytorch/blob/43c5f59/torch/_dynamo/config.py#L158
             torch._dynamo.config.disable = True
             # NOTE(kzawora) multi-HPU inference with HPUGraphs (lazy-only)
             # requires enabling lazy collectives
