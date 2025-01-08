@@ -305,7 +305,15 @@ class GroupCoordinator:
             stream.wait_stream(curr_stream)
 
         with torch.cuda.stream(stream), maybe_ca_context:
-            yield graph_capture_context
+            pynccl_comm = self.pynccl_comm
+            maybe_pynccl_context: Any
+            if not pynccl_comm:
+                maybe_pynccl_context = nullcontext()
+            else:
+                maybe_pynccl_context = pynccl_comm.change_state(
+                    stream=torch.cuda.current_stream())
+            with maybe_pynccl_context:
+                yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         """

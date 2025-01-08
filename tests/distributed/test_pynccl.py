@@ -59,7 +59,8 @@ def worker_fn():
                                      device=get_world_group().device)
     tensor = torch.ones(16, 1024, 1024,
                         dtype=torch.float32).cuda(pynccl_comm.rank)
-    tensor = pynccl_comm.all_reduce(tensor)
+    with pynccl_comm.change_state(enable=True):
+        tensor = pynccl_comm.all_reduce(tensor)
     torch.cuda.synchronize()
     assert torch.all(tensor == pynccl_comm.world_size).cpu().item()
 
@@ -80,16 +81,17 @@ def multiple_allreduce_worker_fn():
     group = groups[0] if torch.distributed.get_rank() in [0, 1] else groups[1]
     pynccl_comm = PyNcclCommunicator(group=group, device=device)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
-    # two groups can communicate independently
-    if torch.distributed.get_rank() in [0, 1]:
-        tensor = pynccl_comm.all_reduce(tensor)
-        tensor = pynccl_comm.all_reduce(tensor)
-        torch.cuda.synchronize()
-        assert torch.all(tensor == 4).cpu().item()
-    else:
-        tensor = pynccl_comm.all_reduce(tensor)
-        torch.cuda.synchronize()
-        assert torch.all(tensor == 2).cpu().item()
+    with pynccl_comm.change_state(enable=True):
+        # two groups can communicate independently
+        if torch.distributed.get_rank() in [0, 1]:
+            tensor = pynccl_comm.all_reduce(tensor)
+            tensor = pynccl_comm.all_reduce(tensor)
+            torch.cuda.synchronize()
+            assert torch.all(tensor == 4).cpu().item()
+        else:
+            tensor = pynccl_comm.all_reduce(tensor)
+            torch.cuda.synchronize()
+            assert torch.all(tensor == 2).cpu().item()
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
@@ -135,7 +137,9 @@ def worker_fn_with_cudagraph():
         # run something in the default stream to initialize torch engine
         a = torch.ones((4, 4), device=f'cuda:{pynccl_comm.rank}')
         torch.cuda.synchronize()
-        with torch.cuda.graph(graph):
+        with torch.cuda.graph(
+                graph, stream=pynccl_comm.stream), pynccl_comm.change_state(
+                    enable=True):
             a_out = pynccl_comm.all_reduce(a)
         torch.cuda.synchronize()
         graph.replay()
@@ -164,7 +168,8 @@ def all_gather_worker_fn():
         for r in range(world_size)
     ]).to(device)
 
-    pynccl_comm.all_gather(result, tensor)
+    with pynccl_comm.change_state(enable=True):
+        pynccl_comm.all_gather(result, tensor)
     torch.cuda.synchronize()
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
 
@@ -201,7 +206,8 @@ def reduce_scatter_worker_fn():
     expected = sum(tensor[rank * scattered_size:(rank + 1) * scattered_size]
                    for tensor in all_tensors).to(device)
 
-    pynccl_comm.reduce_scatter(result, tensor)
+    with pynccl_comm.change_state(enable=True):
+        pynccl_comm.reduce_scatter(result, tensor)
     torch.cuda.synchronize()
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
 
@@ -228,13 +234,15 @@ def send_recv_worker_fn():
     else:
         tensor = torch.empty(16, 1024, 1024,
                              dtype=torch.float32).cuda(pynccl_comm.rank)
-
-    if pynccl_comm.rank == 0:
-        pynccl_comm.send(tensor,
-                         dst=(pynccl_comm.rank + 1) % pynccl_comm.world_size)
-    else:
-        pynccl_comm.recv(tensor,
-                         src=(pynccl_comm.rank - 1) % pynccl_comm.world_size)
+    with pynccl_comm.change_state(enable=True):
+        if pynccl_comm.rank == 0:
+            pynccl_comm.send(tensor,
+                             dst=(pynccl_comm.rank + 1) %
+                             pynccl_comm.world_size)
+        else:
+            pynccl_comm.recv(tensor,
+                             src=(pynccl_comm.rank - 1) %
+                             pynccl_comm.world_size)
     torch.cuda.synchronize()
     assert torch.all(tensor == 1).cpu().item()
 
@@ -265,12 +273,15 @@ def multiple_send_recv_worker_fn():
                              1024,
                              dtype=torch.float32,
                              device=device)
-    if torch.distributed.get_rank() in [0, 1]:
-        pynccl_comm.send(tensor,
-                         dst=(pynccl_comm.rank + 1) % pynccl_comm.world_size)
-    else:
-        pynccl_comm.recv(tensor,
-                         src=(pynccl_comm.rank - 1) % pynccl_comm.world_size)
+    with pynccl_comm.change_state(enable=True):
+        if torch.distributed.get_rank() in [0, 1]:
+            pynccl_comm.send(tensor,
+                             dst=(pynccl_comm.rank + 1) %
+                             pynccl_comm.world_size)
+        else:
+            pynccl_comm.recv(tensor,
+                             src=(pynccl_comm.rank - 1) %
+                             pynccl_comm.world_size)
     torch.cuda.synchronize()
     if torch.distributed.get_rank() in [0, 2]:
         assert torch.all(tensor == 1).cpu().item()
