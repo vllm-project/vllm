@@ -13,8 +13,7 @@ from vllm.utils import is_list_of
 
 from .audio import resample_audio
 from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfVideoItem,
-                     ImageItem, ModalityData, MultiModalDataDict,
-                     VideoItem)
+                     ImageItem, ModalityData, MultiModalDataDict, VideoItem)
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
@@ -248,8 +247,9 @@ class MultiModalDataParser:
 
         self.target_sr = target_sr
 
-    def _is_embeddings(self, data: object) -> TypeGuard[Union[torch.Tensor,
-                                                              list[torch.Tensor]]]:
+    def _is_embeddings(
+            self, data: object
+    ) -> TypeGuard[Union[torch.Tensor, list[torch.Tensor]]]:
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
         if is_list_of(data, torch.Tensor):
