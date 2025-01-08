@@ -81,7 +81,7 @@ class VllmLogger(Logger):
         _print_warning_once(self, msg)
 
 
-def _configure_vllm_root_logger() -> bool:
+def _configure_vllm_root_logger() -> None:
     logging_config = dict[str, Any]()
 
     if not VLLM_CONFIGURE_LOGGING and VLLM_LOGGING_CONFIG_PATH:
@@ -117,13 +117,9 @@ def _configure_vllm_root_logger() -> bool:
 
     logging.setLoggerClass(VllmLogger)
 
-    return True
-
 
 # The root logger is initialized when the module is imported.
-# This is thread-safe as the module is only imported once,
-# guaranteed by the Python GIL.
-is_configured = _configure_vllm_root_logger()
+_configure_vllm_root_logger()
 
 
 def init_logger(name: str) -> VllmLogger:
@@ -132,7 +128,7 @@ def init_logger(name: str) -> VllmLogger:
     already been configured."""
 
     logger = logging.getLogger(name)
-    assert isinstance(logger, VllmLogger), (is_configured, type(logger))
+    assert isinstance(logger, VllmLogger), type(logger)
     return logger
 
 
