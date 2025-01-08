@@ -35,10 +35,7 @@ function cpu_tests() {
   # Run basic model test
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" bash -c "
     set -e
-    pip install pytest pytest-asyncio \
-      decord einops librosa peft Pillow sentence-transformers soundfile \
-      transformers_stream_generator matplotlib datamodel_code_generator
-    pip install torchvision --index-url https://download.pytorch.org/whl/cpu
+    pip install -r vllm/requirements-test.txt
     pytest -v -s tests/models/decoder_only/language -m cpu_model
     pytest -v -s tests/models/embedding/language -m cpu_model
     pytest -v -s tests/models/encoder_decoder/language -m cpu_model
