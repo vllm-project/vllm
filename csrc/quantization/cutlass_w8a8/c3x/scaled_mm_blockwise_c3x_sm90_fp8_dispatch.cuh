@@ -104,10 +104,8 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   using ElementD = typename Gemm::ElementD;
 
   auto prob_shape = c3x::get_problem_shape(a, b);
-
-  int32_t m = a.size(0);
-  int32_t n = b.size(1);
-  int32_t k = a.size(1);
+  int32_t m = get<0>(prob_shape), n = get<1>(prob_shape),
+          k = get<2>(prob_shape);
 
   int64_t lda = a.stride(0);
   int64_t ldb = b.stride(1);
@@ -125,6 +123,15 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   auto b_ptr = static_cast<ElementAB*>(b.data_ptr());
   auto a_scales_ptr = static_cast<float*>(a_scales.data_ptr());
   auto b_scales_ptr = static_cast<float*>(b_scales.data_ptr());
+
+  // TODO(lucas): lets clean-up the kernel so that we pass in Strides so
+  //  we don't have to deal with enforcing implicit layouts
+  TORCH_CHECK(a_scales.size(0) == m / Gemm::GroupSizeM::value);
+  TORCH_CHECK(a_scales.size(1) == k / Gemm::GroupSizeK::value);
+  TORCH_CHECK(a_scales.stride(1) == 1, "a_scales must be K major");
+  TORCH_CHECK(b_scales.size(0) == k / Gemm::GroupSizeK::value);
+  TORCH_CHECK(b_scales.size(1) == n / Gemm::GroupSizeN::value);
+  TORCH_CHECK(b_scales.stride(0) == 1, "b_scales must be K major");
 
   uint32_t mma_promotion_interval = 4;
   typename GemmKernel::MainloopArguments mainloop_args{

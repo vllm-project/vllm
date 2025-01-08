@@ -44,7 +44,13 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
       (scale_group_shape_b == GroupShape{K, N} ||
        scale_group_shape_b == GroupShape{K, 1})) {
     // "standard per-tensor/per-token/per-channel" scaling
-    vllm::cutlass_scaled_mm_sm90_fp8(c, a, b, a_scales, b_scales, bias);
+    TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
+    if (a.dtype() == torch::kFloat8_e4m3fn) {
+      vllm::cutlass_scaled_mm_sm90_fp8(c, a, b, a_scales, b_scales, bias);
+    } else {
+      TORCH_CHECK(a.dtype() == torch::kInt8);
+      vllm::cutlass_scaled_mm_sm90_int8(c, a, b, a_scales, b_scales, bias);
+    }
   } else if (scale_group_shape_a == GroupShape{1, 128} &&
              scale_group_shape_b == GroupShape{128, 128}) {
     // 1x128 per-token group scales for activations

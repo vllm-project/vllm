@@ -97,7 +97,6 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
   TORCH_CHECK(b.stride(0) == 1);                      // Column-major
   TORCH_CHECK(c.stride(0) % 16 == 0 &&
               b.stride(1) % 16 == 0);  // 16 Byte Alignment
-  TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
 
   if (bias) {
     TORCH_CHECK(bias->numel() == b.size(1) && bias->is_contiguous() &&
