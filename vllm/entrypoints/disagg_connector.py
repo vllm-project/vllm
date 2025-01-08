@@ -4,7 +4,6 @@ import uvicorn
 import zmq
 import zmq.asyncio
 from fastapi import FastAPI, Request
-from starlette.datastructures import Headers
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
 # from fastapi.lifespan import Lifespan
@@ -24,7 +23,7 @@ logger = init_logger('vllm.entrypoints.connect')
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # create scoket pool with prefill and decode
+    # create socket pool with prefill and decode
     logger.info("start create_socket_pool")
     app.state.zmqctx = zmq.asyncio.Context()
     app.state.sockets_prefill = await create_socket_pool(app.state.prefill_addr, socket_prefill_num, zmqctx=app.state.zmqctx)
@@ -39,7 +38,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 # create async socket pool with num_sockets use ZMQ_DEALER
-async def create_socket_pool(url: str, num_sockets: int, zmqctx: zmq.asyncio.Context):
+async def create_socket_pool(url: str, num_sockets: int, zmqctx: zmq.asyncio.Context) -> Queue:
     sockets = Queue()
     for i in range(num_sockets):
         sock = zmqctx.socket(zmq.DEALER)
@@ -50,8 +49,8 @@ async def create_socket_pool(url: str, num_sockets: int, zmqctx: zmq.asyncio.Con
         await sockets.put(sock)
     return sockets
 
-# select a scoket and execute task
-async def execute_task_async(route: str, headers: dict, request: dict, sockets: list):
+# select a socket and execute task
+async def execute_task_async(route: str, headers: dict, request: dict, sockets: Queue):
     sock = await sockets.get()
     try:
         requestBody = json.dumps(request)
