@@ -31,14 +31,13 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
 from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges,
-                                   resolve_visual_encoder_outputs)
+                                   consecutive_placeholder_ranges)
 from vllm.sequence import IntermediateTensors, SequenceData
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
-from .vision import VisionEncoderInfo
+from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
 try:
     from xformers import ops as xops
