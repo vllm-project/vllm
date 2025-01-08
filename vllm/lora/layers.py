@@ -30,6 +30,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.lora.punica_wrapper import PunicaWrapperBase
@@ -404,7 +405,9 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         self.output_size = self.base_layer.output_size
         self.n_slices = 1
 
-    def forward(self, input_):
+    def forward(
+        self, input_: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward of ReplicatedLinearWithLoRA
 
         Args:
@@ -424,8 +427,9 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
                        if self.base_layer.skip_bias_add else None)
         return output, output_bias
 
+    # ReplicatedLinear should always be replaced, regardless of the fully
+    # sharded LoRAs setting, because it is, by definition, copied per GPU.
     @classmethod
-    @_not_fully_sharded_can_replace
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
@@ -477,7 +481,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         # ColumnParallelLinear.
         else:
             tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-            shard_size = self.output_dim
+            shard_size = self.output_size
             start_idx = tensor_model_parallel_rank * shard_size
             end_idx = (tensor_model_parallel_rank + 1) * shard_size
             lora_b = lora_b[:, start_idx:end_idx]
@@ -488,13 +492,15 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         if bias is None:
             return bias
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-        shard_size = self.output_dim
+        shard_size = self.output_size
         start_idx = tensor_model_parallel_rank * shard_size
         end_idx = (tensor_model_parallel_rank + 1) * shard_size
         bias = bias[start_idx:end_idx]
         return bias
 
-    def forward(self, input_):
+    def forward(
+        self, input_: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward of ColumnParallelLinear
 
         Args:
@@ -831,7 +837,9 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         return bias
 
-    def forward(self, input_):
+    def forward(
+        self, input_: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward of RowParallelLinear
 
         Args:
@@ -1068,6 +1076,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         ).index_select(0, indices_padded).nan_to_num_(nan=float("-inf"),
                                                       posinf=float("inf"),
                                                       neginf=float("-inf")))
+
+        # HPU needs special handling to prune out dummy samples.
+        if current_platform.is_hpu():
+            lora_logits = lora_logits[:logits.shape[0], :]
+
         logits[:,
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1]] = lora_logits

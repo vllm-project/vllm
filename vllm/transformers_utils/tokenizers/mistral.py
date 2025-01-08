@@ -314,12 +314,15 @@ class MistralTokenizer:
 
             if regular_tokens:
                 decoded_list.append(
-                    self.decode(regular_tokens))  # type: ignore
+                    self.tokenizer.decode(regular_tokens))  # type: ignore
 
             decoded = ''.join(decoded_list)
 
         return decoded
 
+    # WARN: Outlines logits processors can overwrite this method.
+    # See: guided_decoding/outlines_logits_processors.py::_adapt_tokenizer
+    # for more.
     def decode(self,
                ids: Union[List[int], int],
                skip_special_tokens: bool = True) -> str:

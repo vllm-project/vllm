@@ -1,7 +1,4 @@
-"""Compare the outputs of HF and vLLM when using greedy sampling.
-
-This test only tests small models. Big models such as 7B should be tested from
-test_big_models.py because it could use a larger instance to run tests.
+"""Compare the classification outputs of HF and vLLM models.
 
 Run `pytest tests/models/test_cls_models.py`.
 """

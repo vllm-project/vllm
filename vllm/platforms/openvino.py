@@ -34,7 +34,7 @@ class OpenVinoPlatform(Platform):
         return _Backend.OPENVINO
 
     @classmethod
-    def get_device_name(self, device_id: int = 0) -> str:
+    def get_device_name(cls, device_id: int = 0) -> str:
         return "openvino"
 
     @classmethod
@@ -42,19 +42,19 @@ class OpenVinoPlatform(Platform):
         return False
 
     @classmethod
-    def inference_mode(self):
+    def inference_mode(cls):
         return torch.inference_mode(mode=True)
 
     @classmethod
-    def is_openvino_cpu(self) -> bool:
+    def is_openvino_cpu(cls) -> bool:
         return "CPU" in envs.VLLM_OPENVINO_DEVICE
 
     @classmethod
-    def is_openvino_gpu(self) -> bool:
+    def is_openvino_gpu(cls) -> bool:
         return "GPU" in envs.VLLM_OPENVINO_DEVICE
 
     @classmethod
-    def is_pin_memory_available(self) -> bool:
+    def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on OpenViNO.")
         return False
 
@@ -87,6 +87,9 @@ class OpenVinoPlatform(Platform):
         # check and update cache config
         ov_core = ov.Core()
         cache_config = vllm_config.cache_config
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
+
         if envs.VLLM_OPENVINO_CPU_KV_CACHE_PRECISION == "u8":
             if not OpenVinoPlatform.is_openvino_cpu():
                 logger.info("VLLM_OPENVINO_CPU_KV_CACHE_PRECISION is"

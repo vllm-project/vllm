@@ -54,7 +54,7 @@ def test_models(
         hf_outputs = hf_model.encode(example_prompts)
 
     with vllm_runner(model,
-                     task="embedding",
+                     task="embed",
                      dtype=dtype,
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:

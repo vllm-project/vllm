@@ -1,15 +1,17 @@
 import asyncio
 import os
 import socket
-from functools import partial
 from typing import AsyncIterator, Tuple
 
 import pytest
+import torch
+from vllm_test_utils import monitor
 
 from vllm.utils import (FlexibleArgumentParser, StoreBoolean, deprecate_kwargs,
-                        get_open_port, merge_async_iterators, supports_kw)
+                        get_open_port, memory_profiling, merge_async_iterators,
+                        supports_kw)
 
-from .utils import error_on_warning
+from .utils import error_on_warning, fork_new_process_for_each_test
 
 
 @pytest.mark.asyncio
@@ -24,10 +26,7 @@ async def test_merge_async_iterators():
             print(f"iterator {idx} cancelled")
 
     iterators = [mock_async_iterator(i) for i in range(3)]
-    merged_iterator = merge_async_iterators(*iterators,
-                                            is_cancelled=partial(asyncio.sleep,
-                                                                 0,
-                                                                 result=False))
+    merged_iterator = merge_async_iterators(*iterators)
 
     async def stream_output(generator: AsyncIterator[Tuple[int, str]]):
         async for idx, output in generator:
@@ -270,3 +269,57 @@ def test_supports_kw(callable,kw_name,requires_kw_only,
         requires_kw_only=requires_kw_only,
         allow_var_kwargs=allow_var_kwargs
     ) == is_supported
+
+
+@fork_new_process_for_each_test
+def test_memory_profiling():
+    # Fake out some model loading + inference memory usage to test profiling
+    # Memory used by other processes will show up as cuda usage outside of torch
+    from vllm.distributed.device_communicators.cuda_wrapper import (
+        CudaRTLibrary)
+    lib = CudaRTLibrary()
+    # 512 MiB allocation outside of this instance
+    handle1 = lib.cudaMalloc(512 * 1024 * 1024)
+
+    baseline_memory_in_bytes = \
+        torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]
+
+    # load weights
+
+    weights = torch.randn(128, 1024, 1024, device='cuda', dtype=torch.float32)
+
+    weights_memory_in_bytes = 128 * 1024 * 1024 * 4 # 512 MiB
+
+    def measure_current_non_torch():
+        free, total = torch.cuda.mem_get_info()
+        current_used = total - free
+        current_torch = torch.cuda.memory_reserved()
+        current_non_torch = current_used - current_torch
+        return current_non_torch
+
+    with memory_profiling(baseline_memory_in_bytes=baseline_memory_in_bytes,
+    weights_memory_in_bytes=weights_memory_in_bytes) as result, \
+        monitor(measure_current_non_torch) as monitored_values:
+        # make a memory spike, 1 GiB
+        spike = torch.randn(256, 1024, 1024, device='cuda', dtype=torch.float32)
+        del spike
+
+        # Add some extra non-torch memory 256 MiB (simulate NCCL)
+        handle2 = lib.cudaMalloc(256 * 1024 * 1024)
+
+    # this is an analytic value, it is exact,
+    # we only have 256 MiB non-torch memory increase
+    measured_diff = monitored_values.values[-1] - monitored_values.values[0]
+    assert measured_diff == 256 * 1024 * 1024
+
+    # Check that the memory usage is within 5% of the expected values
+    # 5% tolerance is caused by PyTorch caching allocator,
+    # we cannot control PyTorch's behavior of its internal buffers,
+    # which causes a small error (<10 MiB in practice)
+    non_torch_ratio = result.non_torch_increase_in_bytes / (256 * 1024 * 1024) # noqa
+    torch_peak_ratio = result.torch_peak_increase_in_bytes / (1024 * 1024 * 1024) # noqa
+    assert abs(non_torch_ratio - 1) <= 0.05
+    assert abs(torch_peak_ratio - 1) <= 0.05
+    del weights
+    lib.cudaFree(handle1)
+    lib.cudaFree(handle2)
