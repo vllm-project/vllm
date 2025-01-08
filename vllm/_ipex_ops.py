@@ -26,10 +26,6 @@ class ipex_ops:
         return x1, x2
 
     @staticmethod
-    def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-        ipex.llm.functional.silu_and_mul(x, out)
-
-    @staticmethod
     def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
         ipex.llm.functional.gelu_and_mul(x, out)
 
