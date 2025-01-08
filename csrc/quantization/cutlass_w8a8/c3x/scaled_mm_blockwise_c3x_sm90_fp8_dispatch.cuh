@@ -128,7 +128,7 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   //  we don't have to deal with enforcing implicit layouts
   TORCH_CHECK(a_scales.size(0) == m / Gemm::GroupSizeM::value);
   TORCH_CHECK(a_scales.size(1) == k / Gemm::GroupSizeK::value);
-  TORCH_CHECK(a_scales.stride(1) == 1, "a_scales must be K major");
+  TORCH_CHECK(a_scales.stride(0) == 1, "a_scales must be M major");
   TORCH_CHECK(b_scales.size(0) == k / Gemm::GroupSizeK::value);
   TORCH_CHECK(b_scales.size(1) == n / Gemm::GroupSizeN::value);
   TORCH_CHECK(b_scales.stride(0) == 1, "b_scales must be K major");

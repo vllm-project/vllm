@@ -34,11 +34,6 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
     TORCH_CHECK(false, "Unsupported scale shape for scale_b");
   }();
 
-  std::cout << "scale_group_shape_a: " << scale_group_shape_a[0] << " "
-            << scale_group_shape_a[1] << std::endl;
-  std::cout << "scale_group_shape_b: " << scale_group_shape_b[0] << " "
-            << scale_group_shape_b[1] << std::endl;
-
   if ((scale_group_shape_a == GroupShape{M, K} ||
        scale_group_shape_a == GroupShape{1, K}) &&
       (scale_group_shape_b == GroupShape{K, N} ||
