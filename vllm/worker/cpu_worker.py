@@ -285,12 +285,9 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def _init_cache_engine(self) -> None:
         self.cache_engine = [
-            CPUCacheEngine(
-                self.cache_config,
-                self.model_config,
-                self.parallel_config,
-                self.device_config,
-            ) for _ in range(self.parallel_config.pipeline_parallel_size)
+            CPUCacheEngine(self.cache_config, self.model_config,
+                           self.parallel_config, self.device_config)
+            for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.cpu_cache = [
             self.cache_engine[ve].cpu_cache
