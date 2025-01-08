@@ -414,11 +414,12 @@ class MllamaVisionSdpaAttention(nn.Module):
                    self.head_dim).transpose(1, 2)
 
         # TODO: remove padding in image encoder
-        attn_output = F.scaled_dot_product_attention(q,
-                                                     k,
-                                                     v,
-                                                     attn_mask=attention_mask,
-                                                     dropout_p=0.0)
+        if current_platform.is_hpu():
+            from habana_frameworks.torch.hpex.kernels import FusedSDPA
+            attn_output = FusedSDPA.apply(q, k, v, attention_mask, 0.0)
+        else:
+            attn_output = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attention_mask, dropout_p=0.0)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(attn_output.shape[0],
