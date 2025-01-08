@@ -21,7 +21,7 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.utils import GiB_bytes, memory_profiling
+from vllm.utils import GiB_bytes, is_pin_memory_available, memory_profiling
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -281,14 +281,15 @@ class Worker(LocalOrDistributedWorkerBase):
 
         # Initialize the buffer for swapping in/out blocks.
         max_num_blocks = max(num_gpu_blocks, num_cpu_blocks)
+        use_pin_memory = is_pin_memory_available()
         self.blocks_to_swap_in_buffer = torch.zeros((max_num_blocks, 2),
                                                     dtype=torch.int64,
                                                     device="cpu",
-                                                    pin_memory=True)
+                                                    pin_memory=use_pin_memory)
         self.blocks_to_swap_out_buffer = torch.zeros((max_num_blocks, 2),
                                                      dtype=torch.int64,
                                                      device="cpu",
-                                                     pin_memory=True)
+                                                     pin_memory=use_pin_memory)
 
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
