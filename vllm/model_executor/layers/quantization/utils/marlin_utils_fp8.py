@@ -49,7 +49,7 @@ def apply_fp8_marlin_linear(
 
 def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
                                  strategy: str = "tensor") -> None:
-    logger.print_warning_once(
+    logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
         "FP8 quantization is being used. Weight-only FP8 compression will "
         "be used leveraging the Marlin kernel. This may degrade "

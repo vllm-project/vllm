@@ -630,7 +630,7 @@ def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
             if is_flash_attn_2_available():
                 selected_backend = _Backend.FLASH_ATTN
             else:
-                logger.print_warning_once(
+                logger.warning_once(
                     "Current `vllm-flash-attn` has a bug inside vision module, "
                     "so we use xformers backend instead. You can run "
                     "`pip install flash-attn` to use flash-attention backend.")

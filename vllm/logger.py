@@ -52,32 +52,33 @@ DEFAULT_LOGGING_CONFIG = {
 
 @lru_cache
 def _print_info_once(logger: Logger, msg: str) -> None:
-    # Set the stacklevel to 4 to print the original caller's line info
-    logger.info(msg, stacklevel=4)
+    # Set the stacklevel to 2 to print the original caller's line info
+    logger.info(msg, stacklevel=2)
 
 
 @lru_cache
 def _print_warning_once(logger: Logger, msg: str) -> None:
-    # Set the stacklevel to 4 to print the original caller's line info
-    logger.warning(msg, stacklevel=4)
+    # Set the stacklevel to 2 to print the original caller's line info
+    logger.warning(msg, stacklevel=2)
 
 
-# NOTE: This class is just to provide type information.
-# We don't set the logger class to avoid conflicting with other
-# libraries (e.g. `intel_extension_for_pytorch.utils._logger`).
 class _VllmLogger(Logger):
+    """
+    Note:
+        This class is just to provide type information.
+        We actually patch the methods directly on the :class:`logging.Logger`
+        instance to avoid conflicting with other libraries such as
+        `intel_extension_for_pytorch.utils._logger`.
+    """
 
-    # NOTE: We can't use info_once and warning_once because they
-    # are overwritten by transformers:
-    # https://github.com/huggingface/transformers/blob/2c47618c1a282f925446506d53108dc6e82d9ef0/src/transformers/utils/logging.py#L331
-    def print_info_once(self, msg: str) -> None:
+    def info_once(self, msg: str) -> None:
         """
         As :meth:`info`, but subsequent calls with the same message
         are silently dropped.
         """
         _print_info_once(self, msg)
 
-    def print_warning_once(self, msg: str) -> None:
+    def warning_once(self, msg: str) -> None:
         """
         As :meth:`warning`, but subsequent calls with the same message
         are silently dropped.
@@ -127,14 +128,12 @@ def init_logger(name: str) -> _VllmLogger:
 
     logger = logging.getLogger(name)
 
-    for method_name in ("print_info_once", "print_warning_once"):
-        method = getattr(_VllmLogger, method_name)
+    methods_to_patch = {
+        "info_once": _print_info_once,
+        "warning_once": _print_warning_once,
+    }
 
-        if hasattr(logger, method_name):
-            raise RuntimeError(
-                f"Unable to patch `{method_name}` for {type(logger)} "
-                "because a method with the same name already exists.")
-
+    for method_name, method in methods_to_patch.items():
         setattr(logger, method_name, MethodType(method, logger))
 
     return cast(_VllmLogger, logger)

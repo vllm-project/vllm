@@ -448,7 +448,7 @@ class OlmoeForCausalLM(nn.Module, SupportsPP):
                         remapped_kv_scale_name = name.replace(
                             ".kv_scale", ".attn.kv_scale")
                         if remapped_kv_scale_name not in params_dict:
-                            logger.print_warning_once(
+                            logger.warning_once(
                                 "Found kv scale in the checkpoint "
                                 f"(e.g. {name}), but not found the expected "
                                 f"name in the model "

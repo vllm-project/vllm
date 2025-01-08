@@ -44,7 +44,7 @@ class PEFTHelper:
     def __post_init__(self):
         self._validate_features()
         if self.use_rslora:
-            logger.print_info_once("Loading LoRA weights trained with rsLoRA.")
+            logger.info_once("Loading LoRA weights trained with rsLoRA.")
             self.vllm_lora_scaling_factor = self.lora_alpha / math.sqrt(self.r)
         else:
             self.vllm_lora_scaling_factor = self.lora_alpha / self.r

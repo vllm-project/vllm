@@ -387,9 +387,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             raise ValueError(
                 "XFormers does not support block-sparse attention.")
         if logits_soft_cap is not None:
-            logger.print_warning_once(
-                "XFormers does not support logits soft cap. "
-                "Outputs may be slightly off.")
+            logger.warning_once("XFormers does not support logits soft cap. "
+                                "Outputs may be slightly off.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)

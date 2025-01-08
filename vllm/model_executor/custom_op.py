@@ -90,7 +90,7 @@ class CustomOp(nn.Module):
         compilation_config = get_current_vllm_config().compilation_config
         custom_ops = compilation_config.custom_ops
         if not hasattr(cls, "name"):
-            logger.print_warning_once(
+            logger.warning_once(
                 f"Custom op {cls.__name__} was not registered, "
                 f"which means it won't appear in the op registry. "
                 f"It will be enabled/disabled based on the global settings.")
