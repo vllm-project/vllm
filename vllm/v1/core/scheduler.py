@@ -7,8 +7,6 @@ import torch
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalKwargs
-from vllm.multimodal.base import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheManager

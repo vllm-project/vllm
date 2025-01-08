@@ -4,6 +4,7 @@ import enum
 import hashlib
 import json
 import os
+import sys
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -381,16 +382,16 @@ class ModelConfig:
         """
         if is_s3(model) or is_s3(tokenizer):
             if is_s3(model):
-                self.s3_model = S3Model()
-                self.s3_model.pull_files(model, allow_pattern=["*config.json"])
+                s3_model = S3Model()
+                s3_model.pull_files(model, allow_pattern=["*config.json"])
                 self.model_weights = self.model
-                self.model = self.s3_model.dir
+                self.model = s3_model.dir
 
             if is_s3(tokenizer):
-                self.s3_tokenizer = S3Model()
-                self.s3_tokenizer.pull_files(
+                s3_tokenizer = S3Model()
+                s3_tokenizer.pull_files(
                     model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
-                self.tokenizer = self.s3_tokenizer.dir
+                self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
@@ -2051,6 +2052,11 @@ class LoRAConfig:
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
                 f"max_loras ({self.max_loras})")
 
+    def verify_with_cache_config(self, cache_config: CacheConfig):
+        # TODO LoRA supports CPU offload.
+        if cache_config.cpu_offload_gb > 0:
+            raise ValueError("CPU offload is not supported with LoRA yet.")
+
     def verify_with_model_config(self, model_config: ModelConfig):
         if self.lora_dtype in (None, "auto"):
             self.lora_dtype = model_config.dtype
@@ -2253,6 +2259,17 @@ def _get_and_verify_dtype(
                     "using float16 by default. Float16 is not currently "
                     "supported for POWERPC.")
                 torch_dtype = torch.bfloat16
+
+            # TODO: change this condition to check if the platform support bf16
+            # instead of checking the OS. For instance M2 shall supports bf16
+            # already. But we need to modify `cpu_extension.cmake` to activate
+            # the feature in the build.
+            if (current_platform.is_cpu() and sys.platform.startswith("darwin")
+                    and current_platform.get_cpu_architecture()
+                    == CpuArchEnum.ARM and config_dtype == torch.bfloat16):
+                logger.info("For macOS with Apple Silicon, currently bfloat16 "
+                            "is not supported. Setting dtype to float16.")
+                torch_dtype = torch.float16
 
             if current_platform.is_hpu() and config_dtype == torch.float16:
                 logger.info(
@@ -3138,6 +3155,7 @@ class VllmConfig:
             self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config:
+            self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
