@@ -190,6 +190,12 @@ class InputPreprocessor:
             # on the task and language of their request. Also needed to avoid
             # appending an EOS token to the prompt which disrupts generation.
             add_special_tokens = False
+
+        if (self.model_config.encoder_config is not None
+                and self.model_config.encoder_config.get(
+                    "do_lower_case", False)):
+            prompt = prompt.lower()
+
         return tokenizer.encode(request_id=request_id,
                                 prompt=prompt,
                                 lora_request=lora_request,
