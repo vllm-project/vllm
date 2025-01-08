@@ -2051,6 +2051,11 @@ class LoRAConfig:
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
                 f"max_loras ({self.max_loras})")
 
+    def verify_with_cache_config(self, cache_config: CacheConfig):
+        # TODO LoRA supports CPU offload.
+        if cache_config.cpu_offload_gb > 0:
+            raise ValueError("CPU offload is not supported with LoRA yet.")
+
     def verify_with_model_config(self, model_config: ModelConfig):
         if self.lora_dtype in (None, "auto"):
             self.lora_dtype = model_config.dtype
@@ -3138,6 +3143,7 @@ class VllmConfig:
             self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config:
+            self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
