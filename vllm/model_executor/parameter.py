@@ -328,6 +328,15 @@ class PackedvLLMParameter(ModelWeightParameter):
             marlin_tile_size=self.marlin_tile_size)
 
 
+class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
+    """
+    Parameter class for weight scales loaded for weights with
+    block-wise quantization. Uses both column and row parallelism.
+    """
+
+    pass
+
+
 def permute_param_layout_(param: BasevLLMParameter, input_dim: int,
                           output_dim: int, **kwargs) -> BasevLLMParameter:
     """

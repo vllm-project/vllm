@@ -25,7 +25,15 @@ from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
 from vllm.platforms import current_platform
-from vllm.utils import print_warning_once
+from vllm.utils import PlaceholderModule, print_warning_once
+
+try:
+    from runai_model_streamer import SafetensorsStreamer
+except ImportError:
+    runai_model_streamer = PlaceholderModule(
+        "runai_model_streamer")  # type: ignore[assignment]
+    SafetensorsStreamer = runai_model_streamer.placeholder_attr(
+        "SafetensorsStreamer")
 
 logger = init_logger(__name__)
 
@@ -414,13 +422,6 @@ def runai_safetensors_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
-    try:
-        from runai_model_streamer import SafetensorsStreamer
-    except ImportError as err:
-        raise ImportError(
-            "Please install Run:ai optional dependency."
-            "You can install it with: pip install vllm[runai]") from err
-
     enable_tqdm = not torch.distributed.is_initialized(
     ) or torch.distributed.get_rank() == 0
     with SafetensorsStreamer() as streamer:

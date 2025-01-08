@@ -3,6 +3,7 @@ sphinx-book-theme==1.0.1
 sphinx-copybutton==0.5.2
 myst-parser==3.0.1
 sphinx-argparse==0.4.0
+sphinx-togglebutton==0.3.2
 msgspec
 cloudpickle
 
@@ -19,3 +20,4 @@ openai # Required by docs/source/serving/openai_compatible_server.md's vllm.entr
 fastapi # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
 partial-json-parser # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
 requests
+zmq

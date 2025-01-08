@@ -6,10 +6,14 @@ import datetime
 import enum
 import gc
 import getpass
+import importlib.metadata
 import importlib.util
 import inspect
 import ipaddress
+import multiprocessing
 import os
+import re
+import resource
 import signal
 import socket
 import subprocess
@@ -17,17 +21,19 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import OrderedDict, UserDict, defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
-                    Dict, Generator, Generic, Hashable, List, Literal,
-                    Optional, Tuple, Type, TypeVar, Union, overload)
+                    Dict, Generator, Generic, Iterator, List, Literal,
+                    NamedTuple, Optional, Tuple, Type, TypeVar, Union,
+                    overload)
 from uuid import uuid4
 
 import numpy as np
@@ -36,13 +42,14 @@ import psutil
 import torch
 import torch.types
 import yaml
+import zmq
+import zmq.asyncio
 from packaging.version import Version
 from torch.library import Library
 from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
-from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -51,7 +58,7 @@ logger = init_logger(__name__)
 
 # Exception strings for non-implemented encoder/decoder scenarios
 
-# Reminder: Please update docs/source/usage/compatibility_matrix.md
+# Reminder: Please update docs/source/features/compatibility_matrix.md
 # If the feature combo become valid
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
@@ -191,12 +198,28 @@ class Counter:
         self.counter = 0
 
 
+class CacheInfo(NamedTuple):
+    hits: int
+    total: int
+
+    @property
+    def hit_ratio(self) -> float:
+        if self.total == 0:
+            return 0
+
+        return self.hits / self.total
+
+
 class LRUCache(Generic[_K, _V]):
+    """Note: This class is not thread safe!"""
 
     def __init__(self, capacity: int) -> None:
         self.cache = OrderedDict[_K, _V]()
         self.pinned_items = set[_K]()
         self.capacity = capacity
+
+        self._hits = 0
+        self._total = 0
 
     def __contains__(self, key: _K) -> bool:
         return key in self.cache
@@ -215,6 +238,9 @@ class LRUCache(Generic[_K, _V]):
     def __delitem__(self, key: _K) -> None:
         self.pop(key)
 
+    def stat(self) -> CacheInfo:
+        return CacheInfo(hits=self._hits, total=self._total)
+
     def touch(self, key: _K) -> None:
         self.cache.move_to_end(key)
 
@@ -223,8 +249,12 @@ class LRUCache(Generic[_K, _V]):
         if key in self.cache:
             value = self.cache[key]
             self.cache.move_to_end(key)
+
+            self._hits += 1
         else:
             value = default
+
+        self._total += 1
         return value
 
     def put(self, key: _K, value: _V) -> None:
@@ -578,6 +608,7 @@ def create_kv_caches_with_random_flash(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    from vllm.platforms import current_platform
     current_platform.seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
@@ -619,7 +650,7 @@ def create_kv_caches_with_random(
         raise ValueError(
             f"Does not support key cache of type fp8 with head_size {head_size}"
         )
-
+    from vllm.platforms import current_platform
     current_platform.seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
@@ -672,6 +703,7 @@ def print_warning_once(msg: str) -> None:
 
 @lru_cache(maxsize=None)
 def is_pin_memory_available() -> bool:
+    from vllm.platforms import current_platform
     return current_platform.is_pin_memory_available()
 
 
@@ -682,6 +714,7 @@ class DeviceMemoryProfiler:
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
+        from vllm.platforms import current_platform
         if current_platform.is_cuda_alike():
             torch.cuda.reset_peak_memory_stats(self.device)
             mem = torch.cuda.max_memory_allocated(self.device)
@@ -1035,6 +1068,7 @@ def _cuda_device_count_stateless(
     import torch.cuda
     import torch.version
 
+    from vllm.platforms import current_platform
     if not torch.cuda._is_compiled():
         return 0
     if current_platform.is_rocm():
@@ -1550,6 +1584,67 @@ def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     return module
 
 
+@lru_cache(maxsize=None)
+def get_vllm_optional_dependencies():
+    metadata = importlib.metadata.metadata("vllm")
+    requirements = metadata.get_all("Requires-Dist", [])
+    extras = metadata.get_all("Provides-Extra", [])
+
+    return {
+        extra: [
+            re.split(r";|>=|<=|==", req)[0] for req in requirements
+            if req.endswith(f'extra == "{extra}"')
+        ]
+        for extra in extras
+    }
+
+
+@dataclass(frozen=True)
+class PlaceholderModule:
+    """
+    A placeholder object to use when a module does not exist.
+
+    This enables more informative errors when trying to access attributes
+    of a module that does not exists.
+    """
+    name: str
+
+    def placeholder_attr(self, attr_path: str):
+        return _PlaceholderModuleAttr(self, attr_path)
+
+    def __getattr__(self, key: str):
+        name = self.name
+
+        try:
+            importlib.import_module(self.name)
+        except ImportError as exc:
+            for extra, names in get_vllm_optional_dependencies().items():
+                if name in names:
+                    msg = f"Please install vllm[{extra}] for {extra} support"
+                    raise ImportError(msg) from exc
+
+            raise exc
+
+        raise AssertionError("PlaceholderModule should not be used "
+                             "when the original module can be imported")
+
+
+@dataclass(frozen=True)
+class _PlaceholderModuleAttr:
+    module: PlaceholderModule
+    attr_path: str
+
+    def placeholder_attr(self, attr_path: str):
+        return _PlaceholderModuleAttr(self.module,
+                                      f"{self.attr_path}.{attr_path}")
+
+    def __getattr__(self, key: str):
+        getattr(self.module, f"{self.attr_path}.{key}")
+
+        raise AssertionError("PlaceholderModule should not be used "
+                             "when the original module can be imported")
+
+
 # create a library to hold the custom op
 vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
@@ -1581,6 +1676,7 @@ def direct_register_custom_op(
         return
 
     if not supports_custom_op():
+        from vllm.platforms import current_platform
         assert not current_platform.is_cuda_alike(), (
             "cuda platform needs torch>=2.4 to support custom op, "
             "chances are you are using an old version of pytorch "
@@ -1755,3 +1851,99 @@ def memory_profiling(
     result.non_torch_increase_in_bytes = current_cuda_memory_bytes - baseline_memory_in_bytes - weights_memory_in_bytes - diff.torch_memory_in_bytes  # noqa
     result.profile_time = diff.timestamp
     result.non_kv_cache_memory_in_bytes = result.non_torch_increase_in_bytes + result.torch_peak_increase_in_bytes + result.weights_memory_in_bytes  # noqa
+
+
+# Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
+def set_ulimit(target_soft_limit=65535):
+    resource_type = resource.RLIMIT_NOFILE
+    current_soft, current_hard = resource.getrlimit(resource_type)
+
+    if current_soft < target_soft_limit:
+        try:
+            resource.setrlimit(resource_type,
+                               (target_soft_limit, current_hard))
+        except ValueError as e:
+            logger.warning(
+                "Found ulimit of %s and failed to automatically increase"
+                "with error %s. This can cause fd limit errors like"
+                "`OSError: [Errno 24] Too many open files`. Consider "
+                "increasing with ulimit -n", current_soft, e)
+
+
+# Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/utils.py#L28 # noqa: E501
+def get_exception_traceback():
+    etype, value, tb = sys.exc_info()
+    err_str = "".join(traceback.format_exception(etype, value, tb))
+    return err_str
+
+
+# Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
+def make_zmq_socket(
+    ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
+    path: str,
+    type: Any,
+) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
+    """Make a ZMQ socket with the proper bind/connect semantics."""
+
+    mem = psutil.virtual_memory()
+    socket = ctx.socket(type)
+
+    # Calculate buffer size based on system memory
+    total_mem = mem.total / 1024**3
+    available_mem = mem.available / 1024**3
+    # For systems with substantial memory (>32GB total, >16GB available):
+    # - Set a large 0.5GB buffer to improve throughput
+    # For systems with less memory:
+    # - Use system default (-1) to avoid excessive memory consumption
+    if total_mem > 32 and available_mem > 16:
+        buf_size = int(0.5 * 1024**3)  # 0.5GB in bytes
+    else:
+        buf_size = -1  # Use system default buffer size
+
+    if type == zmq.constants.PULL:
+        socket.setsockopt(zmq.constants.RCVHWM, 0)
+        socket.setsockopt(zmq.constants.RCVBUF, buf_size)
+        socket.connect(path)
+    elif type == zmq.constants.PUSH:
+        socket.setsockopt(zmq.constants.SNDHWM, 0)
+        socket.setsockopt(zmq.constants.SNDBUF, buf_size)
+        socket.bind(path)
+    else:
+        raise ValueError(f"Unknown Socket Type: {type}")
+
+    return socket
+
+
+@contextlib.contextmanager
+def zmq_socket_ctx(
+        path: str,
+        type: Any) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
+    """Context manager for a ZMQ socket"""
+
+    ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
+    try:
+        yield make_zmq_socket(ctx, path, type)
+
+    except KeyboardInterrupt:
+        logger.debug("Got Keyboard Interrupt.")
+
+    finally:
+        ctx.destroy(linger=0)
+
+
+def _check_multiproc_method():
+    if (cuda_is_initialized()
+            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
+        logger.warning("CUDA was previously initialized. We must use "
+                       "the `spawn` multiprocessing start method. Setting "
+                       "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+                       "See https://docs.vllm.ai/en/latest/getting_started/"
+                       "troubleshooting.html#python-multiprocessing "
+                       "for more information.")
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+
+def get_mp_context():
+    _check_multiproc_method()
+    mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
+    return multiprocessing.get_context(mp_method)

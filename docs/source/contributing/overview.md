@@ -13,11 +13,12 @@ Finally, one of the most impactful ways to support us is by raising awareness ab
 
 ## License
 
-See [LICENSE](https://github.com/vllm-project/vllm/tree/main/LICENSE).
+See <gh-file:LICENSE>.
 
 ## Developing
 
-Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM with or without compilation. Check out the [building from source](https://docs.vllm.ai/en/latest/getting_started/installation.html#build-from-source) documentation for details.
+Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM with or without compilation.
+Check out the [building from source](#build-from-source) documentation for details.
 
 ## Testing
 
@@ -33,7 +34,7 @@ pytest tests/
 ```
 
 ```{note}
-Currently, the repository does not pass the `mypy` tests.
+Currently, the repository is not fully checked by `mypy`.
 ```
 
 # Contribution Guidelines
@@ -43,7 +44,7 @@ Currently, the repository does not pass the `mypy` tests.
 If you encounter a bug or have a feature request, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
 ```{important}
-If you discover a security vulnerability, please follow the instructions [here](https://github.com/vllm-project/vllm/tree/main/SECURITY.md#reporting-a-vulnerability).
+If you discover a security vulnerability, please follow the instructions [here](gh-file:SECURITY.md#reporting-a-vulnerability).
 ```
 
 ## Pull Requests & Code Reviews
@@ -54,9 +55,9 @@ code quality and improve the efficiency of the review process.
 
 ### DCO and Signed-off-by
 
-When contributing changes to this project, you must agree to the [DCO](https://github.com/vllm-project/vllm/tree/main/DCO).
+When contributing changes to this project, you must agree to the <gh-file:DCO>.
 Commits must include a `Signed-off-by:` header which certifies agreement with
-the terms of the [DCO](https://github.com/vllm-project/vllm/tree/main/DCO).
+the terms of the DCO.
 
 Using `-s` with `git commit` will automatically add this header.
 
@@ -89,8 +90,7 @@ If the PR spans more than one category, please include all relevant prefixes.
 The PR needs to meet the following code quality standards:
 
 - We adhere to [Google Python style guide](https://google.github.io/styleguide/pyguide.html) and [Google C++ style guide](https://google.github.io/styleguide/cppguide.html).
-- Pass all linter checks. Please use [format.sh](https://github.com/vllm-project/vllm/blob/main/format.sh) to format your
-  code.
+- Pass all linter checks. Please use <gh-file:format.sh> to format your code.
 - The code needs to be well-documented to ensure future contributors can easily
   understand the code.
 - Include sufficient tests to ensure the project stays correct and robust. This

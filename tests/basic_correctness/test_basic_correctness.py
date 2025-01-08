@@ -127,11 +127,6 @@ def test_models_distributed(
     if attention_backend:
         os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
 
-    # Import VLLM_USE_V1 dynamically to handle patching
-    from vllm.envs import VLLM_USE_V1
-    if VLLM_USE_V1 and distributed_executor_backend != "mp":
-        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-
     dtype = "half"
     max_tokens = 5
 

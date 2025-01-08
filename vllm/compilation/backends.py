@@ -141,14 +141,14 @@ class AlwaysHitShapeEnv:
         return ""
 
 
-def wrap_inductor(graph,
+def wrap_inductor(graph: fx.GraphModule,
                   example_inputs,
                   additional_inductor_config,
                   compilation_config: CompilationConfig,
                   graph_index: int = 0,
                   num_graphs: int = 1,
                   runtime_shape: Optional[int] = None,
-                  use_inductor: bool = True):
+                  use_inductor: bool = True) -> Any:
     if graph_index == 0:
         # before compiling the first graph, record the start time
         global compilation_start_time
@@ -208,7 +208,7 @@ def wrap_inductor(graph,
         from torch._inductor.compile_fx import graph_returns_tuple
         returns_tuple = graph_returns_tuple(graph)
 
-        # this is the graph we return to Dynamo to run
+        # this is the callable we return to Dynamo to run
         def compiled_graph(*args):
             # convert args to list
             list_args = list(args)
@@ -247,7 +247,7 @@ def wrap_inductor(graph,
             # see https://github.com/pytorch/pytorch/blob/9f5ebf3fc609105a74eab4ccc24932d6353ff566/torch/_inductor/codecache.py#L1221 # noqa
             return
 
-        def _get_shape_env():
+        def _get_shape_env() -> AlwaysHitShapeEnv:
             return AlwaysHitShapeEnv()
 
         with patch(# for hijacking the hash of the compiled graph
@@ -537,6 +537,7 @@ class VllmBackend:
             example_inputs[x].clone() for x in self.sym_tensor_indices
         ]
 
+        # this is the callable we return to Dynamo to run
         def copy_and_call(*args):
             list_args = list(args)
             for i, index in enumerate(self.sym_tensor_indices):
@@ -618,8 +619,10 @@ class PiecewiseBackend:
         # the entries for different shapes that we need to either
         # compile or capture cudagraph
         self.concrete_size_entries: Dict[int, ConcreteSizeEntry] = {}
-        self.to_be_compiled_sizes: Set[int] = self.compile_sizes.union(
-            self.capture_sizes)
+
+        # to_be_compiled_sizes tracks the remaining sizes to compile,
+        # and updates during the compilation process, so we need to copy it
+        self.to_be_compiled_sizes: Set[int] = self.compile_sizes.copy()
         for shape in self.compile_sizes.union(self.capture_sizes):
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,
@@ -627,12 +630,17 @@ class PiecewiseBackend:
                 use_cudagraph=shape in self.capture_sizes,
             )
 
+    def check_for_ending_compilation(self):
+        if self.is_last_graph and not self.to_be_compiled_sizes:
+            # no specific sizes to compile
+            # save the hash of the inductor graph for the next run
+            self.compilation_config.inductor_hash_cache.save_to_file()
+            end_monitoring_torch_compile(self.vllm_config)
+
     def __call__(self, *args) -> Any:
         if not self.first_run_finished:
             self.first_run_finished = True
-            # no specific sizes to compile
-            if self.is_last_graph and not self.to_be_compiled_sizes:
-                end_monitoring_torch_compile(self.vllm_config)
+            self.check_for_ending_compilation()
             return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
@@ -661,10 +669,7 @@ class PiecewiseBackend:
 
             # finished compilations for all required shapes
             if self.is_last_graph and not self.to_be_compiled_sizes:
-
-                # save the hash of the inductor graph for the next run
-                self.compilation_config.inductor_hash_cache.save_to_file()
-                end_monitoring_torch_compile(self.vllm_config)
+                self.check_for_ending_compilation()
 
         if not entry.use_cudagraph:
             return entry.runnable(*args)

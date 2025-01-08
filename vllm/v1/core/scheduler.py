@@ -5,8 +5,6 @@ from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalKwargs
-from vllm.multimodal.base import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -262,6 +260,14 @@ class Scheduler:
         assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
                 len(scheduled_running_reqs) == len(self.running))
 
+        # Get the longest common prefix among all requests in the running queue.
+        # This can be potentially used for cascade attention.
+        if self.running:
+            any_request = self.running[0]
+            num_common_prefix_blocks = (
+                self.kv_cache_manager.get_num_common_prefix_blocks(
+                    any_request, len(self.running)))
+
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
@@ -287,6 +293,7 @@ class Scheduler:
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
+            num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids=preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -594,6 +601,7 @@ class SchedulerOutput:
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int
     scheduled_encoder_inputs: Dict[str, List[int]]
+    num_common_prefix_blocks: int
 
     preempted_req_ids: Set[str]
     finished_req_ids: Set[str]

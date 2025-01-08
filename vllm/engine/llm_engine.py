@@ -1124,6 +1124,8 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
+            if not seq_group.is_prefill():
+                seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
@@ -1166,6 +1168,8 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
+            if not seq_group.is_prefill():
+                seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
@@ -1686,7 +1690,7 @@ class LLMEngine:
                     # If the seq_group just finished the prefill state
                     # get TTFT.
                     if not seq_group.is_prefill():
-                        latency = seq_group.get_last_latency(now)
+                        latency = seq_group.get_last_token_latency()
                         time_to_first_tokens_iter.append(latency)
 
                         # One generation token per finished prefill.
@@ -1694,7 +1698,7 @@ class LLMEngine:
                             seq_group.num_seqs())
                 else:
                     # TPOTs.
-                    latency = seq_group.get_last_latency(now)
+                    latency = seq_group.get_last_token_latency()
                     time_per_output_tokens_iter.append(latency)
                     if seq_group.state.current_step == 0:
                         # For async_output_proc, the do_log_stats()

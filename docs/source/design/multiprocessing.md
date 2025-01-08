@@ -2,13 +2,14 @@
 
 ## Debugging
 
-Please see the [Debugging
-Tips](https://docs.vllm.ai/en/latest/getting_started/debugging.html#python-multiprocessing)
+Please see the [Troubleshooting](#troubleshooting-python-multiprocessing)
 page for information on known issues and how to solve them.
 
 ## Introduction
 
-*Note that source code references are to the state of the code at the time of writing in December, 2024.*
+```{important}
+The source code references are to the state of the code at the time of writing in December, 2024.
+```
 
 The use of Python multiprocessing in vLLM is complicated by:
 
@@ -20,7 +21,7 @@ This document describes how vLLM deals with these challenges.
 
 ## Multiprocessing Methods
 
-[Python multiprocessing methods](https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods) include:
+[Python multiprocessing methods](https://docs.python.org/3/library/multiprocessing.html.md#contexts-and-start-methods) include:
 
 - `spawn` - spawn a new Python process. This will be the default as of Python
   3.14.
@@ -82,7 +83,7 @@ There are other miscellaneous places hard-coding the use of `spawn`:
 
 Related PRs:
 
-- <https://github.com/vllm-project/vllm/pull/8823>
+- <gh-pr:8823>
 
 ## Prior State in v1
 
@@ -96,7 +97,7 @@ engine core.
 
 - <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/v1/engine/llm_engine.py#L93-L95>
 - <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/v1/engine/llm_engine.py#L70-L77>
-- https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/v1/engine/core_client.py#L44-L45
+- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/v1/engine/core_client.py#L44-L45>
 
 It was off by default for all the reasons mentioned above - compatibility with
 dependencies and code using vLLM as a library.
@@ -119,17 +120,17 @@ instruct users to either add a `__main__` guard or to disable multiprocessing.
 If that known-failure case occurs, the user will see two messages that explain
 what is happening. First, a log message from vLLM:
 
-```
-    WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
-      initialized. We must use the `spawn` multiprocessing start method. Setting
-      VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See
-      https://docs.vllm.ai/en/latest/getting_started/debugging.html#python-multiprocessing
-      for more information.
+```console
+WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
+    initialized. We must use the `spawn` multiprocessing start method. Setting
+    VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See
+    https://docs.vllm.ai/en/latest/getting_started/debugging.html#python-multiprocessing
+    for more information.
 ```
 
 Second, Python itself will raise an exception with a nice explanation:
 
-```
+```console
 RuntimeError:
         An attempt has been made to start a new process before the
         current process has finished its bootstrapping phase.

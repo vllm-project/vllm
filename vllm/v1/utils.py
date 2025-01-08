@@ -1,11 +1,12 @@
+import multiprocessing
+import os
+import weakref
 from collections.abc import Sequence
-from contextlib import contextmanager
-from typing import (Any, Generic, Iterator, List, Optional, TypeVar, Union,
-                    overload)
-
-import zmq
+from typing import (Any, Callable, Dict, Generic, List, Optional, TypeVar,
+                    Union, overload)
 
 from vllm.logger import init_logger
+from vllm.utils import get_mp_context, kill_process_tree
 
 logger = init_logger(__name__)
 
@@ -77,27 +78,59 @@ class ConstantList(Generic[T], Sequence):
         return len(self._x)
 
 
-@contextmanager
-def make_zmq_socket(
-        path: str,
-        type: Any) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
-    """Context manager for a ZMQ socket"""
+class BackgroundProcHandle:
+    """
+    Utility class to handle creation, readiness, and shutdown
+    of background processes used by the AsyncLLM and LLMEngine.
+    """
 
-    ctx = zmq.Context()  # type: ignore[attr-defined]
-    try:
-        socket = ctx.socket(type)
+    def __init__(
+        self,
+        input_path: str,
+        output_path: str,
+        process_name: str,
+        target_fn: Callable,
+        process_kwargs: Dict[Any, Any],
+    ):
+        context = get_mp_context()
+        reader, writer = context.Pipe(duplex=False)
 
-        if type == zmq.constants.PULL:
-            socket.connect(path)
-        elif type == zmq.constants.PUSH:
-            socket.bind(path)
-        else:
-            raise ValueError(f"Unknown Socket Type: {type}")
+        assert ("ready_pipe" not in process_kwargs
+                and "input_path" not in process_kwargs
+                and "output_path" not in process_kwargs)
+        process_kwargs["ready_pipe"] = writer
+        process_kwargs["input_path"] = input_path
+        process_kwargs["output_path"] = output_path
 
-        yield socket
+        # Run busy loop in background process.
+        self.proc = context.Process(target=target_fn, kwargs=process_kwargs)
+        self._finalizer = weakref.finalize(self, shutdown, self.proc,
+                                           input_path, output_path)
+        self.proc.start()
 
-    except KeyboardInterrupt:
-        logger.debug("Worker had Keyboard Interrupt.")
+        # Wait for startup.
+        if reader.recv()["status"] != "READY":
+            raise RuntimeError(f"{process_name} initialization failed. "
+                               "See root cause above.")
 
-    finally:
-        ctx.destroy(linger=0)
+    def shutdown(self):
+        self._finalizer()
+
+
+# Note(rob): shutdown function cannot be a bound method,
+# else the gc cannot collect the object.
+def shutdown(proc: multiprocessing.Process, input_path: str, output_path: str):
+    # Shutdown the process.
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(5)
+
+        if proc.is_alive():
+            kill_process_tree(proc.pid)
+
+    # Remove zmq ipc socket files.
+    ipc_sockets = [output_path, input_path]
+    for ipc_socket in ipc_sockets:
+        socket_file = ipc_socket.replace("ipc://", "")
+        if os and os.path.exists(socket_file):
+            os.remove(socket_file)

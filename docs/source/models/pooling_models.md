@@ -65,7 +65,7 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-A code example can be found in [examples/offline_inference_embedding.py](https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_embedding.py).
+A code example can be found here: <gh-file:examples/offline_inference_embedding.py>
 
 ### `LLM.classify`
 
@@ -80,7 +80,7 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found in [examples/offline_inference_classification.py](https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_classification.py).
+A code example can be found here: <gh-file:examples/offline_inference_classification.py>
 
 ### `LLM.score`
 
@@ -102,26 +102,12 @@ score = output.outputs.score
 print(f"Score: {score}")
 ```
 
-A code example can be found in [examples/offline_inference_scoring.py](https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_scoring.py).
+A code example can be found here: <gh-file:examples/offline_inference_scoring.py>
 
 ## Online Inference
 
-Our [OpenAI Compatible Server](../serving/openai_compatible_server.md) can be used for online inference.
-Please click on the above link for more details on how to launch the server.
+Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints that correspond to the offline APIs:
 
-### Embeddings API
-
-Our Embeddings API is similar to `LLM.embed`, accepting both text and [multi-modal inputs](#multimodal-inputs).
-
-The text-only API is compatible with [OpenAI Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
-so that you can use OpenAI client to interact with it.
-A code example can be found in [examples/openai_embedding_client.py](https://github.com/vllm-project/vllm/blob/main/examples/openai_embedding_client.py).
-
-The multi-modal API is an extension of the [OpenAI Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
-that incorporates [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat),
-so it is not part of the OpenAI standard. Please see [](#multimodal-inputs) for more details on how to use it.
-
-### Score API
-
-Our Score API is similar to `LLM.score`.
-Please see [this page](#score-api) for more details on how to use it.
+- [Pooling API](#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
+- [Embeddings API](#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](#multimodal-inputs) for embedding models.
+- [Score API](#score-api) is similar to `LLM.score` for cross-encoder models.
