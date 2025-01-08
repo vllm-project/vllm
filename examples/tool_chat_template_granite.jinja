@@ -21,11 +21,7 @@
     {{- '<|start_of_role|>user<|end_of_role|>' + message['content'] + '<|end_of_text|>
 ' }}
     {%- elif message['role'] == 'assistant_tool_call' or (message['role'] == 'assistant' and message.tool_calls is defined) %}
-    {{- '<|start_of_role|>assistant<|end_of_role|>' }}
-        {% for tc in message.tool_calls %}
-            {{- '<|tool_call|> ' + {'name': tc.function.name, 'arguments': tc.function.arguments}|tojson  }}
-        {% endfor %}
-    {{- '<|end_of_text|>
+    {{- '<|start_of_role|>assistant<|end_of_role|><|tool_call|>' + message.tool_calls|map(attribute='function')|list|tojson(indent=4) + '<|end_of_text|>
 ' }}
     {%- elif message['role'] == 'assistant' %}
     {{- '<|start_of_role|>assistant<|end_of_role|>'  + message['content'] + '<|end_of_text|>

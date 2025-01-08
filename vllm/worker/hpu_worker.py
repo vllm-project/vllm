@@ -65,8 +65,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[HPUCacheEngine]
-        # Initialize gpu_cache as embedding models don't initialize kv_caches
-        self.hpu_cache: Optional[List[List[torch.tensor]]] = None
+        # Initialize gpu_cache as pooling models don't initialize kv_caches
+        self.hpu_cache: Optional[List[List[torch.Tensor]]] = None
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:

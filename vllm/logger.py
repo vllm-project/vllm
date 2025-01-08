@@ -50,7 +50,7 @@ DEFAULT_LOGGING_CONFIG = {
 
 
 def _configure_vllm_root_logger() -> None:
-    logging_config: Optional[Dict] = None
+    logging_config: Dict = {}
 
     if not VLLM_CONFIGURE_LOGGING and VLLM_LOGGING_CONFIG_PATH:
         raise RuntimeError(
@@ -74,6 +74,11 @@ def _configure_vllm_root_logger() -> None:
             raise ValueError("Invalid logging config. Expected Dict, got %s.",
                              type(custom_config).__name__)
         logging_config = custom_config
+
+    for formatter in logging_config.get("formatters", {}).values():
+        # This provides backwards compatibility after #10134.
+        if formatter.get("class") == "vllm.logging.NewLineFormatter":
+            formatter["class"] = "vllm.logging_utils.NewLineFormatter"
 
     if logging_config:
         dictConfig(logging_config)

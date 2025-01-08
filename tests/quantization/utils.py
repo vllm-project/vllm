@@ -1,4 +1,4 @@
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.platforms import current_platform
 
 
@@ -10,6 +10,6 @@ def is_quant_method_supported(quant_method: str) -> bool:
     capability = current_platform.get_device_capability()
     assert capability is not None
 
-    min_capability = QUANTIZATION_METHODS[quant_method].get_min_capability()
+    min_capability = get_quantization_config(quant_method).get_min_capability()
 
     return capability.to_int() >= min_capability

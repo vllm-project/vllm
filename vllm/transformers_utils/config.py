@@ -1,5 +1,6 @@
 import enum
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Type, Union
 
@@ -9,6 +10,7 @@ from huggingface_hub import (file_exists, hf_hub_download,
 from huggingface_hub.utils import (EntryNotFoundError, LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
+from torch import nn
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
@@ -20,17 +22,19 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
-                                             EAGLEConfig, ExaoneConfig,
-                                             H2OVLChatConfig,
+from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
+                                             DbrxConfig, EAGLEConfig,
+                                             ExaoneConfig, H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
                                              NemotronConfig, NVLM_D_Config,
-                                             RWConfig, SolarConfig,
+                                             Olmo2Config, RWConfig,
+                                             SolarConfig, Telechat2Config,
                                              UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
+from vllm.utils import resolve_obj_by_qualname
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -38,6 +42,7 @@ else:
     from transformers import AutoConfig
 
 MISTRAL_CONFIG_NAME = "params.json"
+HF_TOKEN = os.getenv('HF_TOKEN', None)
 
 logger = init_logger(__name__)
 
@@ -47,6 +52,7 @@ _CONFIG_REGISTRY_OVERRIDE_HF: Dict[str, Type[PretrainedConfig]] = {
 
 _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
+    "cohere2": Cohere2Config,
     "dbrx": DbrxConfig,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
@@ -60,7 +66,9 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
+    "olmo2": Olmo2Config,
     "solar": SolarConfig,
+    "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
@@ -72,8 +80,8 @@ class ConfigFormat(str, enum.Enum):
     MISTRAL = "mistral"
 
 
-def file_or_path_exists(model: Union[str, Path], config_name, revision,
-                        token) -> bool:
+def file_or_path_exists(model: Union[str, Path], config_name: str,
+                        revision: Optional[str]) -> bool:
     if Path(model).exists():
         return (Path(model) / config_name).is_file()
 
@@ -88,7 +96,10 @@ def file_or_path_exists(model: Union[str, Path], config_name, revision,
     # NB: file_exists will only check for the existence of the config file on
     # hf_hub. This will fail in offline mode.
     try:
-        return file_exists(model, config_name, revision=revision, token=token)
+        return file_exists(model,
+                           config_name,
+                           revision=revision,
+                           token=HF_TOKEN)
     except huggingface_hub.errors.OfflineModeIsEnabled:
         # Don't raise in offline mode, all we know is that we don't have this
         # file cached.
@@ -107,6 +118,15 @@ def patch_rope_scaling(config: PretrainedConfig) -> None:
 
 
 def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
+    if "rope_type" in rope_scaling and "type" in rope_scaling:
+        rope_type = rope_scaling["rope_type"]
+        rope_type_legacy = rope_scaling["type"]
+        if rope_type != rope_type_legacy:
+            raise ValueError(
+                f"Found conflicts between 'rope_type={rope_type}' (modern "
+                f"field) and 'type={rope_type_legacy}' (legacy field). "
+                "You should only specify one of them.")
+
     if "rope_type" not in rope_scaling and "type" in rope_scaling:
         rope_scaling["rope_type"] = rope_scaling["type"]
         logger.info("Replacing legacy 'type' key with 'rope_type'")
@@ -147,7 +167,6 @@ def get_config(
     revision: Optional[str] = None,
     code_revision: Optional[str] = None,
     config_format: ConfigFormat = ConfigFormat.AUTO,
-    token: Optional[str] = None,
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
@@ -159,19 +178,20 @@ def get_config(
 
     if config_format == ConfigFormat.AUTO:
         if is_gguf or file_or_path_exists(
-                model, HF_CONFIG_NAME, revision=revision, token=token):
+                model, HF_CONFIG_NAME, revision=revision):
             config_format = ConfigFormat.HF
-        elif file_or_path_exists(model,
-                                 MISTRAL_CONFIG_NAME,
-                                 revision=revision,
-                                 token=token):
+        elif file_or_path_exists(model, MISTRAL_CONFIG_NAME,
+                                 revision=revision):
             config_format = ConfigFormat.MISTRAL
         else:
             # If we're in offline mode and found no valid config format, then
             # raise an offline mode error to indicate to the user that they
             # don't have files cached and may need to go online.
             # This is conveniently triggered by calling file_exists().
-            file_exists(model, HF_CONFIG_NAME, revision=revision, token=token)
+            file_exists(model,
+                        HF_CONFIG_NAME,
+                        revision=revision,
+                        token=HF_TOKEN)
 
             raise ValueError(f"No supported config format found in {model}")
 
@@ -180,7 +200,7 @@ def get_config(
             model,
             revision=revision,
             code_revision=code_revision,
-            token=token,
+            token=HF_TOKEN,
             **kwargs,
         )
 
@@ -192,7 +212,7 @@ def get_config(
                 model,
                 revision=revision,
                 code_revision=code_revision,
-                token=token,
+                token=HF_TOKEN,
                 **kwargs,
             )
         else:
@@ -202,7 +222,7 @@ def get_config(
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
-                    token=token,
+                    token=HF_TOKEN,
                     **kwargs,
                 )
             except ValueError as e:
@@ -220,7 +240,7 @@ def get_config(
                     raise e
 
     elif config_format == ConfigFormat.MISTRAL:
-        config = load_params_config(model, revision, token=token, **kwargs)
+        config = load_params_config(model, revision, token=HF_TOKEN, **kwargs)
     else:
         raise ValueError(f"Unsupported config format: {config_format}")
 
@@ -242,8 +262,7 @@ def get_config(
 
 def get_hf_file_to_dict(file_name: str,
                         model: Union[str, Path],
-                        revision: Optional[str] = 'main',
-                        token: Optional[str] = None):
+                        revision: Optional[str] = 'main'):
     """
     Downloads a file from the Hugging Face Hub and returns 
     its contents as a dictionary.
@@ -252,7 +271,6 @@ def get_hf_file_to_dict(file_name: str,
     - file_name (str): The name of the file to download.
     - model (str): The name of the model on the Hugging Face Hub.
     - revision (str): The specific version of the model. 
-    - token (str): The Hugging Face authentication token.
 
     Returns:
     - config_dict (dict): A dictionary containing 
@@ -262,8 +280,7 @@ def get_hf_file_to_dict(file_name: str,
 
     if file_or_path_exists(model=model,
                            config_name=file_name,
-                           revision=revision,
-                           token=token):
+                           revision=revision):
 
         if not file_path.is_file():
             try:
@@ -282,9 +299,7 @@ def get_hf_file_to_dict(file_name: str,
     return None
 
 
-def get_pooling_config(model: str,
-                       revision: Optional[str] = 'main',
-                       token: Optional[str] = None):
+def get_pooling_config(model: str, revision: Optional[str] = 'main'):
     """
     This function gets the pooling and normalize 
     config from the model - only applies to 
@@ -301,8 +316,7 @@ def get_pooling_config(model: str,
     """
 
     modules_file_name = "modules.json"
-    modules_dict = get_hf_file_to_dict(modules_file_name, model, revision,
-                                       token)
+    modules_dict = get_hf_file_to_dict(modules_file_name, model, revision)
 
     if modules_dict is None:
         return None
@@ -318,8 +332,7 @@ def get_pooling_config(model: str,
     if pooling:
 
         pooling_file_name = "{}/config.json".format(pooling["path"])
-        pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision,
-                                           token)
+        pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision)
         pooling_type_name = next(
             (item for item, val in pooling_dict.items() if val is True), None)
 
@@ -354,8 +367,8 @@ def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
 
 
 def get_sentence_transformer_tokenizer_config(model: str,
-                                              revision: Optional[str] = 'main',
-                                              token: Optional[str] = None):
+                                              revision: Optional[str] = 'main'
+                                              ):
     """
     Returns the tokenization configuration dictionary for a 
     given Sentence Transformer BERT model.
@@ -365,7 +378,6 @@ def get_sentence_transformer_tokenizer_config(model: str,
     BERT model.
     - revision (str, optional): The revision of the m
     odel to use. Defaults to 'main'.
-    - token (str): A Hugging Face access token.
 
     Returns:
     - dict: A dictionary containing the configuration parameters 
@@ -380,7 +392,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
             "sentence_xlm-roberta_config.json",
             "sentence_xlnet_config.json",
     ]:
-        encoder_dict = get_hf_file_to_dict(config_name, model, revision, token)
+        encoder_dict = get_hf_file_to_dict(config_name, model, revision)
         if encoder_dict:
             break
 
@@ -460,16 +472,14 @@ def maybe_register_config_serialize_by_value() -> None:
             exc_info=e)
 
 
-def load_params_config(model: Union[str, Path],
-                       revision: Optional[str],
-                       token: Optional[str] = None,
+def load_params_config(model: Union[str, Path], revision: Optional[str],
                        **kwargs) -> PretrainedConfig:
     # This function loads a params.json config which
     # should be used when loading models in mistral format
 
     config_file_name = "params.json"
 
-    config_dict = get_hf_file_to_dict(config_file_name, model, revision, token)
+    config_dict = get_hf_file_to_dict(config_file_name, model, revision)
     assert isinstance(config_dict, dict)
 
     config_mapping = {
@@ -568,3 +578,16 @@ def try_get_generation_config(
             return GenerationConfig.from_model_config(config)
         except OSError:  # Not found
             return None
+
+
+def get_cross_encoder_activation_function(config: PretrainedConfig):
+    if (hasattr(config, "sbert_ce_default_activation_function")
+            and config.sbert_ce_default_activation_function is not None):
+
+        function_name = config.sbert_ce_default_activation_function
+        assert function_name.startswith("torch.nn.modules."), \
+            "Loading of activation functions is restricted to " \
+            "torch.nn.modules for security reasons"
+        return resolve_obj_by_qualname(function_name)()
+    else:
+        return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()

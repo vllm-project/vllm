@@ -48,10 +48,7 @@ class HPUExecutor(ExecutorBase):
                        local_rank: int = 0,
                        rank: int = 0,
                        distributed_init_method: Optional[str] = None):
-        wrapper = WorkerWrapperBase(
-            worker_module_name="vllm.worker.hpu_worker",
-            worker_class_name="HPUWorker",
-        )
+        wrapper = WorkerWrapperBase(vllm_config=self.vllm_config)
         wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
                                                       distributed_init_method))
         return wrapper.worker

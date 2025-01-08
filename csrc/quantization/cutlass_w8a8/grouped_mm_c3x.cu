@@ -24,7 +24,7 @@
 
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
-#include "common.hpp"
+#include "cutlass_extensions/common.hpp"
 
 using namespace cute;
 

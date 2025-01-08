@@ -1,14 +1,39 @@
 import enum
+import platform
 import random
+from platform import uname
 from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
+
+logger = init_logger(__name__)
+
+
+def in_wsl() -> bool:
+    # Reference: https://github.com/microsoft/WSL/issues/4071
+    return "microsoft" in " ".join(uname()).lower()
+
+
+class _Backend(enum.Enum):
+    FLASH_ATTN = enum.auto()
+    FLASH_ATTN_VLLM_V1 = enum.auto()
+    XFORMERS = enum.auto()
+    ROCM_FLASH = enum.auto()
+    TORCH_SDPA = enum.auto()
+    OPENVINO = enum.auto()
+    FLASHINFER = enum.auto()
+    HPU_ATTN = enum.auto()
+    PALLAS = enum.auto()
+    IPEX = enum.auto()
+    NO_ATTENTION = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
@@ -21,6 +46,14 @@ class PlatformEnum(enum.Enum):
     NEURON = enum.auto()
     OPENVINO = enum.auto()
     UNSPECIFIED = enum.auto()
+
+
+class CpuArchEnum(enum.Enum):
+    X86 = enum.auto()
+    ARM = enum.auto()
+    POWERPC = enum.auto()
+    OTHER = enum.auto()
+    UNKNOWN = enum.auto()
 
 
 class DeviceCapability(NamedTuple):
@@ -42,6 +75,13 @@ class DeviceCapability(NamedTuple):
 
 class Platform:
     _enum: PlatformEnum
+    device_name: str
+    device_type: str
+    # available dispatch keys:
+    # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134 # noqa
+    # use "CPU" as a fallback for platforms not registered in PyTorch
+    dispatch_key: str = "CPU"
+    supported_quantization: list[str] = []
 
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
@@ -70,6 +110,11 @@ class Platform:
     def is_cuda_alike(self) -> bool:
         """Stateless version of :func:`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+
+    @classmethod
+    def get_default_attn_backend(cls, selected_backend: _Backend):
+        """Get the default attention backend of a device."""
+        return None
 
     @classmethod
     def get_device_capability(
@@ -113,6 +158,13 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        """
+        Check if the current platform supports async output.
+        """
+        raise NotImplementedError
+
+    @classmethod
     def inference_mode(cls):
         """A device-specific wrapper of `torch.inference_mode`.
 
@@ -147,6 +199,58 @@ class Platform:
         """
         pass
 
+    @classmethod
+    def verify_model_arch(cls, model_arch: str) -> None:
+        """
+        Verify whether the current platform supports the specified model
+        architecture.
+
+        - This will raise an Error or Warning based on the model support on
+        the current platform.
+        - By default all models are considered supported.
+        """
+        pass
+
+    @classmethod
+    def verify_quantization(cls, quant: str) -> None:
+        """
+        Verify whether the quantization is supported by the current platform.
+        """
+        if cls.supported_quantization and \
+            quant not in cls.supported_quantization:
+            raise ValueError(
+                f"{quant} quantization is currently not supported in "
+                f"{cls.device_name}.")
+
+    @classmethod
+    def get_cpu_architecture(cls) -> CpuArchEnum:
+        """
+        Determine the CPU architecture of the current system.
+        Returns CpuArchEnum indicating the architecture type.
+        """
+        machine = platform.machine().lower()
+
+        if machine in ("x86_64", "amd64", "i386", "i686"):
+            return CpuArchEnum.X86
+        elif machine.startswith("arm") or machine.startswith("aarch"):
+            return CpuArchEnum.ARM
+        elif machine.startswith("ppc"):
+            return CpuArchEnum.POWERPC
+
+        return CpuArchEnum.OTHER if machine else CpuArchEnum.UNKNOWN
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        """Checks whether pin memory is available on the current platform."""
+        if in_wsl():
+            # Pinning memory in WSL is not supported.
+            # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
+            logger.warning("Using 'pin_memory=False' as WSL is detected. "
+                           "This may slow down the performance.")
+            return False
+        return True
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
+    device_type = ""

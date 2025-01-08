@@ -48,7 +48,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (extract_layer_index, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -120,6 +120,7 @@ class CohereAttention(nn.Module):
         config: CohereConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         tp_size = get_tensor_model_parallel_world_size()
@@ -170,12 +171,29 @@ class CohereAttention(nn.Module):
             rope_scaling=self.rope_scaling,
             is_neox_style=False,
         )
+
+        # Model v2 has interleaved sliding windows, v1 does not
+        interleaved_sliding_window = getattr(config,
+                                             "interleaved_sliding_window",
+                                             None)
+        self.v1 = interleaved_sliding_window is None
+
+        layer_idx = extract_layer_index(prefix)
+        layer_has_sliding_window = (
+            getattr(config, "sliding_window_pattern", False)
+            and (layer_idx + 1) % self.config.sliding_window_pattern != 0)
+
+        self.sliding_window = (interleaved_sliding_window
+                               if layer_has_sliding_window else None)
+
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              per_layer_sliding_window=self.sliding_window,
+                              prefix=f"{prefix}.attn")
         if self.use_qk_norm:
             self.q_norm = LayerNorm(param_shape=(self.num_heads,
                                                  self.head_dim),
@@ -204,7 +222,8 @@ class CohereAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.use_qk_norm:
             q, k = self._apply_qk_norm(q, k)
-        q, k = self.rotary_emb(positions, q, k)
+        if self.v1 or self.sliding_window:
+            q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
@@ -215,13 +234,15 @@ class CohereDecoderLayer(nn.Module):
     def __init__(self,
                  config: CohereConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.hidden_size = config.hidden_size
 
         self.self_attn = CohereAttention(config,
                                          cache_config,
-                                         quant_config=quant_config)
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.self_attn")
 
         self.mlp = CohereMLP(config, quant_config=quant_config)
         self.input_layernorm = LayerNorm(param_shape=(config.hidden_size),
@@ -271,8 +292,8 @@ class CohereModel(nn.Module):
                                                    config.hidden_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: CohereDecoderLayer(config, cache_config,
-                                              quant_config),
+            lambda prefix: CohereDecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
         self.norm = LayerNorm(param_shape=(config.hidden_size),
                               eps=config.layer_norm_eps)

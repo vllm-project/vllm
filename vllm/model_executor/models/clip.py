@@ -5,11 +5,10 @@ from typing import Iterable, List, Optional, Set, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from PIL import Image
 from transformers import CLIPVisionConfig
 
-from vllm.attention.selector import _Backend
+from vllm.attention.layer import MultiHeadAttention
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import DecoderOnlyInputs, token_inputs
@@ -21,10 +20,11 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges,
-                                   repeat_and_pad_placeholder_tokens)
+                                   repeat_and_pad_placeholder_tokens,
+                                   resolve_visual_encoder_outputs)
 from vllm.sequence import SequenceData
 
-from .utils import get_vit_attn_backend
+from .vision import VisionEncoderInfo
 
 
 def get_clip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -151,6 +151,32 @@ def input_processor_for_clip(
                         multi_modal_placeholders={"image": ranges})
 
 
+class CLIPEncoderInfo(VisionEncoderInfo[CLIPVisionConfig]):
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        return get_clip_image_feature_size(self.vision_config)
+
+    def get_max_image_tokens(self) -> int:
+        return get_max_clip_image_tokens(self.vision_config)
+
+    def get_image_size(self) -> int:
+        return self.vision_config.image_size
+
+    def get_patch_size(self) -> int:
+        return self.vision_config.patch_size
+
+    def get_patch_grid_length(self) -> int:
+        return get_clip_patch_grid_length(
+            image_size=self.vision_config.image_size,
+            patch_size=self.vision_config.patch_size,
+        )
+
+
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa
 class CLIPVisionEmbeddings(nn.Module):
 
@@ -234,11 +260,8 @@ class CLIPAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        # Detect attention implementation.
-        self.attn_backend = get_vit_attn_backend(support_fa=False)
-        if self.attn_backend not in {_Backend.TORCH_SDPA, _Backend.XFORMERS}:
-            raise RuntimeError(
-                f"CLIP does not support {self.attn_backend} backend now.")
+        self.attn = MultiHeadAttention(self.num_heads_per_partition,
+                                       self.head_dim, self.scale)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads,
@@ -249,42 +272,10 @@ class CLIPAttention(nn.Module):
         hidden_states: torch.Tensor,
     ):
         """Input shape: Batch x Time x Channel"""
-        bsz, tgt_len, _ = hidden_states.size()
 
         qkv_states, _ = self.qkv_proj(hidden_states)
         query_states, key_states, value_states = qkv_states.chunk(3, dim=-1)
-
-        query_states = query_states.view(bsz, tgt_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-        key_states = key_states.view(bsz, tgt_len,
-                                     self.num_heads_per_partition,
-                                     self.head_dim)
-        value_states = value_states.view(bsz, tgt_len,
-                                         self.num_heads_per_partition,
-                                         self.head_dim)
-
-        if self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-
-            out = xops.memory_efficient_attention_forward(query_states,
-                                                          key_states,
-                                                          value_states,
-                                                          p=self.dropout,
-                                                          scale=self.scale)
-        elif self.attn_backend == _Backend.TORCH_SDPA:
-            query_states, key_states, value_states = (x.transpose(1, 2)
-                                                      for x in (query_states,
-                                                                key_states,
-                                                                value_states))
-            out = F.scaled_dot_product_attention(query_states,
-                                                 key_states,
-                                                 value_states,
-                                                 dropout_p=self.dropout,
-                                                 scale=self.scale)
-            out = out.transpose(1, 2)
-
-        out = out.view(bsz, tgt_len, -1)
+        out = self.attn(query_states, key_states, value_states)
         attn_output, _ = self.out_proj(out)
 
         return attn_output, None
@@ -389,12 +380,20 @@ class CLIPEncoder(nn.Module):
             for layer_idx in range(num_hidden_layers)
         ])
 
-    def forward(self, inputs_embeds: torch.Tensor):
-
+    def forward(
+        self, inputs_embeds: torch.Tensor, return_all_hidden_states: bool
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+        hidden_states_pool = []
         hidden_states = inputs_embeds
+
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
-
+            if return_all_hidden_states:
+                hidden_states_pool.append(hidden_states)
+        # If we have multiple feature sample layers, we return all hidden
+        # states in order and grab the ones we need by index.
+        if return_all_hidden_states:
+            return hidden_states_pool
         return hidden_states
 
 
@@ -419,6 +418,7 @@ class CLIPVisionTransformer(nn.Module):
         # NOTE: This typo of "layrnorm" is not fixed on purpose to match
         # the original transformers code and name of the model weights.
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+
         self.encoder = CLIPEncoder(
             config=config,
             quant_config=quant_config,
@@ -446,16 +446,26 @@ class CLIPVisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
+        feature_sample_layers: Optional[list[int]] = None,
     ) -> torch.Tensor:
 
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.pre_layrnorm(hidden_states)
-        hidden_states = self.encoder(inputs_embeds=hidden_states)
 
-        if self.post_layernorm is None:
-            return hidden_states
+        return_all_hidden_states = feature_sample_layers is not None
 
-        return self.post_layernorm(hidden_states)
+        # Produces either the last layer output or all of the hidden states,
+        # depending on if we have feature_sample_layers or not
+        encoder_outputs = self.encoder(
+            inputs_embeds=hidden_states,
+            return_all_hidden_states=return_all_hidden_states)
+
+        # Handle post-norm (if applicable) and stacks feature layers if needed
+        encoder_outputs = resolve_visual_encoder_outputs(
+            encoder_outputs, feature_sample_layers, self.post_layernorm,
+            self.config.num_hidden_layers)
+
+        return encoder_outputs
 
 
 class CLIPVisionModel(nn.Module):
@@ -478,11 +488,14 @@ class CLIPVisionModel(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
-            prefix=f"{prefix}.vision_model",
-        )
+            prefix=f"{prefix}.vision_model")
 
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        return self.vision_model(pixel_values)
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        feature_sample_layers: Optional[list[int]] = None,
+    ) -> torch.Tensor:
+        return self.vision_model(pixel_values, feature_sample_layers)
 
     @property
     def device(self):

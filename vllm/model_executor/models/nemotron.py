@@ -195,7 +195,8 @@ class NemotronAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -434,9 +435,11 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                     config.vocab_size,
                                                     logit_scale)
-            self.sampler = get_sampler()
         else:
             self.lm_head = PPMissingLayer()
+
+        self.sampler = get_sampler()
+
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

@@ -69,7 +69,8 @@ class PhiAttention(nn.Module):
     def __init__(self,
                  config: PhiConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
@@ -116,7 +117,8 @@ class PhiAttention(nn.Module):
                               self.head_size,
                               scaling,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -167,11 +169,15 @@ class PhiLayer(nn.Module):
     def __init__(self,
                  config: PhiConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
-        self.self_attn = PhiAttention(config, cache_config, quant_config)
+        self.self_attn = PhiAttention(config,
+                                      cache_config,
+                                      quant_config,
+                                      prefix=f"{prefix}.self_attn")
         self.mlp = PhiMLP(config, quant_config)
 
     def forward(
@@ -210,7 +216,8 @@ class PhiModel(nn.Module):
                                                    config.hidden_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: PhiLayer(config, cache_config, quant_config),
+            lambda prefix: PhiLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
         self.final_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
@@ -279,9 +286,6 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "k_proj": ("qkv_proj", 1),
         "v_proj": ("qkv_proj", 2),
     }
-    default_bitsandbytes_target_modules = [
-        ".q_proj.", ".k_proj.", ".v_proj.", ".fc1.", ".fc2.", ".dense."
-    ]
 
     embedding_modules = {}
     embedding_padding_modules = []

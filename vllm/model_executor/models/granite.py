@@ -161,7 +161,8 @@ class GraniteAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -399,15 +400,16 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 self.lm_head.weight = self.model.embed_tokens.weight
 
             logit_scale = getattr(config, "logit_scale", 1.0)
-
             if hasattr(config, "logits_scaling"):
                 logit_scale /= config.logits_scaling
+
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                     config.vocab_size,
                                                     scale=logit_scale)
-            self.sampler = get_sampler()
         else:
             self.lm_head = PPMissingLayer()
+
+        self.sampler = get_sampler()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -543,8 +545,9 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 # which is consistent with the practice of setting
                 # scaling_factor = tensor_amax / FPtype_max
                 scaling_factor *= 2
-            if hasattr(layer_self_attn, "kv_scale"):
-                layer_self_attn.attn._kv_scale = scaling_factor
+            if hasattr(layer_self_attn.attn, "_k_scale"):
+                layer_self_attn.attn._k_scale = scaling_factor
+                layer_self_attn.attn._v_scale = scaling_factor
             else:
                 raise RuntimeError("Self attention has no KV cache scaling "
                                    "factor attribute!")

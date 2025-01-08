@@ -1,5 +1,4 @@
 import contextlib
-import functools
 import importlib
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
@@ -19,16 +18,12 @@ if not current_platform.is_tpu() and not current_platform.is_hpu():
     except ImportError as e:
         logger.warning("Failed to import from vllm._C with %r", e)
 
-if current_platform.is_rocm():
-    import vllm._rocm_C  # noqa: F401
-
 supports_moe_ops = False
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
     supports_moe_ops = True
 
-# neuron has torch version that doesn't even have impl_abstract
-if TYPE_CHECKING or current_platform.is_neuron():
+if TYPE_CHECKING:
 
     def register_fake(fn):
         return lambda name: fn
@@ -39,39 +34,7 @@ else:
         from torch.library import impl_abstract as register_fake
 
 
-def hint_on_error(fn):
-
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-
-        except NotImplementedError as e:
-            msg = (
-                "Error in calling custom op %s: %s\n"
-                "Not implemented or built, mostly likely because the current current device "
-                "does not support this kernel (less likely TORCH_CUDA_ARCH_LIST was set "
-                "incorrectly while building)")
-            logger.error(msg, fn.__name__, e)
-            raise NotImplementedError(msg % (fn.__name__, e)) from e
-        except AttributeError as e:
-            msg = (
-                "Error in calling custom op %s: %s\n"
-                "Possibly you have built or installed an obsolete version of vllm.\n"
-                "Please try a clean build and install of vllm,"
-                "or remove old built files such as vllm/*cpython*.so and build/ ."
-            )
-            logger.error(msg, fn.__name__, e)
-            raise e
-
-    return wrapper
-
-
 # activation ops
-def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.silu_and_mul(out, x)
-
-
 def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
     torch.ops._C.gelu_and_mul(out, x)
 
@@ -252,6 +215,26 @@ def advance_step_flashinfer(num_seqs: int, num_queries: int, block_size: int,
         block_table_bound)
 
 
+# fused quant layer norm ops
+def rms_norm_dynamic_per_token_quant(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+    scale_ub: Optional[torch.Tensor] = None,
+    residual: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    output = torch.empty_like(input, dtype=quant_dtype)
+    scales = torch.empty((input.numel() // input.shape[-1], 1),
+                         device=input.device,
+                         dtype=torch.float32)
+
+    torch.ops._C.rms_norm_dynamic_per_token_quant(output, input, weight,
+                                                  scales, epsilon, scale_ub,
+                                                  residual)
+    return output, scales
+
+
 # quantization ops
 # awq
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
@@ -343,33 +326,9 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                size_k: torch.SymInt,
                                is_k_full: bool,
                                has_zp: bool = False,
-                               use_fp32_reduce: bool = False) -> torch.Tensor:
+                               use_fp32_reduce: bool = False,
+                               is_zp_float: bool = False) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
-
-    @register_fake("_C::ggml_dequantize")
-    def _ggml_dequantize_fake(W: torch.Tensor, quant_type: int,
-                              m: torch.SymInt,
-                              n: torch.SymInt) -> torch.Tensor:
-        return torch.empty((m, n), dtype=torch.float16, device=W.device)
-
-    @register_fake("_C::ggml_mul_mat_vec_a8")
-    def _ggml_mul_mat_vec_a8_fake(
-        W: torch.Tensor,
-        X: torch.Tensor,
-        quant_type: int,
-        row: torch.SymInt,
-    ) -> torch.Tensor:
-        return torch.empty((1, row), dtype=torch.float16, device=W.device)
-
-    @register_fake("_C::ggml_mul_mat_a8")
-    def _ggml_mul_mat_a8_fake(
-        W: torch.Tensor,
-        X: torch.Tensor,
-        quant_type: int,
-        row: torch.SymInt,
-    ) -> torch.Tensor:
-        batch = X.size(0)
-        return torch.empty((batch, row), dtype=torch.float16, device=W.device)
 
     @register_fake("_C::marlin_qqq_gemm")
     def _marlin_qqq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
@@ -470,6 +429,34 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                 memory_format=torch.contiguous_format)
 
 
+if hasattr(torch.ops._C, "ggml_dequantize"):
+
+    @register_fake("_C::ggml_dequantize")
+    def _ggml_dequantize_fake(W: torch.Tensor, quant_type: int,
+                              m: torch.SymInt,
+                              n: torch.SymInt) -> torch.Tensor:
+        return torch.empty((m, n), dtype=torch.float16, device=W.device)
+
+    @register_fake("_C::ggml_mul_mat_vec_a8")
+    def _ggml_mul_mat_vec_a8_fake(
+        W: torch.Tensor,
+        X: torch.Tensor,
+        quant_type: int,
+        row: torch.SymInt,
+    ) -> torch.Tensor:
+        return torch.empty((1, row), dtype=torch.float16, device=W.device)
+
+    @register_fake("_C::ggml_mul_mat_a8")
+    def _ggml_mul_mat_a8_fake(
+        W: torch.Tensor,
+        X: torch.Tensor,
+        quant_type: int,
+        row: torch.SymInt,
+    ) -> torch.Tensor:
+        batch = X.size(0)
+        return torch.empty((batch, row), dtype=torch.float16, device=W.device)
+
+
 # cutlass
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
@@ -528,6 +515,114 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
 
     torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, azp_adj,
                                        azp, bias)
+    return out
+
+
+def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_sparse_scaled_mm_supported(
+        cuda_device_capability)
+
+
+def cutlass_sparse_compress(a: torch.Tensor) \
+    -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compresses a sparse matrix for use with Cutlass sparse operations.
+
+    This function takes a dense tensor and compresses it into two components:
+    non-zero elements and metadata. The compressed representation is compatible
+    with Cutlass sparse kernels.
+
+    Args:
+        a (torch.Tensor): 
+            The input tensor to be compressed. Must have one of the following data types:
+            - `torch.int8`
+            - `torch.float8_e4m3fn`
+            - `torch.bfloat16`
+            - `torch.float16`
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: 
+            A tuple containing:
+            - `a_nzs` (torch.Tensor): A tensor containing non-zero elements of `a`.
+            - `a_meta` (torch.Tensor): A tensor containing metadata for the sparse representation.
+
+    Raises:
+        ValueError: If the compression operation fails.
+
+    Notes:
+        - The `a_meta` tensor has a data type of `torch.uint8`.
+        - Each metadata element encodes the sparsity of 4 non-zero elements (i.e., `elemsPerMetaElem = 4`).
+        - The shape of `a_nzs` is `(m, k // 2)`, where `m` and `k` are the dimensions of the input tensor.
+        - The shape of `a_meta` is `(m, k // 2 // elemsPerMetaElem)`.
+    """
+    assert (a.dtype in [
+        torch.int8, torch.float8_e4m3fn, torch.bfloat16, torch.float16
+    ])
+    assert (a.is_contiguous())
+
+    # a_meta.dtype: torch.uint8 so elemsPerMetaElem = 8b / 2b_per_nz = 4
+    elemsPerMetaElem = 4
+
+    m = a.shape[0]
+    k = a.shape[1]
+    assert (k % 2 == 0)
+    a_nzs = torch.empty((m, k // 2), dtype=a.dtype, device=a.device)
+    a_meta = torch.empty((m, k // 2 // elemsPerMetaElem),
+                         dtype=torch.uint8,
+                         device=a.device)
+
+    if not (torch.ops._C.cutlass_sparse_compress_entry(a_nzs, a_meta, a)):
+        raise ValueError
+
+    assert (a_nzs.is_contiguous())
+    assert (a_meta.is_contiguous())
+
+    return a_nzs, a_meta
+
+
+def cutlass_scaled_sparse_mm(
+        a: torch.Tensor,
+        bt_nzs: torch.Tensor,
+        bt_meta: torch.Tensor,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+        out_dtype: torch.dtype,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    Performs a scaled sparse matrix multiplication using Cutlass.
+
+    Steps:
+    1. Create a dense matrix `a` of shape (m, k) on the CUDA device:
+    `a = torch.randn((m, k), device='cuda')`.
+
+    2. Create a dense matrix `b` of shape (k, n) on the CUDA device:
+    `b = torch.randn((k, n), device='cuda')`.
+
+    3. Prune matrix `b` to 2:4 sparsity along the specified dimension:
+    `b = prune_to_2_4(b, dim=0)`.
+
+    4. Compress the transposed sparse matrix `b.t()`:
+    `bt_nzs, bt_meta = cutlass_sparse_compress(b.t())`.
+
+    5. Perform sparse matrix multiplication using the compressed matrix,
+    applying scaling factors for `a` and `b`, and the output data type:
+    `out = cutlass_scaled_sparse_mm(a, bt_nzs, bt_meta, scale_a, scale_b, out_dtype)`.
+
+    Returns:
+    - The result of the scaled sparse matrix multiplication.
+    """
+    assert (bt_nzs.shape[0] % 16 == 0 and bt_nzs.shape[1] % 16 == 0)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+    assert bias is None or bias.shape[0] == bt_nzs.shape[0] \
+        and bias.dtype == out_dtype
+
+    m = a.shape[0]
+    n = bt_nzs.shape[0]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+
+    torch.ops._C.cutlass_scaled_sparse_mm(out, a, bt_nzs, bt_meta, scale_a,
+                                          scale_b, bias)
+
     return out
 
 
@@ -601,11 +696,12 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      size_k: int,
                      is_k_full: bool,
                      has_zp: bool = False,
-                     use_fp32_reduce: bool = False) -> torch.Tensor:
+                     use_fp32_reduce: bool = False,
+                     is_zp_float: bool = False) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
                                          g_idx, perm, workspace, b_q_type.id,
                                          size_m, size_n, size_k, is_k_full,
-                                         has_zp, use_fp32_reduce)
+                                         has_zp, use_fp32_reduce, is_zp_float)
 
 
 # fp8 marlin
@@ -971,25 +1067,3 @@ def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[int], List[int]]:
 def register_graph_buffers(fa: int, handles: List[List[int]],
                            offsets: List[List[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
-
-
-# temporary fix for https://github.com/vllm-project/vllm/issues/5456
-# TODO: remove this in v0.6.0
-names_and_values = globals()
-names_and_values_to_update = {}
-# prepare variables to avoid dict size change during iteration
-k, v, arg = None, None, None
-fn_type = type(lambda x: x)
-for k, v in names_and_values.items():
-    # find functions that are defined in this file and have torch.Tensor
-    # in their annotations. `arg == "torch.Tensor"` is used to handle
-    # the case when users use `import __annotations__` to turn type
-    # hints into strings.
-    if isinstance(v, fn_type) \
-        and v.__code__.co_filename == __file__ \
-        and any(arg is torch.Tensor or arg == "torch.Tensor"
-                for arg in v.__annotations__.values()):
-        names_and_values_to_update[k] = hint_on_error(v)
-
-names_and_values.update(names_and_values_to_update)
-del names_and_values_to_update, names_and_values, v, k, fn_type
