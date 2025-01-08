@@ -190,7 +190,7 @@ class LlavaNextMultiModalProcessor(
 
 @MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor,
                                         info=LlavaNextProcessingInfo,
-                                        dummy=LlavaDummyInputsBuilder)
+                                        dummy_inputs=LlavaDummyInputsBuilder)
 class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 

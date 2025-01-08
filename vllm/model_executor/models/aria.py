@@ -526,7 +526,7 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor[AriaProcessingInfo]):
 
 @MULTIMODAL_REGISTRY.register_processor(AriaMultiModalProcessor,
                                         info=AriaProcessingInfo,
-                                        dummy=AriaDummyInputsBuilder)
+                                        dummy_inputs=AriaDummyInputsBuilder)
 class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     """
     Aria model for conditional generation tasks.

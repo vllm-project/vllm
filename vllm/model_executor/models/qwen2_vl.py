@@ -994,7 +994,7 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
 
 @MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor,
                                         info=Qwen2VLProcessingInfo,
-                                        dummy=Qwen2VLDummyInputsBuilder)
+                                        dummy_inputs=Qwen2VLDummyInputsBuilder)
 class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                       SupportsLoRA, SupportsPP):
     packed_modules_mapping = {

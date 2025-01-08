@@ -914,9 +914,10 @@ class ChameleonModel(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(ChameleonMultiModalProcessor,
-                                        info=ChameleonProcessingInfo,
-                                        dummy=ChameleonDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(
+    ChameleonMultiModalProcessor,
+    info=ChameleonProcessingInfo,
+    dummy_inputs=ChameleonDummyInputsBuilder)
 class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 

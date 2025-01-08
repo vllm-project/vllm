@@ -379,9 +379,10 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(LlavaOnevisionMultiModalProcessor,
-                                        info=LlavaOnevisionProcessingInfo,
-                                        dummy=LlavaOnevisionDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(
+    LlavaOnevisionMultiModalProcessor,
+    info=LlavaOnevisionProcessingInfo,
+    dummy_inputs=LlavaOnevisionDummyInputsBuilder)
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              SupportsPP):
 

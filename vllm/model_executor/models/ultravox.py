@@ -341,7 +341,8 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 
 @MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor,
                                         info=UltravoxProcessingInfo,
-                                        dummy=UltravoxDummyInputsBuilder)
+                                        dummy_inputs=UltravoxDummyInputsBuilder
+                                        )
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     hf_to_vllm_mapper = WeightsMapper(

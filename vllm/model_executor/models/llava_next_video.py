@@ -272,7 +272,7 @@ class LlavaNextMultiModalProjector(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(
     LlavaNextVideoMultiModalProcessor,
     info=LlavaNextVideoProcessingInfo,
-    dummy=LlavaNextVideoDummyInputsBuilder,
+    dummy_inputs=LlavaNextVideoDummyInputsBuilder,
 )
 class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              SupportsPP):

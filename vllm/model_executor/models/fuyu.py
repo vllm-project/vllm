@@ -244,7 +244,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
 
 @MULTIMODAL_REGISTRY.register_processor(FuyuMultiModalProcessor,
                                         info=FuyuProcessingInfo,
-                                        dummy=FuyuDummyInputsBuilder)
+                                        dummy_inputs=FuyuDummyInputsBuilder)
 class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

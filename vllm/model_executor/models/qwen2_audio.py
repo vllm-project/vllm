@@ -235,9 +235,10 @@ class Qwen2AudioMultiModalProcessor(
         return not hasattr(self.info.get_hf_processor(), "audio_token")
 
 
-@MULTIMODAL_REGISTRY.register_processor(Qwen2AudioMultiModalProcessor,
-                                        info=Qwen2AudioProcessingInfo,
-                                        dummy=Qwen2AudioDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(
+    Qwen2AudioMultiModalProcessor,
+    info=Qwen2AudioProcessingInfo,
+    dummy_inputs=Qwen2AudioDummyInputsBuilder)
 class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsPP):
 

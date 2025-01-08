@@ -490,7 +490,7 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
 
 @MULTIMODAL_REGISTRY.register_processor(Blip2MultiModalProcessor,
                                         info=Blip2ProcessingInfo,
-                                        dummy=Blip2DummyInputsBuilder)
+                                        dummy_inputs=Blip2DummyInputsBuilder)
 class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

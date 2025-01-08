@@ -461,7 +461,7 @@ def init_vision_tower_for_llava(
 
 @MULTIMODAL_REGISTRY.register_processor(_build_llava_or_pixtral_hf_processor,
                                         info=_build_llava_or_pixtral_hf_info,
-                                        dummy=LlavaDummyInputsBuilder)
+                                        dummy_inputs=LlavaDummyInputsBuilder)
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     # BitandBytes specific attributes
     bitsandbytes_stacked_params_mapping = {
@@ -793,6 +793,6 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 # `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'`
 @MULTIMODAL_REGISTRY.register_processor(MantisMultiModalProcessor,
                                         info=LlavaProcessingInfo,
-                                        dummy=LlavaDummyInputsBuilder)
+                                        dummy_inputs=LlavaDummyInputsBuilder)
 class MantisForConditionalGeneration(LlavaForConditionalGeneration):
     pass

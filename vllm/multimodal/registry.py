@@ -70,7 +70,7 @@ class MultiModalProcessorFactory(Protocol[_I]):
 class _ProcessorFactories(Generic[_I]):
     info: ProcessingInfoFactory[_I]
     processor: MultiModalProcessorFactory[_I]
-    dummy: DummyInputsBuilderFactory[_I]
+    dummy_inputs: DummyInputsBuilderFactory[_I]
 
     def build_processor(
         self,
@@ -79,7 +79,7 @@ class _ProcessorFactories(Generic[_I]):
         cache: Optional[ProcessingCache] = None,
     ):
         info = self.info(ctx)
-        dummy_inputs_builder = self.dummy(info)
+        dummy_inputs_builder = self.dummy_inputs(info)
         return self.processor(info, dummy_inputs_builder, cache=cache)
 
 
@@ -360,7 +360,7 @@ class MultiModalRegistry:
         processor: MultiModalProcessorFactory[_I],
         *,
         info: ProcessingInfoFactory[_I],
-        dummy: DummyInputsBuilderFactory[_I],
+        dummy_inputs: DummyInputsBuilderFactory[_I],
     ):
         """
         Register a multi-modal processor to a model class. The processor
@@ -383,7 +383,7 @@ class MultiModalRegistry:
 
             self._processor_factories[model_cls] = _ProcessorFactories(
                 info=info,
-                dummy=dummy,
+                dummy_inputs=dummy_inputs,
                 processor=processor,
             )
 

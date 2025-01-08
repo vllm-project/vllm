@@ -498,7 +498,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 
 @MULTIMODAL_REGISTRY.register_processor(Phi3VMultiModalProcessor,
                                         info=Phi3VProcessingInfo,
-                                        dummy=Phi3VDummyInputsBuilder)
+                                        dummy_inputs=Phi3VDummyInputsBuilder)
 class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
