@@ -52,7 +52,7 @@ def main(args: argparse.Namespace):
                 llm.generate(dummy_prompts,
                              sampling_params=sampling_params,
                              use_tqdm=False)
-            print(p.key_averages())
+            print(p.key_averages().table(sort_by="self_cuda_time_total"))
         else:
             start_time = time.perf_counter()
             llm.generate(dummy_prompts,
