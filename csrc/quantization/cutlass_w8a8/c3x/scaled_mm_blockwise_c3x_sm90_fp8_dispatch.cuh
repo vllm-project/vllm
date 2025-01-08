@@ -1,9 +1,5 @@
 #pragma once
 
-#include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
-#include "cutlass_extensions/common.hpp"
-
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
 
@@ -20,17 +16,11 @@
 #include "cutlass_extensions/gemm/dispatch_policy.hpp"
 #include "cutlass_extensions/gemm/collective/collective_builder.hpp"
 
-using namespace cute;
+#include "cutlass_gemm_caller.cuh"
 
-template <typename Kernel>
-struct enable_sm90_or_later : Kernel {
-  template <typename... Args>
-  CUTLASS_DEVICE void operator()(Args&&... args) {
-#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 900
-    Kernel::operator()(std::forward<Args>(args)...);
-#endif
-  }
-};
+namespace vllm {
+
+using namespace cute;
 
 template <typename OutType, int GroupSizeM_, int GroupSizeN_, int GroupSizeK_,
           int TileSizeM_ = 128>
@@ -101,39 +91,7 @@ struct cutlass_3x_gemm_fp8_blockwise {
 
   using StrideA = typename GemmKernel::StrideA;
   using StrideB = typename GemmKernel::StrideB;
-  //   using StrideC = typename GemmKernel::StrideC;
-  //   using StrideD = StrideC;
 };
-
-Shape<int, int, int, int> get_problem_shape(torch::Tensor const& a,
-                                            torch::Tensor const& b) {
-  int32_t m = a.size(0), n = b.size(1), k = a.size(1);
-  return {m, n, k, 1};
-}
-
-template <typename GemmKernel>
-void cutlass_gemm_caller(torch::Device device,
-                         Shape<int, int, int, int> prob_shape,
-                         typename GemmKernel::MainloopArguments mainloop_args,
-                         typename GemmKernel::EpilogueArguments epilogue_args) {
-  typename GemmKernel::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
-                                      prob_shape, mainloop_args, epilogue_args};
-
-  // Launch the CUTLASS GEMM kernel.
-  using GemmOp = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
-  GemmOp gemm_op;
-  CUTLASS_CHECK(gemm_op.can_implement(args));
-
-  size_t workspace_size = gemm_op.get_workspace_size(args);
-  auto const workspace_options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(device);
-  auto workspace = torch::empty(workspace_size, workspace_options);
-
-  auto stream = at::cuda::getCurrentCUDAStream(device.index());
-
-  cutlass::Status status = gemm_op.run(args, workspace.data_ptr(), stream);
-  CUTLASS_CHECK(status);
-}
 
 template <typename Gemm>
 void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
@@ -145,7 +103,7 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
-  auto prob_shape = get_problem_shape(a, b);
+  auto prob_shape = c3x::get_problem_shape(a, b);
 
   int32_t m = a.size(0);
   int32_t n = b.size(1);
@@ -169,7 +127,6 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   auto b_scales_ptr = static_cast<float*>(b_scales.data_ptr());
 
   uint32_t mma_promotion_interval = 4;
-
   typename GemmKernel::MainloopArguments mainloop_args{
       a_ptr,        a_stride,    b_ptr, b_stride, mma_promotion_interval,
       a_scales_ptr, b_scales_ptr};
@@ -178,8 +135,8 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   typename GemmKernel::EpilogueArguments epilogue_args{
       {}, c_ptr, c_stride, c_ptr, c_stride};
 
-  cutlass_gemm_caller<GemmKernel>(a.device(), prob_shape, mainloop_args,
-                                  epilogue_args);
+  c3x::cutlass_gemm_caller<GemmKernel>(a.device(), prob_shape, mainloop_args,
+                                       epilogue_args);
 }
 
 template <typename OutType>
@@ -192,3 +149,5 @@ void cutlass_gemm_blockwise_sm90_fp8_dispatch(torch::Tensor& out,
       cutlass_3x_gemm_fp8_blockwise<OutType, 1, 128, 128>>(out, a, b, a_scales,
                                                            b_scales);
 }
+
+}  // namespace vllm

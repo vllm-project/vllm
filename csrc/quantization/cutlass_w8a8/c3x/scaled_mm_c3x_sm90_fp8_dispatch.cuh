@@ -1,6 +1,7 @@
 #pragma once
 
 #include "scaled_mm_c3x.cuh"
+#include "cutlass_gemm_caller.cuh"
 
 /**
  * This file defines Gemm kernel configurations for SM90 (fp8) based on the Gemm
@@ -8,6 +9,8 @@
  */
 
 namespace vllm {
+
+using c3x::cutlass_gemm_caller;
 
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
