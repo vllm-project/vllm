@@ -50,7 +50,7 @@ class CpuPlatform(Platform):
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
-        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if not model_config.enforce_eager:
             logger.warning(
@@ -59,6 +59,9 @@ class CpuPlatform(Platform):
             model_config.enforce_eager = True
 
         cache_config = vllm_config.cache_config
+
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
 

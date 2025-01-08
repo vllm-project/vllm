@@ -30,7 +30,7 @@ def should_ignore_layer(layer_name: Optional[str],
     # in the safetensors checkpoint. So, we convert the name
     # from the fused version to unfused + check to make sure that
     # each shard of the fused layer has the same scheme.
-    if proj_name in FUSED_LAYER_NAME_MAPPING:
+    if proj_name in FUSED_LAYER_NAME_MAPPING and layer_name not in ignore:
         shard_proj_names = FUSED_LAYER_NAME_MAPPING[proj_name]
 
         # Convert fused_name --> [shard_names]

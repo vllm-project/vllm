@@ -1,8 +1,7 @@
 from .base import MultiModalPlaceholderMap, MultiModalPlugin
-from .inputs import (BatchedTensorInputs, MultiModalData,
-                     MultiModalDataBuiltins, MultiModalDataDict,
-                     MultiModalKwargs, MultiModalPlaceholderDict,
-                     NestedTensors)
+from .inputs import (BatchedTensorInputs, ModalityData, MultiModalDataBuiltins,
+                     MultiModalDataDict, MultiModalKwargs,
+                     MultiModalPlaceholderDict, NestedTensors)
 from .registry import MultiModalRegistry
 
 MULTIMODAL_REGISTRY = MultiModalRegistry()
@@ -11,12 +10,12 @@ The global :class:`~MultiModalRegistry` is used by model runners to
 dispatch data processing according to its modality and the target model.
 
 See also:
-    :ref:`input_processing_pipeline`
+    :ref:`input-processing-pipeline`
 """
 
 __all__ = [
     "BatchedTensorInputs",
-    "MultiModalData",
+    "ModalityData",
     "MultiModalDataBuiltins",
     "MultiModalDataDict",
     "MultiModalKwargs",

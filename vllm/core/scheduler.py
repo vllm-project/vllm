@@ -1579,6 +1579,7 @@ class Scheduler:
             seq.status = SequenceStatus.WAITING
             self.free_seq(seq)
             seq.reset_state_for_recompute()
+        self._free_seq_group_cross_attn_blocks(seq_group)
 
     def _preempt_by_swap(
         self,

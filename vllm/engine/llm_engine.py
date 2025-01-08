@@ -5,8 +5,8 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
-                    Iterable, List, Mapping, NamedTuple, Optional)
+from typing import (TYPE_CHECKING, Callable, ClassVar, Deque, Dict, Iterable,
+                    List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
@@ -52,7 +52,6 @@ from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
                            SequenceGroupOutput, SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
-from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import (
@@ -64,20 +63,6 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
-
-
-def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
-    config = try_get_generation_config(
-        model_config.model,
-        trust_remote_code=model_config.trust_remote_code,
-        revision=model_config.revision,
-    )
-
-    if config is None:
-        return {}
-
-    return config.to_diff_dict()
-
 
 _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 _O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
@@ -148,7 +133,7 @@ class LLMEngine:
     and the :class:`AsyncLLMEngine` class wraps this class for online serving.
 
     The config arguments are derived from :class:`~vllm.EngineArgs`. (See
-    :ref:`engine_args`)
+    :ref:`engine-args`)
 
     Args:
         model_config: The configuration related to the LLM model.
@@ -274,8 +259,8 @@ class LLMEngine:
             return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
         self.seq_counter = Counter()
-        self.generation_config_fields = _load_generation_config_dict(
-            self.model_config)
+        self.generation_config_fields = (
+            self.model_config.try_get_generation_config())
 
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
@@ -1139,6 +1124,8 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
+            if not seq_group.is_prefill():
+                seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
@@ -1181,6 +1168,8 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
+            if not seq_group.is_prefill():
+                seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
@@ -1701,7 +1690,7 @@ class LLMEngine:
                     # If the seq_group just finished the prefill state
                     # get TTFT.
                     if not seq_group.is_prefill():
-                        latency = seq_group.get_last_latency(now)
+                        latency = seq_group.get_last_token_latency()
                         time_to_first_tokens_iter.append(latency)
 
                         # One generation token per finished prefill.
@@ -1709,7 +1698,7 @@ class LLMEngine:
                             seq_group.num_seqs())
                 else:
                     # TPOTs.
-                    latency = seq_group.get_last_latency(now)
+                    latency = seq_group.get_last_token_latency()
                     time_per_output_tokens_iter.append(latency)
                     if seq_group.state.current_step == 0:
                         # For async_output_proc, the do_log_stats()

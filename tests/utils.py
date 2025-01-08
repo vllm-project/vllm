@@ -163,12 +163,11 @@ class RemoteOpenAIServer:
             api_key=self.DUMMY_API_KEY,
         )
 
-    def get_async_client(self):
-        return openai.AsyncOpenAI(
-            base_url=self.url_for("v1"),
-            api_key=self.DUMMY_API_KEY,
-            max_retries=0,
-        )
+    def get_async_client(self, **kwargs):
+        return openai.AsyncOpenAI(base_url=self.url_for("v1"),
+                                  api_key=self.DUMMY_API_KEY,
+                                  max_retries=0,
+                                  **kwargs)
 
 
 def _test_completion(

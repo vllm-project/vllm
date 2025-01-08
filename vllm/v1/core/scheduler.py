@@ -73,14 +73,13 @@ class Scheduler:
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
         # projector if needed). Currently, we assume that the encoder also
         # has the Transformer architecture (e.g., ViT).
-        # FIXME(woosuk): Below are placeholder values. We need to calculate the
-        # actual values from the configurations.
-        self.max_num_encoder_input_tokens = 16384
+        self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  #noqa: E501
         # NOTE(woosuk): For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized and used, regardless of
         # the cache size. This is because the memory space for the encoder cache
         # is preallocated in the profiling run.
-        self.encoder_cache_manager = EncoderCacheManager(cache_size=16384)
+        self.encoder_cache_manager = EncoderCacheManager(
+            cache_size=self.scheduler_config.encoder_cache_size)
 
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
@@ -263,6 +262,14 @@ class Scheduler:
         assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
                 len(scheduled_running_reqs) == len(self.running))
 
+        # Get the longest common prefix among all requests in the running queue.
+        # This can be potentially used for cascade attention.
+        if self.running:
+            any_request = self.running[0]
+            num_common_prefix_blocks = (
+                self.kv_cache_manager.get_num_common_prefix_blocks(
+                    any_request, len(self.running)))
+
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
@@ -288,6 +295,7 @@ class Scheduler:
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
+            num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids=preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -517,6 +525,7 @@ class NewRequestData:
     prompt_token_ids: List[int]
     prompt: Optional[str]
     mm_inputs: List["MultiModalKwargs"]
+    mm_hashes: List[str]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
     block_ids: List[int]
@@ -534,6 +543,7 @@ class NewRequestData:
             prompt_token_ids=request.prompt_token_ids,
             prompt=request.prompt,
             mm_inputs=request.mm_inputs,
+            mm_hashes=request.mm_hashes,
             mm_positions=request.mm_positions,
             sampling_params=request.sampling_params,
             block_ids=block_ids,
@@ -593,6 +603,7 @@ class SchedulerOutput:
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int
     scheduled_encoder_inputs: Dict[str, List[int]]
+    num_common_prefix_blocks: int
 
     preempted_req_ids: Set[str]
     finished_req_ids: Set[str]

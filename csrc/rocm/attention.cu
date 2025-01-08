@@ -1042,7 +1042,7 @@ void paged_attention_custom_launcher(
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, const int num_kv_heads, float scale,
     torch::Tensor& block_tables, torch::Tensor& context_lens,
-    int max_context_len, const c10::optional<torch::Tensor>& alibi_slopes,
+    int max_context_len, const std::optional<torch::Tensor>& alibi_slopes,
     torch::Tensor& k_scale, torch::Tensor& v_scale,
     const c10::optional<torch::Tensor>& fp8_out_scale) {
   int num_seqs = query.size(0);
@@ -1265,7 +1265,7 @@ void paged_attention(
     torch::Tensor& block_tables,  // [num_seqs, max_num_blocks_per_seq]
     torch::Tensor& context_lens,  // [num_seqs]
     int64_t block_size, int64_t max_context_len,
-    const c10::optional<torch::Tensor>& alibi_slopes,
+    const std::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale, const c10::optional<torch::Tensor>& fp8_out_scale,
     int64_t partition_size) {

@@ -48,6 +48,12 @@ class HpuPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
 
+        # NOTE(kzawora): default block size for Gaudi should be 128
+        # smaller sizes still work, but very inefficiently
+        cache_config = vllm_config.cache_config
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 128
+
     @classmethod
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on HPU.")

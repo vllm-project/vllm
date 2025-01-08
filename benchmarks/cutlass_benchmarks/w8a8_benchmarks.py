@@ -8,6 +8,7 @@ from typing import Callable, Iterable, List, Tuple
 import torch
 import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
+from utils import make_rand_tensors
 from weight_shapes import WEIGHT_SHAPES
 
 from vllm import _custom_ops as ops
@@ -16,31 +17,6 @@ from vllm.utils import FlexibleArgumentParser
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
 DEFAULT_TP_SIZES = [1]
-
-# helpers
-
-
-def to_fp8(tensor: torch.Tensor) -> torch.Tensor:
-    finfo = torch.finfo(torch.float8_e4m3fn)
-    return torch.round(tensor.clamp(
-        min=finfo.min, max=finfo.max)).to(dtype=torch.float8_e4m3fn)
-
-
-def to_int8(tensor: torch.Tensor) -> torch.Tensor:
-    return torch.round(tensor.clamp(min=-128, max=127)).to(dtype=torch.int8)
-
-
-def make_rand_tensors(dtype: torch.dtype, m: int, n: int,
-                      k: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    a = torch.randn((m, k), device='cuda') * 5
-    b = torch.randn((n, k), device='cuda').t() * 5
-
-    if dtype == torch.int8:
-        return to_int8(a), to_int8(b)
-    if dtype == torch.float8_e4m3fn:
-        return to_fp8(a), to_fp8(b)
-
-    raise ValueError("unsupported dtype")
 
 
 # bench

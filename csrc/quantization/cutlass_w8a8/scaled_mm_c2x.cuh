@@ -21,15 +21,16 @@
 #include "cutlass/epilogue/threadblock/fusion/visitors.hpp"
 #include "cutlass/gemm/kernel/default_gemm_universal_with_visitor.h"
 
-#include "common.hpp"
+#include "core/math.hpp"
+#include "cutlass_extensions/common.hpp"
 // clang-format on
 
 using namespace cute;
 
 /*
-   Epilogue functions can be defined to post-process the output before it is
-   written to GPU memory.
-   Epilogues must contain a public type named EVTCompute of type Sm80EVT,
+   Epilogues defined in,
+   csrc/cutlass_extensions/epilogue/scaled_mm_epilogues_c2x.hpp
+   must contain a public type named EVTCompute of type Sm80EVT,
    as well as a static prepare_args function that constructs an
    EVTCompute::Arguments struct.
 */

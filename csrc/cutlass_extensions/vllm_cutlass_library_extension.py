@@ -14,9 +14,9 @@ class VLLMDataType(enum.Enum):
 
 
 class MixedInputKernelScheduleType(enum.Enum):
-    TmaWarpSpecializedMixedInput = enum_auto()
-    TmaWarpSpecializedPingpongMixedInput = enum_auto()
-    TmaWarpSpecializedCooperativeMixedInput = enum_auto()
+    TmaWarpSpecialized = enum_auto()
+    TmaWarpSpecializedPingpong = enum_auto()
+    TmaWarpSpecializedCooperative = enum_auto()
 
 
 VLLMDataTypeNames: Dict[Union[VLLMDataType, DataType], str] = {
@@ -68,11 +68,11 @@ VLLMKernelScheduleTag: Dict[Union[
     MixedInputKernelScheduleType, KernelScheduleType], str] = {
         **KernelScheduleTag,  # type: ignore
         **{
-            MixedInputKernelScheduleType.TmaWarpSpecializedMixedInput:
-            "cutlass::gemm::KernelTmaWarpSpecializedMixedInput",
-            MixedInputKernelScheduleType.TmaWarpSpecializedPingpongMixedInput:
-            "cutlass::gemm::KernelTmaWarpSpecializedPingpongMixedInput",
-            MixedInputKernelScheduleType.TmaWarpSpecializedCooperativeMixedInput:
-            "cutlass::gemm::KernelTmaWarpSpecializedCooperativeMixedInput",
+            MixedInputKernelScheduleType.TmaWarpSpecialized:
+            "cutlass::gemm::KernelTmaWarpSpecialized",
+            MixedInputKernelScheduleType.TmaWarpSpecializedPingpong:
+            "cutlass::gemm::KernelTmaWarpSpecializedPingpong",
+            MixedInputKernelScheduleType.TmaWarpSpecializedCooperative:
+            "cutlass::gemm::KernelTmaWarpSpecializedCooperative",
         }
     }

@@ -60,7 +60,7 @@ vLLM is flexible and easy to use with:
 
 vLLM seamlessly supports most popular open-source models on HuggingFace, including:
 - Transformer-like LLMs (e.g., Llama)
-- Mixture-of-Expert LLMs (e.g., Mixtral)
+- Mixture-of-Expert LLMs (e.g., Mixtral, Deepseek-V2 and V3)
 - Embedding Models (e.g. E5-Mistral)
 - Multi-modal LLMs (e.g., LLaVA)
 

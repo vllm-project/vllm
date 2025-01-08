@@ -373,7 +373,7 @@ def embed_multimodal(
     input_ids: torch.Tensor,
     multimodal_token_id: int,
     get_text_embeds: Callable[[torch.Tensor], torch.Tensor],
-    multimodal_embeds: Union[torch.Tensor, List[torch.Tensor]],
+    multimodal_embeds: NestedTensors,
 ) -> torch.Tensor:
     """
     Embed token IDs and multimodal inputs and combine their embeddings.
