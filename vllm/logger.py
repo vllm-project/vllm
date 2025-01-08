@@ -8,7 +8,7 @@ from functools import lru_cache, partial
 from logging import Logger
 from logging.config import dictConfig
 from os import path
-from typing import Dict, Optional
+from typing import Any, Optional
 
 import vllm.envs as envs
 
@@ -81,8 +81,8 @@ class VllmLogger(Logger):
         _print_warning_once(self, msg)
 
 
-def _configure_vllm_root_logger() -> None:
-    logging_config: Dict = {}
+def _configure_vllm_root_logger() -> bool:
+    logging_config = dict[str, Any]()
 
     if not VLLM_CONFIGURE_LOGGING and VLLM_LOGGING_CONFIG_PATH:
         raise RuntimeError(
@@ -117,6 +117,14 @@ def _configure_vllm_root_logger() -> None:
 
     logging.setLoggerClass(VllmLogger)
 
+    return True
+
+
+# The root logger is initialized when the module is imported.
+# This is thread-safe as the module is only imported once,
+# guaranteed by the Python GIL.
+is_configured = _configure_vllm_root_logger()
+
 
 def init_logger(name: str) -> VllmLogger:
     """The main purpose of this function is to ensure that loggers are
@@ -124,14 +132,9 @@ def init_logger(name: str) -> VllmLogger:
     already been configured."""
 
     logger = logging.getLogger(name)
-    assert isinstance(logger, VllmLogger)
+    assert isinstance(logger, VllmLogger), (is_configured, type(logger))
     return logger
 
-
-# The root logger is initialized when the module is imported.
-# This is thread-safe as the module is only imported once,
-# guaranteed by the Python GIL.
-_configure_vllm_root_logger()
 
 logger = init_logger(__name__)
 
