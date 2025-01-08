@@ -137,10 +137,10 @@ community/sponsors
 :caption: API Reference
 :maxdepth: 2
 
-dev/sampling_params
-dev/pooling_params
-dev/offline_inference/offline_index
-dev/engine/engine_index
+api/offline_inference/index
+api/engine/index
+api/multimodal/index
+api/params
 ```
 
 % Design Documents: Details about vLLM internals
@@ -154,7 +154,6 @@ design/huggingface_integration
 design/plugin_system
 design/kernel/paged_attention
 design/input_processing/model_inputs_index
-design/multimodal/multimodal_index
 design/automatic_prefix_caching
 design/multiprocessing
 ```
