@@ -1,5 +1,7 @@
+import asyncio
 import json
 import shutil
+from contextlib import suppress
 
 import openai  # use the official client for correctness check
 import pytest
@@ -163,3 +165,72 @@ async def test_dynamic_lora_invalid_lora_rank(client: openai.AsyncOpenAI,
                               "lora_name": "invalid-json",
                               "lora_path": str(invalid_rank)
                           })
+
+
+@pytest.mark.asyncio
+async def test_loading_invalid_adapters_does_not_break_others(
+        client: openai.AsyncOpenAI, tmp_path, zephyr_lora_files):
+
+    invalid_files = tmp_path / "invalid_files"
+    invalid_files.mkdir()
+    (invalid_files / "adapter_config.json").write_text("this is not json")
+
+    stop_good_requests_event = asyncio.Event()
+
+    async def run_good_requests(client):
+        # Run chat completions requests until event set
+
+        results = []
+
+        while not stop_good_requests_event.is_set():
+            try:
+                batch = await client.completions.create(
+                    model="zephyr-lora",
+                    prompt=["Hello there", "Foo bar bazz buzz"],
+                    max_tokens=5,
+                )
+                results.append(batch)
+            except Exception as e:
+                results.append(e)
+
+        return results
+
+    # Create task to run good requests
+    good_task = asyncio.create_task(run_good_requests(client))
+
+    # Run a bunch of bad adapter loads
+    for _ in range(25):
+        with suppress(openai.NotFoundError):
+            await client.post("load_lora_adapter",
+                              cast_to=str,
+                              body={
+                                  "lora_name": "notfound",
+                                  "lora_path": "/not/an/adapter"
+                              })
+    for _ in range(25):
+        with suppress(openai.BadRequestError):
+            await client.post("load_lora_adapter",
+                              cast_to=str,
+                              body={
+                                  "lora_name": "invalid",
+                                  "lora_path": str(invalid_files)
+                              })
+
+    # Ensure all the running requests with lora adapters succeeded
+    stop_good_requests_event.set()
+    results = await good_task
+    for r in results:
+        assert not isinstance(r, Exception), f"Got exception {r}"
+
+    # Ensure we can load another adapter and run it
+    await client.post("load_lora_adapter",
+                      cast_to=str,
+                      body={
+                          "lora_name": "valid",
+                          "lora_path": zephyr_lora_files
+                      })
+    await client.completions.create(
+        model="valid",
+        prompt=["Hello there", "Foo bar bazz buzz"],
+        max_tokens=5,
+    )
