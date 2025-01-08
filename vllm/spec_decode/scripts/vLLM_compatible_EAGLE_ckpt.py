@@ -5,19 +5,16 @@ import os
 import torch
 from safetensors.torch import load_file, save_file
 
-"""
-Script to convert an EAGLE checkpoint available at https://huggingface.co/yuhuili 
-into vLLM compatible checkpoint. Borrowed from
-https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d
+# Script to convert an EAGLE checkpoint available at https://huggingface.co/yuhuili
+# into vLLM compatible checkpoint. Borrowed from
+# https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d
 
-Example Usage
+# Example Usage
 
-python3 vllm/spec_decode/scripts/vLLM_compatible_EAGLE_ckpt.py
-    --eagle_dir </path/to/eagle/checkpoint/dir>
-    --baseline_ckpt_file_lm_head \
-        </path/to/base_model/ckpt_file_with_lm_head_weight>
-
-"""
+# python3 vllm/spec_decode/scripts/vLLM_compatible_EAGLE_ckpt.py
+#     --eagle_dir </path/to/eagle/checkpoint/dir>
+#     --baseline_ckpt_file_lm_head \
+#         </path/to/base_model/ckpt_file_with_lm_head_weight>
 
 
 def update_model(eagle_dir, baseline_ckpt_path):
