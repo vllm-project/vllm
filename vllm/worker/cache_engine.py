@@ -4,11 +4,10 @@ from typing import List
 import torch
 
 from vllm.attention import get_attn_backend
-from vllm.config import (CacheConfig, CompilationConfig, DeviceConfig,
-                         ModelConfig, ParallelConfig)
+from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
-                        bind_kv_cache, get_dtype_size, is_pin_memory_available)
+                        get_dtype_size, is_pin_memory_available)
 
 logger = init_logger(__name__)
 
@@ -21,14 +20,9 @@ class CacheEngine:
     as swapping and copying.
     """
 
-    def __init__(
-        self,
-        cache_config: CacheConfig,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        device_config: DeviceConfig,
-        compilation_config: CompilationConfig,
-    ) -> None:
+    def __init__(self, cache_config: CacheConfig, model_config: ModelConfig,
+                 parallel_config: ParallelConfig,
+                 device_config: DeviceConfig) -> None:
         self.cache_config = cache_config
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -64,8 +58,6 @@ class CacheEngine:
         self.gpu_cache = self._allocate_kv_cache(
             self.num_gpu_blocks, self.device_config.device_type)
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
-        bind_kv_cache(compilation_config.static_forward_context,
-                      self.gpu_cache)
 
     def _allocate_kv_cache(
         self,

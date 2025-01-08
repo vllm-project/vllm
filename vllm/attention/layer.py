@@ -123,7 +123,11 @@ class Attention(nn.Module):
         self.attn_type = attn_type
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
-        self.kv_cache = torch.tensor([])
+        # this variable will not be accessed if use_direct_call is True
+        self.kv_cache = [
+            torch.tensor([]) for _ in range(get_current_vllm_config(
+            ).parallel_config.pipeline_parallel_size)
+        ]
 
     def forward(
         self,
@@ -238,7 +242,8 @@ def unified_attention(
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
-    return self.impl.forward(query, key, value, self.kv_cache, attn_metadata,
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    return self.impl.forward(query, key, value, kv_cache, attn_metadata,
                              self._k_scale, self._v_scale)
 
 
@@ -270,10 +275,11 @@ def unified_attention_with_output(
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
     self.impl.forward(query,
                       key,
                       value,
-                      self.kv_cache,
+                      kv_cache,
                       attn_metadata,
                       self._k_scale,
                       self._v_scale,

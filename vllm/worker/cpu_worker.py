@@ -6,8 +6,8 @@ import torch.distributed
 
 import vllm.envs as envs
 from vllm.attention import get_attn_backend
-from vllm.config import (CacheConfig, CompilationConfig, DeviceConfig,
-                         ModelConfig, ParallelConfig, VllmConfig)
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, VllmConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -33,8 +33,8 @@ class CPUCacheEngine:
     """
 
     def __init__(self, cache_config: CacheConfig, model_config: ModelConfig,
-                 parallel_config: ParallelConfig, device_config: DeviceConfig,
-                 compilation_config: CompilationConfig) -> None:
+                 parallel_config: ParallelConfig,
+                 device_config: DeviceConfig) -> None:
         assert device_config.device_type == "cpu"
         self.cache_config = cache_config
         self.model_config = model_config
@@ -66,8 +66,6 @@ class CPUCacheEngine:
 
         # Initialize the cache.
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks)
-        bind_kv_cache(compilation_config.static_forward_context,
-                      self.cpu_cache)
 
     def _allocate_kv_cache(
         self,
@@ -292,13 +290,15 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                 self.model_config,
                 self.parallel_config,
                 self.device_config,
-                self.compilation_config,
             ) for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.cpu_cache = [
             self.cache_engine[ve].cpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
+        for ve in range(self.parallel_config.pipeline_parallel_size):
+            bind_kv_cache(self.compilation_config.static_forward_context,
+                          self.cpu_cache[ve], ve)
         self.model_runner.block_size = self.cache_engine[0].block_size
 
         assert all(

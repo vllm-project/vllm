@@ -1949,16 +1949,20 @@ def get_mp_context():
     return multiprocessing.get_context(mp_method)
 
 
-def bind_kv_cache(ctx: Dict[str, Any], kv_cache: List[torch.Tensor]) -> None:
+def bind_kv_cache(
+        ctx: Dict[str, Any],
+        kv_cache: List[List[torch.Tensor]],  # [virtual_engine][layer_index]
+) -> None:
     # Bind the kv_cache tensor to Attention modules, similar to
-    # ctx[layer_name].kv_cache = kv_cache[extract_layer_index(layer_name)]
+    # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
     # Special things handled here:
     # 1. Some models have non-attention layers, e.g., Jamba
     # 2. Pipeline parallelism, each rank only has a subset of layers
     # 3. Encoder attention has no kv cache
     # 4. Encoder-decoder models, encoder-decoder attention and decoder-only
     #    attention of the same layer (e.g., bart's decoder.layers.1.self_attn
-    #    and decoder.layers.1.encoder_attn is mapped to the same kv cache tensor
+    #    and decoder.layers.1.encoder_attn) is mapped to the same kv cache
+    #    tensor
     from vllm.attention import AttentionType
     from vllm.model_executor.models.utils import extract_layer_index
     layer_need_kv_cache = [
@@ -1974,4 +1978,7 @@ def bind_kv_cache(ctx: Dict[str, Any], kv_cache: List[torch.Tensor]) -> None:
         kv_cache_idx = layer_index_sorted.index(
             extract_layer_index(layer_name))
         forward_ctx = ctx[layer_name]
-        forward_ctx.kv_cache = kv_cache[kv_cache_idx]
+        assert len(forward_ctx.kv_cache) == len(kv_cache)
+        for ve, ve_kv_cache in enumerate(kv_cache):
+            assert forward_ctx.kv_cache[ve].numel() == 0
+            forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]

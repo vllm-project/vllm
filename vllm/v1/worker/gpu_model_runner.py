@@ -863,4 +863,4 @@ class GPUModelRunner:
                             device=self.device))
         bind_kv_cache(
             self.vllm_config.compilation_config.static_forward_context,
-            self.kv_caches)
+            [self.kv_caches])
