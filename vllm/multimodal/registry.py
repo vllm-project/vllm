@@ -125,9 +125,6 @@ class MultiModalRegistry:
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
         """
         Register a multi-modal plugin so it can be recognized by vLLM.
-
-        See also:
-            :ref:`adding-multimodal-plugin`
         """
         data_type_key = plugin.get_data_key()
 

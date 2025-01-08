@@ -49,9 +49,6 @@ class MultiModalPlugin(ABC):
     process the same data differently). This registry is in turn used by
     :class:`~MultiModalRegistry` which acts at a higher level
     (i.e., the modality of the data).
-
-    See also:
-        :ref:`adding-multimodal-plugin`
     """
 
     def __init__(self) -> None:
