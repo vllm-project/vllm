@@ -153,7 +153,7 @@ def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
     else:
         kv_cache = torch.tensor([])
 
-    attn.kv_cache = kv_cache
+    attn.kv_cache = [kv_cache]
     return TestResources(scale, attn, kv_cache)
 
 
