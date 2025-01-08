@@ -73,9 +73,9 @@ def baseline_scaled_mm(a: torch.Tensor,
         for i, s in enumerate(shape):
             if t.shape[i] != s and t.shape[i] != 1:
                 assert s % t.shape[i] == 0
-                expanded_shape = list(t.shape)
-                expanded_shape.insert(i + 1, s // t.shape[i])
-                t = t.unsqueeze(i + 1).expand(expanded_shape).flatten(i, i + 1)
+                t = t.unsqueeze(i + 1)\
+                  .expand(*t.shape[:i+1], s // t.shape[i], *t.shape[i+1:])\
+                  .flatten(i, i + 1)
         return t
 
     scale_a = group_broadcast(scale_a, a.shape)
