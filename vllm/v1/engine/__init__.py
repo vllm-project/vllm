@@ -41,11 +41,11 @@ class EngineCoreOutput(
 
     request_id: str
     new_token_ids: List[int]
-    logprobs: List[torch.Tensor]
-    logprobs_token_ids: List[torch.Tensor]
-    prompt_logprobs: Optional[torch.Tensor]
-    prompt_logprobs_token_ids: Optional[torch.Tensor]
     finished: bool
+    logprobs: List[torch.Tensor] = []
+    logprobs_token_ids: List[torch.Tensor] = []
+    prompt_logprobs: Optional[torch.Tensor] = None
+    prompt_logprobs_token_ids: Optional[torch.Tensor] = None
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
 

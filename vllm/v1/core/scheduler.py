@@ -460,11 +460,7 @@ class Scheduler:
                     new_token_ids=request.output_token_ids[-num_new_tokens:],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason,
-                    logprobs_token_ids=[],
-                    logprobs=[],
-                    prompt_logprobs_token_ids=None,
-                    prompt_logprobs=None)
+                    stop_reason=request.stop_reason)
                 engine_core_outputs.append(output)
 
                 # Breakout of the loop.
