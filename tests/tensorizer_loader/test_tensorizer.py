@@ -163,8 +163,8 @@ def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
 
 def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
     multilora_inference = import_from_path(
-        "examples.multilora_inference",
-        EXAMPLES_PATH / "multilora_inference.py",
+        "examples.offline_inference.multilora_inference",
+        EXAMPLES_PATH / "offline_inference/multilora_inference.py",
     )
 
     model_ref = "meta-llama/Llama-2-7b-hf"

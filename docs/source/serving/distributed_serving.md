@@ -51,7 +51,7 @@ $     --pipeline-parallel-size 2
 
 If a single node does not have enough GPUs to hold the model, you can run the model using multiple nodes. It is important to make sure the execution environment is the same on all nodes, including the model path, the Python environment. The recommended way is to use docker images to ensure the same environment, and hide the heterogeneity of the host machines via mapping them into the same docker configuration.
 
-The first step, is to start containers and organize them into a cluster. We have provided the helper script <gh-file:examples/run_cluster.sh> to start the cluster. Please note, this script launches docker without administrative privileges that would be required to access GPU performance counters when running profiling and tracing tools. For that purpose, the script can have `CAP_SYS_ADMIN` to the docker container by using the `--cap-add` option in the docker run command.
+The first step, is to start containers and organize them into a cluster. We have provided the helper script <gh-file:examples/online_serving/run_cluster.sh> to start the cluster. Please note, this script launches docker without administrative privileges that would be required to access GPU performance counters when running profiling and tracing tools. For that purpose, the script can have `CAP_SYS_ADMIN` to the docker container by using the `--cap-add` option in the docker run command.
 
 Pick a node as the head node, and run the following command:
 
