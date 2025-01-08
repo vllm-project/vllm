@@ -16,6 +16,9 @@ _I = TypeVar("_I", bound=BaseProcessingInfo)
 
 
 class MultiModalProfiler(Generic[_I]):
+    """
+    Contains code for running memory profiling for multi-modal models.
+    """
 
     def __init__(
         self,
@@ -26,7 +29,7 @@ class MultiModalProfiler(Generic[_I]):
         self.processor = processor
 
     @property
-    def processing(self) -> BaseProcessingInfo:
+    def processing_info(self) -> BaseProcessingInfo:
         return self.processor.info
 
     @property
@@ -34,10 +37,10 @@ class MultiModalProfiler(Generic[_I]):
         return self.processor.dummy_inputs
 
     def _get_mm_limits(self) -> Mapping[str, int]:
-        mm_config = self.processing.ctx.get_mm_config()
+        mm_config = self.processing_info.ctx.get_mm_config()
         mm_limit_per_prompt = mm_config.limit_per_prompt
 
-        supported_mm_limits = self.processing.get_supported_mm_limits()
+        supported_mm_limits = self.processing_info.get_supported_mm_limits()
 
         mm_limits = {
             modality: mm_limit_per_prompt.get(modality, 1)
@@ -75,8 +78,8 @@ class MultiModalProfiler(Generic[_I]):
 
         mm_counts = self._get_mm_limits()
 
-        processing = self.processing
-        mm_max_tokens_per_item = processing.get_mm_max_tokens_per_item(seq_len)
+        info = self.processing_info
+        mm_max_tokens_per_item = info.get_mm_max_tokens_per_item(seq_len)
 
         if mm_counts.keys() != mm_max_tokens_per_item.keys():
             raise AssertionError(
