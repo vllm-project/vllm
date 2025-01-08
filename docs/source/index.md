@@ -140,7 +140,7 @@ community/sponsors
 api/offline_inference/index
 api/engine/index
 api/multimodal/index
-api/input_params
+api/params
 ```
 
 % Design Documents: Details about vLLM internals

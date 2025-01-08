@@ -1,6 +1,6 @@
-# Input Parameters
+# Optional Parameters
 
-Optional parameters for vLLM inputs.
+Optional parameters for vLLM APIs.
 
 (sampling-params)=
 
