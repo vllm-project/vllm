@@ -66,8 +66,9 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, WeightsMapper, get_vit_attn_backend,
+from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix)
+from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
 

@@ -24,11 +24,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges,
-                                   repeat_and_pad_placeholder_tokens,
-                                   resolve_visual_encoder_outputs)
+                                   repeat_and_pad_placeholder_tokens)
 from vllm.sequence import SequenceData
 
-from .vision import VisionEncoderInfo
+from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
 
 def get_siglip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
