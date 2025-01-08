@@ -53,7 +53,7 @@ for output in outputs:
 ```
 
 More API details can be found in the {doc}`Offline Inference
-</dev/offline_inference/offline_index>` section of the API docs.
+</api/offline_inference/index>` section of the API docs.
 
 The code for the `LLM` class can be found in <gh-file:vllm/entrypoints/llm.py>.
 

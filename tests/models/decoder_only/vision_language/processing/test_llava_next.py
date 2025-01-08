@@ -4,24 +4,17 @@ from functools import partial
 import pytest
 from PIL import Image
 from pqdm.threads import pqdm
-from transformers import AutoTokenizer
 
-from vllm.inputs import InputProcessingContext
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageSize
+from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.utils import cached_get_tokenizer
 
 from ....utils import build_model_context
 
 
-# Fixtures lazy import to avoid initializing CUDA during test collection
-@pytest.fixture()
-def processor_for_llava_next():
-    from vllm.model_executor.models.llava_next import (
-        LlavaNextMultiModalProcessor)
-    return LlavaNextMultiModalProcessor
-
-
 def _validate_image_prompt_replacements_one(
-    processor,
+    processor: BaseMultiModalProcessor,
     num_imgs: int,
     failed_size_excs: list[tuple[ImageSize, Exception]],
     image_size: ImageSize,
@@ -78,20 +71,17 @@ def _test_image_prompt_replacements(
 
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 @pytest.mark.parametrize("num_imgs", [1, 2])
-def test_processor_prompt_replacements_regression(
-    processor_for_llava_next,
-    model_id: str,
-    num_imgs: int,
-):
+def test_processor_prompt_replacements_regression(model_id, num_imgs):
     ctx = build_model_context(
         model_name=model_id,
         tokenizer_name=model_id,
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": num_imgs},
     )
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-    ctx = InputProcessingContext(ctx.model_config, tokenizer)
-    processor = processor_for_llava_next(ctx)
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=cached_get_tokenizer(ctx.model_config.tokenizer),
+    )
 
     image_ratios = [(171, 152), (184, 161), (198, 176), (333, 296), (369, 328),
                     (488, 183), (2560, 1669)]
@@ -111,20 +101,17 @@ def test_processor_prompt_replacements_regression(
                   "Comment this out to run it manually.")
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 @pytest.mark.parametrize("num_imgs", [1])
-def test_processor_prompt_replacements_all(
-    processor_for_llava_next,
-    model_id: str,
-    num_imgs: int,
-):
+def test_processor_prompt_replacements_all(model_id, num_imgs):
     ctx = build_model_context(
         model_name=model_id,
         tokenizer_name=model_id,
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": num_imgs},
     )
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-    ctx = InputProcessingContext(ctx.model_config, tokenizer)
-    processor = processor_for_llava_next(ctx)
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=cached_get_tokenizer(ctx.model_config.tokenizer),
+    )
 
     seen_aspect_ratios = set[float]()
     image_sizes = list[ImageSize]()
