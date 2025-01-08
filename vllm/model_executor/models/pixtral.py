@@ -1,8 +1,8 @@
+import math
 from dataclasses import dataclass, fields
 from functools import cached_property
 from typing import Iterable, List, Mapping, Optional, Set, Tuple, Union
 
-import numpy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -38,6 +38,7 @@ from vllm.sequence import IntermediateTensors, SequenceData
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
+from .vision import VisionEncoderInfo
 
 try:
     from xformers import ops as xops
@@ -306,7 +307,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         images: Optional[Union[List[List[torch.Tensor]], List[torch.Tensor],
                                torch.Tensor]] = None,
         image_tokens: Optional[torch.Tensor] = None,
-    ) -> Optional[List[torch.Tensor]]:
+    ) -> Tuple[Optional[List[torch.Tensor]], Optional[torch.Tensor]]:
         if images is None:
             return None, None
 
@@ -604,11 +605,11 @@ class VisionTransformer(nn.Module):
         return self.args.image_size // self.args.patch_size
 
     @property
-    def device(self) -> torch.device:
+    def device(self) -> torch.types.Device:
         return next(self.parameters()).device
 
     @property
-    def dtype(self) -> torch.device:
+    def dtype(self) -> torch.dtype:
         return next(self.parameters()).dtype
 
     @property
@@ -697,10 +698,18 @@ def get_pixtral_hf_patch_grid_length(*, image_size: int,
     return image_size // patch_size
 
 
-def get_pixtral_hf_num_patches(*, image_size: int, patch_size: int) -> int:
-    grid_length = get_pixtral_hf_patch_grid_length(image_size=image_size,
-                                                   patch_size=patch_size)
-    return grid_length * grid_length
+def get_pixtral_hf_image_feature_size(
+    *,
+    image_size: int,
+    patch_size: int,
+) -> int:
+    grid_length = get_pixtral_hf_patch_grid_length(
+        image_size=image_size,
+        patch_size=patch_size,
+    )
+
+    # Consider the image_break_token
+    return (grid_length + 1) * grid_length
 
 
 def get_max_pixtral_hf_image_tokens(hf_config: PixtralVisionConfig) -> int:
@@ -730,26 +739,58 @@ def dummy_image_for_pixtral_hf(
     return {"image": image if num_images == 1 else [image] * num_images}
 
 
-def get_pixtral_hf_image_feature_size(hf_config: PixtralVisionConfig,
-                                      image_width: int,
-                                      image_height: int) -> Tuple[int, int]:
-    # Adapted from transformers.models.pixtral.image_processing_pixtral.get_resize_output_image_size # noqa: E501
-    # https://github.com/huggingface/transformers/blob/2bd4d5897dc73e8b172832070a6f9e567a0df017/src/transformers/models/pixtral/image_processing_pixtral.py#L180 # noqa: E501
-    max_width, max_height = hf_config.image_size, hf_config.image_size
-    patch_width, patch_height = hf_config.patch_size, hf_config.patch_size
+# Adapted from transformers.models.pixtral.image_processing_pixtral.get_resize_output_image_size # noqa: E501
+# https://github.com/huggingface/transformers/blob/2bd4d5897dc73e8b172832070a6f9e567a0df017/src/transformers/models/pixtral/image_processing_pixtral.py#L180
+def get_pixtral_hf_image_feature_grid_size(
+    hf_config: PixtralVisionConfig,
+    *,
+    image_width: int,
+    image_height: int,
+) -> tuple[int, int]:
+    max_width = max_height = hf_config.image_size
+    patch_width = patch_height = hf_config.patch_size
 
     ratio = max(image_width / max_width, image_height / max_height)
 
     if ratio > 1:
-        image_width = int(numpy.ceil(image_width / ratio))
-        image_height = int(numpy.ceil(image_height / ratio))
+        image_width = int(math.ceil(image_width / ratio))
+        image_height = int(math.ceil(image_height / ratio))
 
-    num_height_tokens, num_width_tokens = _get_pixtral_hf_num_image_tokens(
+    nrows, ncols = _get_pixtral_hf_num_image_tokens(
         (image_height, image_width),
         (patch_height, patch_width),
-    )
+    )  # type: ignore
 
-    return num_width_tokens, num_height_tokens
+    return ncols, nrows
+
+
+class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        return get_pixtral_hf_image_feature_size(
+            image_size=self.vision_config.image_size,
+            patch_size=self.vision_config.patch_size,
+        )
+
+    def get_max_image_tokens(self) -> int:
+        return get_max_pixtral_hf_image_tokens(self.vision_config)
+
+    def get_image_size(self) -> int:
+        return self.vision_config.image_size
+
+    def get_patch_size(self) -> int:
+        return self.vision_config.patch_size
+
+    def get_patch_grid_length(self) -> int:
+        return get_pixtral_hf_patch_grid_length(
+            image_size=self.vision_config.image_size,
+            patch_size=self.vision_config.patch_size,
+        )
 
 
 class PixtralHFMLP(nn.Module):

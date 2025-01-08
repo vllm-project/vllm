@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
@@ -16,6 +17,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
@@ -38,6 +40,7 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
+
         assert start_engine_loop
 
         self.log_requests = log_requests
@@ -84,9 +87,6 @@ class AsyncLLM(EngineClient):
 
         self.output_handler: Optional[asyncio.Task] = None
 
-    def __del__(self):
-        self.shutdown()
-
     @classmethod
     def from_engine_args(
         cls,
@@ -104,7 +104,7 @@ class AsyncLLM(EngineClient):
         else:
             vllm_config = engine_config
 
-        executor_class = cls._get_executor_cls(vllm_config)
+        executor_class = Executor.get_class(vllm_config)
 
         # Create the AsyncLLM.
         return cls(
@@ -125,20 +125,6 @@ class AsyncLLM(EngineClient):
 
         if handler := getattr(self, "output_handler", None):
             handler.cancel()
-
-    @classmethod
-    def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
-        executor_class: Type[Executor]
-        distributed_executor_backend = (
-            vllm_config.parallel_config.distributed_executor_backend)
-        if distributed_executor_backend == "mp":
-            from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-            executor_class = MultiprocExecutor
-        else:
-            assert (distributed_executor_backend is None)
-            from vllm.v1.executor.uniproc_executor import UniprocExecutor
-            executor_class = UniprocExecutor
-        return executor_class
 
     async def add_request(
         self,
@@ -276,9 +262,9 @@ class AsyncLLM(EngineClient):
                 # 4) Abort any requests that finished due to stop strings.
                 await self.engine_core.abort_requests_async(reqs_to_abort)
 
-        except BaseException as e:
-            logger.error(e)
-            raise e
+        except Exception as e:
+            logger.exception("EngineCore output handler hit an error: %s", e)
+            kill_process_tree(os.getpid())
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in self, detokenizer, and engine core."""

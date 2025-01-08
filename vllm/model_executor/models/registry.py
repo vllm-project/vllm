@@ -18,7 +18,6 @@ import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 
 from .interfaces import (has_inner_state, is_attention_free, is_hybrid,
                          supports_cross_encoding, supports_multimodal,
@@ -171,6 +170,7 @@ _MULTIMODAL_MODELS = {
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     # [Encoder-decoder]
     "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
+    "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
 }
 
 _SPECULATIVE_DECODING_MODELS = {
@@ -273,6 +273,7 @@ def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
 ) -> Optional[Type[nn.Module]]:
+    from vllm.platforms import current_platform
     current_platform.verify_model_arch(model_arch)
     try:
         return model.load_model_cls()

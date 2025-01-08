@@ -15,6 +15,7 @@ from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
 from .image import ImagePlugin
 from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
 from .processing import BaseMultiModalProcessor, ProcessingCache
+from .utils import cached_get_tokenizer
 from .video import VideoPlugin
 
 if TYPE_CHECKING:
@@ -219,6 +220,11 @@ class MultiModalRegistry:
         Note:
             This is currently directly used only in V1.
         """
+        if self.has_processor(model_config):
+            tokenizer = cached_get_tokenizer(model_config.tokenizer)
+            processor = self.create_processor(model_config, tokenizer)
+            seq_len = model_config.max_model_len
+            return processor.profiling_info.get_mm_max_tokens_per_item(seq_len)
 
         return {
             key: plugin.get_max_multimodal_tokens(model_config)

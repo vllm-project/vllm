@@ -15,7 +15,7 @@ from vllm.transformers_utils.processor import get_video_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import PlaceholderModule, is_list_of
 
-from .base import MediaIO, MultiModalData
+from .base import MediaIO, ModalityData
 from .image import ImageMediaIO, ImagePlugin
 from .inputs import MultiModalKwargs, VideoItem
 
@@ -54,7 +54,7 @@ class VideoPlugin(ImagePlugin):
     def _default_input_mapper(
         self,
         ctx: InputContext,
-        data: MultiModalData[VideoItem],
+        data: ModalityData[VideoItem],
         **mm_processor_kwargs,
     ) -> MultiModalKwargs:
         model_config = ctx.model_config

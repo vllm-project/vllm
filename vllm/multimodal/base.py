@@ -15,12 +15,12 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.sequence import SequenceGroupMetadata
 
-from .inputs import (MultiModalData, MultiModalDataDict, MultiModalKwargs,
+from .inputs import (ModalityData, MultiModalDataDict, MultiModalKwargs,
                      PlaceholderRange)
 
 logger = init_logger(__name__)
 
-MultiModalInputMapper = Callable[[InputContext, MultiModalData[object]],
+MultiModalInputMapper = Callable[[InputContext, ModalityData[object]],
                                  MultiModalKwargs]
 """
 Return a dictionary to be passed as keyword arguments to
@@ -69,7 +69,7 @@ class MultiModalPlugin(ABC):
     def _default_input_mapper(
         self,
         ctx: InputContext,
-        data: MultiModalData[Any],
+        data: ModalityData[Any],
         **mm_processor_kwargs,
     ) -> MultiModalKwargs:
         """
@@ -118,7 +118,7 @@ class MultiModalPlugin(ABC):
     def map_input(
         self,
         model_config: "ModelConfig",
-        data: MultiModalData[Any],
+        data: ModalityData[Any],
         mm_processor_kwargs: Optional[dict[str, Any]],
     ) -> MultiModalKwargs:
         """

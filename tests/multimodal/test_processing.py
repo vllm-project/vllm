@@ -1,5 +1,7 @@
+from contextlib import nullcontext
 from functools import partial
 from typing import cast
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -9,8 +11,8 @@ from vllm.config import ModelConfig
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing import (ProcessingCache, PromptReplacement,
-                                        _PlaceholderInfo, find_text_matches,
-                                        find_token_matches, iter_placeholders,
+                                        _PlaceholderInfo, find_mm_placeholders,
+                                        find_text_matches, find_token_matches,
                                         iter_token_matches,
                                         replace_text_matches,
                                         replace_token_matches)
@@ -312,21 +314,27 @@ def test_find_replace_text(
     # Should not be used since there is nothing to convert to text
     mock_tokenizer = cast(AnyTokenizer, object())
 
-    prompt_repls = [
-        PromptReplacement(key, target, repl_by_key[key]).bind(mock_tokenizer)
+    mm_prompt_repls = {
+        key: [
+            PromptReplacement(key, target,
+                              repl_by_key[key]).bind(mock_tokenizer)
+        ]
         for key, target in target_by_key.items()
-    ]
-    matches = find_text_matches(prompt, prompt_repls)
+    }
+    mm_matches = {
+        key: find_text_matches(prompt, prompt_repls)
+        for key, prompt_repls in mm_prompt_repls.items()
+    }
 
     result = replace_text_matches(
         prompt,
-        matches,
+        mm_matches,
         {key: mm_count
          for key in repl_by_key},
     )
 
     # Only displayed on error
-    print("matches:", matches)
+    print("mm_matches:", mm_matches)
     print("result:", result)
 
     # Manually constructed results
@@ -378,21 +386,27 @@ def test_find_replace_tokens(
     # Should not be used since there is nothing to convert to tokens
     mock_tokenizer = cast(AnyTokenizer, object())
 
-    prompt_repls = [
-        PromptReplacement(key, target, repl_by_key[key]).bind(mock_tokenizer)
+    mm_prompt_repls = {
+        key: [
+            PromptReplacement(key, target,
+                              repl_by_key[key]).bind(mock_tokenizer)
+        ]
         for key, target in target_by_key.items()
-    ]
-    matches = find_token_matches(prompt, prompt_repls)
+    }
+    mm_matches = {
+        key: find_token_matches(prompt, prompt_repls)
+        for key, prompt_repls in mm_prompt_repls.items()
+    }
 
     result = replace_token_matches(
         prompt,
-        matches,
+        mm_matches,
         {key: mm_count
          for key in repl_by_key},
     )
 
     # Only displayed on error
-    print("matches:", matches)
+    print("mm_matches:", mm_matches)
     print("result:", result)
 
     # Manually constructed results
@@ -415,58 +429,76 @@ def test_find_replace_tokens(
     [
         (
             [1, 9833, 28747, 32000, 9833, 28747, 32000, 32000, 918],
-            [
-                _PlaceholderInfo(
-                    modality="pattern_1",
-                    start_idx=6,
-                    replacement=[32000, 32000],
-                ),
-            ],
+            {
+                "pattern_1": [
+                    _PlaceholderInfo(
+                        modality="pattern_1",
+                        item_idx=0,
+                        start_idx=6,
+                        replacement=[32000, 32000],
+                    ),
+                ],
+            }
+
         ),
         (
             [1, 32000, 32000, 9833, 28747, 32000, 32000, 1550, 918, 1550],
-            [
-                _PlaceholderInfo(
-                    modality="pattern_1",
-                    start_idx=1,
-                    replacement=[32000, 32000],
-                ),
-                _PlaceholderInfo(
-                    modality="pattern_1",
-                    start_idx=5,
-                    replacement=[32000, 32000],
-                ),
-                _PlaceholderInfo(
-                    modality="pattern_3",
-                    start_idx=7,
-                    replacement=[1550, 918, 1550],
-                ),
-            ],
+            {
+                "pattern_1": [
+                    _PlaceholderInfo(
+                        modality="pattern_1",
+                        item_idx=0,
+                        start_idx=1,
+                        replacement=[32000, 32000],
+                    ),
+                    _PlaceholderInfo(
+                        modality="pattern_1",
+                        item_idx=1,
+                        start_idx=5,
+                        replacement=[32000, 32000],
+                    ),
+                ],
+                "pattern_3": [
+                    _PlaceholderInfo(
+                        modality="pattern_3",
+                        item_idx=0,
+                        start_idx=7,
+                        replacement=[1550, 918, 1550],
+                    ),
+                ],
+            }
         ),
         (
             [1, 32000, 32000, 32000, 32000, 32000, 1550, 918, 1550],
-            [
-                _PlaceholderInfo(
-                    modality="pattern_1",
-                    start_idx=1,
-                    replacement=[32000, 32000],
-                ),
-                _PlaceholderInfo(
-                    modality="pattern_1",
-                    start_idx=3,
-                    replacement=[32000, 32000],
-                ),
-                _PlaceholderInfo(
-                    modality="pattern_3",
-                    start_idx=6,
-                    replacement=[1550, 918, 1550],
-                ),
-            ],
+            {
+                "pattern_1": [
+                    _PlaceholderInfo(
+                        modality="pattern_1",
+                        item_idx=0,
+                        start_idx=1,
+                        replacement=[32000, 32000],
+                    ),
+                    _PlaceholderInfo(
+                        modality="pattern_1",
+                        item_idx=1,
+                        start_idx=3,
+                        replacement=[32000, 32000],
+                    ),
+                ],
+                "pattern_3": [
+                    _PlaceholderInfo(
+                        modality="pattern_3",
+                        item_idx=0,
+                        start_idx=6,
+                        replacement=[1550, 918, 1550],
+                    ),
+                ],
+            }
         ),
     ]
 )
 # yapf: enable
-def test_iter_placeholders(
+def test_find_mm_placeholders(
     repl_by_key,
     prompt,
     expected,
@@ -474,19 +506,18 @@ def test_iter_placeholders(
     # Should not be used since there is nothing to convert to tokens
     mock_tokenizer = cast(AnyTokenizer, object())
 
-    prompt_repls = [
-        PromptReplacement(key, [], repl).bind(mock_tokenizer)
+    mm_prompt_repls = {
+        key: [PromptReplacement(key, [], repl).bind(mock_tokenizer)]
         for key, repl in repl_by_key.items()
-    ]
+    }
 
-    result = list(
-        iter_placeholders(
-            prompt_repls,
-            prompt,
-            # Effectively match all occurrences in the prompt
-            {key: 3
-             for key in repl_by_key},
-        ))
+    result = find_mm_placeholders(
+        mm_prompt_repls,
+        prompt,
+        # Effectively match all occurrences in the prompt
+        {key: 3
+         for key in repl_by_key},
+    )
 
     # Only displayed on error
     print("result:", result)
@@ -526,9 +557,104 @@ def _rand_audio(
     return rng.rand(audio_len), sr
 
 
+@pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
+@pytest.mark.parametrize(
+    ("limit", "num_supported", "is_valid"),
+    [(0, 0, True), (0, 1, True), (1, 0, False), (1, 1, True), (1, 2, True),
+     (2, 1, False), (2, 2, True)],
+)
+def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
+    limit_mm_per_prompt = {"image": limit}
+
+    model_config = ModelConfig(
+        model=model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="half",
+        revision=None,
+        limit_mm_per_prompt=limit_mm_per_prompt,
+    )
+    model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
+
+    processor_factory = MULTIMODAL_REGISTRY._processor_factories[model_cls]
+    ctx = InputProcessingContext(
+        model_config,
+        tokenizer=cached_get_tokenizer(model_config.tokenizer),
+    )
+
+    processor = processor_factory(ctx, cache=None)
+    profiler = processor.profiling_info
+
+    mock_supported_mm_limits = MagicMock(return_value={"image": num_supported})
+    profiler.get_supported_mm_limits = mock_supported_mm_limits
+
+    if is_valid:
+        exc_ctx = nullcontext()
+    else:
+        exc_ctx = pytest.raises(ValueError, match="this model only supports")
+
+    with exc_ctx:
+        profiler.get_mm_limits()
+
+
+@pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
+@pytest.mark.parametrize(
+    ("num_images", "limit", "is_valid"),
+    [(0, 0, True), (0, 1, True), (1, 0, False), (1, 1, True), (1, 2, True),
+     (2, 1, False), (2, 2, True)],
+)
+def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
+    limit_mm_per_prompt = {"image": limit}
+
+    model_config = ModelConfig(
+        model=model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="half",
+        revision=None,
+        limit_mm_per_prompt=limit_mm_per_prompt,
+    )
+    model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
+
+    processor_factory = MULTIMODAL_REGISTRY._processor_factories[model_cls]
+    ctx = InputProcessingContext(
+        model_config,
+        tokenizer=cached_get_tokenizer(model_config.tokenizer),
+    )
+
+    processor = processor_factory(ctx, cache=None)
+
+    rng = np.random.RandomState(0)
+    image = _rand_img(rng, min_wh=128, max_wh=256)
+    if num_images == 0:
+        mm_data = {}
+    elif num_images == 1:
+        mm_data = {"image": image}
+    else:
+        mm_data = {"image": [image] * num_images}
+
+    if is_valid:
+        exc_ctx = nullcontext()
+    else:
+        exc_ctx = pytest.raises(ValueError, match=f"passed {num_images} image")
+
+    with exc_ctx:
+        processor.apply(
+            "<image>" * num_images,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs={},
+        )
+
+
 def _test_processing_cache_correctness(
     model_id: str,
-    modalities: set[str],
+    modalities: dict[str, bool],
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
@@ -537,6 +663,11 @@ def _test_processing_cache_correctness(
         hf_overrides = {"architectures": ["MantisForConditionalGeneration"]}
     else:
         hf_overrides = {}
+
+    limit_mm_per_prompt = {
+        modality: 3 if supports_multi else 1
+        for modality, supports_multi in modalities.items()
+    }
 
     model_config = ModelConfig(
         model_id,
@@ -548,6 +679,7 @@ def _test_processing_cache_correctness(
         dtype="float16",
         revision=None,
         hf_overrides=hf_overrides,
+        limit_mm_per_prompt=limit_mm_per_prompt,
     )
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
 
@@ -580,24 +712,22 @@ def _test_processing_cache_correctness(
                 min_wh=128,
                 max_wh=256),
         "audio":
-        partial(_rand_audio, rng, min_len=256, max_len=512, sr=16000),
-    }
-    input_max_count = {
-        "image": 3,
-        "video": 3,
-        "audio": 3,
+        partial(_rand_audio, rng, min_len=512, max_len=1024, sr=16000),
     }
 
     for batch_idx in range(num_batches):
         mm_data = {
             k:
             [(input_to_hit[k] if rng.rand() < hit_rate else input_factory[k]())
-             for _ in range(rng.randint(input_max_count[k]))]
+             for _ in range(rng.randint(limit_mm_per_prompt[k]))]
             for k in modalities
         }
 
         mm_counts = {k: len(vs) for k, vs in mm_data.items()}
-        prompt = baseline_processor._get_dummy_mm_inputs(mm_counts).prompt_text
+        prompt = baseline_processor.profiling_info.get_dummy_processor_inputs(
+            model_config.max_model_len,
+            mm_counts,
+        ).prompt_text
 
         # Drop unnecessary keys and test single -> multi conversion
         if rng.rand() < simplify_rate:
@@ -623,13 +753,21 @@ def _test_processing_cache_correctness(
 
 
 # yapf: disable
+# True if the model supports multiple data items of the modality per request
 @pytest.mark.parametrize(("model_id", "modalities"), [
-    ("llava-hf/llava-1.5-7b-hf", {"image"}),
-    ("TIGER-Lab/Mantis-8B-siglip-llama3", {"image"}),
-    ("mistral-community/pixtral-12b", {"image"}),
-    ("Qwen/Qwen2-VL-2B-Instruct", {"image", "video"}),
-    ("Qwen/Qwen2-Audio-7B-Instruct", {"audio"}),
-    ("fixie-ai/ultravox-v0_3", {"audio"}),
+    ("rhymes-ai/Aria", {"image": True}),
+    ("Salesforce/blip2-opt-2.7b", {"image": False}),
+    ("facebook/chameleon-7b", {"image": False}),
+    ("adept/fuyu-8b", {"image": False}),
+    ("llava-hf/llava-1.5-7b-hf", {"image": True}),
+    ("llava-hf/llava-v1.6-mistral-7b-hf", {"image": True}),
+    ("llava-hf/LLaVA-NeXT-Video-7B-hf", {"video": False}),
+    ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf", {"image": True, "video": True}),  # noqa: E501
+    ("TIGER-Lab/Mantis-8B-siglip-llama3", {"image": True}),
+    ("mistral-community/pixtral-12b", {"image": True}),
+    ("Qwen/Qwen2-VL-2B-Instruct", {"image": True, "video": True}),
+    ("Qwen/Qwen2-Audio-7B-Instruct", {"audio": True}),
+    ("fixie-ai/ultravox-v0_3", {"audio": True}),
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
@@ -637,7 +775,7 @@ def _test_processing_cache_correctness(
 # yapf: enable
 def test_processing_cache_correctness(
     model_id: str,
-    modalities: set[str],
+    modalities: dict[str, bool],
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
@@ -653,7 +791,7 @@ def test_processing_cache_correctness(
 
 # yapf: disable
 @pytest.mark.parametrize(("model_id", "modalities"), [
-    ("microsoft/Phi-3-vision-128k-instruct", {"image"}),
+    ("microsoft/Phi-3-vision-128k-instruct", {"image": True}),
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
@@ -661,7 +799,7 @@ def test_processing_cache_correctness(
 # yapf: enable
 def test_processing_cache_correctness_phi3v(
     model_id: str,
-    modalities: set[str],
+    modalities: dict[str, bool],
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
