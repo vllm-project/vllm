@@ -19,4 +19,5 @@ jobs:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
     - uses: DavidAnson/markdownlint-cli2-action@v19
       with:
-        config: '.markdownlint-cli2.yaml'
+        config: ".markdownlint-cli2.yaml"
+        globs: "docs/**/*.md"
