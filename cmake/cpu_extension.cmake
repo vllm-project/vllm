@@ -4,6 +4,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+    set(MACOSX_FOUND TRUE)
+endif()
+
+
 #
 # Define environment variables for special configurations
 #
@@ -12,6 +17,9 @@ if(DEFINED ENV{VLLM_CPU_AVX512BF16})
 endif()
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
+
+
+set (ENABLE_NUMA TRUE)
 
 #
 # Check the compile flags
@@ -22,17 +30,27 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
         "-mf16c"
     )
 endif()
-list(APPEND CXX_COMPILE_FLAGS
-    "-fopenmp"
-    "-DVLLM_CPU_EXTENSION")
 
-execute_process(COMMAND cat /proc/cpuinfo
-                RESULT_VARIABLE CPUINFO_RET
-                OUTPUT_VARIABLE CPUINFO)
-
-if (NOT CPUINFO_RET EQUAL 0)
-    message(FATAL_ERROR "Failed to check CPU features via /proc/cpuinfo")
+if(MACOSX_FOUND)
+    list(APPEND CXX_COMPILE_FLAGS
+        "-Xpreprocessor"
+        "-fopenmp"
+        "-DVLLM_CPU_EXTENSION")
+else()
+    list(APPEND CXX_COMPILE_FLAGS
+        "-fopenmp"
+        "-DVLLM_CPU_EXTENSION")
 endif()
+
+if (NOT MACOSX_FOUND)
+    execute_process(COMMAND cat /proc/cpuinfo
+                    RESULT_VARIABLE CPUINFO_RET
+                    OUTPUT_VARIABLE CPUINFO)
+    if (NOT CPUINFO_RET EQUAL 0)
+        message(FATAL_ERROR "Failed to check CPU features via /proc/cpuinfo")
+    endif()
+endif()
+
 
 function (find_isa CPUINFO TARGET OUT)
     string(FIND ${CPUINFO} ${TARGET} ISA_FOUND)
@@ -54,12 +72,17 @@ endfunction()
 
 is_avx512_disabled(AVX512_DISABLED)
 
-find_isa(${CPUINFO} "avx2" AVX2_FOUND)
-find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
-find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
-find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
-find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
-find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
+if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+    set(APPLE_SILICON_FOUND TRUE)
+else()
+    find_isa(${CPUINFO} "avx2" AVX2_FOUND)
+    find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
+    find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
+    find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
+    find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
+    find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
+endif()
+
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
@@ -103,6 +126,9 @@ elseif (ASIMD_FOUND)
         set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")  
     endif()
     list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})     
+elseif(APPLE_SILICON_FOUND)
+    message(STATUS "Apple Silicon Detected")
+    set(ENABLE_NUMA OFF)
 else()
     message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA or ARMv8 support.")
 endif()
@@ -139,7 +165,12 @@ endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 
-list(APPEND LIBS numa)
+if(ENABLE_NUMA)
+    list(APPEND LIBS numa)
+else()
+    message(STATUS "NUMA is disabled")
+    add_compile_definitions(-DVLLM_NUMA_DISABLED)
+endif()
 
 #
 # _C extension

@@ -1,10 +1,22 @@
-#include <numa.h>
-#include <unistd.h>
-#include <string>
-#include <sched.h>
+#ifndef VLLM_NUMA_DISABLED
+  #include <numa.h>
+  #include <unistd.h>
+  #include <string>
+  #include <sched.h>
+#endif
 
 #include "cpu_types.hpp"
 
+#ifdef VLLM_NUMA_DISABLED
+std::string init_cpu_threads_env(const std::string& cpu_ids) {
+  return std::string(
+      "Warning: NUMA is not enabled in this build. `init_cpu_threads_env` has "
+      "no effect to setup thread affinity.");
+}
+
+#endif
+
+#ifndef VLLM_NUMA_DISABLED
 std::string init_cpu_threads_env(const std::string& cpu_ids) {
   bitmask* omp_cpu_mask = numa_parse_cpustring(cpu_ids.c_str());
   TORCH_CHECK(omp_cpu_mask->size > 0);
@@ -57,7 +69,7 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
   omp_lock_t writelock;
   omp_init_lock(&writelock);
 
-#pragma omp parallel for schedule(static, 1)
+  #pragma omp parallel for schedule(static, 1)
   for (size_t i = 0; i < omp_cpu_ids.size(); ++i) {
     cpu_set_t mask;
     CPU_ZERO(&mask);
@@ -88,3 +100,4 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
 
   return ss.str();
 }
+#endif

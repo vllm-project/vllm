@@ -11,6 +11,7 @@ gpu-cuda
 gpu-rocm
 cpu-x86
 cpu-arm
+cpu-apple
 hpu-gaudi
 tpu
 xpu
