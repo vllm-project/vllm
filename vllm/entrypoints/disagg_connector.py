@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
     yield
     ## close zmq context
     logger.info("term zmqctx")
-    await app.state.zmqctx.term()
+    app.state.zmqctx.destroy(linger=0)
 
 app = FastAPI(lifespan=lifespan)
 
