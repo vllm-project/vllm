@@ -198,8 +198,19 @@ def _support_torch_compile(
             # we need to control all the compilation of the model.
             torch._dynamo.eval_frame.remove_from_cache(
                 self.original_code_object)
+
+            # collect all relevant files traced by Dynamo,
+            # so that the compilation cache can trigger re-compilation
+            # properly when any of these files change.
+
+            # 1. the file containing the top-level forward function
             self.vllm_config.compilation_config.traced_files.add(
                 self.original_code_object.co_filename)
+
+            # 2. every time Dynamo sees a function call, it will inline
+            # the function by calling InliningInstructionTranslator.inline_call
+            # we hijack this function to know all the functions called
+            # during Dynamo tracing, and their corresponding files
             inline_call = InliningInstructionTranslator.inline_call
 
             def patched_inline_call(parent, func, args, kwargs):
