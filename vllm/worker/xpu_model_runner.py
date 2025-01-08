@@ -211,13 +211,13 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                 seq_lens.append(seq_len)
                 input_tokens.extend(tokens)
                 query_len = seq_len - context_len
+                query_lens.append(query_len)
                 if is_prompt or self.scheduler_config.chunked_prefill_enabled:
                     context_lens.append(context_len)
-                    query_lens.append(query_len)
                     input_positions.extend(list(range(context_len, seq_len)))
                 else:
                     context_lens = seq_lens
-                    query_lens = seq_lens
+                    #query_lens = seq_lens
                     position = seq_len - 1
                     input_positions.append(position)
                 if is_prompt:
@@ -343,6 +343,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             num_decode_tokens=num_decode_tokens, # 8
             seq_lens=seq_lens, # 3
             seqlen_q=torch.tensor([]), # 4
+            multi_modal_placeholder_index_maps=None,
             # max_seqlen=max_seqlen, # 5
             max_seqlen=max(query_lens),
             seq_lens_tensor=seq_lens_tensor, # 9
@@ -717,9 +718,7 @@ class XPUModelRunnerBase(ModelRunnerBase[TModelInputForXPU]):
         # it by reference, rather by specializing on the value ``None``.
         # the `dtype` argument does not matter, and we use `float32` as
         # a placeholder (it has wide hardware support).
-        kv_caches = [
-            torch.tensor([], dtype=torch.float32, device=self.device)
-        ] * num_layers
+        kv_caches = [None] * num_layers
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
