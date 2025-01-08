@@ -271,6 +271,9 @@ class FlashInferState(AttentionState):
         state = self
         use_cuda_graph = model_input.attn_metadata.use_cuda_graph
         is_decode = model_input.attn_metadata.num_prefills == 0
+        # In case of multistep chunked-prefill, there might be prefill requests
+        # scheduled while CUDA graph mode is enabled. We don't run graph in that
+        # case.
         if use_cuda_graph and is_decode:
             batch_size = model_input.input_tokens.shape[0]
             state = self.runner.graph_runners[
