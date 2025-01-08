@@ -2,19 +2,20 @@ import contextlib
 import dataclasses
 import sys
 import traceback
-from typing import Any, Callable, Generator, List
+from typing import Any, Callable, Generator, Generic, TypeVar
 
+_T = TypeVar("_T")
 
 @dataclasses.dataclass
-class MonitoredValues:
-    values: List[Any] = dataclasses.field(default_factory=list)
-    trace_stacks: List[str] = dataclasses.field(default_factory=list)
+class MonitoredValues(Generic[_T]):
+    values: list[_T] = dataclasses.field(default_factory=list)
+    trace_stacks: list[str] = dataclasses.field(default_factory=list)
 
 
 @contextlib.contextmanager
 def monitor(
         measure_func: Callable[[],
-                               Any]) -> Generator[MonitoredValues, None, None]:
+                               _T]) -> Generator[MonitoredValues[_T], None, None]:
     """
     Trace the function calls to continuously monitor the change of
     a value.
@@ -30,10 +31,11 @@ def monitor(
     with monitor(measure_func) as monitored_values:
         # do something
     
-    monitored_values.values # all changes of the values
-    monitored_values.trace_stacks # trace stacks of every change
+        monitored_values.values # all changes of the values
+        monitored_values.trace_stacks # trace stacks of every change
+    ```
     """
-    monitored_values = MonitoredValues()
+    monitored_values = MonitoredValues[_T]()
 
     def _trace_calls(frame, event, arg=None):
         nonlocal monitored_values
