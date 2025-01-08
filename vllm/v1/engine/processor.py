@@ -92,8 +92,8 @@ class Processor:
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
 
-        self._validate_logprobs(params)
-        self._validate_lora(lora_request)
+        # self._validate_logprobs(params)
+        # self._validate_lora(lora_request)
 
         if arrival_time is None:
             arrival_time = time.time()
