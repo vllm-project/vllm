@@ -108,7 +108,7 @@ async def serve_zmq(arg, zmq_server_port: int, app: FastAPI) -> None:
         # We never get here but clean up anyhow
         clients.close()
         workers.close()
-        context.term()
+        context.destroy(linger=0)
 
 def _add_shutdown_handlers(app: FastAPI, server: uvicorn.Server) -> None:
     """Adds handlers for fatal errors that should crash the server"""
