@@ -62,7 +62,6 @@ class OpenAIServingModels:
         self.max_model_len = model_config.max_model_len
         self.engine_client = engine_client
 
-        self.lora_id_counter = AtomicCounter(0)
         self.lora_requests = []
         if lora_modules is not None:
             self.lora_requests = [
@@ -75,6 +74,7 @@ class OpenAIServingModels:
                             self.base_model_paths[0].name)
                 for i, lora in enumerate(lora_modules, start=1)
             ]
+        self.lora_id_counter = AtomicCounter(len(self.lora_requests))
 
         self.prompt_adapter_requests = []
         if prompt_adapters is not None:
