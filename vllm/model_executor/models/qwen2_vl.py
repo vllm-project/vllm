@@ -763,14 +763,16 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int = 1,
         do_resize: bool = True,
+        image_processor: Optional[Qwen2VLImageProcessor],
     ) -> tuple[ImageSize, int]:
+        if image_processor is None:
+            image_processor = self.get_image_processor()
+
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = vision_config.temporal_patch_size
-
-        image_processor = self.get_image_processor()
 
         if do_resize:
             resized_height, resized_width = smart_resize(
@@ -800,10 +802,12 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
+        image_processor: Optional[Qwen2VLImageProcessor],
     ) -> int:
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
+            image_processor=image_processor,
         )
         return num_image_tokens
 
@@ -813,11 +817,13 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         num_frames: int,
+        image_processor: Optional[Qwen2VLImageProcessor],
     ) -> int:
         _, num_video_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
             num_frames=num_frames,
+            image_processor=image_processor,
         )
         return num_video_tokens
 
@@ -825,6 +831,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_image_size, _ = self._get_vision_info(
             image_width=9999999,
             image_height=9999999,
+            image_processor=None,
         )
         return max_image_size
 
@@ -834,6 +841,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
+            image_processor=None,
         )
 
     def _get_max_video_frames(self, max_tokens: int) -> int:
@@ -847,6 +855,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
+                image_processor=None,
             )
 
             if next_max_tokens > max_tokens:
@@ -880,6 +889,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             image_width=target_width,
             image_height=target_height,
             num_frames=self.get_num_frames_with_most_features(seq_len),
+            image_processor=None,
         )
 
 

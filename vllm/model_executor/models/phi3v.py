@@ -322,6 +322,7 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
         max_image_tokens = self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
+            processor=None,
         )
 
         return {"image": max_image_tokens}
@@ -331,8 +332,10 @@ class Phi3VProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
+        processor: Optional[ProcessorMixin],
     ) -> int:
-        processor = self.get_hf_processor()
+        if processor is None:
+            processor = self.get_hf_processor()
 
         return processor.calc_num_image_tokens_from_image_size(  # type: ignore
             width=image_width,
@@ -431,6 +434,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
+                    processor=hf_processor,
                 )
 
             return [_IMAGE_TOKEN_ID] * num_image_tokens + [bos_token_id]
