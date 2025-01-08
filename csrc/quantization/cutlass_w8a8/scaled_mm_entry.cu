@@ -89,8 +89,8 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
   TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
               b.size(1) == c.size(1));
-  TORCH_CHECK(a_scales.numel() == 1 || a_scales.numel() == a.size(0));
-  TORCH_CHECK(b_scales.numel() == 1 || b_scales.numel() == b.size(1));
+  // TORCH_CHECK(a_scales.numel() == 1 || a_scales.numel() == a.size(0));
+  // TORCH_CHECK(b_scales.numel() == 1 || b_scales.numel() == b.size(1));
 
   // Check for strides and alignment
   TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);  // Row-major
