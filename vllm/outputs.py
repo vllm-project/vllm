@@ -140,9 +140,9 @@ class RequestOutput:
         prompt_token_ids: Optional[List[int]],
         text: str,
         token_ids: List[int],
-        logprobs: Optional[SampleLogprobs],
-        prompt_logprobs: Optional[PromptLogprobs],
-        cumulative_logprob: Optional[float],
+        logprobs: Optional[SampleLogprobs] = None,
+        prompt_logprobs: Optional[PromptLogprobs] = None,
+        cumulative_logprob: Optional[float] = None,
         finished: bool = False,
     ) -> "RequestOutput":
         """Initialize a new RequestOutput object."""

@@ -46,16 +46,16 @@ class IncrementalDetokenizer:
     # Tokenizer for this request
     tokenizer: AnyTokenizer
 
-    # Logprobs for this request
-    logprobs: Optional[SampleLogprobs]
-    prompt_logprobs: Optional[PromptLogprobs]
-    cumulative_logprob: Optional[float]
-    num_logprobs: int
-    num_prompt_logprobs: int
-
     # Accounting for stop string buffering
     stop_buffer_length: int
     _last_output_text_offset: int = 0
+
+    # Logprobs for this request
+    logprobs: Optional[SampleLogprobs] = None
+    prompt_logprobs: Optional[PromptLogprobs] = None
+    cumulative_logprob: Optional[float] = None
+    num_logprobs: int = 0
+    num_prompt_logprobs: int = 0
 
     @property
     def output_token_ids(self) -> List[int]:
@@ -83,8 +83,8 @@ class IncrementalDetokenizer:
         else:
             stop_buffer_length = 0
 
-        logprobs = request.sampling_params.logprobs
-        prompt_logprobs = request.sampling_params.prompt_logprobs
+        #logprobs = request.sampling_params.logprobs
+        #prompt_logprobs = request.sampling_params.prompt_logprobs
         return cls(
             output_text="",
             tokens=tokens,
@@ -105,11 +105,11 @@ class IncrementalDetokenizer:
             prompt_token_ids=request.prompt_token_ids,
             tokenizer=tokenizer,
             stop_buffer_length=stop_buffer_length,
-            cumulative_logprob=(0. if logprobs else None),
-            logprobs=([] if logprobs else None),
-            prompt_logprobs=([] if prompt_logprobs else None),
-            num_prompt_logprobs=(prompt_logprobs or 0),
-            num_logprobs=(logprobs or 0),
+            #cumulative_logprob=(0. if logprobs else None),
+            #logprobs=([] if logprobs else None),
+            #prompt_logprobs=([] if prompt_logprobs else None),
+            #num_prompt_logprobs=(prompt_logprobs or 0),
+            #num_logprobs=(logprobs or 0),
         )
 
     def _update_sample_logprobs(
@@ -330,18 +330,18 @@ class IncrementalDetokenizer:
                 finish_reason = "stop"  # TODO: use constant
                 stop_reason = stop_str
 
-        # 3) Make Sample Logprobs.
-        logprobs = self._update_sample_logprobs(
-            new_token_ids,
-            new_logprobs_token_ids,
-            new_logprobs,
-        )
+        # # 3) Make Sample Logprobs.
+        # logprobs = self._update_sample_logprobs(
+        #     new_token_ids,
+        #     new_logprobs_token_ids,
+        #     new_logprobs,
+        # )
 
-        # 4) Make Prompt Logprobs.
-        prompt_logprobs = self._update_prompt_logprobs(
-            new_prompt_logprobs_token_ids,
-            new_prompt_logprobs,
-        )
+        # # 4) Make Prompt Logprobs.
+        # prompt_logprobs = self._update_prompt_logprobs(
+        #     new_prompt_logprobs_token_ids,
+        #     new_prompt_logprobs,
+        # )
 
         # 5) Makes the RequestOutput object with the new text.
         finished = bool(finish_reason)
@@ -352,8 +352,8 @@ class IncrementalDetokenizer:
         delta = self.output_kind == RequestOutputKind.DELTA
         output_text = self._get_next_output_text(finished, delta)
         token_ids = new_token_ids if delta else self.output_token_ids
-        logprobs = logprobs if delta else self.logprobs
-        prompt_logprobs = prompt_logprobs if delta else self.prompt_logprobs
+        # logprobs = logprobs if delta else self.logprobs
+        # prompt_logprobs = prompt_logprobs if delta else self.prompt_logprobs
 
         request_output = RequestOutput.new(
             self.request_id,
@@ -361,9 +361,9 @@ class IncrementalDetokenizer:
             self.prompt_token_ids,
             output_text,
             token_ids,
-            logprobs,
-            prompt_logprobs,
-            self.cumulative_logprob,
+            None,
+            None,
+            None,
             finished,
         )
 
