@@ -59,6 +59,8 @@ def _get_prompt_for_image_model(question: str, *, model: str) -> str:
         return f"<s>[INST]{question}\n[IMG][/INST]"
     elif "llava" in model:
         return f"USER: <image>\n{question}\nASSISTANT:"
+    elif "llama-3.2" in model:
+        return f"<|image|><|begin_of_text|>{question}"
     raise ValueError(f"Unsupported model {model}")
 
 
