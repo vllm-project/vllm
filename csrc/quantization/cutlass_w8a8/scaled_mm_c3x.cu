@@ -1,72 +1,12 @@
 #include <cudaTypedefs.h>
+#include "c3x/scaled_mm_c3x_kernels.hpp"
 
-#if defined CUDA_VERSION && CUDA_VERSION >= 12000
-
-  #include "scaled_mm_c3x_sm90_fp8_dispatch.cuh"
-  #include "scaled_mm_c3x_sm90_int8_dispatch.cuh"
-  #include "scaled_mm_c3x_sm90_fp8_blockwise.cuh"
-
-  #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
-using namespace vllm;
+#include "core/math.hpp"
 
 /*
    This file defines quantized GEMM operations using the CUTLASS 3.x API, for
    NVIDIA GPUs with sm90a (Hopper) or later.
 */
-
-template <template <typename, typename, typename> typename Epilogue,
-          typename... EpilogueArgs>
-void cutlass_scaled_mm_sm90_epilogue(torch::Tensor& out, torch::Tensor const& a,
-                                     torch::Tensor const& b,
-                                     EpilogueArgs&&... epilogue_args) {
-  if (a.dtype() == torch::kInt8) {
-    TORCH_CHECK(b.dtype() == torch::kInt8);
-
-    if (out.dtype() == torch::kBFloat16) {
-      return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::bfloat16_t,
-                                             Epilogue>(
-          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
-    } else {
-      TORCH_CHECK(out.dtype() == torch::kFloat16);
-      return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::half_t, Epilogue>(
-          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
-    }
-  } else {
-    TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
-    TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
-
-    if (out.dtype() == torch::kBFloat16) {
-      return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
-                                            cutlass::bfloat16_t, Epilogue>(
-          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
-    } else {
-      TORCH_CHECK(out.dtype() == torch::kFloat16);
-      return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
-                                            cutlass::half_t, Epilogue>(
-          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
-    }
-  }
-}
-
-void cutlass_scaled_mm_sm90_epilogue(torch::Tensor& out, torch::Tensor const& a,
-                                     torch::Tensor const& b,
-                                     torch::Tensor const& a_scales,
-                                     torch::Tensor const& b_scales) {
-  TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
-
-  if (out.dtype() == torch::kBFloat16) {
-    cutlass_gemm_caller_blockwise<
-        cutlass_3x_gemm_fp8_blockwise<cutlass::bfloat16_t, 1, 128, 128>>(
-        out, a, b, a_scales, b_scales);
-
-  } else {
-    TORCH_CHECK(out.dtype() == torch::kFloat16);
-    cutlass_gemm_caller_blockwise<
-        cutlass_3x_gemm_fp8_blockwise<cutlass::half_t, 1, 128, 128>>(
-        out, a, b, a_scales, b_scales);
-  }
-}
 
 void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b,
@@ -103,17 +43,8 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
        scale_group_shape_a == GroupShape{1, K}) &&
       (scale_group_shape_b == GroupShape{K, N} ||
        scale_group_shape_b == GroupShape{K, 1})) {
-    // "standard per-tensor/per-token/per-channel" scaling, can use custom
-    // epilogues
-    if (bias) {
-      TORCH_CHECK(bias->dtype() == c.dtype(),
-                  "currently bias dtype must match output dtype ", c.dtype());
-      return cutlass_scaled_mm_sm90_epilogue<c3x::ScaledEpilogueBias>(
-          c, a, b, a_scales, b_scales, *bias);
-    } else {
-      return cutlass_scaled_mm_sm90_epilogue<c3x::ScaledEpilogue>(
-          c, a, b, a_scales, b_scales);
-    }
+    // "standard per-tensor/per-token/per-channel" scaling
+    vllm::cutlass_scaled_mm_sm90_fp8(c, a, b, a_scales, b_scales, bias);
   } else if (scale_group_shape_a == GroupShape{1, 128} &&
              scale_group_shape_b == GroupShape{128, 128}) {
     // 1x128 per-token group scales for activations
@@ -122,19 +53,9 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                     b.dtype() == torch::kFloat8_e4m3fn,
                 "Currently only FP8 is supported for A group shape 1x128 and "
                 "B group shape 128x128");
+    TORCH_CHECK(!bias, "Bias not yet supported blockwise scaled_mm");
 
-    if (c.dtype() == torch::kBFloat16) {
-      cutlass_gemm_caller_blockwise<
-          cutlass_3x_gemm_fp8_blockwise<cutlass::bfloat16_t, 1, 128, 128>>(
-          c, a, b, a_scales, b_scales);
-
-    } else {
-      TORCH_CHECK(c.dtype() == torch::kFloat16);
-      cutlass_gemm_caller_blockwise<
-          cutlass_3x_gemm_fp8_blockwise<cutlass::half_t, 1, 128, 128>>(
-          c, a, b, a_scales, b_scales);
-    }
-
+    vllm::cutlass_scaled_mm_blockwise_sm90_fp8(c, a, b, a_scales, b_scales);
   } else {
     TORCH_CHECK(false, "Unsupported scale group shapes for CUTLASS 3.x GEMM");
   }
@@ -150,13 +71,6 @@ void cutlass_scaled_mm_azp_sm90(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
 
-  if (azp) {
-    return cutlass_scaled_mm_sm90_epilogue<c3x::ScaledEpilogueBiasAzpToken>(
-        out, a, b, a_scales, b_scales, azp_adj, *azp, bias);
-  } else {
-    return cutlass_scaled_mm_sm90_epilogue<c3x::ScaledEpilogueBiasAzp>(
-        out, a, b, a_scales, b_scales, azp_adj, bias);
-  }
+  vllm::cutlass_scaled_mm_azp_sm90_int8(out, a, b, a_scales, b_scales, azp_adj,
+                                        azp, bias);
 }
-
-#endif

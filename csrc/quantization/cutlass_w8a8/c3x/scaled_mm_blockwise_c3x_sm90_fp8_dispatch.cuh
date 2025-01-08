@@ -1,5 +1,9 @@
 #pragma once
 
+#include <torch/all.h>
+#include <ATen/cuda/CUDAContext.h>
+#include "cutlass_extensions/common.hpp"
+
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
 
@@ -16,6 +20,8 @@
 #include "cutlass_extensions/gemm/dispatch_policy.hpp"
 #include "cutlass_extensions/gemm/collective/collective_builder.hpp"
 
+using namespace cute;
+
 template <typename Kernel>
 struct enable_sm90_or_later : Kernel {
   template <typename... Args>
@@ -29,10 +35,10 @@ struct enable_sm90_or_later : Kernel {
 template <typename OutType, int GroupSizeM_, int GroupSizeN_, int GroupSizeK_,
           int TileSizeM_ = 128>
 struct cutlass_3x_gemm_fp8_blockwise {
-  using GroupSizeM = cute::Int<GroupSizeM_>;
-  using GroupSizeN = cute::Int<GroupSizeN_>;
-  using GroupSizeK = cute::Int<GroupSizeK_>;
-  using TileSizeM = cute::Int<TileSizeM_>;
+  using GroupSizeM = Int<GroupSizeM_>;
+  using GroupSizeN = Int<GroupSizeN_>;
+  using GroupSizeK = Int<GroupSizeK_>;
+  using TileSizeM = Int<TileSizeM_>;
 
   static_assert(TileSizeM_ % GroupSizeM_ == 0,
                 "TileSizeM must be a multiple of GroupSizeM");
@@ -88,7 +94,7 @@ struct cutlass_3x_gemm_fp8_blockwise {
           KernelSchedule>::CollectiveOp;
 
   using KernelType = enable_sm90_or_later<cutlass::gemm::kernel::GemmUniversal<
-      cute::Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
+      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
       cutlass::gemm::PersistentScheduler>>;
 
   struct GemmKernel : public KernelType {};
@@ -99,13 +105,47 @@ struct cutlass_3x_gemm_fp8_blockwise {
   //   using StrideD = StrideC;
 };
 
+Shape<int, int, int, int> get_problem_shape(torch::Tensor const& a,
+                                            torch::Tensor const& b) {
+  int32_t m = a.size(0), n = b.size(1), k = a.size(1);
+  return {m, n, k, 1};
+}
+
+template <typename GemmKernel>
+void cutlass_gemm_caller(torch::Device device,
+                         Shape<int, int, int, int> prob_shape,
+                         typename GemmKernel::MainloopArguments mainloop_args,
+                         typename GemmKernel::EpilogueArguments epilogue_args) {
+  typename GemmKernel::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
+                                      prob_shape, mainloop_args, epilogue_args};
+
+  // Launch the CUTLASS GEMM kernel.
+  using GemmOp = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+  GemmOp gemm_op;
+  CUTLASS_CHECK(gemm_op.can_implement(args));
+
+  size_t workspace_size = gemm_op.get_workspace_size(args);
+  auto const workspace_options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(device);
+  auto workspace = torch::empty(workspace_size, workspace_options);
+
+  auto stream = at::cuda::getCurrentCUDAStream(device.index());
+
+  cutlass::Status status = gemm_op.run(args, workspace.data_ptr(), stream);
+  CUTLASS_CHECK(status);
+}
+
 template <typename Gemm>
 void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
                                    torch::Tensor const& b,
                                    torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales) {
+  using GemmKernel = typename Gemm::GemmKernel;
+
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
+
+  auto prob_shape = get_problem_shape(a, b);
 
   int32_t m = a.size(0);
   int32_t n = b.size(1);
@@ -114,8 +154,6 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   int64_t lda = a.stride(0);
   int64_t ldb = b.stride(1);
   int64_t ldc = out.stride(0);
-  int64_t lda_scales = a_scales.stride(0);
-  int64_t ldb_scales = b_scales.stride(0);
 
   using StrideA = Stride<int64_t, Int<1>, int64_t>;
   using StrideB = Stride<int64_t, Int<1>, int64_t>;
@@ -124,9 +162,6 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   StrideA a_stride{lda, Int<1>{}, 0};
   StrideB b_stride{ldb, Int<1>{}, 0};
   StrideC c_stride{ldc, Int<1>{}, Int<0>{}};
-
-  using GemmKernel = typename Gemm::GemmKernel;
-  typename GemmKernel::ProblemShape prob_shape{m, n, k, 1};
 
   auto a_ptr = static_cast<ElementAB*>(a.data_ptr());
   auto b_ptr = static_cast<ElementAB*>(b.data_ptr());
@@ -143,21 +178,17 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   typename GemmKernel::EpilogueArguments epilogue_args{
       {}, c_ptr, c_stride, c_ptr, c_stride};
 
-  typename GemmKernel::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
-                                      prob_shape, mainloop_args, epilogue_args};
+  cutlass_gemm_caller<GemmKernel>(a.device(), prob_shape, mainloop_args,
+                                  epilogue_args);
+}
 
-  // Launch the CUTLASS GEMM kernel.
-  using GemmOp = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
-  GemmOp gemm_op;
-  CUTLASS_CHECK(gemm_op.can_implement(args));
-
-  size_t workspace_size = gemm_op.get_workspace_size(args);
-  auto const workspace_options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
-  auto workspace = torch::empty(workspace_size, workspace_options);
-
-  auto stream = at::cuda::getCurrentCUDAStream(a.get_device());
-
-  cutlass::Status status = gemm_op.run(args, workspace.data_ptr(), stream);
-  CUTLASS_CHECK(status);
+template <typename OutType>
+void cutlass_gemm_blockwise_sm90_fp8_dispatch(torch::Tensor& out,
+                                              torch::Tensor const& a,
+                                              torch::Tensor const& b,
+                                              torch::Tensor const& a_scales,
+                                              torch::Tensor const& b_scales) {
+  cutlass_gemm_caller_blockwise<
+      cutlass_3x_gemm_fp8_blockwise<OutType, 1, 128, 128>>(out, a, b, a_scales,
+                                                           b_scales);
 }

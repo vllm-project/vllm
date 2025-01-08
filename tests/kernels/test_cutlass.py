@@ -177,7 +177,7 @@ def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
                           per_out_ch: bool, use_bias: bool):
     cutlass_fp8_gemm_helper(m, n, k, 
                             (1, -1) if per_act_token else (-1, -1),
-                            (-1, 1) if per_out_ch else (-1, -1), 
+                            (-1, 1) if per_out_ch else (-1, -1),
                             use_bias)
 
 
@@ -189,7 +189,7 @@ def test_cutlass_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
                            per_out_ch: bool, use_bias: bool):
     cutlass_int8_gemm_helper(m, n, k, 
                             (1, -1) if per_act_token else (-1, -1),
-                            (-1, 1) if per_out_ch else (-1, -1), 
+                            (-1, 1) if per_out_ch else (-1, -1),
                             use_bias)
 
 

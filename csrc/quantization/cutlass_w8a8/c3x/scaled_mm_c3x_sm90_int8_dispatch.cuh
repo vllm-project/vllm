@@ -137,4 +137,24 @@ inline void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out,
   }
 }
 
+template <template <typename, typename, typename> typename Epilogue,
+          typename... EpilogueArgs>
+void cutlass_scaled_mm_sm90_int8_epilogue(torch::Tensor& out,
+                                          torch::Tensor const& a,
+                                          torch::Tensor const& b,
+                                          EpilogueArgs&&... epilogue_args) {
+  TORCH_CHECK(a.dtype() == torch::kInt8);
+  TORCH_CHECK(b.dtype() == torch::kInt8);
+
+  if (out.dtype() == torch::kBFloat16) {
+    return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::bfloat16_t,
+                                           Epilogue>(
+        out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
+  } else {
+    TORCH_CHECK(out.dtype() == torch::kFloat16);
+    return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::half_t, Epilogue>(
+        out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
+  }
+}
+
 }  // namespace vllm
