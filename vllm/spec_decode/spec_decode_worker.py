@@ -474,16 +474,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     def _maybe_disable_speculative_tokens(
             self, disable_all_speculation: bool,
             seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
-        if not disable_all_speculation:
-            return
-
-        for seq_group_metadata in seq_group_metadata_list:
+        for sgm in seq_group_metadata_list:
             # Once num_speculative_tokens is set to 0, the spec decode
             # of this request will be disabled forever.
             # TODO(comaniac): We currently store spec decoding specific
             # state in the global data structure, but we should maintain
             # this state within spec decode worker.
-            seq_group_metadata.num_speculative_tokens = 0
+            has_guided_decoding = sgm.sampling_params is not None and sgm.sampling_params.guided_decoding is not None
+            if disable_all_speculation or has_guided_decoding:
+                sgm.num_speculative_tokens = 0
 
     def _serialize_sampler_output_no_logprobs(
             self, execute_model_req: ExecuteModelRequest,
