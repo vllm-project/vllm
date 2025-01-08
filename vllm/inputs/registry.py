@@ -323,7 +323,7 @@ class InputRegistry:
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
         from vllm.multimodal import MultiModalKwargs
-        from vllm.multimodal.profiler import MultiModalProfiler
+        from vllm.multimodal.profiling import MultiModalProfiler
         from vllm.multimodal.utils import cached_get_tokenizer
 
         if mm_registry.has_processor(model_config):

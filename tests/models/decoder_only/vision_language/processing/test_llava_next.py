@@ -7,7 +7,7 @@ from pqdm.threads import pqdm
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageSize
-from vllm.multimodal.processor import BaseMultiModalProcessor
+from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.utils import cached_get_tokenizer
 
 from ....utils import build_model_context

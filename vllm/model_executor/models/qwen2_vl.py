@@ -58,8 +58,8 @@ from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     NestedTensors, VideoItem)
 from vllm.multimodal.parse import (ImageSize, ModalityDataItems,
                                    MultiModalDataItems, MultiModalDataParser)
-from vllm.multimodal.processing import BaseProcessingInfo, PromptReplacement
-from vllm.multimodal.processor import BaseMultiModalProcessor
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors

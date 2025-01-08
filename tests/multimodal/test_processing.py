@@ -20,7 +20,7 @@ from vllm.multimodal.processing import (PlaceholderInfo, ProcessingCache,
                                         replace_text_matches,
                                         replace_token_matches)
 # yapf: enable
-from vllm.multimodal.profiler import MultiModalProfiler
+from vllm.multimodal.profiling import MultiModalProfiler
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import full_groupby

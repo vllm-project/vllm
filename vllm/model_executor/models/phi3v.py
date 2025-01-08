@@ -35,10 +35,10 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors, PlaceholderRange)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
-from vllm.multimodal.processing import (BaseProcessingInfo,
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo,
                                         BoundPromptReplacement,
                                         PlaceholderInfo, PromptReplacement)
-from vllm.multimodal.processor import BaseMultiModalProcessor
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of

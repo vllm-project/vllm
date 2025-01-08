@@ -15,8 +15,8 @@ from .audio import AudioPlugin
 from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
 from .image import ImagePlugin
 from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
-from .processing import ProcessingCache
-from .processor import BaseMultiModalProcessor, BaseProcessingInfo
+from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
+                         ProcessingCache)
 from .profiling import BaseDummyInputsBuilder
 from .utils import cached_get_tokenizer
 from .video import VideoPlugin
