@@ -426,7 +426,6 @@ class HPUEncoderDecoderModelRunner(
         num_images = mm_counts["image"]
         max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
             self.model_config) * num_images
-        num_cross_blocks = math.ceil(max_mm_tokens / self.block_size)
         seq_len = max(seq_len, 1)
         if is_prompt:
             input_len = seq_len
@@ -437,6 +436,9 @@ class HPUEncoderDecoderModelRunner(
             input_len = seq_len - 1
             output_len = 1
             block_tables = {group_id: [_PAD_BLOCK_ID] * num_blocks}
+            # limit cross blocks to the number of available blocks
+            num_cross_blocks = min(self.bucketing_ctx.num_hpu_blocks,
+                                   max_mm_tokens) // self.block_size
             cross_block_table = [_PAD_BLOCK_ID] * num_cross_blocks
         prompt_token_ids = [0] * input_len
         output_token_ids = [1] * output_len
