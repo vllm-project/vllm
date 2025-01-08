@@ -57,6 +57,8 @@ def _get_prompt_for_image_model(question: str, *, model: str) -> str:
     model = model.lower()
     if "pixtral" in model:
         return f"<s>[INST]{question}\n[IMG][/INST]"
+    elif "llava" in model:
+        return f"USER: <image>\n{question}\nASSISTANT:"
     raise ValueError(f"Unsupported model {model}")
 
 
