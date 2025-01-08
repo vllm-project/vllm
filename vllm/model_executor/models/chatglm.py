@@ -473,7 +473,7 @@ class GLMTransformer(nn.Module):
                                                 get_pp_group().rank_in_group,
                                                 get_pp_group().world_size)
         self.layers = nn.ModuleList([
-            GLMBlock(config, i, cache_config, quant_config)
+            GLMBlock(config, i, cache_config, quant_config, prefix=f"{prefix}.layers.{i}")
             for i in range(self.start_layer, self.end_layer)
         ])
 
