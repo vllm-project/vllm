@@ -5,8 +5,9 @@ import os
 import torch
 from safetensors.torch import load_file, save_file
 
-# Script to convert an EAGLE checkpoint available at https://huggingface.co/yuhuili
-# into vLLM compatible checkpoint. Borrowed from
+# Script to convert an EAGLE checkpoint available at
+# https://huggingface.co/yuhuili into vLLM compatible checkpoint.
+# Borrowed from
 # https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d
 
 # Example Usage
