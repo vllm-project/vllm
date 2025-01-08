@@ -1,0 +1,22 @@
+name: Lint documentation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+
+jobs:
+  markdown-lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+    - uses: DavidAnson/markdownlint-cli2-action@v19
+      with:
+        config: '.markdownlint-cli2.yaml'

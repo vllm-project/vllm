@@ -1,0 +1,24 @@
+# Disable some built-in rules
+config:
+  link-fragments: false
+  line-length: false
+  no-inline-html: false
+  first-line-heading: false
+  no-duplicate-heading:
+    siblings_only: true
+
+# Ignore files referenced by .gitignore (only valid at root)
+gitignore: true
+
+# Define glob expressions to use (only valid at root)
+globs:
+  - "docs/**/*.md"
+
+# Disable banner message on stdout (only valid at root)
+noBanner: true
+
+# Disable progress on stdout (only valid at root)
+noProgress: false
+
+# Show found files on stdout (only valid at root)
+showFound: true

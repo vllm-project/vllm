@@ -1,4 +1,4 @@
-# Welcome to vLLM!
+# Welcome to vLLM
 
 ```{figure} ./assets/logos/vllm-logo-text-light.png
 :align: center
@@ -171,7 +171,7 @@ contributing/model/index
 contributing/vulnerability_management
 ```
 
-# Indices and tables
+## Indices and tables
 
 - {ref}`genindex`
 - {ref}`modindex`
