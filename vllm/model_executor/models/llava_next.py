@@ -2,7 +2,6 @@ from functools import cached_property
 from typing import (Final, Iterable, List, Literal, Mapping, Optional,
                     Protocol, Set, Tuple, TypedDict, Union)
 
-import numpy as np
 import torch
 import torch.nn as nn
 from transformers import BatchFeature, LlavaNextConfig, LlavaNextProcessor
@@ -74,7 +73,7 @@ class LlavaNextProcessingMixin(BaseLlavaProcessingMixin):
     def _get_hf_processor(self):
         return self.ctx.get_hf_processor(LlavaNextProcessor)
 
-    # Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L106
+    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
     def _get_num_image_tokens(
         self,
         *,
@@ -111,7 +110,7 @@ class LlavaNextProcessingMixin(BaseLlavaProcessingMixin):
 
         return unpadded_feature_size + newline_feature_size + base_feature_size
 
-    # Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L79
+    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L86
     def _get_num_unpadded_features(
         self,
         *,
@@ -124,24 +123,17 @@ class LlavaNextProcessingMixin(BaseLlavaProcessingMixin):
         current_height = npatches * num_patch_height
         current_width = npatches * num_patch_width
 
-        # NOTE: Use float32 to remain consistent with HF output
-        original_aspect_ratio = np.array(original_width / original_height,
-                                         dtype=np.float32)
-        current_aspect_ratio = np.array(current_width / current_height,
-                                        dtype=np.float32)
+        aspect_ratio = original_width / original_height
+        current_aspect_ratio = current_width / current_height
 
-        if original_aspect_ratio > current_aspect_ratio:
-            scale_factor = np.array(current_width / original_width,
-                                    dtype=np.float32)
-            new_height = int(original_height * scale_factor)
+        if aspect_ratio > current_aspect_ratio:
+            new_height = (original_height * current_width) // original_width
             padding = (current_height - new_height) // 2
-            current_height -= 2 * padding
+            current_height = current_height - (2 * padding)
         else:
-            scale_factor = np.array(current_height / original_height,
-                                    dtype=np.float32)
-            new_width = int(original_width * scale_factor)
+            new_width = (original_width * current_height) // original_height
             padding = (current_width - new_width) // 2
-            current_width -= 2 * padding
+            current_width = current_width - (2 * padding)
 
         unpadded_features = current_height * current_width
         newline_features = current_height
