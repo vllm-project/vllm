@@ -4,7 +4,7 @@ USER root
 
 ENV PATH="/usr/local/cargo/bin:$PATH:/opt/conda/bin/"
 
-RUN apt-get update -y && apt-get install -y git wget curl vim libnuma-dev libsndfile-dev libprotobuf-dev build-essential ffmpeg libsm6 libxext6 libgl1 
+RUN apt-get update -y && apt-get install -y git wget curl vim libnuma-dev libsndfile-dev libprotobuf-dev build-essential ffmpeg libsm6 libxext6 libgl1 libssl-dev 
 
 # Some packages in requirements-cpu are installed here
 # IBM provides optimized packages for ppc64le processors in the open-ce project for mamba
@@ -18,9 +18,8 @@ ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
 
-# These packages will be in rocketce eventually
 RUN --mount=type=cache,target=/root/.cache/pip  \
-    pip install -v --prefer-binary --extra-index-url https://repo.fury.io/mgiessing \
+    RUSTFLAGS='-L /opt/conda/lib' pip install -v --prefer-binary --extra-index-url https://repo.fury.io/mgiessing \
         'cmake>=3.26' ninja packaging 'setuptools-scm>=8' wheel jinja2 \
         torch==2.3.1 \
         -r requirements-cpu.txt \
