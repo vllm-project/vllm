@@ -143,7 +143,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         self.prefill_usefusedsdpa = os.getenv('VLLM_PROMPT_USE_FUSEDSDPA',
-                                              '0').lower() in ['1', 'true']
+                                              '1').lower() in ['1', 'true']
         if self.prefill_usefusedsdpa:
             assert alibi_slopes is None, \
                 'Prefill with FusedSDPA not supported with alibi slopes!'
@@ -235,7 +235,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 matmul_qk_op=self.matmul_qk,
                 softmax_op=self.softmax,
                 matmul_av_op=self.matmul_av,
-                valid_seq_lengths=attn_metadata.seq_lens_tensor,
                 fsdpa_op=self.fused_scaled_dot_product_attention,
             )
             output = out.reshape(batch_size, seq_len, hidden_size)
