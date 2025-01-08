@@ -1,8 +1,10 @@
 import inspect
 from typing import Callable, Dict, List, Optional, TypeVar, Union, overload
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
+from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
@@ -196,7 +198,31 @@ def _support_torch_compile(
             # we need to control all the compilation of the model.
             torch._dynamo.eval_frame.remove_from_cache(
                 self.original_code_object)
-            return self.compiled_callable(*args, **kwargs)
+
+            # collect all relevant files traced by Dynamo,
+            # so that the compilation cache can trigger re-compilation
+            # properly when any of these files change.
+
+            # 1. the file containing the top-level forward function
+            self.vllm_config.compilation_config.traced_files.add(
+                self.original_code_object.co_filename)
+
+            # 2. every time Dynamo sees a function call, it will inline
+            # the function by calling InliningInstructionTranslator.inline_call
+            # we hijack this function to know all the functions called
+            # during Dynamo tracing, and their corresponding files
+            inline_call = InliningInstructionTranslator.inline_call
+
+            def patched_inline_call(parent, func, args, kwargs):
+                code = func.get_code()
+                self.vllm_config.compilation_config.traced_files.add(
+                    code.co_filename)
+                return inline_call(parent, func, args, kwargs)
+
+            with patch.object(InliningInstructionTranslator, 'inline_call',
+                              patched_inline_call):
+                output = self.compiled_callable(*args, **kwargs)
+            return output
 
         # usually, capturing the model once is enough, and then we can
         # dispatch to the compiled code directly, without going through

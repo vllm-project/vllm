@@ -1108,6 +1108,13 @@ class IntermediateTensors:
 
     tensors: Dict[str, torch.Tensor]
 
+    def __init__(self, tensors):
+        # manually define this function, so that
+        # Dynamo knows `IntermediateTensors()` comes from this file.
+        # Otherwise, dataclass will generate this function by evaluating
+        # a string, and we will lose the information about the source file.
+        self.tensors = tensors
+
     def __getitem__(self, key: Union[str, slice]):
         if isinstance(key, str):
             return self.tensors[key]
