@@ -1,10 +1,10 @@
 import functools
 from collections import UserDict
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional,
-                    Sequence, Type, TypeVar)
+from dataclasses import dataclass
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Mapping, Optional,
+                    Protocol, Sequence, Type, TypeVar)
 
 import torch.nn as nn
-from typing_extensions import TypeAlias
 
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
@@ -15,7 +15,10 @@ from .audio import AudioPlugin
 from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
 from .image import ImagePlugin
 from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
-from .processing import BaseMultiModalProcessor
+from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
+                         ProcessingCache)
+from .profiling import BaseDummyInputsBuilder
+from .utils import cached_get_tokenizer
 from .video import VideoPlugin
 
 if TYPE_CHECKING:
@@ -23,15 +26,61 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# TODO: Tune the MM cache size
+MM_CACHE_SIZE = 256
+
 N = TypeVar("N", bound=Type[nn.Module])
+_I = TypeVar("_I", bound=BaseProcessingInfo)
+_I_co = TypeVar("_I_co", bound=BaseProcessingInfo, covariant=True)
 
-MultiModalProcessorFactory: TypeAlias = Callable[[InputProcessingContext],
-                                                 BaseMultiModalProcessor]
-"""
-Constructs a :class:`MultiModalProcessor` instance from the context.
 
-The processing metadata should be derived from the context.
-"""
+class ProcessingInfoFactory(Protocol[_I_co]):
+    """Constructs a :class:`MultiModalProcessor` instance from the context."""
+
+    def __call__(
+        self,
+        ctx: InputProcessingContext,
+    ) -> _I_co:
+        ...
+
+
+class DummyInputsBuilderFactory(Protocol[_I]):
+    """
+    Constructs a :class:`BaseDummyInputsBuilder` instance from the context.
+    """
+
+    def __call__(self, info: _I) -> BaseDummyInputsBuilder[_I]:
+        ...
+
+
+class MultiModalProcessorFactory(Protocol[_I]):
+    """Constructs a :class:`MultiModalProcessor` instance from the context."""
+
+    def __call__(
+        self,
+        info: _I,
+        dummy_inputs: BaseDummyInputsBuilder[_I],
+        *,
+        cache: Optional[ProcessingCache] = None,
+    ) -> BaseMultiModalProcessor[_I]:
+        ...
+
+
+@dataclass(frozen=True)
+class _ProcessorFactories(Generic[_I]):
+    info: ProcessingInfoFactory[_I]
+    processor: MultiModalProcessorFactory[_I]
+    dummy_inputs: DummyInputsBuilderFactory[_I]
+
+    def build_processor(
+        self,
+        ctx: InputProcessingContext,
+        *,
+        cache: Optional[ProcessingCache] = None,
+    ):
+        info = self.info(ctx)
+        dummy_inputs_builder = self.dummy_inputs(info)
+        return self.processor(info, dummy_inputs_builder, cache=cache)
 
 
 class _MultiModalLimits(UserDict["ModelConfig", Dict[str, int]]):
@@ -64,19 +113,18 @@ class MultiModalRegistry:
         self._plugins = {p.get_data_key(): p for p in plugins}
 
         self._processor_factories = ClassRegistry[nn.Module,
-                                                  MultiModalProcessorFactory]()
+                                                  _ProcessorFactories]()
 
         # This is used for non-multimodal models
         self._disabled_limits_per_plugin = {k: 0 for k in self._plugins}
 
         self._limits_by_model = _MultiModalLimits()
 
+        self._processing_cache = ProcessingCache(MM_CACHE_SIZE)
+
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
         """
         Register a multi-modal plugin so it can be recognized by vLLM.
-
-        See also:
-            :ref:`adding-multimodal-plugin`
         """
         data_type_key = plugin.get_data_key()
 
@@ -211,6 +259,11 @@ class MultiModalRegistry:
         Note:
             This is currently directly used only in V1.
         """
+        if self.has_processor(model_config):
+            tokenizer = cached_get_tokenizer(model_config.tokenizer)
+            processor = self.create_processor(model_config, tokenizer)
+            seq_len = model_config.max_model_len
+            return processor.info.get_mm_max_tokens_per_item(seq_len)
 
         return {
             key: plugin.get_max_multimodal_tokens(model_config)
@@ -301,7 +354,10 @@ class MultiModalRegistry:
 
     def register_processor(
         self,
-        factory: MultiModalProcessorFactory,
+        processor: MultiModalProcessorFactory[_I],
+        *,
+        info: ProcessingInfoFactory[_I],
+        dummy_inputs: DummyInputsBuilderFactory[_I],
     ):
         """
         Register a multi-modal processor to a model class. The processor
@@ -322,36 +378,42 @@ class MultiModalRegistry:
                     "registered to %s. It is overwritten by the new one.",
                     model_cls, self)
 
-            self._processor_factories[model_cls] = factory
+            self._processor_factories[model_cls] = _ProcessorFactories(
+                info=info,
+                dummy_inputs=dummy_inputs,
+                processor=processor,
+            )
 
             return model_cls
 
         return wrapper
 
-    def has_processor(self, model_config: "ModelConfig") -> bool:
-        """
-        Test whether a multi-modal processor is defined for a specific model.
-        """
+    def _get_model_cls(self, model_config: "ModelConfig"):
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
 
         model_cls, _ = get_model_architecture(model_config)
-        return model_cls in self._processor_factories
+        return model_cls
+
+    def has_processor(self, model_config: "ModelConfig") -> bool:
+        """
+        Test whether a multi-modal processor is defined for a specific model.
+        """
+        return self._get_model_cls(model_config) in self._processor_factories
 
     def create_processor(
         self,
         model_config: "ModelConfig",
         tokenizer: AnyTokenizer,
-    ) -> BaseMultiModalProcessor:
+    ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
         Create a multi-modal processor for a specific model and tokenizer.
         """
-
-        # Avoid circular import
-        from vllm.model_executor.model_loader import get_model_architecture
-
-        model_cls, _ = get_model_architecture(model_config)
-        processor_factory = self._processor_factories[model_cls]
+        model_cls = self._get_model_cls(model_config)
+        factories = self._processor_factories[model_cls]
 
         ctx = InputProcessingContext(model_config, tokenizer)
-        return processor_factory(ctx)
+        cache = (None if model_config.disable_mm_preprocessor_cache else
+                 self._processing_cache)
+
+        return factories.build_processor(ctx, cache=cache)

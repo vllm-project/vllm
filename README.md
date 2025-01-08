@@ -60,7 +60,7 @@ vLLM is flexible and easy to use with:
 
 vLLM seamlessly supports most popular open-source models on HuggingFace, including:
 - Transformer-like LLMs (e.g., Llama)
-- Mixture-of-Expert LLMs (e.g., Mixtral)
+- Mixture-of-Expert LLMs (e.g., Mixtral, Deepseek-V2 and V3)
 - Embedding Models (e.g. E5-Mistral)
 - Multi-modal LLMs (e.g., LLaVA)
 
@@ -77,7 +77,7 @@ pip install vllm
 Visit our [documentation](https://vllm.readthedocs.io/en/latest/) to learn more.
 - [Installation](https://vllm.readthedocs.io/en/latest/getting_started/installation.html)
 - [Quickstart](https://vllm.readthedocs.io/en/latest/getting_started/quickstart.html)
-- [Supported Models](https://vllm.readthedocs.io/en/latest/models/supported_models.html)
+- [List of Supported Models](https://vllm.readthedocs.io/en/latest/models/supported_models.html)
 
 ## Contributing
 
@@ -90,28 +90,33 @@ vLLM is a community project. Our compute resources for development and testing a
 
 <!-- Note: Please sort them in alphabetical order. -->
 <!-- Note: Please keep these consistent with docs/source/community/sponsors.md -->
-
+Cash Donations:
 - a16z
+- Dropbox
+- Sequoia Capital
+- Skywork AI
+- ZhenFund
+
+Compute Resources:
 - AMD
 - Anyscale
 - AWS
 - Crusoe Cloud
 - Databricks
 - DeepInfra
-- Dropbox
 - Google Cloud
 - Lambda Lab
 - Nebius
+- Novita AI
 - NVIDIA
 - Replicate
 - Roblox
 - RunPod
-- Sequoia Capital
-- Skywork AI
 - Trainy
 - UC Berkeley
 - UC San Diego
-- ZhenFund
+
+Slack Sponsor: Anyscale
 
 We also have an official fundraising venue through [OpenCollective](https://opencollective.com/vllm). We plan to use the fund to support the development, maintenance, and adoption of vLLM.
 

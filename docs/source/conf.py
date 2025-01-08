@@ -43,6 +43,10 @@ extensions = [
     "sphinx.ext.autosummary",
     "myst_parser",
     "sphinxarg.ext",
+    "sphinx_togglebutton",
+]
+myst_enable_extensions = [
+    "colon_fence",
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -191,6 +195,7 @@ def linkcode_resolve(domain, info):
 
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
 autodoc_mock_imports = [
+    "blake3",
     "compressed_tensors",
     "cpuinfo",
     "cv2",
@@ -207,7 +212,7 @@ autodoc_mock_imports = [
     "tensorizer",
     "pynvml",
     "outlines",
-    "xgrammar,"
+    "xgrammar",
     "librosa",
     "soundfile",
     "gguf",

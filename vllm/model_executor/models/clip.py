@@ -24,6 +24,8 @@ from vllm.multimodal.utils import (cached_get_tokenizer,
                                    resolve_visual_encoder_outputs)
 from vllm.sequence import SequenceData
 
+from .vision import VisionEncoderInfo
+
 
 def get_clip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
     assert image_size % patch_size == 0
@@ -147,6 +149,32 @@ def input_processor_for_clip(
                         prompt=new_prompt,
                         multi_modal_data=multi_modal_data,
                         multi_modal_placeholders={"image": ranges})
+
+
+class CLIPEncoderInfo(VisionEncoderInfo[CLIPVisionConfig]):
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        return get_clip_image_feature_size(self.vision_config)
+
+    def get_max_image_tokens(self) -> int:
+        return get_max_clip_image_tokens(self.vision_config)
+
+    def get_image_size(self) -> int:
+        return self.vision_config.image_size
+
+    def get_patch_size(self) -> int:
+        return self.vision_config.patch_size
+
+    def get_patch_grid_length(self) -> int:
+        return get_clip_patch_grid_length(
+            image_size=self.vision_config.image_size,
+            patch_size=self.vision_config.patch_size,
+        )
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa

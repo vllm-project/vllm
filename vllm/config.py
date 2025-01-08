@@ -3,14 +3,14 @@ import copy
 import enum
 import hashlib
 import json
-import os
+import sys
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
-                    Final, List, Literal, Mapping, Optional, Set, Tuple, Type,
-                    Union)
+                    Final, List, Literal, Mapping, Optional, Protocol, Set,
+                    Tuple, Type, Union)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
-from vllm.platforms import current_platform, interface
+from vllm.platforms import CpuArchEnum
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
@@ -73,6 +73,12 @@ _TASK_RUNNER: Dict[_ResolvedTask, RunnerType] = {
 
 HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
                                              PretrainedConfig]]
+
+
+class SupportsHash(Protocol):
+
+    def compute_hash(self) -> str:
+        ...
 
 
 class ModelConfig:
@@ -161,7 +167,7 @@ class ModelConfig:
             override default pooling config for the pooling model.
         logits_processor_pattern: Optional regex pattern specifying valid
             logits processor qualified names that can be passed with the
-            `logits_processors` extra completion argument. Defaults to None, 
+            `logits_processors` extra completion argument. Defaults to None,
             which allows no processors.
         generation_config: Configuration parameter file for generation.
     """
@@ -301,7 +307,7 @@ class ModelConfig:
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
         has_interleaved_attention = (sliding_window is not None) and (
             isinstance(sliding_window, list) or
-            (self.hf_text_config.model_type in ["gemma2"]))
+            (self.hf_text_config.model_type in ["gemma2", "cohere2"]))
 
         if (not self.disable_sliding_window and has_interleaved_attention):
             if envs.VLLM_ATTENTION_BACKEND == "XFORMERS":
@@ -343,6 +349,7 @@ class ModelConfig:
         self.is_hybrid = self._init_is_hybrid()
         self.has_inner_state = self._init_has_inner_state()
 
+        from vllm.platforms import current_platform
         if current_platform.is_neuron():
             self.override_neuron_config = override_neuron_config
         else:
@@ -364,7 +371,7 @@ class ModelConfig:
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
         """
-        Pull the model config or tokenizer to a temporary 
+        Pull the model config or tokenizer to a temporary
         directory in case of S3.
 
         Args:
@@ -374,16 +381,16 @@ class ModelConfig:
         """
         if is_s3(model) or is_s3(tokenizer):
             if is_s3(model):
-                self.s3_model = S3Model()
-                self.s3_model.pull_files(model, allow_pattern=["*config.json"])
+                s3_model = S3Model()
+                s3_model.pull_files(model, allow_pattern=["*config.json"])
                 self.model_weights = self.model
-                self.model = self.s3_model.dir
+                self.model = s3_model.dir
 
             if is_s3(tokenizer):
-                self.s3_tokenizer = S3Model()
-                self.s3_tokenizer.pull_files(
+                s3_tokenizer = S3Model()
+                s3_tokenizer.pull_files(
                     model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
-                self.tokenizer = self.s3_tokenizer.dir
+                self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
@@ -583,6 +590,7 @@ class ModelConfig:
                 raise ValueError(
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}.")
+            from vllm.platforms import current_platform
             current_platform.verify_quantization(self.quantization)
             if self.quantization not in optimized_quantization_methods:
                 logger.warning(
@@ -595,6 +603,12 @@ class ModelConfig:
             self.max_seq_len_to_capture = self.max_model_len
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
+
+        if (self.hf_config.model_type == 'deepseek_v3'
+                and not self.enforce_eager):
+            logger.warning("CUDA graph is not supported for Deepseek V3 yet, "
+                           "fallback to the eager mode.")
+            self.enforce_eager = True
 
     def _verify_bnb_config(self) -> None:
         """
@@ -630,8 +644,9 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        # Reminder: Please update docs/source/usage/compatibility_matrix.md
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
+        from vllm.platforms import current_platform
         if not current_platform.is_async_output_supported(self.enforce_eager):
             logger.warning(
                 "Async output processing is not supported on the "
@@ -650,7 +665,7 @@ class ModelConfig:
         if self.runner_type == "pooling":
             self.use_async_output_proc = False
 
-        # Reminder: Please update docs/source/usage/compatibility_matrix.md
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if speculative_config:
             logger.warning("Async output processing is not supported with"
@@ -712,8 +727,9 @@ class ModelConfig:
 
     def get_head_size(self) -> int:
         # TODO remove hard code
-        if hasattr(self.hf_text_config, "model_type"
-                   ) and self.hf_text_config.model_type == 'deepseek_v2':
+        if hasattr(self.hf_text_config,
+                   "model_type") and (self.hf_text_config.model_type
+                                      in ('deepseek_v2', 'deepseek_v3')):
             # FlashAttention supports only head_size 32, 64, 128, 256,
             # we need to pad head_size 192 to 256
             return 256
@@ -866,14 +882,14 @@ class ModelConfig:
 
     def get_diff_sampling_param(self) -> Dict[str, Any]:
         """
-        This method returns a dictionary containing the parameters 
-        that differ from the default sampling parameters, but only 
-        if `generation_config` is set. If `generation_config` is not 
+        This method returns a dictionary containing the parameters
+        that differ from the default sampling parameters, but only
+        if `generation_config` is set. If `generation_config` is not
         set, an empty dictionary is returned.
 
         Returns:
-            Dict[str, Any]: A dictionary with the differing sampling 
-            parameters if `generation_config` is set, otherwise an 
+            Dict[str, Any]: A dictionary with the differing sampling
+            parameters if `generation_config` is set, otherwise an
             empty dictionary.
         """
         if self.generation_config is None:
@@ -999,10 +1015,6 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
-        if (current_platform.is_cuda() and self.block_size is not None
-                and self.block_size > 32):
-            raise ValueError("CUDA Paged Attention kernel only supports "
-                             f"block sizes up to 32. Got {self.block_size}.")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
@@ -1266,6 +1278,7 @@ class ParallelConfig:
                                  f"distributed executor backend "
                                  f"'{self.distributed_executor_backend}'.")
         ray_only_devices = ["tpu", "hpu"]
+        from vllm.platforms import current_platform
         if (current_platform.device_type in ray_only_devices
                 and self.world_size > 1):
             if self.distributed_executor_backend is None:
@@ -1314,7 +1327,7 @@ class ParallelConfig:
     def _verify_args(self) -> None:
         # Lazy import to avoid circular import
         from vllm.executor.executor_base import ExecutorBase
-
+        from vllm.platforms import current_platform
         if self.distributed_executor_backend not in (
                 "ray", "mp", None) and not (isinstance(
                     self.distributed_executor_backend, type) and issubclass(
@@ -1515,6 +1528,7 @@ class DeviceConfig:
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
             # Automated device type detection
+            from vllm.platforms import current_platform
             self.device_type = current_platform.device_type
             if not self.device_type:
                 raise RuntimeError("Failed to infer device type")
@@ -2037,6 +2051,11 @@ class LoRAConfig:
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
                 f"max_loras ({self.max_loras})")
 
+    def verify_with_cache_config(self, cache_config: CacheConfig):
+        # TODO LoRA supports CPU offload.
+        if cache_config.cpu_offload_gb > 0:
+            raise ValueError("CPU offload is not supported with LoRA yet.")
+
     def verify_with_model_config(self, model_config: ModelConfig):
         if self.lora_dtype in (None, "auto"):
             self.lora_dtype = model_config.dtype
@@ -2050,7 +2069,7 @@ class LoRAConfig:
                            model_config.quantization)
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
-        # Reminder: Please update docs/source/usage/compatibility_matrix.md
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if scheduler_config.chunked_prefill_enabled:
             logger.warning("LoRA with chunked prefill is still experimental "
@@ -2228,9 +2247,10 @@ def _get_and_verify_dtype(
             else:
                 torch_dtype = config_dtype
 
+            from vllm.platforms import current_platform
             if (current_platform.is_cpu()
                     and current_platform.get_cpu_architecture()
-                    == interface.CpuArchEnum.POWERPC
+                    == CpuArchEnum.POWERPC
                     and (config_dtype == torch.float16
                          or config_dtype == torch.float32)):
                 logger.info(
@@ -2238,6 +2258,17 @@ def _get_and_verify_dtype(
                     "using float16 by default. Float16 is not currently "
                     "supported for POWERPC.")
                 torch_dtype = torch.bfloat16
+
+            # TODO: change this condition to check if the platform support bf16
+            # instead of checking the OS. For instance M2 shall supports bf16
+            # already. But we need to modify `cpu_extension.cmake` to activate
+            # the feature in the build.
+            if (current_platform.is_cpu() and sys.platform.startswith("darwin")
+                    and current_platform.get_cpu_architecture()
+                    == CpuArchEnum.ARM and config_dtype == torch.bfloat16):
+                logger.info("For macOS with Apple Silicon, currently bfloat16 "
+                            "is not supported. Setting dtype to float16.")
+                torch_dtype = torch.float16
 
             if current_platform.is_hpu() and config_dtype == torch.float16:
                 logger.info(
@@ -2292,6 +2323,8 @@ def _get_and_verify_max_len(
         "seq_length",
         # Command-R
         "model_max_length",
+        # Whisper
+        "max_target_positions",
         # Others
         "max_sequence_length",
         "max_seq_length",
@@ -2552,14 +2585,6 @@ class KVTransferConfig(BaseModel):
         return KVTransferConfig.model_validate_json(cli_value)
 
     def model_post_init(self, __context: Any) -> None:
-        supported_kv_connector = ["PyNcclConnector", "MooncakeConnector"]
-        if all([
-                self.kv_connector is not None, self.kv_connector
-                not in supported_kv_connector
-        ]):
-            raise ValueError(f"Unsupported kv_connector: {self.kv_connector}. "
-                             f"Supported connectors are "
-                             f"{supported_kv_connector}.")
 
         if self.kv_role is not None and self.kv_role not in [
                 "kv_producer", "kv_consumer", "kv_both"
@@ -2752,9 +2777,8 @@ class CompilationConfig(BaseModel):
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
+    traced_files: Set[str] = PrivateAttr
     compilation_time: float = PrivateAttr
-    # should be InductorHashCache, but Pydantic does not support it
-    inductor_hash_cache: Any = PrivateAttr
 
     # Per-model forward context
     # Mainly used to store attention cls
@@ -2792,6 +2816,7 @@ class CompilationConfig(BaseModel):
             "compilation_time",
             "bs_to_padded_graph_size",
             "pass_config",
+            "traced_files",
         }
         return self.model_dump_json(exclude=exclude, exclude_unset=True)
 
@@ -2851,6 +2876,7 @@ class CompilationConfig(BaseModel):
 
         self.enabled_custom_ops = Counter()
         self.disabled_custom_ops = Counter()
+        self.traced_files = set()
         self.static_forward_context = {}
         self.compilation_time = 0.0
 
@@ -2872,29 +2898,6 @@ class CompilationConfig(BaseModel):
         # TODO: pass user-specified backend to piecewise compilation
         # merge with the config use_inductor
         assert self.level == CompilationLevel.PIECEWISE
-
-        if not self.cache_dir:
-            # no provided cache dir, generate one based on the known factors
-            # that affects the compilation. if none of the factors change,
-            # the cache dir will be the same so that we can reuse the compiled
-            # graph.
-            hash_key = vllm_config.compute_hash()
-            cache_dir = os.path.join(
-                envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key,
-                f"rank_{vllm_config.parallel_config.rank}")
-            os.makedirs(cache_dir, exist_ok=True)
-            self.cache_dir = cache_dir
-
-            disabled = envs.VLLM_DISABLE_COMPILE_CACHE
-            from vllm.compilation.backends import InductorHashCache
-            self.inductor_hash_cache: InductorHashCache = InductorHashCache(
-                self.cache_dir, disabled=disabled)
-            if disabled:
-                logger.info("vLLM's torch.compile cache is disabled.")
-            else:
-                logger.info(
-                    "Using cache directory: %s for vLLM's torch.compile",
-                    self.cache_dir)
 
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)
@@ -2970,6 +2973,10 @@ class VllmConfig:
                                                   init=True)  # type: ignore
     kv_transfer_config: KVTransferConfig = field(default=None,
                                                  init=True)  # type: ignore
+    # some opaque config, only used to provide additional information
+    # for the hash computation, mainly used for testing and debugging.
+    additional_config: SupportsHash = field(default=None,
+                                            init=True)  # type: ignore
     instance_id: str = ""
 
     def compute_hash(self) -> str:
@@ -3001,33 +3008,62 @@ class VllmConfig:
         vllm_factors.append(__version__)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.cache_config:
             vllm_factors.append(self.cache_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.parallel_config:
             vllm_factors.append(self.parallel_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.scheduler_config:
             vllm_factors.append(self.scheduler_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.device_config:
             vllm_factors.append(self.device_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.load_config:
             vllm_factors.append(self.load_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.speculative_config:
             vllm_factors.append(self.speculative_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.decoding_config:
             vllm_factors.append(self.decoding_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.observability_config:
             vllm_factors.append(self.observability_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.prompt_adapter_config:
             vllm_factors.append(self.prompt_adapter_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.quant_config:
             pass  # should be captured by model_config.quantization
         if self.compilation_config:
             vllm_factors.append(self.compilation_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.kv_transfer_config:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
-
+        else:
+            vllm_factors.append("None")
+        if self.additional_config:
+            vllm_factors.append(self.additional_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         factors.append(vllm_factors)
 
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()[:10]
@@ -3045,6 +3081,7 @@ class VllmConfig:
             model_config: ModelConfig,
             load_config: LoadConfig) -> Optional[QuantizationConfig]:
         """Get the quantization config."""
+        from vllm.platforms import current_platform
         if model_config.quantization is not None:
             from vllm.model_executor.model_loader.weight_utils import (
                 get_quant_config)
@@ -3095,6 +3132,7 @@ class VllmConfig:
             self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config:
+            self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
@@ -3107,6 +3145,7 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
 
+        from vllm.platforms import current_platform
         if self.scheduler_config is not None and \
             self.model_config is not None and \
             self.scheduler_config.chunked_prefill_enabled and \
