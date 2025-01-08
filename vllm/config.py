@@ -381,16 +381,16 @@ class ModelConfig:
         """
         if is_s3(model) or is_s3(tokenizer):
             if is_s3(model):
-                self.s3_model = S3Model()
-                self.s3_model.pull_files(model, allow_pattern=["*config.json"])
+                s3_model = S3Model()
+                s3_model.pull_files(model, allow_pattern=["*config.json"])
                 self.model_weights = self.model
-                self.model = self.s3_model.dir
+                self.model = s3_model.dir
 
             if is_s3(tokenizer):
-                self.s3_tokenizer = S3Model()
-                self.s3_tokenizer.pull_files(
+                s3_tokenizer = S3Model()
+                s3_tokenizer.pull_files(
                     model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
-                self.tokenizer = self.s3_tokenizer.dir
+                self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
