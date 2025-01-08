@@ -201,44 +201,6 @@ def apply_fp8_linear(
             return output.to(dtype=input.dtype).view(*output_shape)
 
 
-def apply_int8_linear(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    input_scale: Optional[torch.Tensor] = None,
-    input_zero_point: Optional[torch.Tensor] = None,
-    azp_adj: Optional[torch.Tensor] = None,
-    bias: Optional[torch.Tensor] = None,
-):
-    # ops.scaled_int8_quant supports both dynamic and static quant.
-    # * dynamic, layer.input_scale is None and x_scale computed from x.
-    # * static, layer.input_scale is scalar and x_scale is input_scale.
-    symmetric = azp_adj is None
-    x_q, x_scale, x_zp = ops.scaled_int8_quant(input,
-                                               input_scale,
-                                               input_zero_point,
-                                               symmetric=symmetric)
-
-    if x_zp is not None:
-        # Currently, static is always per-tensor and dynamic is per-token
-        static = input_zero_point is not None
-        azp = None if static else x_zp
-        return ops.cutlass_scaled_mm_azp(x_q,
-                                         weight,
-                                         scale_a=x_scale,
-                                         scale_b=weight_scale,
-                                         out_dtype=input.dtype,
-                                         azp_adj=azp_adj,
-                                         azp=azp,
-                                         bias=bias)
-    return ops.cutlass_scaled_mm(x_q,
-                                 weight,
-                                 scale_a=x_scale,
-                                 scale_b=weight_scale,
-                                 out_dtype=input.dtype,
-                                 bias=bias)
-
-
 def normalize_e4m3fn_to_e4m3fnuz(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
