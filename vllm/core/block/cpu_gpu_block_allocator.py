@@ -102,18 +102,24 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             & gpu_block_allocator.all_block_ids
         ), "cpu and gpu block allocators can't have intersection of block ids"
 
-        self._allocators = {
-            Device.CPU: cpu_block_allocator,
-            Device.GPU: gpu_block_allocator,
-        }
+        self._cpu_block_allocator = cpu_block_allocator
+        self._gpu_block_allocator = gpu_block_allocator
 
         self._swap_mapping: Dict[int, int] = {}
         self._null_block: Optional[Block] = None
 
         self._block_ids_to_allocator: Dict[int, BlockAllocator] = {}
-        for _, allocator in self._allocators.items():
-            for block_id in allocator.all_block_ids:
-                self._block_ids_to_allocator[block_id] = allocator
+
+        for block_id in cpu_block_allocator.all_block_ids:
+            self._block_ids_to_allocator[block_id] = cpu_block_allocator
+        for block_id in gpu_block_allocator.all_block_ids:
+            self._block_ids_to_allocator[block_id] = gpu_block_allocator
+ 
+    def allocator(self, tpe):
+        if tpe == Device.CPU:
+            return self._cpu_block_allocator
+        else:
+            return self._gpu_block_allocator
 
     def allocate_or_get_null_block(self) -> Block:
         if self._null_block is None:
@@ -138,7 +144,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Returns:
             Block: The newly allocated mutable block.
         """
-        return self._allocators[device].allocate_mutable_block(
+        return self.allocator(device).allocate_mutable_block(
             prev_block, extra_hash=extra_hash)
 
     def allocate_immutable_blocks(
@@ -164,7 +170,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             List[Block]: The newly allocated list of immutable blocks 
                 containing the provided block token IDs.
         """
-        return self._allocators[device].allocate_immutable_blocks(
+        return self.allocator(device).allocate_immutable_blocks(
             prev_block, block_token_ids, extra_hash=extra_hash)
 
     def allocate_immutable_block(self,
@@ -189,7 +195,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             Block: The newly allocated immutable block containing the provided
                 token IDs.
         """
-        return self._allocators[device].allocate_immutable_block(
+        return self.allocator(device).allocate_immutable_block(
             prev_block, token_ids, extra_hash=extra_hash)
 
     def free(self, block: Block) -> None:
@@ -234,10 +240,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Returns:
             int: The number of free blocks available on the specified device.
         """
-        return self._allocators[device].get_num_free_blocks()
+        return self.allocator(device).get_num_free_blocks()
 
     def get_num_total_blocks(self, device: Device) -> int:
-        return self._allocators[device].get_num_total_blocks()
+        return self.allocator(device).get_num_total_blocks()
 
     def get_physical_block_id(self, device: Device, absolute_id: int) -> int:
         """Returns the zero-offset block id on certain device given the 
@@ -251,7 +257,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Returns:
             int: The zero-offset block id on certain device.
         """
-        return self._allocators[device].get_physical_block_id(absolute_id)
+        return self.allocator(device).get_physical_block_id(absolute_id)
 
     def swap(self, blocks: List[Block], src_device: Device,
              dst_device: Device) -> Dict[int, int]:
@@ -270,8 +276,8 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 on to dest_device.
         """
         src_block_ids = [block.block_id for block in blocks]
-        self._allocators[src_device].swap_out(blocks)
-        self._allocators[dst_device].swap_in(blocks)
+        self.allocator(src_device).swap_out(blocks)
+        self.allocator(dst_device).swap_in(blocks)
         dst_block_ids = [block.block_id for block in blocks]
 
         current_swap_mapping: Dict[int, int] = {}
@@ -296,7 +302,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 Non full blocks are ignored when deciding the number
                 of blocks to touch.
         """
-        return self._allocators[device].get_num_full_blocks_touched(blocks)
+        return self.allocator(device).get_num_full_blocks_touched(blocks)
 
     def clear_copy_on_writes(self) -> List[Tuple[int, int]]:
         """Clears the copy-on-write (CoW) state and returns the mapping of
@@ -308,26 +314,26 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         """
         # CoW only supported on GPU
         device = Device.GPU
-        return self._allocators[device].clear_copy_on_writes()
+        return self.allocator(device).clear_copy_on_writes()
 
     def mark_blocks_as_accessed(self, block_ids: List[int],
                                 now: float) -> None:
         """Mark blocks as accessed, only use for prefix caching."""
         # Prefix caching only supported on GPU.
         device = Device.GPU
-        return self._allocators[device].mark_blocks_as_accessed(block_ids, now)
+        return self.allocator(device).mark_blocks_as_accessed(block_ids, now)
 
     def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
         """Mark blocks as accessed, only use for prefix caching."""
         # Prefix caching only supported on GPU.
         device = Device.GPU
-        return self._allocators[device].mark_blocks_as_computed(block_ids)
+        return self.allocator(device).mark_blocks_as_computed(block_ids)
 
     def get_common_computed_block_ids(
             self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         # Prefix caching only supported on GPU.
         device = Device.GPU
-        return self._allocators[device].get_common_computed_block_ids(
+        return self.allocator(device).get_common_computed_block_ids(
             computed_seq_block_ids)
 
     @property
@@ -336,8 +342,8 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         """Prefix cache hit rate. -1 means not supported or disabled."""
-        assert device in self._allocators
-        return self._allocators[device].get_prefix_cache_hit_rate()
+        assert device in [Device.GPU, Device.CPU]
+        return self.allocator(device).get_prefix_cache_hit_rate()
 
     def get_and_reset_swaps(self) -> List[Tuple[int, int]]:
         """Returns and clears the mapping of source to destination block IDs.
@@ -356,7 +362,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         block_hashes: List[int],
         device: Device = Device.GPU,
     ) -> List[int]:
-        return self._allocators[device].find_cached_blocks_prefix(block_hashes)
+        return self.allocator(device).find_cached_blocks_prefix(block_hashes)
 
 
 class NullBlock(Block):
