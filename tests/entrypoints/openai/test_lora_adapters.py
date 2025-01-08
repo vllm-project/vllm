@@ -168,6 +168,39 @@ async def test_dynamic_lora_invalid_lora_rank(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
+async def test_multiple_lora_adapters(client: openai.AsyncOpenAI, tmp_path,
+                                      zephyr_lora_files):
+    """Validate that many loras can be dynamically registered and inferenced 
+    with concurrently"""
+
+    # This test file configures the server with --max-cpu-loras=2 and this test
+    # will concurrently load 10 adapters, so it should flex the LRU cache
+    async def load_and_run_adapter(adapter_name: str):
+        await client.post("load_lora_adapter",
+                          cast_to=str,
+                          body={
+                              "lora_name": adapter_name,
+                              "lora_path": str(zephyr_lora_files)
+                          })
+        for _ in range(3):
+            await client.completions.create(
+                model=adapter_name,
+                prompt=["Hello there", "Foo bar bazz buzz"],
+                max_tokens=5,
+            )
+
+    lora_tasks = []
+    for i in range(10):
+        lora_tasks.append(
+            asyncio.create_task(load_and_run_adapter(f"adapter_{i}")))
+
+    results, _ = await asyncio.wait(lora_tasks)
+
+    for r in results:
+        assert not isinstance(r, Exception), f"Got exception {r}"
+
+
+@pytest.mark.asyncio
 async def test_loading_invalid_adapters_does_not_break_others(
         client: openai.AsyncOpenAI, tmp_path, zephyr_lora_files):
 
