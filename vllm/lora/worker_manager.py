@@ -224,7 +224,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             lora = self._load_adapter(lora_request)
             loaded = self._adapter_manager.add_adapter(lora)
             # If adding this adapter took us over capacity, evict the oldest one
-            if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
+            if len(self._adapter_manager) > self._adapter_manager.capacity:
                 assert isinstance(self._adapter_manager,
                                   LRUCacheLoRAModelManager)
                 self._adapter_manager.remove_oldest_adapter()
