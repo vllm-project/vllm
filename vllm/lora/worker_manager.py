@@ -217,13 +217,17 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
 
     def add_adapter(self, lora_request: LoRARequest) -> bool:
         if lora_request.lora_int_id not in self.list_adapters():
-            # Remove before we load the new lora to save memory
+            # Load the new adapter first to ensure it is actually valid, before
+            # evicting any existing adapters.
+            # This may cause the # of cached lora adapters to very temporarily
+            # exceed `--max-cpu-loras`.
+            lora = self._load_adapter(lora_request)
+            loaded = self._adapter_manager.add_adapter(lora)
+            # If adding this adapter took us over capacity, evict the oldest one
             if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
                 assert isinstance(self._adapter_manager,
                                   LRUCacheLoRAModelManager)
                 self._adapter_manager.remove_oldest_adapter()
-            lora = self._load_adapter(lora_request)
-            loaded = self._adapter_manager.add_adapter(lora)
         else:
             # If the lora is already loaded, just touch it to
             # update its position in the caches
