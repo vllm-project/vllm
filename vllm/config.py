@@ -3,6 +3,7 @@ import copy
 import enum
 import hashlib
 import json
+import sys
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -2257,6 +2258,17 @@ def _get_and_verify_dtype(
                     "using float16 by default. Float16 is not currently "
                     "supported for POWERPC.")
                 torch_dtype = torch.bfloat16
+
+            # TODO: change this condition to check if the platform support bf16
+            # instead of checking the OS. For instance M2 shall supports bf16
+            # already. But we need to modify `cpu_extension.cmake` to activate
+            # the feature in the build.
+            if (current_platform.is_cpu() and sys.platform.startswith("darwin")
+                    and current_platform.get_cpu_architecture()
+                    == CpuArchEnum.ARM and config_dtype == torch.bfloat16):
+                logger.info("For macOS with Apple Silicon, currently bfloat16 "
+                            "is not supported. Setting dtype to float16.")
+                torch_dtype = torch.float16
 
             if current_platform.is_hpu() and config_dtype == torch.float16:
                 logger.info(
