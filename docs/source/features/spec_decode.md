@@ -177,6 +177,7 @@ llm = LLM(
     tensor_parallel_size=4,
     speculative_model="path/to/modified/eagle/model",
     speculative_draft_tensor_parallel_size=1,
+    num_speculative_tokens=2,
 )
 
 outputs = llm.generate(prompts, sampling_params)
@@ -192,7 +193,7 @@ A few important things to consider when using the EAGLE based draft models:
 
 1. The EAGLE draft models available in the [HF repository for EAGLE models](https://huggingface.co/yuhuili) cannot be
    used directly with vLLM due to differences in the expected layer names and model definition.
-   To use these models with vLLM, use the [following script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d) 
+   To use these models with vLLM, use the [following script](../../../vllm/spec_decode/scripts/vLLM_compatible_EAGLE_ckpt.py) 
    to convert them. Note that this script does not modify the model's weights.
 
    In the above example, use the script to first convert

@@ -89,6 +89,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         ngram_prompt_lookup_min=speculative_config.ngram_prompt_lookup_min,
     )
 
+    print('draft_worker_kwargs ' + str(draft_worker_kwargs))
+
     spec_decode_worker = SpecDecodeWorker.create_worker(
         scorer_worker=target_worker,
         draft_worker_kwargs=draft_worker_kwargs,
@@ -187,6 +189,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)
+
+        print('draft_worker_kwargs12 ' + str(draft_worker_kwargs))
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
