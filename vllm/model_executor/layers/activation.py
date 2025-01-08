@@ -61,7 +61,7 @@ class SiluAndMul(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike():
+        if current_platform.is_cuda_alike() or current_platform.is_cpu():
             self.op = torch.ops._C.silu_and_mul
         elif current_platform.is_xpu():
             import intel_extension_for_pytorch as ipex
