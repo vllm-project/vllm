@@ -2,9 +2,10 @@ import contextlib
 import dataclasses
 import sys
 import traceback
-from typing import Any, Callable, Generator, Generic, TypeVar
+from typing import Callable, Generator, Generic, TypeVar
 
 _T = TypeVar("_T")
+
 
 @dataclasses.dataclass
 class MonitoredValues(Generic[_T]):
@@ -14,8 +15,8 @@ class MonitoredValues(Generic[_T]):
 
 @contextlib.contextmanager
 def monitor(
-        measure_func: Callable[[],
-                               _T]) -> Generator[MonitoredValues[_T], None, None]:
+    measure_func: Callable[[],
+                           _T]) -> Generator[MonitoredValues[_T], None, None]:
     """
     Trace the function calls to continuously monitor the change of
     a value.
