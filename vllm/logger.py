@@ -8,7 +8,8 @@ from functools import lru_cache, partial
 from logging import Logger
 from logging.config import dictConfig
 from os import path
-from typing import Any, Optional
+from types import MethodType
+from typing import Any, Optional, cast
 
 import vllm.envs as envs
 
@@ -61,7 +62,10 @@ def _print_warning_once(logger: Logger, msg: str) -> None:
     logger.warning(msg, stacklevel=4)
 
 
-class VllmLogger(Logger):
+# NOTE: This class is just to provide type information.
+# We don't set the logger class to avoid conflicting with other
+# libraries (e.g. `intel_extension_for_pytorch.utils._logger`).
+class _VllmLogger(Logger):
 
     # NOTE: We can't use info_once and warning_once because they
     # are overwritten by transformers:
@@ -115,22 +119,31 @@ def _configure_vllm_root_logger() -> None:
     if logging_config:
         dictConfig(logging_config)
 
-    logging.setLoggerClass(VllmLogger)
 
-
-# The root logger is initialized when the module is imported.
-_configure_vllm_root_logger()
-
-
-def init_logger(name: str) -> VllmLogger:
+def init_logger(name: str) -> _VllmLogger:
     """The main purpose of this function is to ensure that loggers are
     retrieved in such a way that we can be sure the root vllm logger has
     already been configured."""
 
     logger = logging.getLogger(name)
-    assert isinstance(logger, VllmLogger), type(logger)
-    return logger
 
+    for method_name in ("print_info_once", "print_warning_once"):
+        method = getattr(_VllmLogger, method_name)
+
+        if hasattr(logger, method_name):
+            raise RuntimeError(
+                f"Unable to patch `{method_name}` for {type(logger)} "
+                "because a method with the same name already exists.")
+
+        setattr(logger, method_name, MethodType(method, logger))
+
+    return cast(_VllmLogger, logger)
+
+
+# The root logger is initialized when the module is imported.
+# This is thread-safe as the module is only imported once,
+# guaranteed by the Python GIL.
+_configure_vllm_root_logger()
 
 logger = init_logger(__name__)
 
