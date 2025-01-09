@@ -721,11 +721,19 @@ class GPUModelRunner:
         ]
 
         # Profile with multimodal encoder & encoder cache.
-        if self.is_multimodal_model:
+        # TODO: handle encoder-decoder models once we support them.
+        if self.is_multimodal_model and self.encoder_cache_budget > 0:
 
-            # Encoder cache budget should be set to the model and scheduler
-            # configurations accordingly.
-            assert self.encoder_cache_budget > 0
+            # NOTE: Currently model is profiled with a single non-text
+            # modality with the max possible input tokens even when
+            # it supports multiple.
+            max_tokens_by_modality_dict = self.mm_registry.get_max_tokens_per_item_by_nonzero_modality(  # noqa: E501
+                self.model_config)
+
+            dummy_data_modality, max_tokens_per_mm_item = max(
+                max_tokens_by_modality_dict.items(), key=lambda item: item[1])
+
+            max_num_mm_items = self.encoder_cache_budget // max_tokens_per_mm_item  # noqa: E501
 
             # Create dummy batch of multimodal inputs.
             dummy_request_data = self.input_registry.dummy_data_for_profiling(
@@ -734,17 +742,6 @@ class GPUModelRunner:
                 mm_registry=self.mm_registry,
             )
             dummy_mm_data = dummy_request_data.multi_modal_data
-
-            # NOTE: Currently model is profiled with a single non-text
-            # modality with the max possible input tokens even when
-            # it supports multiple.
-            max_tokens_by_modality_dict = self.mm_registry.get_max_tokens_per_item_by_modality(  # noqa: E501
-                self.model_config)
-
-            dummy_data_modality, max_tokens_per_mm_item = max(
-                max_tokens_by_modality_dict.items(), key=lambda item: item[1])
-
-            max_num_mm_items = self.encoder_cache_budget // max_tokens_per_mm_item  # noqa: E501
 
             # Dummy data definition in V0 may contain multiple multimodal items
             # (e.g, multiple images) for a single request, therefore here we

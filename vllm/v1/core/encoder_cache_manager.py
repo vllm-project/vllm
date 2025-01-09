@@ -62,14 +62,31 @@ def compute_encoder_cache_budget(
 ) -> int:
     """Compute the encoder cache budget based on the model and scheduler 
     configurations.
+
+    Args:
+        model_config: Model configuration.
+        scheduler_config: Scheduler configuration.
+
+    Returns:
+        The encoder cache budget, in unit of number of tokens 
+        in the input sequence.
     """
 
     encoder_cache_budget = 0
+
+    # TODO: handle encoder-decoder models once we support them.
     if not model_config.is_multimodal_model:
         return encoder_cache_budget
 
-    max_tokens_by_modality_dict = MULTIMODAL_REGISTRY.get_max_tokens_per_item_by_modality(  # noqa: E501
+    max_tokens_by_modality_dict = MULTIMODAL_REGISTRY.get_max_tokens_per_item_by_nonzero_modality(  # noqa: E501
         model_config)
+
+    if not max_tokens_by_modality_dict:
+        logger.warning(
+            "All non-text modalities supported by the model have been "
+            "explicitly disabled via limit_mm_per_prompt. Encoder cache will "
+            "not be initialized.")
+        return encoder_cache_budget
 
     modality, max_tokens_per_mm_item = max(max_tokens_by_modality_dict.items(),
                                            key=lambda item: item[1])
@@ -103,12 +120,13 @@ def compute_encoder_cache_budget(
     # requests * max number of multimodal items per request.
     max_mm_items_per_req = max(
         MULTIMODAL_REGISTRY.get_mm_limits_per_prompt(model_config).values())
-    num_items = min(num_items, max_num_reqs * max_mm_items_per_req)
 
+    num_items = min(num_items, max_num_reqs * max_mm_items_per_req)
     encoder_cache_budget = num_items * max_tokens_per_mm_item
+
     logger.info(
-        "Encoder cache will be initialized with a budget of %s tokens, and "
-        "profiled with %s %s items of the maximum feature size.",
+        "Encoder cache will be initialized with a budget of %s tokens,"
+        " and profiled with %s %s items of the maximum feature size.",
         encoder_cache_budget, num_items, modality)
 
     return encoder_cache_budget
