@@ -297,7 +297,8 @@ class GPUModelRunner:
             num_scheduled_tokens[req_idx])
         return torch.tensor([self.input_batch.token_ids_cpu[req_idx, tok_idx]],
                             dtype=torch.int,
-                            device=self.device)
+                            device='cpu').to(device=self.device,
+                                             non_blocking=True)
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
