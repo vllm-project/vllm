@@ -613,24 +613,22 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     Credits to Peng et al. github.com/jquesnelle/yarn
     """
 
-    def __init__(
-        self,
-        head_size: int,
-        rotary_dim: int,
-        max_position_embeddings: int,
-        base: int,
-        is_neox_style: bool,
-        scaling_factor: float,
-        dtype: torch.dtype,
-        *,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
-        beta_fast: int = 32,
-        beta_slow: int = 1,
-        mscale: float = 1,
-        mscale_all_dim: float = 0,
-        device: Optional[str] = None
-    ) -> None:
+    def __init__(self,
+                 head_size: int,
+                 rotary_dim: int,
+                 max_position_embeddings: int,
+                 base: int,
+                 is_neox_style: bool,
+                 scaling_factor: float,
+                 dtype: torch.dtype,
+                 *,
+                 extrapolation_factor: float = 1,
+                 attn_factor: float = 1,
+                 beta_fast: int = 32,
+                 beta_slow: int = 1,
+                 mscale: float = 1,
+                 mscale_all_dim: float = 0,
+                 device: Optional[str] = None) -> None:
         self.scaling_factor = scaling_factor
         self.extrapolation_factor = extrapolation_factor
         self.attn_factor = attn_factor
