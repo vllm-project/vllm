@@ -51,7 +51,7 @@ Before you begin, ensure that you have the following:
 
       Here are two examples for using NVIDIA GPU and AMD GPU.
 
-      - NVIDIA GPU
+      NVIDIA GPU:
 
       ```yaml
       apiVersion: apps/v1
@@ -123,7 +123,7 @@ Before you begin, ensure that you have the following:
                 periodSeconds: 5
       ```
 
-      - AMD GPU
+      AMD GPU:
 
       You can refer to the `deployment.yaml` below if using AMD ROCm GPU like MI300X.
 
