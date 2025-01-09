@@ -94,13 +94,13 @@ def compute_encoder_cache_budget(
     max_num_batched_tokens = scheduler_config.max_num_batched_tokens
     max_num_reqs = scheduler_config.max_num_seqs
 
-    # In case that the biggest possible multimodal item takes space more
-    # than the batch size, then it needs to be cached and chunk prefilled.
+    # The biggest possible multimodal item cannot be fully prefilled in a
+    # batch, so every batch can partially prefill at most one of such item.
     if max_tokens_per_mm_item > max_num_batched_tokens:
         num_items = 1
 
-    # In case that the biggest possible multimodal item takes space less
-    # the batch size, then all items will be full prefilled except one.
+    # A batch can fully cover multiple biggest possible multimodal items, and
+    # one that will be partially prefilled.
     else:
         num_items = cdiv(max_num_batched_tokens, max_tokens_per_mm_item)
 
