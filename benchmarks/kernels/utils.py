@@ -13,13 +13,13 @@ class CudaGraphBenchParams:
 
 @dataclasses.dataclass
 class ArgPool:
-    '''
+    """
     When some argument of the benchmarking function is annotated with this type,
     the benchmarking class (BenchMM) will collapse the argument to a pick a
     single value from the given list of values, during function invocation.
     For every invocation during a benchmarking run, it will choose a
     different value from the list.
-    '''
+    """
     values: Iterable[Any]
 
     def __getitem__(self, index):
@@ -128,7 +128,6 @@ class Bench:
 
         self.args_iterator.reset()
         args_it = self.args_iterator.__next__()
-
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream):
             g = torch.cuda.CUDAGraph()
