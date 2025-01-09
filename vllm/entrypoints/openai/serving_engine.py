@@ -160,6 +160,11 @@ class OpenAIServing:
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
+        if (self.model_config.encoder_config is not None
+                and self.model_config.encoder_config.get(
+                    "do_lower_case", False)):
+            prompt = prompt.lower()
+
         if truncate_prompt_tokens is None:
             encoded = tokenizer(prompt, add_special_tokens=add_special_tokens)
         else:
