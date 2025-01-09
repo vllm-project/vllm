@@ -4,7 +4,9 @@ import math
 from dataclasses import MISSING, dataclass, field, fields
 from typing import Literal, Optional, Union
 
-from vllm.utils import print_info_once
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -42,7 +44,7 @@ class PEFTHelper:
     def __post_init__(self):
         self._validate_features()
         if self.use_rslora:
-            print_info_once("Loading LoRA weights trained with rsLoRA.")
+            logger.info_once("Loading LoRA weights trained with rsLoRA.")
             self.vllm_lora_scaling_factor = self.lora_alpha / math.sqrt(self.r)
         else:
             self.vllm_lora_scaling_factor = self.lora_alpha / self.r

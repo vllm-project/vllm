@@ -15,10 +15,19 @@ This guide will help you quickly get started with vLLM to perform:
 ## Installation
 
 If you are using NVIDIA GPUs, you can install vLLM using [pip](https://pypi.org/project/vllm/) directly.
-It's recommended to use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments.
+
+It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
 
 ```console
-$ conda create -n myenv python=3.10 -y
+$ uv venv myenv --python 3.12 --seed
+$ source myenv/bin/activate
+$ uv pip install vllm
+```
+
+You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments.
+
+```console
+$ conda create -n myenv python=3.12 -y
 $ conda activate myenv
 $ pip install vllm
 ```
@@ -31,7 +40,7 @@ For non-CUDA platforms, please refer [here](#installation-index) for specific in
 
 ## Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference.py>
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference/offline_inference.py>
 
 The first line of this example imports the classes {class}`~vllm.LLM` and {class}`~vllm.SamplingParams`:
 
@@ -42,7 +51,7 @@ The first line of this example imports the classes {class}`~vllm.LLM` and {class
 from vllm import LLM, SamplingParams
 ```
 
-The next section defines a list of input prompts and sampling parameters for text generation. The [sampling temperature](https://arxiv.org/html/2402.05201v1) is set to `0.8` and the [nucleus sampling probability](https://en.wikipedia.org/wiki/Top-p_sampling) is set to `0.95`. You can find more information about the sampling parameters [here](https://docs.vllm.ai/en/stable/dev/sampling_params.html).
+The next section defines a list of input prompts and sampling parameters for text generation. The [sampling temperature](https://arxiv.org/html/2402.05201v1) is set to `0.8` and the [nucleus sampling probability](https://en.wikipedia.org/wiki/Top-p_sampling) is set to `0.95`. You can find more information about the sampling parameters [here](#sampling-params).
 
 ```python
 prompts = [
@@ -133,7 +142,7 @@ completion = client.completions.create(model="Qwen/Qwen2.5-1.5B-Instruct",
 print("Completion result:", completion)
 ```
 
-A more detailed client example can be found here: <gh-file:examples/openai_completion_client.py>
+A more detailed client example can be found here: <gh-file:examples/online_serving/openai_completion_client.py>
 
 ### OpenAI Chat Completions API with vLLM
 

@@ -34,9 +34,14 @@ envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
-if not sys.platform.startswith("linux"):
+if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
     logger.warning(
-        "vLLM only supports Linux platform (including WSL). "
+        "VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
+    VLLM_TARGET_DEVICE = "cpu"
+elif not (sys.platform.startswith("linux")
+          or sys.platform.startswith("darwin")):
+    logger.warning(
+        "vLLM only supports Linux platform (including WSL) and MacOS."
         "Building on %s, "
         "so vLLM may not be able to run correctly", sys.platform)
     VLLM_TARGET_DEVICE = "empty"
@@ -252,7 +257,7 @@ class cmake_build_ext(build_ext):
 
 class repackage_wheel(build_ext):
     """Extracts libraries and other files from an existing wheel."""
-    default_wheel = "https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+    default_wheel = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
 
     def run(self) -> None:
         wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION",

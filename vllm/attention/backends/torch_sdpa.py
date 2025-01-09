@@ -13,8 +13,11 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.ipex_attn import PagedAttention
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
-from vllm.utils import make_tensor_with_pad, print_warning_once
+from vllm.logger import init_logger
+from vllm.utils import make_tensor_with_pad
 from vllm.worker.cpu_model_runner import ModelInputForCPUBuilder
+
+logger = init_logger(__name__)
 
 
 class TorchSDPABackend(AttentionBackend):
@@ -397,8 +400,8 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             raise ValueError(
                 "Torch SPDA does not support block-sparse attention.")
         if logits_soft_cap is not None:
-            print_warning_once("Torch SPDA does not support logits soft cap. "
-                               "Outputs may be slightly off.")
+            logger.warning_once("Torch SPDA does not support logits soft cap. "
+                                "Outputs may be slightly off.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
