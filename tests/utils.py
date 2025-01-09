@@ -157,13 +157,19 @@ class RemoteOpenAIServer:
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
 
-    def get_client(self):
+    def get_client(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 60
         return openai.OpenAI(
             base_url=self.url_for("v1"),
             api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
         )
 
     def get_async_client(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 60
         return openai.AsyncOpenAI(base_url=self.url_for("v1"),
                                   api_key=self.DUMMY_API_KEY,
                                   max_retries=0,
