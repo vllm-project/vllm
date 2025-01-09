@@ -270,15 +270,34 @@ class GPUModelRunner:
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-    def _compute_partial_req_next_token(
+    def _peek_next_chunk_first_token(
         self,
         req_id: str,
         num_scheduled_tokens: npt.NDArray,
-    ) -> int:
+    ) -> torch.Tensor:
+        """During chunked prefill, peek at ID of next chunk's first token.
+
+        Example:
+
+        * Suppose prompt logprobs are enabled for request with id '6'
+        * Suppose prompt_token_ids = [0,5,2,3,8,5,6,7] for request id '6'
+        * Suppose in this step, the chunk [0,5,2,3] is being prefilled
+        * This method will return the token ID 8
+
+        Args:
+          req_id: request ID
+          num_scheduled_tokens: np array of per-req scheduled token counts
+
+        Returns:
+          Single-element 1D GPU tensor containing ID of first token in next
+          chunk.
+        """
         req_idx = self.input_batch.req_id_to_index[req_id]
         tok_idx = self.input_batch.num_computed_tokens_cpu[req_idx] + int(
             num_scheduled_tokens[req_idx])
-        return int(self.input_batch.token_ids_cpu[req_idx, tok_idx])
+        return torch.tensor([self.input_batch.token_ids_cpu[req_idx, tok_idx]],
+                            dtype=torch.int,
+                            device=self.device)
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -319,11 +338,12 @@ class GPUModelRunner:
                arange,
                out=positions_np)
 
-        # ONLY for partial requests which need logprobs - prefetch the ID of the
-        # token immediately following the last token processed in this step.
-        self.input_batch.partial_req_peek_token_ids = {
-            req_id:
-            self._compute_partial_req_next_token(req_id, num_scheduled_tokens)
+        # ONLY for partial requests with prompt logprobs enabled - peek at the
+        # ID of the prompt token immediately following the chunk processed in
+        # this step. Cache the token ID.
+        self.input_batch.cached_partial_req_peek_token_ids = {
+            req_id: self._peek_next_chunk_first_token(req_id,
+                                                      num_scheduled_tokens)
             for req_id in set(scheduler_output.partial_req_ids)
             & set(self.input_batch.num_prompt_logprobs.keys())
         }
@@ -696,12 +716,10 @@ class GPUModelRunner:
                 # - The prompt logprobs at the final position in this chunk,
                 #   are predicting the probability distribution of the first
                 #   token id in the next chunk - thus we must peek ahead at
-                #   the next chunk in order to know which token's prompt
-                #   logprobs to hold on to.
-                peek_token_id = torch.tensor(
-                    [self.input_batch.partial_req_peek_token_ids[request_id]],
-                    dtype=torch.int,
-                    device=input_ids.device)
+                #   the first token in the next chunk in order to know which
+                #   token's prompt logprobs to hold on to.
+                peek_token_id = (self.input_batch.
+                                 cached_partial_req_peek_token_ids[request_id])
                 chunk_prompt_token_ids = torch.cat(
                     (input_ids[prompt_indices[:-1] + 1], peek_token_id))
             else:
