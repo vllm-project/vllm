@@ -100,12 +100,16 @@ def _test_case_get_logprobs_and_prompt_logprobs(
             # correct
             assert vllm_result.outputs[0].logprobs is not None
             assert len(vllm_result.outputs[0].logprobs) == max_tokens
-            for logprobs in vllm_result.outputs[0].logprobs:
+            for logprobs, token_id in zip(vllm_result.outputs[0].logprobs,
+                                          vllm_result.outputs[0].token_ids):
                 assert logprobs is not None
                 # If the output token is not included in the top X
                 # logprob, it can return 1 more data
                 assert (len(logprobs) == num_top_logprobs
                         or len(logprobs) == num_top_logprobs + 1)
+                # But confirm that the output token ultimately does appear
+                # among the logprobs
+                assert token_id in logprobs
             output_text = vllm_result.outputs[0].text
             output_string_from_most_likely_tokens_lst: List[str] = []
             for top_logprobs in vllm_result.outputs[0].logprobs:
@@ -165,13 +169,17 @@ def _test_case_get_logprobs_and_prompt_logprobs(
             #   the prompt
             assert len(vllm_result.prompt_logprobs) == len(
                 vllm_result.prompt_token_ids)
-            for prompt_logprobs in vllm_result.prompt_logprobs[1:]:
+            for prompt_logprobs, prompt_token_id in zip(
+                    vllm_result.prompt_logprobs[1:],
+                    vllm_result.prompt_token_ids[1:]):
                 assert prompt_logprobs is not None
                 # - If the prompt token is not included in the top X
                 #   logprob, it can return 1 more data
                 assert (len(prompt_logprobs) == num_top_prompt_logprobs
                         or len(prompt_logprobs) == num_top_prompt_logprobs + 1)
-
+                # But confirm that the prompt token ultimately does appear
+                # among the prompt logprobs
+                assert prompt_token_id in prompt_logprobs
             # Compare prompt logprobs to HF
             # The first prompt logprob is always None, so we compare it from
             # 1:.

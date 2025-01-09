@@ -670,7 +670,9 @@ class GPUModelRunner:
                 request_id, scheduler_output, req_indices)
             prompt_hidden_states = hidden_states[prompt_indices]
             logits = self.model.compute_logits(prompt_hidden_states, None)
-            chunk_prompt_token_ids = input_ids[prompt_indices]
+            # - Offset `prompt_indices` by 1 because (in general) the logprob
+            #   distribution at sequence position i is predicting position i+1
+            chunk_prompt_token_ids = input_ids[prompt_indices + 1]
 
             # Compute prompt logprobs.
             prompt_logprobs_dict[request_id] = self.model.sampler.get_logprobs(

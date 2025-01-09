@@ -256,8 +256,7 @@ class IncrementalDetokenizer:
                     decoded_token=self.tokenizer.decode(prompt_token_id))
                 self.prompt_logprobs.append(
                     self._make_pos_logprob_dict(
-                        topk_logprobs.tolist(),
-                        topk_token_ids.tolist(),
+                        topk_logprobs.tolist(), topk_token_ids.tolist(),
                         decoded_tokens[tok_idx * num_logprobs:],
                         self.num_prompt_logprobs,
                         (prompt_token_id, prompt_logprob_obj)))
