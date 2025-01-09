@@ -1,9 +1,7 @@
-from typing import Any, Dict, List, Optional, Type
-
 from transformers import AutoModelForSeq2SeqLM
-
-from ....conftest import (DecoderPromptType, ExplicitEncoderDecoderPrompt,
-                          HfRunner, VllmRunner)
+from ....conftest import (DecoderPromptType, HfRunner, VllmRunner,
+                          ExplicitEncoderDecoderPrompt)
+from typing import List, Optional, Tuple, Type, Dict, Any
 from ...utils import check_logprobs_close
 from .utils import vllm_to_hf_output
 
@@ -20,7 +18,7 @@ def compare_hf_vllm_logprobs(
         num_logprobs: int,
         tensor_parallel_size: int,
         distributed_executor_backend: Optional[str] = None,
-        vllm_runner_kwargs: Optional[Dict[str, Any]] = None,
+        vllm_runner_kwargs: Optional[Dict[str, Any]] = dict(),
         hf_tokens_to_skip: int = 0) -> None:
     '''
     Test the provided model for a variety of encoder/decoder input prompts,
@@ -103,8 +101,6 @@ def compare_hf_vllm_logprobs(
     # decoder-only unit tests expect), so when testing an encoder/decoder
     # model we must explicitly specify enforce_eager=True in the VllmRunner
     # constructor.
-    if not vllm_runner_kwargs:
-        vllm_runner_kwargs = dict()
     with vllm_runner(model,
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,

@@ -609,7 +609,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             if attn_bias:
                 assert len(
                     attn_bias
-                ) == 1, "PagedAttention expects a single bias to be provided for all input sequences."
+                ) == 1, "PagedAttention expects a single bias to be provided\
+                      for all input sequences."
+
                 attn_bias = attn_bias[0]
             output[num_prefill_query_tokens:] = PagedAttention.forward_decode(
                 decode_query,
@@ -717,7 +719,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                         attn_metadata.seq_lens)
                 else:
                     raise ValueError("Unknown AttentionType: %s", attn_type)
-                
+
                 assert isinstance(attn_bias, BlockDiagonalMask)
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(
@@ -754,7 +756,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # lengths with custom attention bias, we process each prompt one by
         # one. This is inefficient, especially when we have many short prompts.
         output = torch.empty_like(original_query)
-        seq_lens = attn_metadata.encoder_seq_lens if attn_type == AttentionType.ENCODER else attn_metadata.seq_lens
+        seq_lens = attn_metadata.encoder_seq_lens \
+            if attn_type == AttentionType.ENCODER else attn_metadata.seq_lens
         assert seq_lens
         start = 0
         for i, seq_len in enumerate(seq_lens):

@@ -17,51 +17,55 @@
 """PyTorch T5 model."""
 
 import math
-from typing import List, Optional, Tuple, Set, Iterable
 import re
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
+from transformers import T5Config
+# TODO best way to handle xformers imports?
+from xformers.ops.fmha.attn_bias import LowerTriangularMaskWithTensorBias
+
+# TODO func should be in backend interface
+from vllm.attention.backends.xformers import (XFormersMetadata, _get_attn_bias,
+                                              _set_attn_bias)
+from vllm.attention.layer import Attention, AttentionMetadata, AttentionType
+from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.layers.activation import get_act_fn
-from vllm.attention.layer import Attention, AttentionType, AttentionMetadata
-from vllm.config import CacheConfig
-from transformers import T5Config
-from vllm.attention.backends.xformers import XFormersMetadata
-from vllm.config import VllmConfig
-from vllm.model_executor.layers.sampler import get_sampler, SamplerOutput
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.sequence import IntermediateTensors
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.sequence import IntermediateTensors
+
 from .utils import maybe_prefix
-# TODO best way to handle xformers imports?
-from xformers.ops.fmha.attn_bias import LowerTriangularMaskWithTensorBias
-# TODO func should be in backend interface
-from vllm.attention.backends.xformers import _get_attn_bias, _set_attn_bias
 
 
 class T5LayerNorm(nn.Module):
 
     def __init__(self, hidden_size, eps=1e-6):
         """
-        Construct a layernorm module in the T5 style. No bias and no subtraction of mean.
+        Construct a layernorm module in the T5 style. 
+        No bias and no subtraction of mean.
         """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
     def forward(self, hidden_states) -> torch.Tensor:
-        # T5 uses a layer_norm which only scales and doesn't shift, which is also known as Root Mean
-        # Square Layer Normalization https://arxiv.org/abs/1910.07467 thus variance is calculated
-        # w/o mean and there is no bias. Additionally we want to make sure that the accumulation for
-        # half-precision inputs is done in fp32
+        # T5 uses a layer_norm which only scales and doesn't shift, which is
+        # also known as Root Mean Square Layer Normalization
+        # https://arxiv.org/abs/1910.07467 thus variance is calculated w/o mean
+        # and there is no bias. Additionally we want to make sure that the
+        # accumulation for half-precision inputs is done in fp32.
 
         variance = hidden_states.to(torch.float32).pow(2).mean(-1,
                                                                keepdim=True)
@@ -115,6 +119,8 @@ class T5DenseGatedActDense(nn.Module):
                                          config.d_ff,
                                          bias=False,
                                          quant_config=quant_config)
+        # Should not run in fp16 unless mixed-precision is used,
+        # see https://github.com/huggingface/transformers/issues/20287.
         self.wo = RowParallelLinear(config.d_ff,
                                     config.d_model,
                                     bias=False,
@@ -125,18 +131,6 @@ class T5DenseGatedActDense(nn.Module):
         hidden_gelu = self.act(self.wi_0(hidden_states)[0])
         hidden_linear, _ = self.wi_1(hidden_states)
         hidden_states = hidden_gelu * hidden_linear
-
-        # TODO
-        # To make 8bit quantization work for google/flan-t5-xxl, self.wo is kept in float32.
-        # See https://github.com/huggingface/transformers/issues/20287
-        # we also make sure the weights are not in `int8` in case users will force `_keep_in_fp32_modules` to be `None``
-        # if (
-        #     isinstance(self.wo.weight, torch.Tensor)
-        #     and hidden_states.dtype != self.wo.weight.dtype
-        #     and self.wo.weight.dtype != torch.int8
-        # ):
-        #     hidden_states = hidden_states.to(self.wo.weight.dtype)
-
         hidden_states, _ = self.wo(hidden_states)
         return hidden_states
 
@@ -178,8 +172,10 @@ class T5Attention(nn.Module):
         # Cross-attention has no relative pos encoding anyway
         self.is_decoder = attn_type == AttentionType.DECODER
         self.has_relative_attention_bias = has_relative_attention_bias
-        self.relative_attention_num_buckets = config.relative_attention_num_buckets
-        self.relative_attention_max_distance = config.relative_attention_max_distance
+        self.relative_attention_num_buckets = \
+            config.relative_attention_num_buckets
+        self.relative_attention_max_distance = \
+            config.relative_attention_max_distance
         self.d_model = config.d_model
         self.key_value_proj_dim = config.d_kv
 
@@ -211,8 +207,12 @@ class T5Attention(nn.Module):
         # Only the first SelfAttention block in encoder decoder has this
         # embedding layer, the others reuse its output.
         if self.has_relative_attention_bias:
-            self.relative_attention_bias = VocabParallelEmbedding(self.relative_attention_num_buckets,\
-                                                                   self.n_heads, org_num_embeddings=self.relative_attention_num_buckets, quant_config=quant_config)
+            self.relative_attention_bias = \
+                VocabParallelEmbedding(self.relative_attention_num_buckets,
+                                       self.n_heads,
+                                       org_num_embeddings=\
+                                        self.relative_attention_num_buckets,
+                                       quant_config=quant_config)
         self.out_proj = RowParallelLinear(
             self.inner_dim,
             self.d_model,
@@ -229,12 +229,16 @@ class T5Attention(nn.Module):
         Adapted from Mesh Tensorflow:
         https://github.com/tensorflow/mesh/blob/0cb87fe07da627bf0b7e60475d59f95ed6b5be3d/mesh_tensorflow/transformer/transformer_layers.py#L593
 
-        Translate relative position to a bucket number for relative attention. The relative position is defined as
-        memory_position - query_position, i.e. the distance in tokens from the attending position to the attended-to
-        position. If bidirectional=False, then positive relative positions are invalid. We use smaller buckets for
-        small absolute relative_position and larger buckets for larger absolute relative_positions. All relative
-        positions >=max_distance map to the same bucket. All relative positions <=-max_distance map to the same bucket.
-        This should allow for more graceful generalization to longer sequences than the model has been trained on
+        Translate relative position to a bucket number for relative attention. 
+        The relative position is defined as memory_position - query_position, 
+        i.e. the distance in tokens from the attending position to the 
+        attended-to position. If bidirectional=False, then positive relative 
+        positions are invalid. We use smaller buckets for small absolute 
+        relative_position and larger buckets for larger absolute 
+        relative_positions. All relative positions >=max_distance map to the
+        same bucket. All relative positions <=-max_distance map to the same 
+        bucket. This should allow for more graceful generalization to longer
+        sequences than the model has been trained on
 
         Args:
             relative_position: an int32 Tensor
@@ -243,8 +247,9 @@ class T5Attention(nn.Module):
             max_distance: an integer
 
         Returns:
-            a Tensor with the same shape as relative_position, containing int32 values in the range [0, num_buckets)
-        """
+            a Tensor with the same shape as relative_position, containing int32
+            values in the range [0, num_buckets)
+        """# noqa: E501
         relative_buckets = 0
         if bidirectional:
             num_buckets //= 2
@@ -260,7 +265,8 @@ class T5Attention(nn.Module):
         max_exact = num_buckets // 2
         is_small = relative_position < max_exact
 
-        # The other half of the buckets are for logarithmically bigger bins in positions up to max_distance
+        # The other half of the buckets are for logarithmically bigger bins
+        # in positions up to max_distance
         relative_position_if_large = max_exact + (
             torch.log(relative_position.float() / max_exact) /
             math.log(max_distance / max_exact) *
@@ -288,7 +294,7 @@ class T5Attention(nn.Module):
                                        dtype=torch.long,
                                        device=device)[None, :]
         # max_seq_len, nh
-        relative_position = memory_position - context_position  # shape (query_length, key_length)
+        relative_position = memory_position - context_position
         relative_position_bucket = self._relative_position_bucket(
             relative_position,  # shape (query_length, key_length)
             bidirectional=(not self.is_decoder),
@@ -359,7 +365,8 @@ class T5Attention(nn.Module):
                 seq_len = attn_metadata.max_encoder_seq_len
                 padded_seq_len = (seq_len + align_to -
                                   1) // align_to * align_to
-                # TODO (NickLucche) avoid extra copy on repeat, provide multiple slices of same memory
+                # TODO (NickLucche) avoid extra copy on repeat,
+                # provide multiple slices of same memory
                 position_bias = self.compute_bias(seq_len,
                                                   padded_seq_len).repeat(
                                                       num_seqs, 1, 1, 1)
@@ -698,7 +705,7 @@ class T5ForConditionalGeneration(nn.Module):
     ) -> Optional[torch.Tensor]:
         if self.config.tie_word_embeddings:
             # Rescale output before projecting on vocab
-            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586
+            # See https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/transformer/transformer.py#L586 # noqa: E501
             hidden_states = hidden_states * (self.model_dim**-0.5)
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)

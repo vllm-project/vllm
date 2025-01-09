@@ -1,8 +1,6 @@
 from typing import List, Optional, Tuple
-
+from ....conftest import (DecoderPromptType)
 from vllm.sequence import SampleLogprobs
-
-from ....conftest import DecoderPromptType
 
 
 def vllm_to_hf_output(

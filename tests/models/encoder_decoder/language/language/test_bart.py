@@ -1,13 +1,11 @@
-# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM for BART models using greedy sampling.
 
 Run `pytest tests/models/encoder_decoder/language/test_bart.py`.
 """
 import pytest
 
-from tests.utils import multi_gpu_test  # type: ignore[attr-defined]
-
 from ....conftest import DecoderPromptType
+from ....utils import multi_gpu_test
 from .conftest import compare_hf_vllm_logprobs
 
 
@@ -62,4 +60,4 @@ def test_models_distributed(hf_runner, vllm_runner,
         num_logprobs=num_logprobs,
         tensor_parallel_size=2,
         distributed_executor_backend=distributed_executor_backend,
-    )
+        hf_tokens_to_skip=int(decoder_prompt_type == DecoderPromptType.NONE))
