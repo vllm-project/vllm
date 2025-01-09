@@ -21,7 +21,7 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format)
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
-from vllm.inputs.parse import parse_and_batch_prompt
+from vllm.inputs.parse import is_token_prompt, parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding.guided_fields import (
@@ -115,7 +115,7 @@ class LLM:
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
-            :ref:`engine_args`)
+            :ref:`engine-args`)
 
     Note:
         This class is intended to be used for offline inference. For online
@@ -225,16 +225,10 @@ class LLM:
         # Logic to switch between engines is done at runtime instead of import
         # to avoid import order issues
         self.engine_class = self.get_engine_class()
-
-        # TODO(rob): enable mp by default (issue with fork vs spawn)
         self.llm_engine = self.engine_class.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)
 
         self.request_counter = Counter()
-
-    def __del__(self):
-        if self.llm_engine and hasattr(self.llm_engine, "shutdown"):
-            self.llm_engine.shutdown()
 
     @staticmethod
     def get_engine_class() -> Type[LLMEngine]:
@@ -257,6 +251,13 @@ class LLM:
             tokenizer_group.tokenizer = tokenizer
         else:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
+
+    def get_default_sampling_params(self) -> SamplingParams:
+        diff_sampling_param = (
+            self.llm_engine.model_config.get_diff_sampling_param())
+        if diff_sampling_param:
+            return SamplingParams.from_optional(**diff_sampling_param)
+        return SamplingParams()
 
     @overload
     def generate(
@@ -441,7 +442,7 @@ class LLM:
 
         if sampling_params is None:
             # Use default sampling params.
-            sampling_params = SamplingParams()
+            sampling_params = self.get_default_sampling_params()
 
         self._validate_and_add_requests(
             prompts=parsed_prompts,
@@ -456,7 +457,7 @@ class LLM:
 
     def beam_search(
         self,
-        prompts: List[Union[str, List[int]]],
+        prompts: List[Union[TokensPrompt, TextPrompt]],
         params: BeamSearchParams,
     ) -> List[BeamSearchOutput]:
         """
@@ -492,8 +493,10 @@ class LLM:
         instances: List[BeamSearchInstance] = []
 
         for prompt in prompts:
-            prompt_tokens = prompt if isinstance(
-                prompt, list) else tokenizer.encode(prompt)
+            if is_token_prompt(prompt):
+                prompt_tokens = prompt["prompt_token_ids"]
+            else:
+                prompt_tokens = tokenizer.encode(prompt["prompt"])
             instances.append(BeamSearchInstance(prompt_tokens))
 
         for _ in range(max_tokens):

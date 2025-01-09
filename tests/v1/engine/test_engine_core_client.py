@@ -11,8 +11,8 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.executor.abstract import Executor
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -84,13 +84,12 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
         engine_args = EngineArgs(model=MODEL_NAME, compilation_config=3)
         vllm_config = engine_args.create_engine_config(
             UsageContext.UNKNOWN_CONTEXT)
-        executor_class = AsyncLLM._get_executor_cls(vllm_config)
+        executor_class = Executor.get_class(vllm_config)
         client = EngineCoreClient.make_client(
-            vllm_config,
-            executor_class,
-            UsageContext.UNKNOWN_CONTEXT,
             multiprocess_mode=multiprocessing_mode,
             asyncio_mode=False,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
         )
 
         MAX_TOKENS = 20
@@ -143,9 +142,6 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
         client.abort_requests([request.request_id])
 
-        # Shutdown the client.
-        client.shutdown()
-
 
 @pytest.mark.asyncio
 async def test_engine_core_client_asyncio(monkeypatch):
@@ -156,13 +152,12 @@ async def test_engine_core_client_asyncio(monkeypatch):
         engine_args = EngineArgs(model=MODEL_NAME)
         vllm_config = engine_args.create_engine_config(
             usage_context=UsageContext.UNKNOWN_CONTEXT)
-        executor_class = AsyncLLM._get_executor_cls(vllm_config)
+        executor_class = Executor.get_class(vllm_config)
         client = EngineCoreClient.make_client(
-            vllm_config,
-            executor_class,
-            UsageContext.UNKNOWN_CONTEXT,
             multiprocess_mode=True,
             asyncio_mode=True,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
         )
 
         MAX_TOKENS = 20
@@ -202,6 +197,3 @@ async def test_engine_core_client_asyncio(monkeypatch):
             else:
                 assert len(outputs[req_id]) == MAX_TOKENS, (
                     f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
-
-        # Shutdown the client.
-        client.shutdown()
