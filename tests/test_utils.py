@@ -8,9 +8,10 @@ import torch
 from vllm_test_utils import monitor
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.utils import (FlexibleArgumentParser, StoreBoolean, bind_kv_cache,
-                        deprecate_kwargs, get_open_port, memory_profiling,
-                        merge_async_iterators, supports_kw)
+from vllm.utils import (FlexibleArgumentParser, PlaceholderModule,
+                        StoreBoolean, bind_kv_cache, deprecate_kwargs,
+                        get_open_port, memory_profiling, merge_async_iterators,
+                        supports_kw)
 
 from .utils import error_on_warning, fork_new_process_for_each_test
 
@@ -403,3 +404,44 @@ def test_bind_kv_cache_pp():
         bind_kv_cache(ctx, kv_cache)
         assert ctx['layers.0.self_attn'].kv_cache[0] is kv_cache[0][0]
         assert ctx['layers.0.self_attn'].kv_cache[1] is kv_cache[1][0]
+
+
+def test_placeholder_module_error_handling():
+    placeholder = PlaceholderModule("placeholder_1234")
+
+    def build_ctx():
+        return pytest.raises(ModuleNotFoundError,
+                             match="No module named")
+
+    with build_ctx():
+        int(placeholder)
+
+    with build_ctx():
+        placeholder()
+
+    with build_ctx():
+        _ = placeholder.some_attr
+
+    with build_ctx():
+        # Test conflict with internal __name attribute
+        _ = placeholder.name
+
+    # OK to print the placeholder or use it in a f-string
+    _ = repr(placeholder)
+    _ = str(placeholder)
+
+    # No error yet; only error when it is used downstream
+    placeholder_attr = placeholder.placeholder_attr("attr")
+
+    with build_ctx():
+        int(placeholder_attr)
+
+    with build_ctx():
+        placeholder_attr()
+
+    with build_ctx():
+        _ = placeholder_attr.some_attr
+
+    with build_ctx():
+        # Test conflict with internal __module attribute
+        _ = placeholder_attr.module
