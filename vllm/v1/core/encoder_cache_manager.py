@@ -112,8 +112,8 @@ def compute_encoder_cache_budget(
     #   recomputation of the last block.
     # - AND the part of the embeddings of the item is in this last block.
 
-    # This can be improved when we have a global encoder cache that does
-    # not associate items to request id only.
+    # This issue can be fundamentally resolved by supporting num_new_tokens=0 
+    # on the model runner.
     num_items += 1
 
     # Number of items needed cannot be bigger than max number of running
