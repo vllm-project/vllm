@@ -944,6 +944,39 @@ def find_nccl_library() -> str:
     return so_file
 
 
+prev_set_stream = torch.cuda.set_stream
+
+_current_stream = None
+
+
+def _patched_set_stream(stream: torch.cuda.Stream) -> None:
+    global _current_stream
+    _current_stream = stream
+    prev_set_stream(stream)
+
+
+torch.cuda.set_stream = _patched_set_stream
+
+
+def current_stream() -> torch.cuda.Stream:
+    """
+    replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
+    it turns out that `torch.cuda.current_stream()` is quite expensive,
+    as it will construct a new stream object at each call.
+    here we patch `torch.cuda.set_stream` to keep track of the current stream
+    directly, so that we can avoid calling `torch.cuda.current_stream()`.
+
+    the underlying hypothesis is that we do not call `torch._C._cuda_setStream`
+    from C/C++ code.
+    """
+    global _current_stream
+    if _current_stream is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _current_stream = torch.cuda.current_stream()
+    return _current_stream
+
+
 def enable_trace_function_call_for_thread(vllm_config: "VllmConfig") -> None:
     """Set up function tracing for the current thread,
     if enabled via the VLLM_TRACE_FUNCTION environment variable
