@@ -60,7 +60,9 @@ def compute_encoder_cache_budget(
     model_config: "ModelConfig",
     scheduler_config: "SchedulerConfig",
 ) -> int:
-    """Compute the encoder cache budget based on the model and scheduler configurations."""
+    """Compute the encoder cache budget based on the model and scheduler 
+    configurations.
+    """
 
     encoder_cache_budget = 0
     if not model_config.is_multimodal_model:
@@ -89,7 +91,7 @@ def compute_encoder_cache_budget(
     # ADDITIONAL multimodal item, and is required only when:
     # - Two requests in the current batch share the same prefix with such item
     #   as part of the prefix.
-    # - AND the prefix length is divisible by the block size, triggering the 
+    # - AND the prefix length is divisible by the block size, triggering the
     #   recomputation of the last block.
     # - AND the part of the embeddings of the item is in this last block.
 
@@ -104,7 +106,7 @@ def compute_encoder_cache_budget(
     encoder_cache_budget = num_items * max_tokens_per_mm_item
     logger.info(
         "Encoder cache will be initialized with a budget of %s tokens, and "
-        "profiled with %s %s items of the maximum feature size.", encoder_cache_budget, num_items,
-        modality)
+        "profiled with %s %s items of the maximum feature size.",
+        encoder_cache_budget, num_items, modality)
 
     return encoder_cache_budget

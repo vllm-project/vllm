@@ -722,7 +722,7 @@ class GPUModelRunner:
 
         # Profile with multimodal encoder & encoder cache.
         if self.is_multimodal_model:
-            
+
             # Encoder cache budget should be set to the model and scheduler
             # configurations accordingly.
             assert self.encoder_cache_budget > 0
