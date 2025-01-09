@@ -981,6 +981,11 @@ def current_stream() -> torch.cuda.Stream:
     the underlying hypothesis is that we do not call `torch._C._cuda_setStream`
     from C/C++ code.
     """
+    global _current_stream
+    if _current_stream is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _current_stream = torch.cuda.current_stream()
     return _current_stream
 
 
