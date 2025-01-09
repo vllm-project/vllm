@@ -675,8 +675,9 @@ class GPUModelRunner:
             prompt_logprobs_dict[request_id] = self.model.sampler.get_logprobs(
                 logits,
                 num_prompt_logprobs,
-                actual_token_ids=self.input_batch.
-                prompt_token_ids[prompt_indices])
+                token_ids=self.input_batch.prompt_token_ids[
+                    prompt_indices]  #type: ignore
+            )
 
         sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over

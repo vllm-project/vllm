@@ -1,5 +1,5 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -52,7 +52,7 @@ class Sampler(nn.Module):
             logprobs, logprob_token_ids = self.get_logprobs(
                 raw_logits,
                 sampling_metadata.max_num_logprobs,
-                actual_token_ids=sampled)
+                token_ids=sampled)
         else:
             logprobs, logprob_token_ids = None, None
 
@@ -111,14 +111,26 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         num_logprobs: int,
-        actual_token_ids: Optional[torch.Tensor] = None,
+        token_ids: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute logprobs from logits.
-        
-        
-        
-        """
 
+        Also compute logprobs associated with `token_ids` and
+        concatenate to the output.
+
+        Args:
+          logits: (num tokens) x (vocab) tensor
+          num_logprobs: minimum number of logprobs to
+                        retain per token
+          token_ids: prompt tokens (if prompt logprobs)
+                     or sampled tokens (if sampled
+                     logprobs); 1D token ID tensor
+                     with (num tokens) elements
+
+        Returns:
+          Top-k float logprobs tensor, (num tokens) x (num_logprobs + 1)
+          Top-k int indices tensor, (num tokens) x (num_logprobs + 1)
+        """
         # Compute logprobs.
         logprobs = logits.log_softmax(dim=-1, dtype=torch.float32)
         topk_logprobs, topk_indices = torch.topk(logprobs,
@@ -127,13 +139,12 @@ class Sampler(nn.Module):
         # Use int32 to reduce the tensor size.
         topk_indices = topk_indices.to(torch.int32)
 
-        # Concatenate with the sampled token_ids if provided.
-        if actual_token_ids is not None:
-            sampled_logprobs = logprobs[torch.arange(logprobs.size(0)),
-                                        actual_token_ids].unsqueeze(-1)
-            actual_token_ids = actual_token_ids.unsqueeze(-1)
-            topk_indices = torch.cat([actual_token_ids, topk_indices], dim=1)
-            topk_logprobs = torch.cat([sampled_logprobs, topk_logprobs], dim=1)
+        # Concatenate with the token_ids
+        sampled_logprobs = logprobs[torch.arange(logprobs.size(0)),
+                                    token_ids].unsqueeze(-1)
+        token_ids = token_ids.unsqueeze(-1)
+        topk_indices = torch.cat([token_ids, topk_indices], dim=1)
+        topk_logprobs = torch.cat([sampled_logprobs, topk_logprobs], dim=1)
 
         return topk_logprobs.cpu(), topk_indices.cpu()
 
