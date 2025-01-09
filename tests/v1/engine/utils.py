@@ -32,7 +32,7 @@ def _create_random_top_logprob_test_vector(
     Returns:
       1D length-`num_logprobs` torch Tensor of float logprob values
     """
-    return torch.rand(num_logprobs + 1) * (upper - lower) + lower
+    return torch.rand(num_logprobs) * (upper - lower) + lower
 
 
 def _create_random_top_logprob_test_matrix(
@@ -61,8 +61,11 @@ def _create_random_top_logprob_test_matrix(
 
 
 def _create_random_top_token_test_vector(
-        num_logprobs: int, lower: int, upper: int, sampled_token_id: int,
-        adjust_num_logprobs: bool) -> torch.Tensor:
+    num_logprobs: int,
+    lower: int,
+    upper: int,
+    sampled_token_id: int,
+) -> torch.Tensor:
     """Create a random vector of top logprob token indices
 
     Use to create fake sample logprobs for testing. The sampled token
@@ -104,6 +107,7 @@ def _create_random_top_token_test_matrix(
     shape: Tuple[int, int],
     lower: int,
     upper: int,
+    tokens_list: List[int],
 ) -> torch.Tensor:
     """Create a random matrix of top logprob token indices
 
@@ -123,7 +127,9 @@ def _create_random_top_token_test_matrix(
     """
     num_elements = shape[0] * shape[1]
     choice_tensor = torch.randperm(upper - lower)[:num_elements] + lower
-    return choice_tensor.view(shape)
+    return torch.cat((torch.tensor(tokens_list, dtype=torch.int).unsqueeze(-1),
+                      choice_tensor.view(shape)),
+                     dim=1)
 
 
 def generate_dummy_sample_logprobs(
@@ -148,13 +154,11 @@ def generate_dummy_sample_logprobs(
     """
     res = []
     for sampled_token_id in sampled_tokens_list:
-        num_logprobs_adjustment = random.choice([0, 1])
-        res.append((_create_random_top_logprob_test_vector(
-            num_logprobs + num_logprobs_adjustment, -100, 0),
-                    _create_random_top_token_test_vector(
-                        num_logprobs, 0,
-                        len(tokenizer.vocab) - 1, sampled_token_id,
-                        num_logprobs_adjustment > 0)))
+        res.append(
+            (_create_random_top_logprob_test_vector(num_logprobs + 1, -100, 0),
+             _create_random_top_token_test_vector(num_logprobs, 0,
+                                                  len(tokenizer.vocab) - 1,
+                                                  sampled_token_id)))
     return res
 
 
@@ -181,10 +185,10 @@ def generate_dummy_prompt_logprobs(
     """
     num_prompt_tokens = len(prompt_tokens_list)
     return (_create_random_top_logprob_test_matrix(
-        (num_prompt_tokens, num_logprobs), -100, 0),
+        (num_prompt_tokens, num_logprobs + 1), -100, 0),
             _create_random_top_token_test_matrix(
                 (num_prompt_tokens, num_logprobs), 0,
-                len(tokenizer.vocab) - 1))
+                len(tokenizer.vocab) - 1, prompt_tokens_list))
 
 
 def _decode_token(

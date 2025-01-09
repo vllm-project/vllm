@@ -1,8 +1,10 @@
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Union
 
 import pytest
 import torch
-from transformers import AutoTokenizer
+from transformers import (AutoTokenizer, PreTrainedTokenizer,
+                          PreTrainedTokenizerFast)
 
 from tests.v1.engine.utils import (generate_dummy_prompt_logprobs,
                                    generate_dummy_sample_logprobs,
@@ -17,52 +19,83 @@ NUM_SAMPLE_LOGPROBS = 5
 NUM_PROMPT_LOGPROBS = 7
 # Use Mistral instruct tokenizer
 TOKENIZER_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
-tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
 
 FULL_STRINGS = [
     "My name is Robert from Neural Magic and I love working on vLLM so much!",
     "Red Hat is the best open source company by far across Linux, K8s, and AI.",
     "Nick is the name of my brother in addition to my colleague from Red Hat.",
 ]
-
 STOP_STRINGS = ["I love working on", "company by far", "brother in"]
-
-FULL_TOKENS = [tokenizer(text).input_ids for text in FULL_STRINGS]
 PROMPT_LEN = 5
 
-# Tokenize prompts under test & create dummy generated tokens
-PROMPT_TOKENS = [
-    tokenizer(text).input_ids[:PROMPT_LEN] for text in FULL_STRINGS
-]
-GENERATION_TOKENS = [
-    tokenizer(text).input_ids[PROMPT_LEN:] for text in FULL_STRINGS
-]
 
-# Generate dummy prompt logprobs & sample logprobs for initializing
-# the mock engine
-PROMPT_LOGPROBS: List[Tuple[torch.Tensor, torch.Tensor]] = [
-    generate_dummy_prompt_logprobs(prompt_tokens_list=tokens_list,
-                                   num_logprobs=NUM_PROMPT_LOGPROBS,
-                                   tokenizer=tokenizer)
-    for tokens_list in PROMPT_TOKENS
-]
-GENERATION_LOGPROBS = [
-    generate_dummy_sample_logprobs(sampled_tokens_list=tokens_list,
-                                   num_logprobs=NUM_SAMPLE_LOGPROBS,
-                                   tokenizer=tokenizer)
-    for tokens_list in GENERATION_TOKENS
-]
+@dataclass
+class DummyTestVectors:
+    """Dummy test vectors for detokenizer tests"""
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+    full_tokens: List[List[int]]  # Prompt + generated tokens
+    prompt_tokens: List[List[int]]
+    generation_tokens: List[List[int]]
+    # Each request is associated with a tuple of (top logprobs,top tokens)
+    # prompt logprobs tensors
+    prompt_logprobs: List[Tuple[torch.Tensor, torch.Tensor]]
+    # Each request is associated with a sample logprobs; a request's
+    # sample logprobs are a list of (top logprobs,top tokens)
+    # sample logprobs tensors at each sequence position
+    generation_logprobs: List[List[Tuple[torch.Tensor, torch.Tensor]]]
+    prompt_strings: List[str]
+    prompt_strings_len: List[int]
+    generation_strings: List[str]
 
-PROMPT_STRINGS = [
-    tokenizer.decode(prompt_tokens,
-                     skip_special_tokens=True,
-                     tokenizer=tokenizer) for prompt_tokens in PROMPT_TOKENS
-]
-PROMPT_STRINGS_LEN = [len(prompt_string) for prompt_string in PROMPT_STRINGS]
-GENERATION_STRINGS = [
-    text[prompt_len:]
-    for text, prompt_len in zip(FULL_STRINGS, PROMPT_STRINGS_LEN)
-]
+
+@pytest.fixture(scope="module")
+def dummy_test_vectors() -> DummyTestVectors:
+    """Generate dummy test vectors for detokenizer tests.
+    
+    Returns:
+      DummyTestVectors instance
+    """
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
+    # Tokenize prompts under test & create dummy generated tokens
+    prompt_tokens = [
+        tokenizer(text).input_ids[:PROMPT_LEN] for text in FULL_STRINGS
+    ]
+    generation_tokens = [
+        tokenizer(text).input_ids[PROMPT_LEN:] for text in FULL_STRINGS
+    ]
+    # Generate prompt strings
+    prompt_strings = [
+        tokenizer.decode(prompt_tokens,
+                         skip_special_tokens=True,
+                         tokenizer=tokenizer)
+        for prompt_tokens in prompt_tokens
+    ]
+    prompt_strings_len = [
+        len(prompt_string) for prompt_string in prompt_strings
+    ]
+    return DummyTestVectors(
+        tokenizer=tokenizer,
+        full_tokens=[tokenizer(text).input_ids for text in FULL_STRINGS],
+        prompt_tokens=prompt_tokens,
+        generation_tokens=generation_tokens,
+        prompt_strings=prompt_strings,
+        prompt_strings_len=prompt_strings_len,
+        generation_strings=[
+            text[prompt_len:]
+            for text, prompt_len in zip(FULL_STRINGS, prompt_strings_len)
+        ],
+        prompt_logprobs=[
+            generate_dummy_prompt_logprobs(prompt_tokens_list=tokens_list,
+                                           num_logprobs=NUM_PROMPT_LOGPROBS,
+                                           tokenizer=tokenizer)
+            for tokens_list in prompt_tokens
+        ],
+        generation_logprobs=[
+            generate_dummy_sample_logprobs(sampled_tokens_list=tokens_list,
+                                           num_logprobs=NUM_SAMPLE_LOGPROBS,
+                                           tokenizer=tokenizer)
+            for tokens_list in generation_tokens
+        ])
 
 
 class MockEngineCore:
@@ -143,16 +176,22 @@ def test_incremental_detokenization(
     request_output_kind: RequestOutputKind,
     logprobs: Optional[int],
     prompt_logprobs: Optional[int],
+    dummy_test_vectors: DummyTestVectors,
 ) -> None:
+    generation_tokens = dummy_test_vectors.generation_tokens
+    prompt_tokens = dummy_test_vectors.prompt_tokens
+    # Determine whether sample/prompt logprobs are enabled
     do_generated_logprobs = logprobs is not None
     do_prompt_logprobs = prompt_logprobs is not None
     detokenizer = Detokenizer(TOKENIZER_NAME)
+    # Build mock engine core, which emulates sampling & logprobs
     engine_core = MockEngineCore(
-        generated_tokens_list=GENERATION_TOKENS,
-        prompt_tokens_list=PROMPT_TOKENS,
-        generated_logprobs_raw=GENERATION_LOGPROBS
+        generated_tokens_list=generation_tokens,
+        prompt_tokens_list=prompt_tokens,
+        generated_logprobs_raw=dummy_test_vectors.generation_logprobs
         if do_generated_logprobs else None,
-        prompt_logprobs_raw=PROMPT_LOGPROBS if do_prompt_logprobs else None)
+        prompt_logprobs_raw=dummy_test_vectors.prompt_logprobs
+        if do_prompt_logprobs else None)
 
     # Make N requests.
     requests = [
@@ -173,9 +212,8 @@ def test_incremental_detokenization(
                               include_stop_str_in_output=False,
                               logprobs=logprobs,
                               prompt_logprobs=prompt_logprobs))
-        for idx, (
-            prompt,
-            prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
+        for idx, (prompt, prompt_tokens) in enumerate(
+            zip(dummy_test_vectors.prompt_strings, prompt_tokens))
     ]
 
     # Add requests to the detokenizer.
@@ -195,7 +233,8 @@ def test_incremental_detokenization(
         assert len(requests_to_abort) == 0
 
         # Validate logprob detokenization
-        validate_requests_logprobs(requests, request_outputs, tokenizer)
+        validate_requests_logprobs(requests, request_outputs,
+                                   dummy_test_vectors.tokenizer)
 
         # Update tracking.
         for request_output in request_outputs:
@@ -211,7 +250,7 @@ def test_incremental_detokenization(
 
     # Confirmed tracked values matches what we expected.
     for idx, (ref_gen_str, ref_gen_toks) in enumerate(
-            zip(GENERATION_STRINGS, GENERATION_TOKENS)):
+            zip(dummy_test_vectors.generation_strings, generation_tokens)):
         gen_str = gen_strings[f"request-{idx}"]
         gen_toks = gen_tokens[f"request-{idx}"]
 
@@ -231,16 +270,19 @@ def test_stop_string(
     include_stop_str_in_output: bool,
     logprobs: Optional[int],
     prompt_logprobs: Optional[int],
+    dummy_test_vectors: DummyTestVectors,
 ) -> None:
+    prompt_tokens = dummy_test_vectors.prompt_tokens
     do_generated_logprobs = logprobs is not None
     do_prompt_logprobs = prompt_logprobs is not None
     detokenizer = Detokenizer(TOKENIZER_NAME)
     engine_core = MockEngineCore(
-        generated_tokens_list=GENERATION_TOKENS,
-        prompt_tokens_list=PROMPT_TOKENS,
-        generated_logprobs_raw=GENERATION_LOGPROBS
+        generated_tokens_list=dummy_test_vectors.generation_tokens,
+        prompt_tokens_list=prompt_tokens,
+        generated_logprobs_raw=dummy_test_vectors.generation_logprobs
         if do_generated_logprobs else None,
-        prompt_logprobs_raw=PROMPT_LOGPROBS if do_prompt_logprobs else None)
+        prompt_logprobs_raw=dummy_test_vectors.prompt_logprobs
+        if do_prompt_logprobs else None)
 
     # Make N requests.
     requests = [
@@ -262,9 +304,8 @@ def test_stop_string(
                 include_stop_str_in_output=include_stop_str_in_output,
                 logprobs=logprobs,
                 prompt_logprobs=prompt_logprobs,
-            )) for idx, (
-                prompt,
-                prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
+            )) for idx, (prompt, prompt_tokens) in enumerate(
+                zip(dummy_test_vectors.prompt_strings, prompt_tokens))
     ]
 
     # Add requests to the detokenizer.
@@ -288,7 +329,8 @@ def test_stop_string(
         aborted.extend(requests_to_abort)
 
         # Validate logprob detokenization
-        validate_requests_logprobs(requests, request_outputs, tokenizer)
+        validate_requests_logprobs(requests, request_outputs,
+                                   dummy_test_vectors.tokenizer)
 
         # Update tracking.
         for request_output in request_outputs:
@@ -304,8 +346,8 @@ def test_stop_string(
         i += 1
 
     # Confirmed tracked values matches what we expected.
-    for idx, (ref_gen_str,
-              stop_str) in enumerate(zip(GENERATION_STRINGS, STOP_STRINGS)):
+    for idx, (ref_gen_str, stop_str) in enumerate(
+            zip(dummy_test_vectors.generation_strings, STOP_STRINGS)):
 
         # Request should be aborted.
         request_id = f"request-{idx}"
