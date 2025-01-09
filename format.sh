@@ -41,7 +41,7 @@ MYPY_VERSION=$(mypy --version | awk '{print $2}')
 CODESPELL_VERSION=$(codespell --version)
 ISORT_VERSION=$(isort --vn)
 CLANGFORMAT_VERSION=$(clang-format --version | awk '{print $3}')
-SPHINX_LINT_VERSION=$(sphinx-lint --version | awk '{print $2}')
+PYMARKDOWNLNT_VERSION=$(pymarkdownlnt version | awk '{print $1}')
 
 # # params: tool name, tool version, required version
 tool_version_check() {
@@ -58,7 +58,7 @@ tool_version_check "mypy" "$MYPY_VERSION"
 tool_version_check "isort" "$ISORT_VERSION"
 tool_version_check "codespell" "$CODESPELL_VERSION"
 tool_version_check "clang-format" "$CLANGFORMAT_VERSION"
-tool_version_check "sphinx-lint" "$SPHINX_LINT_VERSION"
+tool_version_check "pymarkdownlnt" "$PYMARKDOWNLNT_VERSION"
 
 YAPF_FLAGS=(
     '--recursive'

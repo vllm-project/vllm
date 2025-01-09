@@ -19,17 +19,17 @@ If you are using NVIDIA GPUs, you can install vLLM using [pip](https://pypi.org/
 It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
 
 ```console
-$ uv venv myenv --python 3.12 --seed
-$ source myenv/bin/activate
-$ uv pip install vllm
+uv venv myenv --python 3.12 --seed
+source myenv/bin/activate
+uv pip install vllm
 ```
 
 You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments.
 
 ```console
-$ conda create -n myenv python=3.12 -y
-$ conda activate myenv
-$ pip install vllm
+conda create -n myenv python=3.12 -y
+conda activate myenv
+pip install vllm
 ```
 
 ```{note}
