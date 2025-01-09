@@ -1,5 +1,6 @@
 ************************************************************************************
 Please add the following README into the vllm Rocm branch and vllm installation Docs. 
+https://docs.vllm.ai/en/stable/getting_started/amd-installation.html
 ************************************************************************************
 
 This Docker image, created by the AMD Team, is designed to deliver optimal performance with all existing optimizations included. We highly recommend using this pre-built image instead of building one from scratch. Thank you.
