@@ -27,6 +27,7 @@ class HpuPlatform(Platform):
     dispatch_key: str = "HPU"
     ray_device_key: str = "HPU"
     device_control_env_var: str = "HABANA_VISIBLE_MODULES"
+    supported_quantization: list[str] = ["inc"]
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
