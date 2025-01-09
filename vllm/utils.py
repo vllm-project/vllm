@@ -696,18 +696,6 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
-@lru_cache
-def print_info_once(msg: str) -> None:
-    # Set the stacklevel to 2 to print the caller's line info
-    logger.info(msg, stacklevel=2)
-
-
-@lru_cache
-def print_warning_once(msg: str) -> None:
-    # Set the stacklevel to 2 to print the caller's line info
-    logger.warning(msg, stacklevel=2)
-
-
 @lru_cache(maxsize=None)
 def is_pin_memory_available() -> bool:
     from vllm.platforms import current_platform
