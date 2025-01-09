@@ -31,6 +31,7 @@ jobs:
         run: mkdir -p docs/source/assets/contributing
 
       - name: Generate Dockerfile graph
+        # The instruction follows https://docs.vllm.ai/en/latest/contributing/dockerfile/dockerfile.html.
         run: |
           docker run \
             --rm \
