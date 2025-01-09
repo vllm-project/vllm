@@ -5,7 +5,7 @@ Run `pytest tests/models/encoder_decoder/language/test_bart.py`.
 """
 import pytest
 
-from tests.utils import multi_gpu_test  # type: ignore[attr-defined]
+from tests.utils import multi_gpu_test
 
 from ....conftest import DecoderPromptType
 from .conftest import compare_hf_vllm_logprobs

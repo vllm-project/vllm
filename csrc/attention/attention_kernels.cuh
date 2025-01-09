@@ -155,21 +155,6 @@ __device__ void paged_attention_kernel(
   const int kv_head_idx = head_idx / num_queries_per_kv;
   const float alibi_slope =
       alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
-  // TODO check if indexing still makes sense
-  // seq_len indexes on 'max_seq_lens' dim,
-  // it's like renaming dim you get attn_bias: seq_len x num_kv_heads x seq_len
-  // TODO each seq can have different len (seq_lens) but only one bias!!
-  // NOTE (NickLucche) `max_seq_len` bias values for current sequence and current head
-  const float* attn_bias_vec =
-      attn_bias == nullptr
-          ? nullptr
-          : attn_bias + seq_idx * num_heads * num_seq_blocks * BLOCK_SIZE +
-                head_idx * num_seq_blocks * BLOCK_SIZE;
-          // : attn_bias + seq_idx * num_kv_heads * num_seq_blocks * BLOCK_SIZE +
-  // const float* attn_bias_vec = attn_bias == nullptr
-  //  ? nullptr
-  //  : attn_bias + seq_idx * num_kv_heads * seq_len +
-  //  kv_head_idx * seq_len;
 
   // NOTE (NickLucche) `max_seq_len` (padded) bias values for current sequence
   // and current head.
