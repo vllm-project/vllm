@@ -19,4 +19,3 @@ Optional parameters for vLLM APIs.
 .. autoclass:: vllm.PoolingParams
     :members:
 ```
-

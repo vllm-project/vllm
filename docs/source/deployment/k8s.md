@@ -14,7 +14,7 @@ Before you begin, ensure that you have the following:
 
 ## Deployment Steps
 
-1. **Create a PVC , Secret and Deployment for vLLM**
+1. Create a PVC, Secret and Deployment for vLLM
 
 PVC is used to store the model cache and it is optional, you can use hostPath or other storage options
 
@@ -49,7 +49,7 @@ stringData:
 
 Next to create the deployment file for vLLM to run the model server. The following example deploys the `Mistral-7B-Instruct-v0.3` model.
 
-Here are two examples for using NVIDIA GPU and AMD GPU. 
+Here are two examples for using NVIDIA GPU and AMD GPU.
 
 - NVIDIA GPU
 
@@ -194,9 +194,10 @@ spec:
         - name: shm
           mountPath: /dev/shm
 ```
+
 You can get the full example with steps and sample yaml files from <https://github.com/ROCm/k8s-device-plugin/tree/master/example/vllm-serve>.
 
-2. **Create a Kubernetes Service for vLLM**
+1. Create a Kubernetes Service for vLLM
 
 Next, create a Kubernetes Service file to expose the `mistral-7b` deployment:
 
@@ -219,7 +220,7 @@ spec:
   type: ClusterIP
 ```
 
-3. **Deploy and Test**
+1. Deploy and Test
 
 Apply the deployment and service configurations using `kubectl apply -f <filename>`:
 

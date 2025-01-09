@@ -13,7 +13,6 @@ via the `multi_modal_data` field in {class}`vllm.inputs.PromptType`.
 
 Looking to add your own multi-modal model? Please follow the instructions listed [here](#enabling-multimodal-inputs).
 
-
 ## Module Contents
 
 ```{eval-rst}

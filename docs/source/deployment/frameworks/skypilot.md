@@ -338,7 +338,7 @@ run: |
 sky launch -c gui ./gui.yaml --env ENDPOINT=$(sky serve status --endpoint vllm)
 ```
 
-2. Then, we can access the GUI at the returned gradio link:
+1. Then, we can access the GUI at the returned gradio link:
 
 ```console
 | INFO | stdout | Running on public URL: https://6141e84201ce0bb4ed.gradio.live
