@@ -388,7 +388,7 @@ class ModelConfig:
             if is_s3(tokenizer):
                 s3_tokenizer = S3Model()
                 s3_tokenizer.pull_files(
-                    model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                    model, allow_pattern=["*.json"])
                 self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(
