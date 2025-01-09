@@ -780,7 +780,6 @@ async def completions_with_server_args(
     assert len(max_tokens) == len(prompts)
 
     outputs = None
-    max_wait_seconds = 240 * 3  # 240 is default
     with RemoteOpenAIServer(model_name,
                             server_cli_args,
                             max_wait_seconds=max_wait_seconds) as server:
