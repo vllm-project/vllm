@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.platforms.interface import CpuArchEnum
 
 if current_platform.is_cuda_alike():
     from .fused_moe import fused_experts
@@ -87,10 +88,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         super().process_weights_after_loading(layer)
 
         if current_platform.is_cpu():
-            import intel_extension_for_pytorch as ipex
-            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(layer.w13_weight,
-                                                             layer.w2_weight,
-                                                             use_prepack=True)
+            if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+                import intel_extension_for_pytorch as ipex
+                layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+                    layer.w13_weight,
+                    layer.w2_weight,
+                    use_prepack=True,
+                )
+            else:
+                raise NotImplementedError("CPU MOE only supports x86 arch.")
 
     def apply(
         self,
@@ -164,6 +170,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         custom_routing_function: Optional[Callable] = None,
         **kwargs,
     ):
+        assert custom_routing_function is None
         return layer.ipex_fusion(
             x,
             use_grouped_topk,
