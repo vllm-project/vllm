@@ -1,8 +1,8 @@
 
 ## vLLM and tt-metal Branches
 Git-checkout the following branches in each repo separately:
-- vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev) (last verified commit: [294dd4b](https://github.com/tenstorrent/vllm/tree/294dd4bc06a9229b9d691d63b74b343252acb3b3))
-- tt-metal branch: [main](https://github.com/tenstorrent/tt-metal) (last verified commit: [9f24a71](https://github.com/tenstorrent/tt-metal/tree/9f24a7131625735e68b105193636cb135675dfb2))
+- vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev) (last verified commit: [2f33504](https://github.com/tenstorrent/vllm/tree/2f33504bad49a6202d3685155107a6126a5b5e6e))
+- tt-metal branch: [main](https://github.com/tenstorrent/tt-metal) (last verified commit: [47fb1a2](https://github.com/tenstorrent/tt-metal/tree/47fb1a2fb6e0b62ddfe3fc5fef95c18d4b857c20))
 
 ## Environment Creation
 
@@ -47,7 +47,7 @@ To run Meta-Llama-3.1/3.2, it is required to have access to the model on Hugging
 ## Preparing the tt-metal models
 
 1. Ensure that `$PYTHONPATH` contains the path to tt-metal (should already have been done when installing tt-metal)
-2. For the desired model, follow the setup instructions (if any) for the corresponding tt-metal demo. E.g. For Llama-3.1/3.2, follow the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3) for preparing the weights and environment variables.
+2. For the desired model, follow the setup instructions (if any) for the corresponding tt-metal demo. E.g. For Llama-3.1/3.2, follow the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3) for preparing the weights and environment variables, and install any extra requirements (e.g. `pip install -r models/demos/llama3/requirements.txt`).
 
 ## Running the offline inference example
 
@@ -81,10 +81,10 @@ MESH_DEVICE=N300 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examp
 
 To measure performance for a single batch (with the default prompt length of 128 tokens):
 ```python
-MESH_DEVICE=N300 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --model "meta-llama/Llama-3.2-11B-Vision-Instruct" --measure_perf --multi_modal --max_seqs_in_batch 16 --num_repeat_prompts 4
+MESH_DEVICE=N300 WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python examples/offline_inference_tt.py --model "meta-llama/Llama-3.2-11B-Vision-Instruct" --measure_perf --multi_modal --max_seqs_in_batch 16
 ```
 
-**Note**: To run on T3000, set `MESH_DEVICE=T3K_LINE` and `--max_seqs_in_batch 32 --num_repeat_prompts 16`.
+**Note**: To run on T3000, set `MESH_DEVICE=T3K_LINE` and `--max_seqs_in_batch 32`.
 
 ## Running the server example
 
