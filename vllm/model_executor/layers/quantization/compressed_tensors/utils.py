@@ -105,7 +105,7 @@ def find_matched_target(layer_name: Optional[str], module: Module,
     matched_target = _find_first_match(layer_name, targets)
 
     # Fused layers like gate_up_proj or qkv_proj will not be fused
-    # in the safetensors checkpoint. So, they will not be matched 
+    # in the safetensors checkpoint. So, they will not be matched
     # in the first match process. Here, we convert the name
     # from the fused version to unfused + check to make sure that
     # each shard of the fused layer has the same scheme.
@@ -125,9 +125,10 @@ def find_matched_target(layer_name: Optional[str], module: Module,
                 shard_name = shard_names[i]
                 matched_target_shard = _find_first_match(shard_name, targets)
                 if matched_target_shard is None != matched_target is None:
-                    raise ValueError(f"Found a different quantization schemes for "
-                                     f"{shard_proj_names} in {layer_name}. vLLM "
-                                     "requires all to use the same scheme.")
+                    raise ValueError(
+                        f"Found a different quantization schemes for "
+                        f"{shard_proj_names} in {layer_name}. vLLM "
+                        "requires all to use the same scheme.")
 
     # if layer_name is not matched, then match the class name with targets.
     if matched_target is None:

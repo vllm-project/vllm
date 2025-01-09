@@ -387,8 +387,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 layer_name=layer_name,
                 module=layer,
                 targets=self.sparsity_scheme_map.keys())
-            sparsity_scheme = self.sparsity_scheme_map.get(
-                    matched_target)
+            sparsity_scheme = self.sparsity_scheme_map.get(matched_target)
 
         # For models with sparsity, assumes that the sparse layers are also
         # quantized for cutlass 2:4 support
