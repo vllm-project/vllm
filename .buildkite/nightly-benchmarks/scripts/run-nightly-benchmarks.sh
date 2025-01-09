@@ -435,6 +435,8 @@ main() {
   ensure_installed wget
   ensure_installed curl
   ensure_installed jq
+  # genai-perf dependency
+  ensure_installed libb64-0d
 
   prepare_dataset
 
