@@ -1,8 +1,8 @@
+from abc import abstractmethod
 from functools import cached_property
 from typing import (Final, Iterable, List, Literal, Mapping, Optional,
-                    Protocol, Set, Tuple, TypedDict, Union)
+                    Protocol, Set, Tuple, TypedDict, TypeVar, Union)
 
-import numpy as np
 import torch
 import torch.nn as nn
 from transformers import BatchFeature, LlavaNextConfig, LlavaNextProcessor
@@ -17,13 +17,12 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
 from vllm.multimodal.parse import ImageSize
-from vllm.multimodal.profiling import BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 
 from .clip import CLIPVisionModel
 from .interfaces import SupportsMultiModal, SupportsPP
-from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingMixin,
-                    BaseLlavaProfilingInfo, LlavaLikeConfig,
+from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
+                    LlavaDummyInputsBuilder, LlavaLikeConfig,
                     LlavaMultiModalProjector, init_vision_tower_for_llava)
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
@@ -66,23 +65,23 @@ class LlavaNextLikeConfig(LlavaLikeConfig, Protocol):
     image_grid_pinpoints: Final[list[list[int]]]
 
 
-class LlavaNextProcessingMixin(BaseLlavaProcessingMixin):
+class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
 
-    def _get_hf_config(self) -> LlavaNextLikeConfig:
+    def get_hf_config(self) -> LlavaNextLikeConfig:
         return self.ctx.get_hf_config(LlavaNextConfig)
 
-    def _get_hf_processor(self):
+    def get_hf_processor(self):
         return self.ctx.get_hf_processor(LlavaNextProcessor)
 
-    # Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L106
-    def _get_num_image_tokens(
+    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
+    def get_num_image_tokens(
         self,
         *,
         image_width: int,
         image_height: int,
     ) -> int:
-        hf_config = self._get_hf_config()
-        vision_encoder_info = self._get_vision_encoder_info()
+        hf_config = self.get_hf_config()
+        vision_encoder_info = self.get_vision_encoder_info()
 
         base_feature_size = self._apply_feature_select_strategy(
             hf_config.vision_feature_select_strategy,
@@ -111,7 +110,7 @@ class LlavaNextProcessingMixin(BaseLlavaProcessingMixin):
 
         return unpadded_feature_size + newline_feature_size + base_feature_size
 
-    # Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L79
+    # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L86
     def _get_num_unpadded_features(
         self,
         *,
@@ -121,42 +120,33 @@ class LlavaNextProcessingMixin(BaseLlavaProcessingMixin):
         num_patch_height: int,
         num_patch_width: int,
     ) -> tuple[int, int]:
-        # NOTE: Use float32 to remain consistent with HF output
-        current_height_f = np.float32(npatches * num_patch_height)
-        current_width_f = np.float32(npatches * num_patch_width)
+        current_height = npatches * num_patch_height
+        current_width = npatches * num_patch_width
 
-        original_width_f = np.float32(original_width)
-        original_height_f = np.float32(original_height)
+        aspect_ratio = original_width / original_height
+        current_aspect_ratio = current_width / current_height
 
-        original_aspect_ratio = original_width_f / original_height_f
-        current_aspect_ratio = current_width_f / current_height_f
-
-        if original_aspect_ratio > current_aspect_ratio:
-            scale_factor = current_width_f / original_width_f
-            new_height = int(original_height_f * scale_factor)
-            padding = (current_height_f - new_height) // 2
-            current_height_f -= 2 * padding
+        if aspect_ratio > current_aspect_ratio:
+            new_height = (original_height * current_width) // original_width
+            padding = (current_height - new_height) // 2
+            current_height = current_height - (2 * padding)
         else:
-            scale_factor = current_height_f / original_height_f
-            new_width = int(original_width_f * scale_factor)
-            padding = (current_width_f - new_width) // 2
-            current_width_f -= 2 * padding
+            new_width = (original_width * current_height) // original_height
+            padding = (current_width - new_width) // 2
+            current_width = current_width - (2 * padding)
 
-        unpadded_features = int(current_height_f * current_width_f)
-        newline_features = int(current_height_f)
+        unpadded_features = current_height * current_width
+        newline_features = current_height
 
         return (unpadded_features, newline_features)
 
-
-class LlavaNextProfilingInfo(LlavaNextProcessingMixin, BaseLlavaProfilingInfo):
-
-    def _get_image_size_with_most_features(self) -> ImageSize:
-        hf_config = self._get_hf_config()
+    def get_image_size_with_most_features(self) -> ImageSize:
+        hf_config = self.get_hf_config()
 
         largest_feature_size, largest_feature_pinpoint = 0, None
         for (height, width) in hf_config.image_grid_pinpoints:
-            feat_size = self._get_num_image_tokens(image_width=width,
-                                                   image_height=height)
+            feat_size = self.get_num_image_tokens(image_width=width,
+                                                  image_height=height)
             if feat_size > largest_feature_size:
                 largest_feature_size = feat_size
                 largest_feature_pinpoint = ImageSize(width=width,
@@ -168,11 +158,23 @@ class LlavaNextProfilingInfo(LlavaNextProcessingMixin, BaseLlavaProfilingInfo):
         return largest_feature_pinpoint
 
 
-class LlavaNextMultiModalProcessor(LlavaNextProcessingMixin,
-                                   BaseLlavaMultiModalProcessor):
+_I = TypeVar("_I", bound=LlavaNextProcessingInfo)
 
-    def _get_profiling_info(self) -> BaseProfilingInfo:
-        return LlavaNextProfilingInfo(self.ctx)
+
+class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
+
+    # Copied from BaseMultiModalProcessor
+    @abstractmethod
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        raise NotImplementedError
+
+
+class LlavaNextMultiModalProcessor(
+        BaseLlavaNextMultiModalProcessor[LlavaNextProcessingInfo]):
 
     def _get_mm_fields_config(
         self,
@@ -186,7 +188,9 @@ class LlavaNextMultiModalProcessor(LlavaNextProcessingMixin,
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor)
+@MULTIMODAL_REGISTRY.register_processor(LlavaNextMultiModalProcessor,
+                                        info=LlavaNextProcessingInfo,
+                                        dummy_inputs=LlavaDummyInputsBuilder)
 class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 

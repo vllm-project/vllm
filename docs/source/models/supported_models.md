@@ -430,6 +430,9 @@ You can set `--hf-overrides '{"is_causal": false}'` to change the attention mask
 
 On the other hand, its 1.5B variant (`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
 despite being described otherwise on its model card.
+
+Regardless of the variant, you need to enable `--trust-remote-code` for the correct tokenizer to be
+loaded. See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
@@ -640,7 +643,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `llava-hf/LLaVA-NeXT-Video-7B-hf`, etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `LlavaOnevisionForConditionalGeneration`
   - LLaVA-Onevision
   - T + I<sup>+</sup> + V<sup>+</sup>
@@ -710,7 +713,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `Qwen/Qwen2-Audio-7B-Instruct`
   -
   - ✅︎
-  -
+  - ✅︎
 * - `Qwen2VLForConditionalGeneration`
   - Qwen2-VL
   - T + I<sup>E+</sup> + V<sup>E+</sup>
@@ -724,7 +727,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `fixie-ai/ultravox-v0_3`
   -
   - ✅︎
-  -
+  - ✅︎
 ```
 
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  

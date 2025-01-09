@@ -3,7 +3,7 @@ import copy
 import enum
 import hashlib
 import json
-import os
+import sys
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -381,16 +381,16 @@ class ModelConfig:
         """
         if is_s3(model) or is_s3(tokenizer):
             if is_s3(model):
-                self.s3_model = S3Model()
-                self.s3_model.pull_files(model, allow_pattern=["*config.json"])
+                s3_model = S3Model()
+                s3_model.pull_files(model, allow_pattern=["*config.json"])
                 self.model_weights = self.model
-                self.model = self.s3_model.dir
+                self.model = s3_model.dir
 
             if is_s3(tokenizer):
-                self.s3_tokenizer = S3Model()
-                self.s3_tokenizer.pull_files(
+                s3_tokenizer = S3Model()
+                s3_tokenizer.pull_files(
                     model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
-                self.tokenizer = self.s3_tokenizer.dir
+                self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
@@ -2051,6 +2051,11 @@ class LoRAConfig:
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
                 f"max_loras ({self.max_loras})")
 
+    def verify_with_cache_config(self, cache_config: CacheConfig):
+        # TODO LoRA supports CPU offload.
+        if cache_config.cpu_offload_gb > 0:
+            raise ValueError("CPU offload is not supported with LoRA yet.")
+
     def verify_with_model_config(self, model_config: ModelConfig):
         if self.lora_dtype in (None, "auto"):
             self.lora_dtype = model_config.dtype
@@ -2253,6 +2258,17 @@ def _get_and_verify_dtype(
                     "using float16 by default. Float16 is not currently "
                     "supported for POWERPC.")
                 torch_dtype = torch.bfloat16
+
+            # TODO: change this condition to check if the platform support bf16
+            # instead of checking the OS. For instance M2 shall supports bf16
+            # already. But we need to modify `cpu_extension.cmake` to activate
+            # the feature in the build.
+            if (current_platform.is_cpu() and sys.platform.startswith("darwin")
+                    and current_platform.get_cpu_architecture()
+                    == CpuArchEnum.ARM and config_dtype == torch.bfloat16):
+                logger.info("For macOS with Apple Silicon, currently bfloat16 "
+                            "is not supported. Setting dtype to float16.")
+                torch_dtype = torch.float16
 
             if current_platform.is_hpu() and config_dtype == torch.float16:
                 logger.info(
@@ -2761,9 +2777,8 @@ class CompilationConfig(BaseModel):
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
+    traced_files: Set[str] = PrivateAttr
     compilation_time: float = PrivateAttr
-    # should be InductorHashCache, but Pydantic does not support it
-    inductor_hash_cache: Any = PrivateAttr
 
     # Per-model forward context
     # Map from layer name to the attention cls
@@ -2800,6 +2815,7 @@ class CompilationConfig(BaseModel):
             "compilation_time",
             "bs_to_padded_graph_size",
             "pass_config",
+            "traced_files",
         }
         return self.model_dump_json(exclude=exclude, exclude_unset=True)
 
@@ -2859,6 +2875,7 @@ class CompilationConfig(BaseModel):
 
         self.enabled_custom_ops = Counter()
         self.disabled_custom_ops = Counter()
+        self.traced_files = set()
         self.static_forward_context = {}
         self.compilation_time = 0.0
 
@@ -2880,29 +2897,6 @@ class CompilationConfig(BaseModel):
         # TODO: pass user-specified backend to piecewise compilation
         # merge with the config use_inductor
         assert self.level == CompilationLevel.PIECEWISE
-
-        if not self.cache_dir:
-            # no provided cache dir, generate one based on the known factors
-            # that affects the compilation. if none of the factors change,
-            # the cache dir will be the same so that we can reuse the compiled
-            # graph.
-            hash_key = vllm_config.compute_hash()
-            cache_dir = os.path.join(
-                envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key,
-                f"rank_{vllm_config.parallel_config.rank}")
-            os.makedirs(cache_dir, exist_ok=True)
-            self.cache_dir = cache_dir
-
-            disabled = envs.VLLM_DISABLE_COMPILE_CACHE
-            from vllm.compilation.backends import InductorHashCache
-            self.inductor_hash_cache: InductorHashCache = InductorHashCache(
-                self.cache_dir, disabled=disabled)
-            if disabled:
-                logger.info("vLLM's torch.compile cache is disabled.")
-            else:
-                logger.info(
-                    "Using cache directory: %s for vLLM's torch.compile",
-                    self.cache_dir)
 
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)
@@ -3137,6 +3131,7 @@ class VllmConfig:
             self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config:
+            self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
