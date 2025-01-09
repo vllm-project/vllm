@@ -436,7 +436,7 @@ loaded. See [relevant issue on HF Transformers](https://github.com/huggingface/t
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
-{func}`vllm.model_executor.models.adapters.as_embedding_model`. By default, the embeddings
+{func}`~vllm.model_executor.models.adapters.as_embedding_model`. By default, the embeddings
 of the whole prompt are extracted from the normalized hidden state corresponding to the last token.
 
 #### Reward Modeling (`--task reward`)
@@ -468,7 +468,7 @@ of the whole prompt are extracted from the normalized hidden state corresponding
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
-{func}`vllm.model_executor.models.adapters.as_reward_model`. By default, we return the hidden states of each token directly.
+{func}`~vllm.model_executor.models.adapters.as_reward_model`. By default, we return the hidden states of each token directly.
 
 ```{important}
 For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
@@ -499,7 +499,7 @@ e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "r
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
-{func}`vllm.model_executor.models.adapters.as_classification_model`. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
+{func}`~vllm.model_executor.models.adapters.as_classification_model`. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
 #### Sentence Pair Scoring (`--task score`)
 
@@ -567,6 +567,10 @@ Online inference:
 vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
 ```
 ````
+
+```{note}
+vLLM currently only supports adding LoRA to the language backbone of multimodal models.
+```
 
 ### Generative Models
 
@@ -750,10 +754,6 @@ See [this page](#generative-models) for more information on how to use generativ
 
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
-
-```{note}
-vLLM currently only supports adding LoRA to the language backbone of multimodal models.
-```
 
 ```{note}
 To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
