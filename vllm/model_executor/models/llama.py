@@ -288,13 +288,11 @@ class LlamaDecoderLayer(nn.Module):
 @support_torch_compile
 class LlamaModel(nn.Module):
 
-    def __init__(
-            self,
-            *,
-            vllm_config: VllmConfig,
-            prefix: str = "",
-            embed_type: Type[VocabParallelEmbedding] = VocabParallelEmbedding,
-            layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer):
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -310,7 +308,7 @@ class LlamaModel(nn.Module):
         self.org_vocab_size = config.vocab_size
         if get_pp_group().is_first_rank or (config.tie_word_embeddings
                                             and get_pp_group().is_last_rank):
-            self.embed_tokens = embed_type(
+            self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
