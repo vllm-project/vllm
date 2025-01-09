@@ -21,6 +21,19 @@ AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
                      MistralTokenizer]
 
 
+def decode_tokens(
+    tokenizer: AnyTokenizer,
+    token_ids: list[int],
+    *,
+    skip_special_tokens: bool = False,
+) -> str:
+    """
+    Backend-agnostic equivalent of HF's
+    :code:`tokenizer.decode(token_ids, skip_special_tokens=...)`.
+    """
+    return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
+
+
 def encode_tokens(
     tokenizer: AnyTokenizer,
     text: str,

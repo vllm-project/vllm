@@ -63,7 +63,7 @@ torch::Tensor mm_dispatch_{{type_sig}}(MMArgs args) {
 
 
 static inline std::optional<at::ScalarType> maybe_scalartype(
-    c10::optional<at::Tensor> const& t) {
+    std::optional<at::Tensor> const& t) {
     if (!t) {
       return std::nullopt;
     } else {

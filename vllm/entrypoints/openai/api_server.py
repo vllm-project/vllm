@@ -7,6 +7,7 @@ import os
 import re
 import signal
 import socket
+import sys
 import tempfile
 import uuid
 from argparse import Namespace
@@ -767,11 +768,11 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
-    valide_tool_parses = ToolParserManager.tool_parsers.keys()
+    valid_tool_parses = ToolParserManager.tool_parsers.keys()
     if args.enable_auto_tool_choice \
-        and args.tool_call_parser not in valide_tool_parses:
+        and args.tool_call_parser not in valid_tool_parses:
         raise KeyError(f"invalid tool call parser: {args.tool_call_parser} "
-                       f"(chose from {{ {','.join(valide_tool_parses)} }})")
+                       f"(chose from {{ {','.join(valid_tool_parses)} }})")
 
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.
@@ -805,6 +806,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
+            # Workaround to work on macOS
+            fd=sock.fileno() if sys.platform.startswith("darwin") else None,
             **uvicorn_kwargs,
         )
 

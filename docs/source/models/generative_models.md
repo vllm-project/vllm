@@ -46,7 +46,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference.py>
+A code example can be found here: <gh-file:examples/offline_inference/offline_inference.py>
 
 ### `LLM.beam_search`
 
@@ -103,7 +103,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference_chat.py>
+A code example can be found here: <gh-file:examples/offline_inference/offline_inference_chat.py>
 
 If the model doesn't have a chat template or you want to specify another one,
 you can explicitly pass a chat template:
@@ -120,7 +120,7 @@ outputs = llm.chat(conversation, chat_template=custom_template)
 
 ## Online Inference
 
-Our [OpenAI Compatible Server](../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
+Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints that correspond to the offline APIs:
 
 - [Completions API](#completions-api) is similar to `LLM.generate` but only accepts text.
 - [Chat API](#chat-api)  is similar to `LLM.chat`, accepting both text and [multi-modal inputs](#multimodal-inputs) for models with a chat template.

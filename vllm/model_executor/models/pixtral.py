@@ -31,14 +31,13 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
 from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges,
-                                   resolve_visual_encoder_outputs)
+                                   consecutive_placeholder_ranges)
 from vllm.sequence import IntermediateTensors, SequenceData
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
-from .vision import VisionEncoderInfo
+from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
 try:
     from xformers import ops as xops
@@ -774,20 +773,23 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
     ) -> int:
         return get_pixtral_hf_image_feature_size(
             image_size=self.vision_config.image_size,
-            patch_size=self.get_image_size(),
+            patch_size=self.vision_config.patch_size,
         )
 
     def get_max_image_tokens(self) -> int:
         return get_max_pixtral_hf_image_tokens(self.vision_config)
 
-    def get_num_patches(self) -> int:
+    def get_image_size(self) -> int:
+        return self.vision_config.image_size
+
+    def get_patch_size(self) -> int:
+        return self.vision_config.patch_size
+
+    def get_patch_grid_length(self) -> int:
         return get_pixtral_hf_patch_grid_length(
             image_size=self.vision_config.image_size,
             patch_size=self.vision_config.patch_size,
         )
-
-    def get_image_size(self) -> int:
-        return self.vision_config.image_size
 
 
 class PixtralHFMLP(nn.Module):

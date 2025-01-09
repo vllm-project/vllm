@@ -19,7 +19,9 @@ class TpuPlatform(Platform):
     device_name: str = "tpu"
     device_type: str = "tpu"
     dispatch_key: str = "XLA"
-    supported_quantization: list[str] = ["tpu_int8"]
+    supported_quantization: list[str] = [
+        "tpu_int8", "compressed-tensors", "compressed_tensors"
+    ]
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
