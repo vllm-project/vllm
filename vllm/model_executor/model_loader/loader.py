@@ -181,6 +181,9 @@ class DefaultModelLoader(BaseModelLoader):
         fall_back_to_pt: bool = True
         """Whether .pt weights can be used."""
 
+        allow_patterns_overrides: Optional[list[str]] = None
+        """If defined, weights will load exclusively using these patterns."""
+
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         if load_config.model_loader_extra_config:
@@ -217,6 +220,7 @@ class DefaultModelLoader(BaseModelLoader):
         model_name_or_path: str,
         revision: Optional[str],
         fall_back_to_pt: bool,
+        allow_patterns_overrides: Optional[list[str]],
     ) -> Tuple[str, List[str], bool]:
         """Prepare weights for the model.
 
@@ -247,6 +251,9 @@ class DefaultModelLoader(BaseModelLoader):
 
         if fall_back_to_pt:
             allow_patterns += ["*.pt"]
+
+        if allow_patterns_overrides is not None:
+            allow_patterns = allow_patterns_overrides
 
         if not is_local:
             hf_folder = download_weights_from_hf(
@@ -297,7 +304,8 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
-            source.model_or_path, source.revision, source.fall_back_to_pt)
+            source.model_or_path, source.revision, source.fall_back_to_pt,
+            source.allow_patterns_overrides)
         if self.load_config.load_format == LoadFormat.NPCACHE:
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
@@ -339,6 +347,8 @@ class DefaultModelLoader(BaseModelLoader):
             prefix="",
             fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load",
                                     True),
+            allow_patterns_overrides=getattr(model, "allow_patterns_overrides",
+                                             None),
         )
         yield from self._get_weights_iterator(primary_weights)
 
@@ -352,7 +362,8 @@ class DefaultModelLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model,
                               model_config.revision,
-                              fall_back_to_pt=True)
+                              fall_back_to_pt=True,
+                              allow_patterns_overrides=None)
 
     def load_model(self, vllm_config: VllmConfig) -> nn.Module:
         device_config = vllm_config.device_config
