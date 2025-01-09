@@ -75,7 +75,7 @@ def compute_encoder_cache_budget(
                                            key=lambda item: item[1])
 
     max_num_batched_tokens = scheduler_config.max_num_batched_tokens
-    max_num_seqs = scheduler_config.max_num_seqs
+    max_num_reqs = scheduler_config.max_num_seqs
 
     # In case that the biggest possible multimodal item takes space more
     # than the batch size, then it needs to be cached and chunk prefilled.
@@ -100,8 +100,8 @@ def compute_encoder_cache_budget(
     num_items += 1
 
     # Number of items needed cannot be bigger than max number of running
-    # sequences.
-    num_items = min(num_items, max_num_seqs)
+    # requests.
+    num_items = min(num_items, max_num_reqs)
 
     encoder_cache_budget = num_items * max_tokens_per_mm_item
     logger.info(
