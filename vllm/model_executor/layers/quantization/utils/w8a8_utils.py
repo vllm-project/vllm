@@ -149,19 +149,12 @@ def apply_fp8_linear(
 
         if per_tensor_weights and per_tensor_activations:
             # Fused GEMM_DQ
-            if current_platform.is_hpu():
-                #hpu does not support torch._scaled_mm (SW-197036)
-                output = torch.ops.hpu.fp8_gemm_v2(qinput, False, weight,
-                                                   False, None, input.dtype,
-                                                   x_scale, weight_scale, None,
-                                                   False)
-            else:
-                output = torch._scaled_mm(qinput,
-                                          weight,
-                                          out_dtype=input.dtype,
-                                          scale_a=x_scale,
-                                          scale_b=weight_scale,
-                                          bias=bias)
+            output = torch._scaled_mm(qinput,
+                                      weight,
+                                      out_dtype=input.dtype,
+                                      scale_a=x_scale,
+                                      scale_b=weight_scale,
+                                      bias=bias)
 
             # A fix for discrepancy in scaled_mm which returns tuple
             # for torch < 2.5 and a single value in torch >= 2.5
