@@ -41,7 +41,7 @@ vLLM is a fast and easy-to-use library for LLM inference and serving.
 vLLM is fast with:
 
 - State-of-the-art serving throughput
-- Efficient management of attention key and value memory with **PagedAttention**
+- Efficient management of attention key and value memory with [**PagedAttention**](https://vllm.ai)
 - Continuous batching of incoming requests
 - Fast model execution with CUDA/HIP graph
 - Quantizations: [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), INT4, INT8, and FP8.
