@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from PIL import Image
 from transformers import AutoProcessor, BatchFeature, ProcessorMixin
 
 from vllm.attention import AttentionMetadata
@@ -22,10 +21,11 @@ from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
-from vllm.multimodal.parse import ImageEmbeddingItems, ImageProcessorItems
+from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
+                                   MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataItems, ProcessorInputs,
-                                        PromptReplacement)
+                                        BaseProcessingInfo, PromptReplacement)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import (DeepseekVLV2Config,
@@ -124,38 +124,9 @@ class MlpProjector(nn.Module):
         return self.layers(x)
 
 
-class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
+class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None}
-
-    def _get_num_image_tokens(self, *, image_width: int,
-                              image_height: int) -> int:
-        hf_processor = self._get_hf_processor()
-        image_size = hf_processor.image_size
-        patch_size = hf_processor.patch_size
-        downsample_ratio = hf_processor.downsample_ratio
-
-        best_width, best_height = hf_processor.select_best_resolution(
-            (image_width, image_height))
-
-        num_width_tiles, num_height_tiles = (best_width // image_size,
-                                             best_height // image_size)
-        h = w = math.ceil((image_size // patch_size) / downsample_ratio)
-
-        global_views_tokens = h * (w + 1)
-        local_views_tokens = (num_height_tiles * h) * (num_width_tiles * w + 1)
-        return global_views_tokens + local_views_tokens + 1
-
-    def get_mm_max_tokens_per_item(self) -> Mapping[str, int]:
-        max_image_tokens = self._get_num_image_tokens(
-            image_width=99999,
-            image_height=99999,
-        )
-
-        return {"image": max_image_tokens}
-
-    def _get_hf_processor(self) -> ProcessorMixin:
+    def get_hf_processor(self) -> ProcessorMixin:
         try:
             from deepseek_vl2.models.processing_deepseek_vl_v2 import (
                 DeepseekVLV2Processor, select_best_resolution)
@@ -173,6 +144,75 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
             candidate_resolutions=processor.candidate_resolutions)
         return processor
 
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def get_num_image_tokens(self, *, image_width: int,
+                             image_height: int) -> int:
+        hf_processor = self.get_hf_processor()
+        image_size = hf_processor.image_size
+        patch_size = hf_processor.patch_size
+        downsample_ratio = hf_processor.downsample_ratio
+
+        best_width, best_height = hf_processor.select_best_resolution(
+            (image_width, image_height))
+
+        num_width_tiles, num_height_tiles = (best_width // image_size,
+                                             best_height // image_size)
+        h = w = math.ceil((image_size // patch_size) / downsample_ratio)
+
+        global_views_tokens = h * (w + 1)
+        local_views_tokens = (num_height_tiles * h) * (num_width_tiles * w + 1)
+        return global_views_tokens + local_views_tokens + 1
+
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        hf_config = self.get_hf_config()
+
+        max_image_tokens = max(
+            self.get_num_image_tokens(image_width=width, image_height=height)
+            for (height, width) in hf_config.candidate_resolutions)
+
+        return {"image": max_image_tokens}
+
+
+class DeepseekVL2DummyInputsBuilder(
+        BaseDummyInputsBuilder[DeepseekVL2ProcessingInfo]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+        hf_processor = self.info.get_hf_processor()
+        image_token: str = hf_processor.image_token
+
+        image_size_with_num_tokens = [
+            (self.info.get_num_image_tokens(image_width=width,
+                                            image_height=height), (height,
+                                                                   width))
+            for (height, width) in hf_processor.candidate_resolutions
+        ]
+        _, (target_height, target_width) = sorted(image_size_with_num_tokens,
+                                                  key=lambda x: x[0],
+                                                  reverse=True)[0]
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
+
+        return ProcessorInputs(
+            prompt_text=image_token * num_images,
+            mm_data=mm_data,
+        )
+
+
+class DeepseekVL2MultiModalProcessor(
+        BaseMultiModalProcessor[DeepseekVL2ProcessingInfo]):
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -180,8 +220,8 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
-            outputs = self.ctx.call_hf_processor(
-                self._get_hf_processor(**mm_kwargs),
+            outputs = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**mm_kwargs),
                 dict(prompt=prompt, **mm_data),
                 mm_kwargs,
             )
@@ -194,7 +234,7 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
 
             # Remove batch dimension from processor outputs,
             # because we will try batch to create NestedTensors
-            target_dtype = self.ctx.model_config.dtype
+            target_dtype = self.info.ctx.model_config.dtype
             pixel_values = outputs["images"].to(target_dtype).squeeze(0)
             images_spatial_crop = outputs["images_spatial_crop"].squeeze(0)
             patches_per_image = [
@@ -206,7 +246,7 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
                 pixel_values.split(patches_per_image))
             processed_outputs["images_spatial_crop"] = images_spatial_crop
         else:
-            tokenizer = self._get_tokenizer()
+            tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
                                           add_special_tokens=True,
                                           return_tensors="pt")
@@ -230,7 +270,7 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_processor = self._get_hf_processor()
+        hf_processor = self.info.get_hf_processor()
         image_token_id: int = hf_processor.image_token_id
 
         def get_replacement_deepseek_vl2(item_idx: int):
@@ -242,7 +282,7 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
             else:
                 image_size = images.get_image_size(item_idx)
 
-                num_image_tokens = self._get_num_image_tokens(
+                num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                 )
@@ -256,28 +296,11 @@ class DeepseekVL2MultiModalProcessor(BaseMultiModalProcessor):
             )
         ]
 
-    def _get_dummy_mm_inputs(
-        self,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        num_images = mm_counts.get("image", 0)
-        hf_processor = self._get_hf_processor()
-        image_token: str = hf_processor.image_token
 
-        data = {}
-        resized_height, resized_width = hf_processor.select_best_resolution(
-            (999999, 999999))
-
-        dummy_image = Image.new("RGB", (resized_width, resized_height),
-                                color=0)
-        data["image"] = [dummy_image] * num_images
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data=data,
-        )
-
-
-@MULTIMODAL_REGISTRY.register_processor(DeepseekVL2MultiModalProcessor)
+@MULTIMODAL_REGISTRY.register_processor(
+    DeepseekVL2MultiModalProcessor,
+    info=DeepseekVL2ProcessingInfo,
+    dummy_inputs=DeepseekVL2DummyInputsBuilder)
 class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
@@ -374,7 +397,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
 
-        h = w = 384
+        h = w = self.vision_config.image_size
         expected_dims = (3, h, w)
 
         def _validate_shape(d: torch.Tensor):
