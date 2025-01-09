@@ -7,7 +7,7 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.processing import MultiModalDataDict, MultiModalInputsV2
+from vllm.multimodal.inputs import MultiModalDataDict, MultiModalInputsV2
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.utils import print_info_once, print_warning_once
@@ -190,6 +190,12 @@ class InputPreprocessor:
             # on the task and language of their request. Also needed to avoid
             # appending an EOS token to the prompt which disrupts generation.
             add_special_tokens = False
+
+        if (self.model_config.encoder_config is not None
+                and self.model_config.encoder_config.get(
+                    "do_lower_case", False)):
+            prompt = prompt.lower()
+
         return tokenizer.encode(request_id=request_id,
                                 prompt=prompt,
                                 lora_request=lora_request,
