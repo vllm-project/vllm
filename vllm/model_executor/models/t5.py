@@ -202,7 +202,8 @@ class T5Attention(nn.Module):
                               1.0,
                               cache_config=cache_config,
                               quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+                              prefix=f"{prefix}.attn",
+                              attn_type=self.attn_type)
 
         # Only the first SelfAttention block in encoder decoder has this
         # embedding layer, the others reuse its output.
@@ -418,12 +419,7 @@ class T5Attention(nn.Module):
             # Encoder/Decoder Self-Attention Layer, attn bias already cached.
             assert attn_bias is not None
 
-        attn_output = self.attn(q,
-                                k,
-                                v,
-                                kv_cache,
-                                attn_metadata,
-                                attn_type=self.attn_type)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.out_proj(attn_output)
         return output
 
