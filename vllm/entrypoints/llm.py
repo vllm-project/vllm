@@ -21,7 +21,7 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format)
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
-from vllm.inputs.parse import parse_and_batch_prompt
+from vllm.inputs.parse import is_token_prompt, parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding.guided_fields import (
@@ -457,7 +457,7 @@ class LLM:
 
     def beam_search(
         self,
-        prompts: List[Union[str, List[int]]],
+        prompts: List[Union[TokensPrompt, TextPrompt]],
         params: BeamSearchParams,
     ) -> List[BeamSearchOutput]:
         """
@@ -493,8 +493,10 @@ class LLM:
         instances: List[BeamSearchInstance] = []
 
         for prompt in prompts:
-            prompt_tokens = prompt if isinstance(
-                prompt, list) else tokenizer.encode(prompt)
+            if is_token_prompt(prompt):
+                prompt_tokens = prompt["prompt_token_ids"]
+            else:
+                prompt_tokens = tokenizer.encode(prompt["prompt"])
             instances.append(BeamSearchInstance(prompt_tokens))
 
         for _ in range(max_tokens):
