@@ -322,7 +322,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - ✅︎
   - ✅︎
 * - `Qwen2ForCausalLM`
-  - Qwen2
+  - QwQ, Qwen2
   - `Qwen/QwQ-32B-Preview`, `Qwen/Qwen2-7B-Instruct`, `Qwen/Qwen2-7B`, etc.
   - ✅︎
   - ✅︎
@@ -689,14 +689,14 @@ See [this page](#generative-models) for more information on how to use generativ
 * - `Phi3VForCausalLM`
   - Phi-3-Vision, Phi-3.5-Vision
   - T + I<sup>E+</sup>
-  - `microsoft/Phi-3-vision-128k-instruct`, `microsoft/Phi-3.5-vision-instruct` etc.
+  - `microsoft/Phi-3-vision-128k-instruct`, `microsoft/Phi-3.5-vision-instruct`, etc.
   -
   - ✅︎
   - ✅︎
 * - `PixtralForConditionalGeneration`
   - Pixtral
   - T + I<sup>+</sup>
-  - `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b` etc.
+  - `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b` (see note), etc.
   -
   - ✅︎
   - ✅︎
@@ -715,7 +715,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - ✅︎
   - ✅︎
 * - `Qwen2VLForConditionalGeneration`
-  - Qwen2-VL
+  - QVQ, Qwen2-VL
   - T + I<sup>E+</sup> + V<sup>E+</sup>
   - `Qwen/QVQ-72B-Preview`, `Qwen/Qwen2-VL-7B-Instruct`, `Qwen/Qwen2-VL-72B-Instruct`, etc.
   - ✅︎
@@ -760,6 +760,11 @@ To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have pass `--hf_overrides '{"arc
 ```{note}
 The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
 For more details, please see: <gh-pr:4087#issuecomment-2250397630>
+```
+
+```{note}
+The chat template for Pixtral-HF is incorrect (see [discussion](https://huggingface.co/mistral-community/pixtral-12b/discussions/22)).
+A corrected version is available at <gh-file:examples/template_pixtral_hf.jinja>.
 ```
 
 ### Pooling Models
