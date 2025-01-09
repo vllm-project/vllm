@@ -139,9 +139,8 @@ community/sponsors
 
 api/offline_inference/index
 api/engine/index
-api/inference_params
 api/multimodal/index
-api/model/index
+api/params
 ```
 
 % Design Documents: Details about vLLM internals
