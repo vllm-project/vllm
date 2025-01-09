@@ -100,8 +100,10 @@ def compute_encoder_cache_budget(
     num_items += 1
 
     # Number of items needed cannot be bigger than max number of running
-    # requests.
-    num_items = min(num_items, max_num_reqs)
+    # requests * max number of multimodal items per request.
+    max_mm_items_per_req = max(
+        MULTIMODAL_REGISTRY.get_mm_limits_per_prompt(model_config).values())
+    num_items = min(num_items, max_num_reqs * max_mm_items_per_req)
 
     encoder_cache_budget = num_items * max_tokens_per_mm_item
     logger.info(
