@@ -316,6 +316,6 @@ else
     echo "✨🎉 Format check passed! Congratulations! 🎉✨"
 fi
 
-echo 'vLLM sphinx-lint:'
-tools/sphinx-lint.sh
-echo 'vLLM sphinx-lint: Done'
+echo 'vLLM doc-lint:'
+tools/doc-lint.sh
+echo 'vLLM doc-lint: Done'

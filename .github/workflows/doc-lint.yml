@@ -29,11 +29,4 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-lint.txt
       - name: Linting docs
-        run: tools/sphinx-lint.sh
-  markdown-lint:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-    - uses: DavidAnson/markdownlint-cli2-action@v19
-      with:
-        globs: "docs/**/*.md"
+        run: tools/doc-lint.sh
