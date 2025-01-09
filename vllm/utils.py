@@ -1594,7 +1594,7 @@ def get_vllm_optional_dependencies():
     }
 
 
-class _PlaceholderMixin:
+class _PlaceholderBase:
     """
     Disallows downstream usage of placeholder modules.
 
@@ -1605,12 +1605,12 @@ class _PlaceholderMixin:
         [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
     """
 
-    if TYPE_CHECKING:
-
-        def __getattr__(self, key: str) -> Never:
-            # Implemented by the main class to throw an error for
-            # any attribute access
-            ...
+    def __getattr__(self, key: str) -> Never:
+        """
+        The main class should implement this to throw an error
+        for attribute accesses representing downstream usage.
+        """
+        raise NotImplementedError
 
     # [Basic customization]
 
@@ -1749,7 +1749,7 @@ class _PlaceholderMixin:
         return self.__getattr__("__exit__")
 
 
-class PlaceholderModule(_PlaceholderMixin):
+class PlaceholderModule(_PlaceholderBase):
     """
     A placeholder object to use when a module does not exist.
 
@@ -1783,7 +1783,7 @@ class PlaceholderModule(_PlaceholderMixin):
                              "when the original module can be imported")
 
 
-class _PlaceholderModuleAttr(_PlaceholderMixin):
+class _PlaceholderModuleAttr(_PlaceholderBase):
 
     def __init__(self, module: PlaceholderModule, attr_path: str) -> None:
         super().__init__()
