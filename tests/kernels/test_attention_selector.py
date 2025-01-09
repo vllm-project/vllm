@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -41,7 +41,8 @@ def test_env(name: str, device: str, monkeypatch):
         assert backend.get_name() == "ROCM_FLASH"
     elif device == "openvino":
         with patch("vllm.attention.selector.current_platform",
-                   OpenVinoPlatform()):
+                   OpenVinoPlatform()), patch.dict('sys.modules',
+                                                   {'openvino': Mock()}):
             backend = get_attn_backend(16, torch.float16, torch.float16, 16,
                                        False)
         assert backend.get_name() == "OPENVINO"
