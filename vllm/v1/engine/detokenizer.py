@@ -183,6 +183,7 @@ class IncrementalDetokenizer:
         self,
         token_ids: Optional[torch.Tensor],
         prompt_logprobs: Optional[torch.Tensor],
+        prompt_token_ids_lst: List[int],
     ) -> Optional[PromptLogprobs]:
         """Incorporate prompt logprobs from this step, if they exist.
 
@@ -196,9 +197,11 @@ class IncrementalDetokenizer:
         If prompt logprobs are disabled, both arguments should be `None`.
 
         Args:
-          token_ids: (num tokens) x (topk + 1) token ids tensor
+          token_ids: (num prompt tokens-1) x (topk + 1) token ids tensor
                      `None` if prompt logprobs are disabled in this req
-          prompt_logprobs: (num tokens) x (topk + 1) logprobs tensor
+          prompt_logprobs: (num prompt tokens-1) x (topk + 1) logprobs tensor
+          prompt_token_ids_lst: (num prompt tokens)-length list of prompt
+                                token ids
 
         Return:
           Prompt logprobs, if required for this request
@@ -227,11 +230,17 @@ class IncrementalDetokenizer:
                                                       token_ids)
 
         # Make Logprob for each token.
-        num_tokens, num_logprobs = prompt_logprobs.shape
-        for tok_idx in range(num_tokens):
-
+        num_chunk_tokens, decoded_tokens_stride = prompt_logprobs.shape
+        prompt_idx = len(self.prompt_logprobs)
+        for tok_idx, prompt_token_id in zip(range(num_chunk_tokens),
+                                            prompt_token_ids_lst[prompt_idx:]):
+            # Iterate over prefill chunk
+            assert prompt_token_id
+            assert prompt_token_id == token_ids[tok_idx, 0].item(), (
+                "Sampler concats the prompt token logprob in front of "
+                f"the topk logprobs, but got {prompt_token_id=} and "
+                f"{token_ids[tok_idx, 0].item()=}")
             # Split into prompt token vs top_k.
-            prompt_token_id = token_ids[tok_idx, 0].item()
             prompt_token_logprob = prompt_logprobs[tok_idx, 0].item()
             topk_token_ids = token_ids[tok_idx, 1:]
             topk_logprobs = prompt_logprobs[tok_idx, 1:]
@@ -244,7 +253,7 @@ class IncrementalDetokenizer:
                         topk_logprobs.tolist(),
                         topk_token_ids.tolist(),
                         # Deal with the flattening from above.
-                        decoded_tokens[tok_idx * num_logprobs:],
+                        decoded_tokens[tok_idx * decoded_tokens_stride:],
                         self.num_prompt_logprobs,
                     ))
             else:
@@ -257,7 +266,7 @@ class IncrementalDetokenizer:
                 self.prompt_logprobs.append(
                     self._make_pos_logprob_dict(
                         topk_logprobs.tolist(), topk_token_ids.tolist(),
-                        decoded_tokens[tok_idx * num_logprobs:],
+                        decoded_tokens[tok_idx * decoded_tokens_stride:],
                         self.num_prompt_logprobs,
                         (prompt_token_id, prompt_logprob_obj)))
         return self.prompt_logprobs
@@ -265,32 +274,34 @@ class IncrementalDetokenizer:
     @staticmethod
     def _make_pos_logprob_dict(
         logprobs: List[float],
-        token_ids: List[int],
+        logprob_token_ids: List[int],
         decoded_tokens: List[str],
         num_logprobs: int,
-        sampled_token_id_logprob: Optional[Tuple[int, Logprob]] = None,
+        special_token_id_logprob: Optional[Tuple[int, Logprob]] = None,
     ) -> Dict[int, Logprob]:
         """Make a Logprob dictionary for a position in the sequence.
         
         Returns a dictionary mapping top token ids to Logprob data
         structures. Each Logprob data structure includes log probability,
-        decoded token, and rank (1-indexed). The size of the dict returned
+        decoded token, and rank (index+1). The size of the dict returned
         will be be num_logprobs.
 
-        If the sampled token is not among the top logprobs, then 
-        sampled_token_id_logprob = (sampled_token_id,sample_logprob) must be
-        provided; an additional dictionary entry mapping sampled_token_id -> 
-        sample_logprob will be injected with rank equal to num_logprobs + 1 
-        (sampled_token_id must be lowest-rank if we are having to inject it.)
+        If the special token (sampled token or prompt token associated
+        with the current sequence position) is not among the top logprobs,
+        then special_token_id_logprob = (special_token_id,logprob) must be
+        provided; an additional dictionary entry mapping special_token_id -> 
+        logprob will be injected with rank equal to num_logprobs + 1 
+        (special_token_id must be lowest-rank if we are having to inject it.)
         Note that the size of the dict returned will then be num_logprobs + 1.
 
         Args:
           logprobs: list of log probabilities
-          token_ids: list of top token ids
+          logprob_token_ids: list of top token ids
           decoded_tokens: list of decoded top tokens
           num_logprobs: number of top tokens
-          sampled_token_id_logprob: (optional) tuple of
-                                    (sampled_token_id,sample_logprob)
+          special_token_id_logprob: (optional) tuple of
+                                    (special_token_id,logprob) associated with
+                                    sampled token or prompt token
 
         Returns:
           Dict[top token id, Logprob]; num_logprobs or num_logprobs+1
@@ -300,7 +311,7 @@ class IncrementalDetokenizer:
         # Sampler uses torch.topk() which sorts so the
         # index in lists is equivalent to rank-1.
         logprobs_dict = {
-            token_ids[idx]: Logprob(
+            logprob_token_ids[idx]: Logprob(
                 logprob=logprobs[idx],
                 rank=idx + 1,
                 decoded_token=decoded_tokens[idx],
@@ -308,14 +319,14 @@ class IncrementalDetokenizer:
             for idx in range(num_logprobs)
         }
 
-        # Inject sampled token Logprob if necessary
-        if sampled_token_id_logprob:
-            sampled_token_id = sampled_token_id_logprob[0]
-            sample_logprob_obj = sampled_token_id_logprob[1]
-            assert sampled_token_id is not None
-            assert sample_logprob_obj is not None
-            sample_logprob_obj.rank = num_logprobs + 1
-            logprobs_dict[sampled_token_id] = sample_logprob_obj
+        # Inject special token Logprob if necessary
+        if special_token_id_logprob:
+            special_token_id = special_token_id_logprob[0]
+            special_logprob_obj = special_token_id_logprob[1]
+            assert special_token_id is not None
+            assert special_logprob_obj is not None
+            special_logprob_obj.rank = num_logprobs + 1
+            logprobs_dict[special_token_id] = special_logprob_obj
 
         return logprobs_dict
 
@@ -387,9 +398,8 @@ class IncrementalDetokenizer:
 
         # 4) Make Prompt Logprobs.
         prompt_logprobs = self._update_prompt_logprobs(
-            new_prompt_logprobs_token_ids,
-            new_prompt_logprobs,
-        )
+            new_prompt_logprobs_token_ids, new_prompt_logprobs,
+            self.prompt_token_ids)
 
         # 5) Makes the RequestOutput object with the new text.
         finished = bool(finish_reason)

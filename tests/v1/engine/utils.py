@@ -183,12 +183,20 @@ def generate_dummy_prompt_logprobs(
       where both matrices have dimensions
       num_prompt_tokens x num_logprobs
     """
-    num_prompt_tokens = len(prompt_tokens_list)
+    # For now, assume the whole prompt is processed in one chunk; thus,
+    # the number of non-`None` prompt logprobs is `len(prompt_tokens_list)-1`.
+    # Prior to injecting `None` at the beginning of prompt logprobs (which
+    # happens later in the detokenizer, not here), the prompt logprobs in
+    # the ith position are predicting the probability distribution of the
+    # prompt token in (i+1)st position. Thus, we concat
+    # `prompt_tokens_list[1:]` to the dummy token ids, just as the engine
+    # would.
+    num_prompt_logprobs = len(prompt_tokens_list) - 1
     return (_create_random_top_logprob_test_matrix(
-        (num_prompt_tokens, num_logprobs + 1), -100, 0),
+        (num_prompt_logprobs, num_logprobs + 1), -100, 0),
             _create_random_top_token_test_matrix(
-                (num_prompt_tokens, num_logprobs), 0,
-                len(tokenizer.vocab) - 1, prompt_tokens_list))
+                (num_prompt_logprobs, num_logprobs), 0,
+                len(tokenizer.vocab) - 1, prompt_tokens_list[1:]))
 
 
 def _decode_token(
