@@ -15,6 +15,7 @@ bitblas
 gguf
 gptqmodel
 int4
+inc
 int8
 fp8
 modelopt
