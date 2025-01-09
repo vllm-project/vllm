@@ -141,6 +141,10 @@ def _cached_get_attn_backend(
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
         return TorchSDPABackend
+    elif backend == _Backend.TORCH_SDPA:
+        logger.info("Using Torch SDPA backend.")
+        from vllm.attention.backends.sage_attention import SageAttentionBackend
+        return SageAttentionBackend
     elif backend == _Backend.OPENVINO:
         logger.info("Using OpenVINO Attention backend.")
         from vllm.attention.backends.openvino import OpenVINOAttentionBackend
