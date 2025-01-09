@@ -135,7 +135,7 @@ class CudaPlatformBase(Platform):
             else:
                 if envs.VLLM_USE_V1:
                     parallel_config.worker_cls = \
-                            "vllm.v1.worker.gpu_worker.Worker"
+                            "vllm.v1.worker.gpu_worker.GPUWorker"
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
 
