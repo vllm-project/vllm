@@ -554,12 +554,19 @@ See [this page](#multimodal-inputs) on how to pass multi-modal inputs to the mod
 To enable multiple multi-modal items per text prompt, you have to set `limit_mm_per_prompt` (offline inference)
 or `--limit-mm-per-prompt` (online inference). For example, to enable passing up to 4 images per text prompt:
 
+Offline inference:
 ```python
 llm = LLM(
     model="Qwen/Qwen2-VL-7B-Instruct",
     limit_mm_per_prompt={"image": 4},
 )
 ```
+
+Online inference:
+```bash
+vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
+```
+````
 
 ### Generative Models
 
@@ -743,11 +750,6 @@ See [this page](#generative-models) for more information on how to use generativ
 
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
-
-```bash
-vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
-```
-````
 
 ```{note}
 vLLM currently only supports adding LoRA to the language backbone of multimodal models.
