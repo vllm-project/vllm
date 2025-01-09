@@ -40,11 +40,11 @@ struct CollectiveBuilder<
     TileShape_MNK,
     ClusterShape_MNK,
     StageCountType,
-    KernelTmaWarpSpecializedCooperativeFP8BlockScaledAccum<ScaleGranularityM>,
+    KernelTmaWarpSpecializedCooperativeFP8BlockScaledSubGroupMAccum<ScaleGranularityM>,
     cute::enable_if_t<
       not detail::is_use_rmem_A<ElementA, GmemLayoutATag, ElementB, GmemLayoutBTag>()>
 > {
-  using KernelScheduleType = KernelTmaWarpSpecializedCooperativeFP8BlockScaledAccum<ScaleGranularityM>;
+  using KernelScheduleType = KernelTmaWarpSpecializedCooperativeFP8BlockScaledSubGroupMAccum<ScaleGranularityM>;
 
   static_assert(is_static<TileShape_MNK>::value);
   static_assert(is_static<ClusterShape_MNK>::value);
@@ -91,7 +91,7 @@ struct CollectiveBuilder<
 
   static constexpr int PipelineStages = detail::compute_stage_count_or_override<detail::sm90_smem_capacity_bytes - KernelSmemCarveout,
       ElementAMma, ElementBMma, TileShape_MNK>(StageCountType{});
-  using DispatchPolicy = MainloopSm90TmaGmmaWarpSpecializedBlockScalingFP8<PipelineStages, ClusterShape_MNK, KernelScheduleType, ScaleGranularityM>;
+  using DispatchPolicy = MainloopSm90TmaGmmaWarpSpecializedBlockScalingSubGroupMFP8<PipelineStages, ClusterShape_MNK, KernelScheduleType, ScaleGranularityM>;
 
   using SmemCopyAtomA = void;
   using SmemCopyAtomB = void;

@@ -162,7 +162,7 @@ get_torch_gpu_compiler_flags(VLLM_GPU_FLAGS ${VLLM_GPU_LANG})
 if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_GPU_FLAGS "--threads=${NVCC_THREADS}")
 endif()
-
+list(APPEND VLLM_GPU_FLAGS "-lineinfo")
 
 #
 # Use FetchContent for C++ dependencies that are compiled as part of vLLM's build process.
@@ -245,13 +245,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        GIT_TAG v3.6.0
+        GIT_TAG ef5620dd1d5e7c0af33083fae17b43c34f1d8950
         GIT_PROGRESS TRUE
 
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
         # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
         # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-        GIT_SHALLOW TRUE
+        GIT_SHALLOW FALSE # update when we can go back to using a TAG
     )
   endif()
   FetchContent_MakeAvailable(cutlass)

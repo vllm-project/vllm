@@ -11,7 +11,7 @@ namespace cutlass::gemm {
 //  `ScaleGranularityM` indicates that scaling granularity is
 //  `size<0>(TileShape_MNK{})` along M.
 template <int ScaleGranularityM = 0>
-struct KernelTmaWarpSpecializedCooperativeFP8BlockScaledAccum
+struct KernelTmaWarpSpecializedCooperativeFP8BlockScaledSubGroupMAccum
     : KernelTmaWarpSpecializedCooperative {};
 
 // n-buffer in smem (Hopper TMA), pipelined with Hopper GMMA and TMA, Warp
@@ -23,7 +23,7 @@ template <int Stages_, class ClusterShape_ = Shape<_1, _1, _1>,
                  // while zero-value `ScaleGranularityM` indicates that scaling
                  // granularity is `size<0>(TileShape_MNK{})` along M.
           >
-struct MainloopSm90TmaGmmaWarpSpecializedBlockScalingFP8
+struct MainloopSm90TmaGmmaWarpSpecializedBlockScalingSubGroupMFP8
     : MainloopSm90TmaGmmaWarpSpecialized<Stages_, ClusterShape_,
                                          KernelSchedule> {
   static_assert(

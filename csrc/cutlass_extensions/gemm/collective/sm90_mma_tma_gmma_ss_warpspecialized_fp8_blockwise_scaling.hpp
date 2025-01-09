@@ -81,7 +81,7 @@ template <
   class SmemCopyAtomB_,
   class TransformB_>
 struct CollectiveMma<
-    MainloopSm90TmaGmmaWarpSpecializedBlockScalingFP8<Stages, ClusterShape, KernelSchedule, ScaleGranularityM_>,
+    MainloopSm90TmaGmmaWarpSpecializedBlockScalingSubGroupMFP8<Stages, ClusterShape, KernelSchedule, ScaleGranularityM_>,
     TileShape_,
     ElementA_,
     StrideA_,
@@ -100,7 +100,7 @@ struct CollectiveMma<
   //
   // Type Aliases
   //
-  using DispatchPolicy = MainloopSm90TmaGmmaWarpSpecializedBlockScalingFP8<Stages, ClusterShape, KernelSchedule, ScaleGranularityM_>;
+  using DispatchPolicy = MainloopSm90TmaGmmaWarpSpecializedBlockScalingSubGroupMFP8<Stages, ClusterShape, KernelSchedule, ScaleGranularityM_>;
   using TileShape = TileShape_;
   using ElementA = ElementA_;
   using StrideA = StrideA_;
@@ -120,7 +120,7 @@ struct CollectiveMma<
   using ArchTag = typename DispatchPolicy::ArchTag;
 
   using CtaShape_MNK = decltype(shape_div(TileShape{}, ClusterShape{}));
-  using MainloopPipeline = cutlass::PipelineTmaAsync<DispatchPolicy::Stages>;
+  using MainloopPipeline = cutlass::PipelineTmaAsyncArrivalCount<DispatchPolicy::Stages, 2>;
   using PipelineState = cutlass::PipelineState<DispatchPolicy::Stages>;
   using PipelineParams = typename MainloopPipeline::Params;
 
