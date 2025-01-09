@@ -661,7 +661,7 @@ class GPUModelRunner:
         prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
         if len(self.input_batch.num_prompt_logprobs) > 0:
             # Prompt token ids are required for computing prompt logprobs
-            assert self.input_batch.prompt_token_ids is not None
+            assert input_ids is not None
         for (request_id, num_prompt_logprobs
              ) in self.input_batch.num_prompt_logprobs.items():
 
@@ -670,13 +670,13 @@ class GPUModelRunner:
                 request_id, scheduler_output, req_indices)
             prompt_hidden_states = hidden_states[prompt_indices]
             logits = self.model.compute_logits(prompt_hidden_states, None)
+            chunk_prompt_token_ids = input_ids[prompt_indices]
 
             # Compute prompt logprobs.
             prompt_logprobs_dict[request_id] = self.model.sampler.get_logprobs(
                 logits,
                 num_prompt_logprobs,
-                token_ids=self.input_batch.prompt_token_ids[
-                    prompt_indices]  #type: ignore
+                token_ids=chunk_prompt_token_ids  #type: ignore
             )
 
         sampled_token_ids = sampler_output.sampled_token_ids

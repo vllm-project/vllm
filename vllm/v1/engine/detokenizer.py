@@ -118,13 +118,20 @@ class IncrementalDetokenizer:
         token_ids_lst: List[torch.Tensor],
         sample_logprobs_lst: List[torch.Tensor],
     ) -> Optional[SampleLogprobs]:
-        """
+        """Incorporate sample logprobs from this step, if they exist.
+
         Lists are only of length >1 if EngineCore made
         >1 tokens in prior step (e.g. in spec decoding).
 
-        Tensors are:
-            token_ids: [topk + 1]: topk token ids at pos
-            sample_logprobs:  [topk + 1]: topk logprobs at pos
+        Args:
+          sampled_token_ids: list of int token ids
+          token_ids_list: list of (topk + 1) token ids tensors at each pos;
+                          `None` if sample logprobs are disabled in this req
+          sample_logprobs: list of (topk + 1) logprobs tensors at each pos;
+                          `None` if sample logprobs are disabled in this req
+
+        Return:
+          Sample logprobs, if required for this request
         """
         if self.num_logprobs == 0:
             # Sample logprobs disabled for this request
@@ -177,6 +184,25 @@ class IncrementalDetokenizer:
         token_ids: Optional[torch.Tensor],
         prompt_logprobs: Optional[torch.Tensor],
     ) -> Optional[PromptLogprobs]:
+        """Incorporate prompt logprobs from this step, if they exist.
+
+        If prompt logprobs are enabled for this request and EngineCore
+        prefilled the prompt or a chunk of the prompt in this step,
+        both arguments should be non-empty lists. 
+
+        If prompt logprobs are enabled but prefill is completed, both
+        arguments should be empty lists.
+
+        If prompt logprobs are disabled, both arguments should be `None`.
+
+        Args:
+          token_ids: (num tokens) x (topk + 1) token ids tensor
+                     `None` if prompt logprobs are disabled in this req
+          prompt_logprobs: (num tokens) x (topk + 1) logprobs tensor
+
+        Return:
+          Prompt logprobs, if required for this request
+        """
         if self.num_prompt_logprobs == 0:
             # Prompt logprobs disabled for this request
             return None
@@ -191,27 +217,50 @@ class IncrementalDetokenizer:
         # logprobs, in one or more chunks.
         assert self.prompt_logprobs is not None
 
+        if len(self.prompt_logprobs) == 0:
+            self.prompt_logprobs = [None]
+
         # Detokenize non-incrementally.
         # NOTE(rob): the output is flattened:
         # [num_tok, num_lps] -> [num_tok * num_lps]
         decoded_tokens = detokenize_non_incrementally(self.tokenizer,
                                                       token_ids)
+
         # Make Logprob for each token.
         num_tokens, num_logprobs = prompt_logprobs.shape
-        chunk_prompt_logprobs = [
-            self._make_pos_logprob_dict(
-                prompt_logprobs[tok_idx].tolist(),
-                token_ids[tok_idx].tolist(),
-                # Deal with the flattening from above.
-                decoded_tokens[tok_idx * num_logprobs:],
-                num_logprobs,
-            ) for tok_idx in range(num_tokens)
-        ]
-        # Buffer prefill chunk
-        self.prompt_logprobs = (
-            ([None]  # First logprob is None
-             if len(self.prompt_logprobs) == 0 else self.prompt_logprobs) +
-            chunk_prompt_logprobs)
+        for tok_idx in range(num_tokens):
+
+            # Split into prompt token vs top_k.
+            prompt_token_id = token_ids[tok_idx, 0].item()
+            prompt_token_logprob = prompt_logprobs[tok_idx, 0].item()
+            topk_token_ids = token_ids[tok_idx, 1:]
+            topk_logprobs = prompt_logprobs[tok_idx, 1:]
+
+            # Make the dict of top-token Logprob objects associated with the
+            # current prompt offset
+            if prompt_token_id in topk_token_ids:
+                self.prompt_logprobs.append(
+                    self._make_pos_logprob_dict(
+                        topk_logprobs.tolist(),
+                        topk_token_ids.tolist(),
+                        # Deal with the flattening from above.
+                        decoded_tokens[tok_idx * num_logprobs:],
+                        self.num_prompt_logprobs,
+                    ))
+            else:
+                # If the prompt token is not one of the top tokens
+                # at this prompt offset, inject the prompt token
+                # & its Logprob instance into the dict
+                prompt_logprob_obj = Logprob(
+                    logprob=prompt_token_logprob,
+                    decoded_token=self.tokenizer.decode(prompt_token_id))
+                self.prompt_logprobs.append(
+                    self._make_pos_logprob_dict(
+                        topk_logprobs.tolist(),
+                        topk_token_ids.tolist(),
+                        decoded_tokens[tok_idx * num_logprobs:],
+                        self.num_prompt_logprobs,
+                        (prompt_token_id, prompt_logprob_obj)))
         return self.prompt_logprobs
 
     @staticmethod
