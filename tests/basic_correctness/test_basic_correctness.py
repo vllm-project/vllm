@@ -44,7 +44,6 @@ def test_vllm_gc_ed():
     assert weak_llm() is None
 
 
-@pytest.mark.skip_v1
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS", "FLASHINFER"])
 @pytest.mark.parametrize("dtype", ["half"])
