@@ -22,7 +22,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
-                                   MultiModalDataItems)
+                                   ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
@@ -126,6 +126,9 @@ class MlpProjector(nn.Module):
 
 class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
 
+    def get_hf_config(self):
+        return self.ctx.get_hf_config(DeepseekVLV2Config)
+
     def get_hf_processor(self) -> ProcessorMixin:
         try:
             from deepseek_vl2.models.processing_deepseek_vl_v2 import (
@@ -165,12 +168,19 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
         local_views_tokens = (num_height_tiles * h) * (num_width_tiles * w + 1)
         return global_views_tokens + local_views_tokens + 1
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_image_size_with_most_features(self) -> ImageSize:
         hf_config = self.get_hf_config()
+        candidate_resolutions = hf_config.candidate_resolutions
+        height, width = max(candidate_resolutions,
+                            key=lambda x: self.get_num_image_tokens(
+                                image_width=x[1], image_height=x[0]))
+        return ImageSize(width=width, height=height)
 
-        max_image_tokens = max(
-            self.get_num_image_tokens(image_width=width, image_height=height)
-            for (height, width) in hf_config.candidate_resolutions)
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        max_image_size = self.get_image_size_with_most_features()
+        max_image_tokens = self.get_num_image_tokens(
+            image_height=max_image_size.height,
+            image_width=max_image_size.width)
 
         return {"image": max_image_tokens}
 
@@ -187,20 +197,12 @@ class DeepseekVL2DummyInputsBuilder(
         hf_processor = self.info.get_hf_processor()
         image_token: str = hf_processor.image_token
 
-        image_size_with_num_tokens = [
-            (self.info.get_num_image_tokens(image_width=width,
-                                            image_height=height), (height,
-                                                                   width))
-            for (height, width) in hf_processor.candidate_resolutions
-        ]
-        _, (target_height, target_width) = sorted(image_size_with_num_tokens,
-                                                  key=lambda x: x[0],
-                                                  reverse=True)[0]
+        max_image_size = self.info.get_image_size_with_most_features()
 
         mm_data = {
             "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
+            self._get_dummy_images(width=max_image_size.width,
+                                   height=max_image_size.height,
                                    num_images=num_images)
         }
 
