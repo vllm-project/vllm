@@ -52,8 +52,10 @@ If the model's implementation in vLLM defines its own pooler, the default pooler
 When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
 we attempt to override the default pooler based on its Sentence Transformers configuration file (`modules.json`).
 
+```{tip}
 You can customize the model's pooling method via the `--override-pooler-config` option,
 which takes priority over both the model's and Sentence Transformers's defaults.
+```
 
 ## Offline Inference
 
