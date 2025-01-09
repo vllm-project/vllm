@@ -142,6 +142,7 @@ class GeluAndMul(CustomOp):
 
 @CustomOp.register("gelu_new")
 class NewGELU(CustomOp):
+
     def __init__(self):
         super().__init__()
         if current_platform.is_cuda_alike():
@@ -167,6 +168,7 @@ class NewGELU(CustomOp):
 
 @CustomOp.register("gelu_fast")
 class FastGELU(CustomOp):
+
     def __init__(self):
         super().__init__()
         if current_platform.is_cuda_alike():
