@@ -72,7 +72,7 @@ class InputBatch:
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
         self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
-        self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
+        self.num_computed_tokens_cpu = np.zeros(max_num_reqs, dtype=np.int32)
 
         # Block table.
         self.block_table = BlockTable(

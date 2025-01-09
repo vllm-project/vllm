@@ -5,10 +5,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
 import numpy as np
 import torch
 import torch.distributed
-import torch.nn as nn
 
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
@@ -19,18 +16,17 @@ from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, cdiv, is_pin_memory_available)
+from vllm.utils import DeviceMemoryProfiler, cdiv
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.model_runner_base import ExecutionMode, ModelRunnerBase
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -38,53 +34,30 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class GPUModelRunner:
+class GPUModelRunner(ModelRunnerBase):
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config
-        self.lora_config = vllm_config.lora_config
-        self.load_config = vllm_config.load_config
-        self.parallel_config = vllm_config.parallel_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
-        self.observability_config = vllm_config.observability_config
+        super().__init__(vllm_config, device)
 
-        model_config = self.model_config
-        cache_config = self.cache_config
-        scheduler_config = self.scheduler_config
-        parallel_config = self.parallel_config
-        self.device = device
-        self.pin_memory = is_pin_memory_available()
-        self.dtype = self.model_config.dtype
-        if cache_config.cache_dtype == "auto":
-            self.kv_cache_dtype = self.dtype
-        else:
-            self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
-                cache_config.cache_dtype]
+        # Persistent batch.
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.model_config.get_vocab_size(),
+        )
 
-        self.is_multimodal_model = model_config.is_multimodal_model
-        self.sliding_window = model_config.get_sliding_window()
-        self.block_size = cache_config.block_size
-        self.max_model_len = model_config.max_model_len
-        self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
-        self.max_num_tokens = scheduler_config.max_num_batched_tokens
-        self.max_num_reqs = scheduler_config.max_num_seqs
+        # Request states.
+        self.requests: Dict[str, CachedRequestState] = {}
 
-        # Model-related.
-        self.num_attn_layers = model_config.get_num_layers_by_block_type(
-            parallel_config, LayerBlockType.attention)
-        self.num_query_heads = model_config.get_num_attention_heads(
-            parallel_config)
-        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        self.head_size = model_config.get_head_size()
-        self.hidden_size = model_config.get_hidden_size()
+        # KV caches for forward pass
+        self.kv_caches: List[torch.Tensor] = []
 
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
@@ -96,29 +69,14 @@ class GPUModelRunner:
         self.mm_input_mapper_profiling.use_cache = False
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
+            model_config=self.model_config,
+            scheduler_config=self.scheduler_config,
         )
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
 
-        # Lazy initialization
-        # self.model: nn.Module  # Set after load_model
-        self.kv_caches: List[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
-
-        # Request states.
-        self.requests: Dict[str, CachedRequestState] = {}
-        # Persistent batch.
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
-            device=self.device,
-            pin_memory=self.pin_memory,
-            vocab_size=model_config.get_vocab_size(),
-        )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
@@ -611,6 +569,8 @@ class GPUModelRunner:
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
+        assert self.model is not None
+
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return
@@ -698,14 +658,13 @@ class GPUModelRunner:
                 encoder_outputs.append(encoder_output[start_idx:end_idx])
         return encoder_outputs
 
-    def get_model(self) -> nn.Module:
-        return self.model
-
     @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
+        assert self.model is not None
+
         self._update_states(scheduler_output)
 
         if self.is_multimodal_model:
@@ -833,14 +792,15 @@ class GPUModelRunner:
                     self.model_memory_usage / float(2**30))
 
     @torch.inference_mode()
-    def _dummy_run(
+    def dummy_run(
         self,
+        kv_caches,
         num_tokens: int,
-        kv_caches: Optional[List[torch.Tensor]] = None,
+        seq_len: Optional[int] = None,
+        exec_mode: Optional[ExecutionMode] = None,
     ) -> torch.Tensor:
-        model = self.model
-        if kv_caches is None:
-            kv_caches = self.kv_caches
+        assert self.model is not None
+
         if self.is_multimodal_model:
             input_ids = None
             inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -851,7 +811,7 @@ class GPUModelRunner:
             positions = self.mrope_positions[:, :num_tokens] \
                 if self.model_config.uses_mrope \
                 else self.positions[:num_tokens]
-            hidden_states = model(
+            hidden_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 kv_caches=kv_caches,
@@ -861,6 +821,7 @@ class GPUModelRunner:
         return hidden_states
 
     def profile_run(self) -> None:
+        assert self.model is not None
         # use an empty tensor instead of `None`` to force Dynamo to pass
         # it by reference, rather by specializing on the value `None`.
         # the `dtype` argument does not matter, and we use `float32` as
@@ -966,7 +927,7 @@ class GPUModelRunner:
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.max_num_tokens, dummy_kv_caches)
+        hidden_states = self.dummy_run(dummy_kv_caches, self.max_num_tokens)
         logits = self.model.compute_logits(hidden_states, None)
         logits = logits[:self.max_num_tokens]
         # TODO(woosuk): Consider the memory usage of the sampler.
@@ -992,8 +953,8 @@ class GPUModelRunner:
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(num_tokens)
-                self._dummy_run(num_tokens)
+                    self.dummy_run(None, num_tokens)
+                self.dummy_run(None, num_tokens)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -1036,38 +997,3 @@ class GPUModelRunner:
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
-
-    def get_kv_cache_spec(self) -> KVCacheSpec:
-        """
-        Generates the KVCacheSpec by parsing the kv cache format from each 
-        Attention module in the static forward context.
-        Returns:
-            KVCacheSpec: A dictionary mapping layer names to their KV cache 
-            format. Layers that do not need KV cache are not included.
-        """
-
-        forward_ctx = self.vllm_config.compilation_config.static_forward_context
-        block_size = self.vllm_config.cache_config.block_size
-        kv_cache_spec: KVCacheSpec = {}
-        for layer_name, attn_module in forward_ctx.items():
-            # TODO: Support other attention modules, e.g., sliding window,
-            # cross-attention, MLA.
-            assert isinstance(attn_module, Attention)
-            if attn_module.attn_type == AttentionType.DECODER:
-                kv_cache_spec[layer_name] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=attn_module.num_kv_heads,
-                    head_size=attn_module.head_size,
-                    dtype=attn_module.dtype,
-                )
-            elif attn_module.attn_type in (AttentionType.ENCODER,
-                                           AttentionType.ENCODER_ONLY):
-                # encoder-only attention does not need KV cache.
-                continue
-            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
-                raise NotImplementedError
-            else:
-                raise ValueError(
-                    f"Unknown attention type: {attn_module.attn_type}")
-
-        return kv_cache_spec

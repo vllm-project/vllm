@@ -66,14 +66,21 @@ def run_test(more_args):
                 ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(),
-                    reason="V1 currently only supported on CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda()
+                    and not current_platform.is_tpu(),
+                    reason="V1 currently only supported on CUDA and TPU")
 def test_lm_eval_accuracy_v1_engine(monkeypatch):
     """Run with the V1 Engine."""
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
-        run_test([])
+        more_args = []
+
+        # Limit compilation time for V1
+        if current_platform.is_tpu():
+            more_args = ["--max-num-seqs", "64"]
+
+        run_test(more_args)
 
 
 @pytest.mark.parametrize("more_args", MORE_ARGS_LIST)
