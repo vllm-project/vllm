@@ -10,11 +10,11 @@ import torch
 
 # Enable custom op register
 import vllm.lora.ops.triton_ops  # noqa: F401
-from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
-from vllm.platforms import current_platform
 from vllm.lora.ops.torch_ops import (bgmv_expand, bgmv_expand_slice,
                                      bgmv_shrink, sgmv_expand,
                                      sgmv_expand_slice, sgmv_shrink)
+from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
+from vllm.platforms import current_platform
 
 from .utils import (assert_close, generate_data,
                     generate_data_for_expand_nslices,
