@@ -13,6 +13,7 @@ einops # required for MPT, qwen-vl and Mamba
 httpx
 librosa # required for audio tests
 peft
+pqdm
 ray[adag]==2.40.0
 sentence-transformers # required for embedding tests
 soundfile # required for audio tests
@@ -22,7 +23,7 @@ transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 mistral_common[opencv] >= 1.5.0 # required for pixtral test
 datamodel_code_generator # required for minicpm3 test
-lm-eval[api] @ git+https://github.com/robertgshaw2-neuralmagic/lm-evaluation-harness.git@streaming-api # required for model evaluation test with streaming
+lm-eval[api]==0.4.4 # required for model evaluation test
 
 # quantization
 bitsandbytes>=0.45.0
