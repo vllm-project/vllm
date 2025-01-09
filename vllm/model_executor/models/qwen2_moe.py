@@ -34,6 +34,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -50,12 +51,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.utils import print_warning_once
 
 from .interfaces import SupportsPP
 from .utils import (extract_layer_index, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
+
+logger = init_logger(__name__)
 
 
 class Qwen2MoeMLP(nn.Module):
@@ -524,7 +526,7 @@ class Qwen2MoeForCausalLM(nn.Module, SupportsPP):
                         remapped_kv_scale_name = name.replace(
                             ".kv_scale", ".attn.kv_scale")
                         if remapped_kv_scale_name not in params_dict:
-                            print_warning_once(
+                            logger.warning_once(
                                 "Found kv scale in the checkpoint "
                                 f"(e.g. {name}), but not found the expected "
                                 f"name in the model "

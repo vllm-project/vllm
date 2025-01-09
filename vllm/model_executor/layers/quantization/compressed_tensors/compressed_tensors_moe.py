@@ -8,6 +8,7 @@ from compressed_tensors.quantization import QuantizationStrategy
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -16,7 +17,8 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import print_warning_once
+
+logger = init_logger(__name__)
 
 
 class GPTQMarlinState(Enum):
@@ -142,10 +144,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     "activation scales are None.")
             if (not all_close_1d(layer.w13_input_scale)
                     or not all_close_1d(layer.w2_input_scale)):
-                print_warning_once(
+                logger.warning_once(
                     "Found input_scales that are not equal for "
                     "fp8 MoE layer. Using the maximum across experts "
-                    "for each layer. ")
+                    "for each layer.")
             layer.w13_input_scale = torch.nn.Parameter(
                 layer.w13_input_scale.max(), requires_grad=False)
             layer.w2_input_scale = torch.nn.Parameter(

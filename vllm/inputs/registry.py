@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
-                        print_warning_once, resolve_mm_processor_kwargs)
+                        resolve_mm_processor_kwargs)
 
 from .data import ProcessorInputs, SingletonInputs
 from .parse import is_encoder_decoder_inputs
@@ -352,7 +352,7 @@ class InputRegistry:
         num_tokens = dummy_data.seq_data.prompt_token_ids
         if len(num_tokens) < seq_len:
             if is_encoder_data:
-                print_warning_once(
+                logger.warning_once(
                     f"Expected at least {seq_len} dummy encoder tokens for "
                     f"profiling, but found {len(num_tokens)} tokens instead.")
             else:

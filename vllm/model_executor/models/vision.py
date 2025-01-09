@@ -7,8 +7,10 @@ from transformers import PretrainedConfig
 import vllm.envs as envs
 from vllm.attention.selector import (backend_name_to_enum,
                                      get_global_forced_attn_backend)
+from vllm.logger import init_logger
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import print_warning_once
+
+logger = init_logger(__name__)
 
 _C = TypeVar("_C", bound=PretrainedConfig)
 
@@ -87,7 +89,7 @@ def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
             if is_flash_attn_2_available():
                 selected_backend = _Backend.FLASH_ATTN
             else:
-                print_warning_once(
+                logger.warning_once(
                     "Current `vllm-flash-attn` has a bug inside vision module, "
                     "so we use xformers backend instead. You can run "
                     "`pip install flash-attn` to use flash-attention backend.")

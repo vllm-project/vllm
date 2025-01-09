@@ -4,11 +4,12 @@ import json
 import logging
 import os
 import sys
-from functools import partial
+from functools import lru_cache, partial
 from logging import Logger
 from logging.config import dictConfig
 from os import path
-from typing import Dict, Optional
+from types import MethodType
+from typing import Any, Optional, cast
 
 import vllm.envs as envs
 
@@ -49,8 +50,44 @@ DEFAULT_LOGGING_CONFIG = {
 }
 
 
+@lru_cache
+def _print_info_once(logger: Logger, msg: str) -> None:
+    # Set the stacklevel to 2 to print the original caller's line info
+    logger.info(msg, stacklevel=2)
+
+
+@lru_cache
+def _print_warning_once(logger: Logger, msg: str) -> None:
+    # Set the stacklevel to 2 to print the original caller's line info
+    logger.warning(msg, stacklevel=2)
+
+
+class _VllmLogger(Logger):
+    """
+    Note:
+        This class is just to provide type information.
+        We actually patch the methods directly on the :class:`logging.Logger`
+        instance to avoid conflicting with other libraries such as
+        `intel_extension_for_pytorch.utils._logger`.
+    """
+
+    def info_once(self, msg: str) -> None:
+        """
+        As :meth:`info`, but subsequent calls with the same message
+        are silently dropped.
+        """
+        _print_info_once(self, msg)
+
+    def warning_once(self, msg: str) -> None:
+        """
+        As :meth:`warning`, but subsequent calls with the same message
+        are silently dropped.
+        """
+        _print_warning_once(self, msg)
+
+
 def _configure_vllm_root_logger() -> None:
-    logging_config: Dict = {}
+    logging_config = dict[str, Any]()
 
     if not VLLM_CONFIGURE_LOGGING and VLLM_LOGGING_CONFIG_PATH:
         raise RuntimeError(
@@ -84,12 +121,22 @@ def _configure_vllm_root_logger() -> None:
         dictConfig(logging_config)
 
 
-def init_logger(name: str) -> Logger:
+def init_logger(name: str) -> _VllmLogger:
     """The main purpose of this function is to ensure that loggers are
     retrieved in such a way that we can be sure the root vllm logger has
     already been configured."""
 
-    return logging.getLogger(name)
+    logger = logging.getLogger(name)
+
+    methods_to_patch = {
+        "info_once": _print_info_once,
+        "warning_once": _print_warning_once,
+    }
+
+    for method_name, method in methods_to_patch.items():
+        setattr(logger, method_name, MethodType(method, logger))
+
+    return cast(_VllmLogger, logger)
 
 
 # The root logger is initialized when the module is imported.

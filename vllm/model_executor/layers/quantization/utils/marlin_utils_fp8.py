@@ -3,10 +3,12 @@ from typing import Optional
 import torch
 
 import vllm._custom_ops as ops
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import print_warning_once
 
 from .marlin_utils import marlin_make_workspace, marlin_permute_scales
+
+logger = init_logger(__name__)
 
 
 def is_fp8_marlin_supported():
@@ -47,7 +49,7 @@ def apply_fp8_marlin_linear(
 
 def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
                                  strategy: str = "tensor") -> None:
-    print_warning_once(
+    logger.warning_once(
         "Your GPU does not have native support for FP8 computation but "
         "FP8 quantization is being used. Weight-only FP8 compression will "
         "be used leveraging the Marlin kernel. This may degrade "
