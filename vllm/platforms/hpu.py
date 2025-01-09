@@ -21,8 +21,11 @@ class HpuPlatform(Platform):
     dispatch_key: str = "HPU"
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
-        return _Backend.HPU_ATTN
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool) -> str:
+        logger.info("Using HPUAttention backend.")
+        return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
