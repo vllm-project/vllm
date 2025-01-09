@@ -154,8 +154,7 @@ class CudaPlatformBase(Platform):
             logger.info("Using XFormers backend.")
             return "vllm.attention.backends.xformers.XFormersBackend"
         elif selected_backend == _Backend.FLASH_ATTN:
-            logger.info("Using FlashAttention backend.")
-            return "vllm.attention.backends.flash_attn.FlashAttentionBackend"
+            pass
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}")

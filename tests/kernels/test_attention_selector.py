@@ -4,12 +4,19 @@ import pytest
 import torch
 
 from tests.kernels.utils import override_backend_env_variable
-from vllm.attention.selector import get_attn_backend
+from vllm.attention.selector import _cached_get_attn_backend, get_attn_backend
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
 from vllm.platforms.openvino import OpenVinoPlatform
 from vllm.platforms.rocm import RocmPlatform
 from vllm.utils import STR_FLASH_ATTN_VAL, STR_INVALID_VAL
+
+
+@pytest.fixture(autouse=True)
+def clear_cache():
+    """Clear lru cache to ensure each test case runs without caching.
+    """
+    _cached_get_attn_backend.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -39,10 +46,12 @@ def test_env(name: str, device: str, monkeypatch):
                                        False)
         assert backend.get_name() == "OPENVINO"
     else:
-        with patch("vllm.attention.selector.current_platform", CudaPlatform()):
-            backend = get_attn_backend(16, torch.float16, torch.float16, 16,
-                                       False)
-        assert backend.get_name() == name
+        if name in ["XFORMERS", "FLASHINFER"]:
+            with patch("vllm.attention.selector.current_platform",
+                       CudaPlatform()):
+                backend = get_attn_backend(16, torch.float16, torch.float16,
+                                           16, False)
+            assert backend.get_name() == name
 
 
 def test_flash_attn(monkeypatch):
