@@ -1,6 +1,4 @@
-
 // clang-format off
-// adapted from: https://github.com/soundOfDestiny/cutlass/blob/a4208aa6958864923505cade9c63eb2a6daf16e5/include/cutlass/gemm/collective/sm90_mma_tma_gmma_ss_warpspecialized_fp8_blockwise_scaling.hpp
 
 /***************************************************************************************************
  * Copyright (c) 2023 - 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -36,7 +34,6 @@
 #pragma once
 
 #include "cutlass/cutlass.h"
-#include "cutlass/arch/barrier.h"
 #include "cutlass/gemm/dispatch_policy.hpp"
 #include "cutlass/trace.h"
 #include "cutlass/numeric_types.h"
@@ -120,12 +117,12 @@ struct CollectiveMma<
   using ArchTag = typename DispatchPolicy::ArchTag;
 
   using CtaShape_MNK = decltype(shape_div(TileShape{}, ClusterShape{}));
-  using MainloopPipeline = cutlass::PipelineTmaAsyncArrivalCount<DispatchPolicy::Stages, 2>;
+  using MainloopPipeline = cutlass::PipelineTmaAsync<DispatchPolicy::Stages>;
   using PipelineState = cutlass::PipelineState<DispatchPolicy::Stages>;
   using PipelineParams = typename MainloopPipeline::Params;
 
   // Two threads per CTA are producers (1 for operand tile and 1 for scales)
-  static constexpr int NumProducerThreadEvents = 1; 
+  static constexpr int NumProducerThreadEvents = 2; 
 
   static constexpr int ScaleGranularityM = ScaleGranularityM_ == 0 ? size<0>(TileShape{}) : ScaleGranularityM_;
   static constexpr int ScaleMsPerTile = size<0>(TileShape{}) / ScaleGranularityM;
@@ -446,16 +443,16 @@ struct CollectiveMma<
         //
         int write_stage = smem_pipe_write.index();
         using BarrierType = typename MainloopPipeline::ProducerBarrierType;
-        BarrierType* load_barrier = pipeline.producer_get_barrier(smem_pipe_write);
+        BarrierType* tma_barrier = pipeline.producer_get_barrier(smem_pipe_write);
+
+        // Copy operands A and B from global memory to shared memory
+        copy(mainloop_params.tma_load_a.with(*tma_barrier, mcast_mask_a), tAgA(_,_,_,*k_tile_iter), tAsA(_,_,_,write_stage));
+        copy(mainloop_params.tma_load_b.with(*tma_barrier, mcast_mask_b), tBgB(_,_,_,*k_tile_iter), tBsB(_,_,_,write_stage));
 
         // Copy scale tensors from global memory to shared memory
         copy(scale_copy_a, tAgA_ScaleA(_,_,*k_tile_iter), tAsA_ScaleA(_,_,write_stage));
         copy(scale_copy_b, tBgB_ScaleB(_,*k_tile_iter), tBsB_ScaleB(_,write_stage));
-        cutlass::arch::cpasync_barrier_arrive(load_barrier);
-
-        // Copy operands A and B from global memory to shared memory
-        copy(mainloop_params.tma_load_a.with(*load_barrier, mcast_mask_a), tAgA(_,_,_,*k_tile_iter), tAsA(_,_,_,write_stage));
-        copy(mainloop_params.tma_load_b.with(*load_barrier, mcast_mask_b), tBgB(_,_,_,*k_tile_iter), tBsB(_,_,_,write_stage));
+        pipeline.producer_commit(smem_pipe_write, cutlass::arch::cpasync_barrier_arrive_noinc);
 
         ++k_tile_iter;
 
