@@ -33,20 +33,24 @@ _PromptSeq = Union[str, list[int]]
 
 @dataclass
 class PromptReplacement:
+    """
+    Defines how to replace portions of an input prompt with placeholder tokens.
+    """
+
     modality: str
     """The modality for which the replacement is made."""
 
     target: _PromptSeq
-    """The text or token sequence to find and replace."""
+    """The token sequence (or text) to find and replace."""
 
     replacement: Union[Callable[[int], _PromptSeq],
                        _PromptSeq] = field(repr=False)
     """
-    Given the index of the processed item within :attr:`modality`, output the
-    replacement text or token sequence.
+    Given the index of the processed item within :attr:`modality`,
+    output the replacement token sequence (or text).
 
-    For convenience, you can pass in the replacement instead of a function
-    if it does not depend on the input.
+    For convenience, you can directly pass in the replacement token sequence
+    (or text) instead of a function if it does not depend on the input.
     """
 
     def bind(self, tokenizer: AnyTokenizer) -> "BoundPromptReplacement":
@@ -132,6 +136,11 @@ class _BoundPromptSequence:
 
 @dataclass
 class BoundPromptReplacement:
+    """
+    A :class:`PromptReplacement` bound to a tokenizer to automatically
+    convert :attr:`target` and the result of :meth:`get_replacement` between
+    token sequence and text representations.
+    """
     tokenizer: AnyTokenizer = field(repr=False)
     modality: str
 
@@ -144,6 +153,7 @@ class BoundPromptReplacement:
 
     @property
     def target(self) -> _BoundPromptSequence:
+        """The token sequence (or text) to find and replace."""
         target = self._target
 
         return _BoundPromptSequence(
@@ -153,6 +163,10 @@ class BoundPromptReplacement:
         )
 
     def get_replacement(self, item_idx: int) -> _BoundPromptSequence:
+        """
+        Given the index of the processed item within :attr:`modality`,
+        output the replacement token sequence (or text).
+        """
         replacement = self._replacement
         if callable(replacement):
             cache_key = item_idx
@@ -528,7 +542,7 @@ class ProcessingCache:
 
 
 class BaseProcessingInfo:
-    """Base class containing information to perform processing."""
+    """Base class to provide the information necessary for data processing."""
 
     def __init__(self, ctx: InputProcessingContext) -> None:
         super().__init__()

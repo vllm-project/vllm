@@ -2,10 +2,6 @@
 
 # Multi-Modality
 
-```{eval-rst}
-.. currentmodule:: vllm.multimodal
-```
-
 vLLM provides experimental support for multi-modal models through the {mod}`vllm.multimodal` package.
 
 Multi-modal inputs can be passed alongside text and token prompts to [supported models](#supported-mm-models)
@@ -16,57 +12,17 @@ Looking to add your own multi-modal model? Please follow the instructions listed
 ## Module Contents
 
 ```{eval-rst}
-.. automodule:: vllm.multimodal
-```
-
-### Registry
-
-```{eval-rst}
 .. autodata:: vllm.multimodal.MULTIMODAL_REGISTRY
 ```
 
-```{eval-rst}
-.. autoclass:: vllm.multimodal.MultiModalRegistry
-    :members:
-    :show-inheritance:
-```
+## Submodules
 
-### Base Classes
+```{toctree}
+:maxdepth: 1
 
-```{eval-rst}
-.. automodule:: vllm.multimodal.base
-    :members:
-    :show-inheritance:
-```
-
-### Input Classes
-
-```{eval-rst}
-.. automodule:: vllm.multimodal.inputs
-    :members:
-    :show-inheritance:
-```
-
-### Audio Classes
-
-```{eval-rst}
-.. automodule:: vllm.multimodal.audio
-    :members:
-    :show-inheritance:
-```
-
-### Image Classes
-
-```{eval-rst}
-.. automodule:: vllm.multimodal.image
-    :members:
-    :show-inheritance:
-```
-
-### Video Classes
-
-```{eval-rst}
-.. automodule:: vllm.multimodal.video
-    :members:
-    :show-inheritance:
+inputs
+parse
+processing
+profiling
+registry
 ```

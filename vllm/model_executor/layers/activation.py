@@ -64,8 +64,8 @@ class SiluAndMul(CustomOp):
         if current_platform.is_cuda_alike() or current_platform.is_cpu():
             self.op = torch.ops._C.silu_and_mul
         elif current_platform.is_xpu():
-            import intel_extension_for_pytorch as ipex
-            self.op = ipex.llm.functional.silu_and_mul
+            from vllm._ipex_ops import ipex_ops
+            self.op = ipex_ops.silu_and_mul
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
