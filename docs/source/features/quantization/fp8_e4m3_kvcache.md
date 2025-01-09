@@ -3,7 +3,7 @@
 # FP8 E4M3 KV Cache
 
 Quantizing the KV cache to FP8 reduces its memory footprint. This increases the number of tokens that can be stored in the cache,
-improving throughput. OCP (Open Compute Project <www.opencompute.org>) specifies two common 8-bit floating point data formats: E5M2
+improving throughput. OCP (Open Compute Project www.opencompute.org) specifies two common 8-bit floating point data formats: E5M2
 (5 exponent bits and 2 mantissa bits) and E4M3FN (4 exponent bits and 3 mantissa bits), often shortened as E4M3. One benefit of
 the E4M3 format over E5M2 is that floating point numbers are represented in higher precision. However, the small dynamic range of
 FP8 E4M3 (±240.0 can be represented) typically necessitates the use of a higher-precision (typically FP32) scaling factor alongside
@@ -17,7 +17,7 @@ unquantized model through a quantizer tool (e.g. AMD quantizer or NVIDIA AMMO).
 To install AMMO (AlgorithMic Model Optimization):
 
 ```console
-pip install --no-cache-dir --extra-index-url https://pypi.nvidia.com nvidia-ammo
+$ pip install --no-cache-dir --extra-index-url https://pypi.nvidia.com nvidia-ammo
 ```
 
 Studies have shown that FP8 E4M3 quantization typically only minimally degrades inference accuracy. The most recent silicon

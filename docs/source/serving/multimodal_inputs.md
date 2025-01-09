@@ -303,7 +303,6 @@ vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --task generate --max-model
 ```
 
 Then, you can use the OpenAI client as follows:
-
 ```python
 from openai import OpenAI
 

@@ -1,4 +1,4 @@
-# Welcome to vLLM
+# Welcome to vLLM!
 
 ```{figure} ./assets/logos/vllm-logo-text-light.png
 :align: center
@@ -139,8 +139,9 @@ community/sponsors
 
 api/offline_inference/index
 api/engine/index
+api/inference_params
 api/multimodal/index
-api/params
+api/model/index
 ```
 
 % Design Documents: Details about vLLM internals
@@ -171,7 +172,7 @@ contributing/model/index
 contributing/vulnerability_management
 ```
 
-## Indices and tables
+# Indices and tables
 
 - {ref}`genindex`
 - {ref}`modindex`
