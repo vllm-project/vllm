@@ -65,7 +65,8 @@ def main():
         '--baseline_ckpt_file_lm_head',
         type=str,
         help="Path to the baseline model checkpoint file containing the "
-        "weights for lm_head")
+        "weights for lm_head. The checkpoint needs to be in safetensor "
+        "format.")
 
     args = parser.parse_args()
 
