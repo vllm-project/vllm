@@ -163,6 +163,10 @@ def _cached_get_attn_backend(
         logger.info("Using Pallas backend.")
         from vllm.attention.backends.pallas import PallasAttentionBackend
         return PallasAttentionBackend
+    elif backend == _Backend.PALLAS_VLLM_V1:
+        logger.info("Using Pallas backend.")
+        from vllm.v1.attention.backends.pallas import PallasAttentionBackendV1
+        return PallasAttentionBackendV1
     elif backend == _Backend.NO_ATTENTION:
         from vllm.attention.backends.placeholder_attn import (
             PlaceholderAttentionBackend)
