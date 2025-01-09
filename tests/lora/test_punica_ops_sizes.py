@@ -124,7 +124,7 @@ _dict_lock = Lock()
 @pytest.mark.parametrize("scaling", SCALES)
 @pytest.mark.parametrize("nslices", [1, 2, 3])
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("op_type",  ["shrink", "expand"])
+@pytest.mark.parametrize("op_type", ["shrink", "expand"])
 @pytest.mark.parametrize("seed", SEED)
 @pytest.mark.parametrize("device", DEVICES)
 def test_punica_sgmv(
@@ -198,7 +198,7 @@ def test_punica_sgmv(
                 token_nums,
                 scaling,
             )
-            
+
     else:
         with _dict_lock:
             _LORA_B_PTR_DICT.clear()
@@ -215,7 +215,7 @@ def test_punica_sgmv(
                 offset_start=0,
                 add_inputs=True,
             )
-        if nslices==1:
+        if nslices == 1:
             # Verify the torch's sgmv_expand op
             sgmv_expand(
                 inputs_tensor[0],
@@ -387,14 +387,14 @@ def test_punica_bgmv_expand_nslices(
             add_inputs=True,
         )
         bgmv_expand_slice(
-                inputs_tensor,
-                lora_weights,
-                ref_outputs,
-                indices,
-                slice_offset,
-                slice_size=hidden_size,
-                add_inputs=True,
-            )
+            inputs_tensor,
+            lora_weights,
+            ref_outputs,
+            indices,
+            slice_offset,
+            slice_size=hidden_size,
+            add_inputs=True,
+        )
 
         slice_offset += hidden_size
     assert_close(our_outputs, ref_outputs)
