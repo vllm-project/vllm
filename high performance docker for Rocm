@@ -1,3 +1,7 @@
+************************************************************************************
+Please add the following README into the vllm Rocm branch and vllm installation Docs. 
+************************************************************************************
+
 This Docker image, created by the AMD Team, is designed to deliver optimal performance with all existing optimizations included. We highly recommend using this pre-built image instead of building one from scratch. Thank you.
 This Docker image packages vLLM with PyTorch for an AMD Instinct™ MI300X accelerator. It includes:
 
