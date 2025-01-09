@@ -112,7 +112,7 @@ def compute_encoder_cache_budget(
     #   recomputation of the last block.
     # - AND the part of the embeddings of the item is in this last block.
 
-    # This issue can be fundamentally resolved by supporting num_new_tokens=0 
+    # This issue can be fundamentally resolved by supporting num_new_tokens=0
     # on the model runner.
     num_items += 1
 
