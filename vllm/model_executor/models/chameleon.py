@@ -122,8 +122,8 @@ class ChameleonMultiModalProcessor(
     ) -> list[int]:
         # HF processor adds sep token for chat mode
         tokenizer = self.info.get_tokenizer()
-        sep_token_id: int = tokenizer.vocab[
-            tokenizer.sep_token]  # type: ignore
+        sep_token_id: int = \
+            tokenizer.vocab[tokenizer.sep_token]  # type: ignore
 
         return prompt_tokens + [sep_token_id]
 
