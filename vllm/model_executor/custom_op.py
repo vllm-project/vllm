@@ -5,7 +5,6 @@ import torch.nn as nn
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -91,7 +90,7 @@ class CustomOp(nn.Module):
         compilation_config = get_current_vllm_config().compilation_config
         custom_ops = compilation_config.custom_ops
         if not hasattr(cls, "name"):
-            print_warning_once(
+            logger.warning_once(
                 f"Custom op {cls.__name__} was not registered, "
                 f"which means it won't appear in the op registry. "
                 f"It will be enabled/disabled based on the global settings.")
