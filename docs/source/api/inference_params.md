@@ -1,6 +1,6 @@
-# Optional Parameters
+# Inference Parameters
 
-Optional parameters for vLLM APIs.
+Inference parameters for vLLM APIs.
 
 (sampling-params)=
 
@@ -19,4 +19,3 @@ Optional parameters for vLLM APIs.
 .. autoclass:: vllm.PoolingParams
     :members:
 ```
-
