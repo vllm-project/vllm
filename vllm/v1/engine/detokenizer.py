@@ -244,6 +244,7 @@ class IncrementalDetokenizer:
             prompt_token_logprob = prompt_logprobs[tok_idx, 0].item()
             topk_token_ids = token_ids[tok_idx, 1:]
             topk_logprobs = prompt_logprobs[tok_idx, 1:]
+            decoded_tokens_offset = tok_idx * decoded_tokens_stride + 1
 
             # Make the dict of top-token Logprob objects associated with the
             # current prompt offset
@@ -253,7 +254,7 @@ class IncrementalDetokenizer:
                         topk_logprobs.tolist(),
                         topk_token_ids.tolist(),
                         # Deal with the flattening from above.
-                        decoded_tokens[tok_idx * decoded_tokens_stride:],
+                        decoded_tokens[decoded_tokens_offset:],
                         self.num_prompt_logprobs,
                     ))
             else:
@@ -266,7 +267,7 @@ class IncrementalDetokenizer:
                 self.prompt_logprobs.append(
                     self._make_pos_logprob_dict(
                         topk_logprobs.tolist(), topk_token_ids.tolist(),
-                        decoded_tokens[tok_idx * decoded_tokens_stride:],
+                        decoded_tokens[decoded_tokens_offset:],
                         self.num_prompt_logprobs,
                         (prompt_token_id, prompt_logprob_obj)))
         return self.prompt_logprobs
