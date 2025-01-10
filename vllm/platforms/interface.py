@@ -82,8 +82,11 @@ class Platform:
     # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134 # noqa
     # use "CPU" as a fallback for platforms not registered in PyTorch
     dispatch_key: str = "CPU"
-    # The backend for torch.compile. The default value is "inductor" to keep
+    # The torch.compile backend for compiling simple and
+    # standalone functions. The default value is "inductor" to keep
     # the same behavior as PyTorch.
+    # NOTE: for the forward part of the model, vLLM has another separate
+    # compilation strategy.
     simple_compile_backend: str = "inductor"
     supported_quantization: list[str] = []
 
