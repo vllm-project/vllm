@@ -29,7 +29,7 @@ from vllm.utils import PlaceholderModule
 
 try:
     from runai_model_streamer import SafetensorsStreamer
-except ImportError:
+except (ImportError, OSError):
     runai_model_streamer = PlaceholderModule(
         "runai_model_streamer")  # type: ignore[assignment]
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
