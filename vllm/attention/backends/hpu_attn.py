@@ -163,13 +163,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
-
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
+        
+        self.attn_type = attn_type
+        if (self.attn_type != AttentionType.DECODER
+                and self.attn_type != AttentionType.ENCODER_DECODER):
+            raise NotImplementedError("Encoder self-attention "
+                                      "is not implemented for "
                                       "HPUAttentionImpl")
-
     def forward(
         self,
         query: torch.Tensor,
@@ -192,12 +192,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        if (attn_type != AttentionType.DECODER
-                and attn_type != AttentionType.ENCODER_DECODER):
-            raise NotImplementedError("Encoder self-attention "
-                                      "is not implemented for "
-                                      "HPUAttentionImpl")
-        if attn_type == AttentionType.ENCODER_DECODER:
+        if self.attn_type == AttentionType.ENCODER_DECODER:
             return self.forward_encoder_decoder(
                 query=query,
                 key=key,
