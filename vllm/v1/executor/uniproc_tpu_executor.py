@@ -6,7 +6,7 @@ from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.worker.tpu_worker_new import TPUWorker
+from vllm.v1.worker.tpu_worker import TPUWorker
 
 logger = init_logger(__name__)
 
@@ -38,7 +38,7 @@ class UniprocTPUExecutor(Executor):
         if distributed_init_method is None:
             distributed_init_method = get_distributed_init_method(
                 get_ip(), get_open_port())
-            
+
         return TPUWorker(
             vllm_config=self.vllm_config,
             local_rank=local_rank,
