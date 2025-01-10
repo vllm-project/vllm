@@ -142,12 +142,18 @@ def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
             torch.tensor([], dtype=torch.float32, device=CUDA_DEVICE))
 
     # Construct KV cache
-    kv_cache = make_kv_cache(test_pt.num_blocks,
-                             test_pt.num_heads,
-                             test_pt.head_size,
-                             test_pt.block_size,
-                             device=CUDA_DEVICE,
-                             backend=test_pt.backend_name)
+    if test_pt.attn_type in (AttentionType.DECODER,
+                             AttentionType.ENCODER_DECODER):
+        kv_cache = make_kv_cache(test_pt.num_blocks,
+                                 test_pt.num_heads,
+                                 test_pt.head_size,
+                                 test_pt.block_size,
+                                 device=CUDA_DEVICE,
+                                 backend=test_pt.backend_name)
+    else:
+        kv_cache = torch.tensor([])
+
+    attn.kv_cache = [kv_cache]
     return TestResources(scale, attn, kv_cache)
 
 

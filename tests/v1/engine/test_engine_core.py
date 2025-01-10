@@ -4,6 +4,7 @@ import uuid
 import pytest
 from transformers import AutoTokenizer
 
+from tests.utils import fork_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
@@ -36,6 +37,7 @@ def make_request() -> EngineCoreRequest:
     )
 
 
+@fork_new_process_for_each_test
 def test_engine_core(monkeypatch):
 
     with monkeypatch.context() as m:
@@ -138,6 +140,7 @@ def test_engine_core(monkeypatch):
         assert len(engine_core.scheduler.running) == 0
 
 
+@fork_new_process_for_each_test
 def test_engine_core_advanced_sampling(monkeypatch):
     """
     A basic end-to-end test to verify that the engine functions correctly 

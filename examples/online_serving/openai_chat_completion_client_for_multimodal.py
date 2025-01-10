@@ -1,5 +1,5 @@
 """An example showing how to use vLLM to serve multimodal models 
-and run online inference with OpenAI client.
+and run online serving with OpenAI client.
 
 Launch the vLLM server with the following command:
 
@@ -309,7 +309,7 @@ def main(args) -> None:
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description='Demo on using OpenAI client for online inference with '
+        description='Demo on using OpenAI client for online serving with '
         'multimodal language models served with vLLM.')
     parser.add_argument('--chat-type',
                         '-c',
