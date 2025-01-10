@@ -1500,6 +1500,8 @@ def convert_sparse_cross_attention_mask_to_dense(
             dense_mask[seq_start + start:seq_start + end,
                        tile_start:tile_start + tile] = 1
             tile_start += tile
+        assert ts != -1
+        assert td != 0
         tile_range_for_decode.append((ts, ts + td))
         seq_start += length
 
