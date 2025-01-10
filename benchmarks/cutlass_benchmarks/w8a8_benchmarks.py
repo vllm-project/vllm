@@ -168,12 +168,17 @@ def bench_fp8(dtype: torch.dtype,
     return timers
 
 
-def bench(dtype: torch.dtype, m: int, k: int, n: int, label: str,
-          sub_label: str) -> Iterable[TMeasurement]:
+def bench(dtype: torch.dtype,
+          m: int,
+          k: int,
+          n: int,
+          label: str,
+          sub_label: str,
+          bench_filter: Optional[str] = None) -> Iterable[TMeasurement]:
     if dtype == torch.int8:
-        return bench_int8(dtype, m, k, n, label, sub_label)
+        return bench_int8(dtype, m, k, n, label, sub_label, bench_filter)
     if dtype == torch.float8_e4m3fn:
-        return bench_fp8(dtype, m, k, n, label, sub_label)
+        return bench_fp8(dtype, m, k, n, label, sub_label, bench_filter)
     raise ValueError("unsupported type")
 
 
@@ -184,11 +189,12 @@ def print_timers(timers: Iterable[TMeasurement]):
 
 
 def run(dtype: torch.dtype,
-        MKNs: Iterable[Tuple[int, int, int]]) -> Iterable[TMeasurement]:
+        MKNs: Iterable[Tuple[int, int, int]],
+        bench_filter: Optional[str] = None) -> Iterable[TMeasurement]:
     results = []
     for m, k, n in MKNs:
         timers = bench(dtype, m, k, n, f"scaled-{dtype}-gemm",
-                       f"MKN=({m}x{k}x{n})")
+                       f"MKN=({m}x{k}x{n})", bench_filter)
         print_timers(timers)
         results.extend(timers)
 
@@ -218,7 +224,7 @@ def run_square_bench(args):
     MKNs = list(zip(dim_sizes, dim_sizes, dim_sizes))
     data = run(args.dtype, MKNs)
 
-    make_output(data, MKNs, f"square_bench-{args.dtype}")
+    make_output(data, MKNs, f"square_bench-{args.dtype}", args.filter)
 
 
 def run_range_bench(args):
@@ -230,7 +236,7 @@ def run_range_bench(args):
     MKNs = list(zip(Ms, Ks, Ns))
     data = run(args.dtype, MKNs)
 
-    make_output(data, MKNs, f"range_bench-{args.dtype}")
+    make_output(data, MKNs, f"range_bench-{args.dtype}", args.filter)
 
 
 def run_model_bench(args):
@@ -255,7 +261,7 @@ def run_model_bench(args):
             for k, n in KNs:
                 MKNs.append((m, k, n))
 
-        data = run(args.dtype, MKNs)
+        data = run(args.dtype, MKNs, args.filter)
         model_bench_data.append(data)
 
     # Print all results
@@ -305,6 +311,12 @@ Benchmark Cutlass GEMM.
                         type=to_torch_dtype,
                         required=True,
                         help="Available options are ['int8', 'fp8']")
+    parser.add_argument(
+        "--filter",
+        type=str,
+        default=None,
+        help="Filter for the kernels to run, if this substring "
+        "is in the kernel name it will be run")
     subparsers = parser.add_subparsers(dest="cmd")
 
     square_parser = subparsers.add_parser("square_bench")
