@@ -20,7 +20,7 @@
 #endif
 
 #include <functional>
-#include <ipex.h>
+// #include <ipex.h>
 
 #define WARP_SIZE 32
 #define MAX(a, b) ((a) > (b) ? (a) : (b))

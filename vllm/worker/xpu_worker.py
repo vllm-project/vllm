@@ -3,7 +3,8 @@ import gc
 import os
 from typing import List, Optional, Tuple
 
-import intel_extension_for_pytorch  # noqa: F401
+# import intel_extension_for_pytorch  # noqa: F401
+# TODO: handle case for oneccl_bindings for dual cards
 import oneccl_bindings_for_pytorch  # noqa: F401
 import torch
 import torch.distributed

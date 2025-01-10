@@ -324,6 +324,60 @@ class PyObjectCache:
         self._index = 0
 
 
+def is_hip() -> bool:
+    return torch.version.hip is not None
+
+
+@lru_cache(maxsize=None)
+def is_cpu() -> bool:
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return "cpu" in version("vllm")
+    except PackageNotFoundError:
+        return False
+
+
+@lru_cache(maxsize=None)
+def is_openvino() -> bool:
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return "openvino" in version("vllm")
+    except PackageNotFoundError:
+        return False
+
+
+@lru_cache(maxsize=None)
+def is_neuron() -> bool:
+    try:
+        import transformers_neuronx
+    except ImportError:
+        transformers_neuronx = None
+    return transformers_neuronx is not None
+
+
+@lru_cache(maxsize=None)
+def is_xpu() -> bool:
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        is_xpu_flag = "xpu" in version("vllm")
+    except PackageNotFoundError:
+        return False
+    # vllm is not build with xpu
+    if not is_xpu_flag:
+        return False
+    # try:
+    #     import intel_extension_for_pytorch as ipex  # noqa: F401
+    #     _import_ipex = True
+    # except ImportError as e:
+    #     logger.warning("Import Error for IPEX: %s", e.msg)
+    #     _import_ipex = False
+    # # ipex dependency is not ready
+    # if not _import_ipex:
+    #     logger.warning("not found ipex lib")
+    #     return False
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
+
+
 @lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""

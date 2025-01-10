@@ -8,11 +8,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 #
 # Check the compile flags
 #
-append_cmake_prefix_path("intel_extension_for_pytorch" "intel_extension_for_pytorch.cmake_prefix_path")
-find_package(IPEX REQUIRED)
+# append_cmake_prefix_path("intel_extension_for_pytorch" "intel_extension_for_pytorch.cmake_prefix_path")
+# find_package(IPEX REQUIRED)
 # IPEX will overwrite TORCH_LIBRARIES, so re-add torch_python lib.
 append_torchlib_if_found(torch_python)
-include_directories(${IPEX_INCLUDE_DIRS})
+# include_directories(${IPEX_INCLUDE_DIRS})
 set(CMPLR_ROOT $ENV{CMPLR_ROOT})
 set(CMAKE_CXX_COMPILER icpx)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-narrowing")
@@ -21,7 +21,7 @@ set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
 
 list(APPEND VLLM_GPU_FLAGS "-fsycl" "-fsycl-targets=spir64")
 list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
-list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "dnnl" "intel-ext-pt-gpu" )    
+list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "dnnl" )
 
 #
 # Define extension targets

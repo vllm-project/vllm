@@ -3,7 +3,7 @@
 #include <sycl/sycl.hpp>
 #include <functional>
 #include <memory>
-#include <ipex.h>
+// #include <ipex.h>
 #include <ATen/ATen.h>
 #include <torch/torch.h>
 
