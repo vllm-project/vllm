@@ -1,20 +1,20 @@
-(installation-apple)=
+# Installation
 
-# Installation for macOS
-
-vLLM has experimental support for macOS with Apple Silicon. For now, users shall build from the source vLLM to natively run on macOS. For more details, like running on vLLM in a docker container, see [ARM CPU Documentation](installation-arm)
+vLLM has experimental support for macOS with Apple Silicon. For now, users shall build from the source vLLM to natively run on macOS.
 
 Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 
 ## Requirements
 
-- **Operating System**: `macOS Sonoma` or later
-- **SDK** `XCode 15.4` or later with Command Line Tools
-- **Compilers**: `Apple Clang >= 15.0.0`
+- OS: `macOS Sonoma` or later
+- SDK: `XCode 15.4` or later with Command Line Tools
+- Compiler: `Apple Clang >= 15.0.0`
 
-<!-- (arm-backend-quick-start-dockerfile)= -->
+## Python
 
-## Build and installation
+### Pre-built wheels
+
+### Build wheel from source
 
 After installation of XCode and the Command Line Tools, which include Apple Clang, execute the following commands to build and install vLLM from the source.
 
@@ -29,9 +29,7 @@ $ pip install -e .
 On macOS the `VLLM_TARGET_DEVICE` is automatically set to `cpu`, which currently is the only supported device.
 ```
 
-
-
-## Troubleshooting
+#### Troubleshooting
 
 If the build has error like the following snippet where standard C++ headers cannot be found, try to remove and reinstall your 
 [Command Line Tools for Xcode](https://developer.apple.com/download/all/).
@@ -49,3 +47,10 @@ If the build has error like the following snippet where standard C++ headers can
       1 error generated.
 ```
 
+## Docker
+
+### Pre-built images
+
+### Build image from source
+
+## Supported features
