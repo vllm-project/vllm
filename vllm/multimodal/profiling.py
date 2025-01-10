@@ -137,7 +137,7 @@ class MultiModalProfiler(Generic[_I]):
             seq_len, mm_counts)
 
         return self.processor.apply(
-            prompt_text=processor_inputs.prompt_text,
+            prompt=processor_inputs.prompt_text,
             mm_data=processor_inputs.mm_data,
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         )

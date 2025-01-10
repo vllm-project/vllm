@@ -5,7 +5,7 @@
 This guide will help you quickly get started with vLLM to perform:
 
 - [Offline batched inference](#quickstart-offline)
-- [Online inference using OpenAI-compatible server](#quickstart-online)
+- [Online serving using OpenAI-compatible server](#quickstart-online)
 
 ## Prerequisites
 
@@ -40,7 +40,7 @@ For non-CUDA platforms, please refer [here](#installation-index) for specific in
 
 ## Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference/offline_inference.py>
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference/basic.py>
 
 The first line of this example imports the classes {class}`~vllm.LLM` and {class}`~vllm.SamplingParams`:
 
