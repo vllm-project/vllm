@@ -9,6 +9,6 @@ vLLM supports the following hardware platforms:
 
 gpu/index
 cpu/index
-ai-accelerator/index
+ai_accelerator/index
 openvino
 ```
