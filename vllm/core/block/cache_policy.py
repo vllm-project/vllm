@@ -46,7 +46,8 @@ class CachePolicyBase(CachePolicy):
 
     def add_tokens_prefill(self,
                            token_ids: List[int],
-                           device: Device = Device.GPU) -> None:
+                           device: Device = Device.GPU,
+                           extra_hash: Optional[int] = None) -> None:
         """Allocates memory blocks for storing the given sequence of token IDs
         in prefill stage only.
 
@@ -57,13 +58,17 @@ class CachePolicyBase(CachePolicy):
             token_ids (List[int]): The sequence of token IDs to be stored.
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
+            extra_hash (Optional[int]): The hash value of additional
+                factors, such as adapters, that influence the block hash
+                in the prefix-caching block.
         """
         assert not self._is_allocated
         assert token_ids
         token_chunks = chunk_list(token_ids, self._block_size)
         blocks = self._allocate_blocks_for_token_ids(prev_block=None,
                                                      token_chunks=token_chunks,
-                                                     device=device)
+                                                     device=device,
+                                                     extra_hash=extra_hash)
         self.update_blocks(blocks)
         self._virtual_block_table.append_tokens(blocks, len(token_ids))
 
@@ -74,7 +79,8 @@ class CachePolicyBase(CachePolicy):
 
     def add_tokens_decode(self,
                           token_ids: List[int],
-                          num_lookahead_slots: int = 0) -> None:
+                          num_lookahead_slots: int = 0,
+                          extra_hash: Optional[int] = None) -> None:
         """Add a sequence of token IDs to the existing blocks in the
         PhysicalBlockTable.
 
@@ -91,6 +97,9 @@ class CachePolicyBase(CachePolicy):
             token_ids (List[int]): The sequence of token IDs to be appended.
             num_lookahead_slots (int): The number of lookahead slots to allocate
                 in speculative decoding or chunked prefill.
+            extra_hash (Optional[int]): The hash value of additional
+                factors such as adapters that influence the block, apart
+                from the token_ids.
         """
         assert self._is_allocated, "no blocks have been allocated"
         assert self.num_physical_blocks > 0
@@ -98,7 +107,8 @@ class CachePolicyBase(CachePolicy):
         # Ensure there are enough empty slots for the new tokens plus
         # lookahead slots
         self._ensure_num_empty_slots(num_empty_slots=len(token_ids) +
-                                     num_lookahead_slots)
+                                     num_lookahead_slots,
+                                     extra_hash=extra_hash)
 
         # Update the blocks with the new tokens
         first_block_idx = self.num_tokens // self._block_size
@@ -109,7 +119,9 @@ class CachePolicyBase(CachePolicy):
                 first_block_idx + i, token_block)
             self._virtual_block_table.append_tokens([block], len(token_block))
 
-    def _ensure_num_empty_slots(self, num_empty_slots: int) -> None:
+    def _ensure_num_empty_slots(self,
+                                num_empty_slots: int,
+                                extra_hash: Optional[int] = None) -> None:
         """Ensures that the PhysicalBlockTable has at least the specified number
         of empty slots available.
 
@@ -120,6 +132,9 @@ class CachePolicyBase(CachePolicy):
 
         Args:
             num_empty_slots (int): The minimum number of empty slots required.
+            extra_hash (Optional[int]): The hash value of additional
+                factors such as adapters that influence the block, apart
+                from the token_ids.
         """
         # Currently the block table only supports
         # appending tokens to GPU blocks.
@@ -136,7 +151,9 @@ class CachePolicyBase(CachePolicy):
             assert self.num_physical_blocks > 0
             self._physical_block_table.append(
                 self._allocator.allocate_mutable_block(
-                    prev_block=self._physical_block_table[-1], device=device))
+                    prev_block=self._physical_block_table[-1],
+                    device=device,
+                    extra_hash=extra_hash))
 
     def fork(self) -> "CachePolicy":
         """Creates a new PhysicalBlockTable instance with a copy of the blocks
@@ -222,9 +239,12 @@ class CachePolicyBase(CachePolicy):
         # the ones after the processed ones in block table.
         return sequence_token_ids[self.num_full_slots:]
 
-    def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block],
-                                       token_chunks: List[List[int]],
-                                       device: Device) -> List[Block]:
+    def _allocate_blocks_for_token_ids(
+            self,
+            prev_block: Optional[Block],
+            token_chunks: List[List[int]],
+            device: Device,
+            extra_hash: Optional[int] = None) -> List[Block]:
         blocks: List[Block] = []
 
         block_token_ids = []
@@ -238,8 +258,10 @@ class CachePolicyBase(CachePolicy):
         if block_token_ids:
             blocks.extend(
                 self._allocator.allocate_immutable_blocks(
-                    prev_block, block_token_ids=block_token_ids,
-                    device=device))
+                    prev_block,
+                    block_token_ids=block_token_ids,
+                    device=device,
+                    extra_hash=extra_hash))
             prev_block = blocks[-1]
 
         if tail_token_ids:
@@ -247,7 +269,7 @@ class CachePolicyBase(CachePolicy):
             cur_token_ids = tail_token_ids[0]
 
             block = self._allocator.allocate_mutable_block(
-                prev_block=prev_block, device=device)
+                prev_block=prev_block, device=device, extra_hash=extra_hash)
             block.append_token_ids(cur_token_ids)
 
             blocks.append(block)
@@ -355,7 +377,8 @@ class CachePolicySlidingWindow(CachePolicyBase):
 
     def add_tokens_prefill(self,
                            token_ids: List[int],
-                           device: Device = Device.GPU) -> None:
+                           device: Device = Device.GPU,
+                           extra_hash: Optional[int] = None) -> None:
         """Allocate memory blocks for storing the given sequence of token IDs
         in prefill stage only.
 
@@ -394,7 +417,8 @@ class CachePolicySlidingWindow(CachePolicyBase):
 
         blocks = self._allocate_blocks_for_token_ids(prev_block=None,
                                                      token_chunks=token_chunks,
-                                                     device=device)
+                                                     device=device,
+                                                     extra_hash=extra_hash)
         self.update_blocks(blocks)
 
         num_evicted_tokens = 0
@@ -421,7 +445,8 @@ class CachePolicySlidingWindow(CachePolicyBase):
 
     def add_tokens_decode(self,
                           token_ids: List[int],
-                          num_lookahead_slots: int = 0) -> None:
+                          num_lookahead_slots: int = 0,
+                          extra_hash: Optional[int] = None) -> None:
         """Add a sequence of token IDs to the blocks in the PhysicalBlockTable
         by rotating the blocks when appending new tokens when the sliding window
         is full. This means the currently oldest tokens are evicted and replaced
@@ -438,7 +463,8 @@ class CachePolicySlidingWindow(CachePolicyBase):
             # Ensure there are enough empty slots for the new tokens plus
             # lookahead slots
             self._ensure_num_empty_slots(num_empty_slots=len(token_ids) +
-                                         num_lookahead_slots)
+                                         num_lookahead_slots,
+                                         extra_hash=extra_hash)
 
         # Update the blocks with the new tokens
         first_block_idx = (self.num_tokens // self._block_size %

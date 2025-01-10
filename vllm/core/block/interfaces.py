@@ -328,11 +328,14 @@ class CachePolicy(ABC):
     @abstractmethod
     def add_tokens_prefill(self,
                            token_ids: List[int],
-                           device: Device = Device.GPU) -> None:
+                           device: Device = Device.GPU,
+                           extra_hash: Optional[int] = None) -> None:
         pass
 
     @abstractmethod
-    def update_blocks(self, blocks: List[Block]) -> None:
+    def update_blocks(self,
+                      blocks: List[Block],
+                      extra_hash: Optional[int] = None) -> None:
         pass
 
     @abstractmethod
