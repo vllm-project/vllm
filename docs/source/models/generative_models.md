@@ -103,7 +103,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/offline_inference_chat.py>
+A code example can be found here: <gh-file:examples/offline_inference/chat.py>
 
 If the model doesn't have a chat template or you want to specify another one,
 you can explicitly pass a chat template:
