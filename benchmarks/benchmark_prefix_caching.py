@@ -10,7 +10,8 @@ Fixed example usage:
         --model meta-llama/Llama-2-7b-chat-hf \
         --enable-prefix-caching \
         --num-prompts 1 \
-        --repeat-count 100
+        --repeat-count 100 \
+        --input-length-range 128:256
 
 ShareGPT example usage:
     # This command samples 20 prompts with input lengths
