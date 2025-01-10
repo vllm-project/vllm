@@ -13,7 +13,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncIterator, Optional, Set, Tuple, Dict, Union
+from typing import AsyncIterator, Dict, Optional, Set, Tuple, Union
 
 import uvloop
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -419,7 +419,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
             "use the Pooling API (`/pooling`) instead.")
 
         res = await fallback_handler.create_pooling(request, raw_request)
-        
+
         generator: Union[ErrorResponse, EmbeddingResponse]
         if isinstance(res, PoolingResponse):
             generator = EmbeddingResponse(
@@ -495,7 +495,7 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
     return await create_score(request, raw_request)
 
 
-TASK_HANDLERS: Dict[str, Dict[str,tuple]] = {
+TASK_HANDLERS: Dict[str, Dict[str, tuple]] = {
     "generate": {
         "messages": (ChatCompletionRequest, create_chat_completion),
         "default": (CompletionRequest, create_completion),
