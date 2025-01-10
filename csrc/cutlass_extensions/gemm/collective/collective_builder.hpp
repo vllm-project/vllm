@@ -71,7 +71,7 @@ struct CollectiveBuilder<
   static constexpr bool IsCooperative = cute::is_any_of_v<KernelScheduleType,
                                                           KernelTmaWarpSpecializedCooperative,
                                                           KernelPtrArrayTmaWarpSpecializedCooperative,
-                                                          KernelTmaWarpSpecializedCooperativeFP8BlockScaledAccum<ScaleGranularityM>>;
+                                                          KernelTmaWarpSpecializedCooperativeFP8BlockScaledSubGroupMAccum<ScaleGranularityM>>;
   using AtomLayoutMNK = cute::conditional_t<IsCooperative,
       Layout<Shape<_2,_1,_1>>, Layout<Shape<_1,_1,_1>>>;
 

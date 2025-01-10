@@ -27,9 +27,10 @@ struct MainloopSm90TmaGmmaWarpSpecializedBlockScalingSubGroupMFP8
     : MainloopSm90TmaGmmaWarpSpecialized<Stages_, ClusterShape_,
                                          KernelSchedule> {
   static_assert(
-      cute::is_same_v<KernelSchedule,
-                      KernelTmaWarpSpecializedCooperativeFP8BlockScaledAccum<
-                          ScaleGranularityM>>,
+      cute::is_same_v<
+          KernelSchedule,
+          KernelTmaWarpSpecializedCooperativeFP8BlockScaledSubGroupMAccum<
+              ScaleGranularityM>>,
       "KernelSchedule must be one of the warp specialized policies");
 };
 

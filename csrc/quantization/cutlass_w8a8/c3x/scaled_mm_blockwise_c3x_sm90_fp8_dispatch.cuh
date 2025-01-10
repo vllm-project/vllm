@@ -59,8 +59,8 @@ struct cutlass_3x_gemm_fp8_blockwise {
   using TileShape = Shape<TileSizeM, GroupSizeN, GroupSizeK>;
   using ClusterShape = Shape<_1, _2, _1>;
 
-  using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8BlockScaledAccum<
+  using KernelSchedule = cutlass::gemm::
+      KernelTmaWarpSpecializedCooperativeFP8BlockScaledSubGroupMAccum<
           GroupSizeM_>;
   using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecializedCooperative;
   using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
@@ -124,14 +124,26 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   auto a_scales_ptr = static_cast<float*>(a_scales.data_ptr());
   auto b_scales_ptr = static_cast<float*>(b_scales.data_ptr());
 
+  // Check is the t is contiguous and is 1D or 2D with one of the dimensions
+  // being 1 (i.e. a row or column vector)
+  auto is_contiguous_vector = [](const torch::Tensor& t) {
+    auto t_sizes = t.sizes();
+    return t.is_contiguous() &&
+           (t.dim() == 1 ||
+            (t.dim() == 2 &&
+             *std::min_element(t_sizes.begin(), t_sizes.end()) == 1));
+  };
+
   // TODO(lucas): lets clean-up the kernel so that we pass in Strides so
   //  we don't have to deal with enforcing implicit layouts
   TORCH_CHECK(a_scales.size(0) == m / Gemm::GroupSizeM::value);
   TORCH_CHECK(a_scales.size(1) == k / Gemm::GroupSizeK::value);
-  TORCH_CHECK(a_scales.stride(0) == 1, "a_scales must be M major");
+  TORCH_CHECK(a_scales.stride(0) == 1 || is_contiguous_vector(a_scales),
+              "a_scales must be M major");
   TORCH_CHECK(b_scales.size(0) == k / Gemm::GroupSizeK::value);
   TORCH_CHECK(b_scales.size(1) == n / Gemm::GroupSizeN::value);
-  TORCH_CHECK(b_scales.stride(0) == 1, "b_scales must be K major");
+  TORCH_CHECK(b_scales.stride(0) == 1 || is_contiguous_vector(b_scales),
+              "b_scales must be K major");
 
   uint32_t mma_promotion_interval = 4;
   typename GemmKernel::MainloopArguments mainloop_args{

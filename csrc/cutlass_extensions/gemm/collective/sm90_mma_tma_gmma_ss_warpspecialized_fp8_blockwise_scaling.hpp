@@ -121,8 +121,8 @@ struct CollectiveMma<
   using PipelineState = cutlass::PipelineState<DispatchPolicy::Stages>;
   using PipelineParams = typename MainloopPipeline::Params;
 
-  // Two threads per CTA are producers (1 for operand tile and 1 for scales)
-  static constexpr int NumProducerThreadEvents = 2; 
+  // Two threads per CTA are producers (1 for operand tile and 32 for scales)
+  static constexpr int NumProducerThreadEvents = 33; 
 
   static constexpr int ScaleGranularityM = ScaleGranularityM_ == 0 ? size<0>(TileShape{}) : ScaleGranularityM_;
   static constexpr int ScaleMsPerTile = size<0>(TileShape{}) / ScaleGranularityM;
@@ -148,8 +148,7 @@ struct CollectiveMma<
       cute::conditional_t< ::cutlass::gemm::detail::is_major<0,StrideB>(), Step<_2,_1,_3>, Step<_1,_2,_3>>{}));
   
   // Block scaling gmem-to-smem copy atom 
-  using BlockScaleCopyTypeA = cute::uint_byte_t<cute::min(static_cast<int>(sizeof(ElementBlockScale)) * ScaleMsPerTile, 16)>;
-  using SmemBlockScalingCopyAtomA = Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<BlockScaleCopyTypeA>, ElementBlockScale>;
+  using SmemBlockScalingCopyAtomA = Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<ElementBlockScale>, ElementBlockScale>;
   using SmemBlockScalingCopyAtomB = Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<ElementBlockScale>, ElementBlockScale>;
   
   // Block scaling smem layout
@@ -326,17 +325,20 @@ struct CollectiveMma<
     Tensor gA_mkl = local_tile(mA_mkl, TileShape{}, make_coord(_,_,_), Step<_1, X,_1>{});        // (BLK_M,BLK_K,m,k,l)
     Tensor gB_nkl = local_tile(mB_nkl, TileShape{}, make_coord(_,_,_), Step< X,_1,_1>{});        // (BLK_N,BLK_K,n,k,l)
 
+    constexpr auto scales_m = Int<ScaleMsPerTile>{};
+    auto tM = get<2>(gA_mkl.shape());
+    auto tN = get<2>(gB_nkl.shape());
+    auto tK = get<3>(gA_mkl.shape());
+
     // Make the tiled views of scale tensors
-    auto scaleA_shape = make_shape(get<2>(gA_mkl.shape()), Int<ScaleMsPerTile>{}, get<3>(gA_mkl.shape()), get<4>(gA_mkl.shape())); // (m,ScaleMsPerTile,k,l)
-    auto scale_dA = make_stride(Int<ScaleMsPerTile>{}, Int<1>{}, get<3>(gA_mkl.shape()) * Int<ScaleMsPerTile>{}, get<2>(gA_mkl.shape()) * get<3>(gA_mkl.shape()) * Int<ScaleMsPerTile>{});
-    auto scaleA_layout = make_layout(scaleA_shape, scale_dA);
-    auto scaleB_shape = make_shape(get<2>(gB_nkl.shape()), get<3>(gB_nkl.shape()), get<4>(gB_nkl.shape())); // (n,k,l)
-    auto scale_dB = make_stride(get<3>(gB_nkl.shape()), Int<1>{}, get<2>(gB_nkl.shape()) * get<3>(gB_nkl.shape())); 
-    auto scaleB_layout = make_layout(scaleB_shape, scale_dB);
+    auto scaleA_shape = make_shape(M / ScaleGranularityM, tK, L); // (scale_m,k,l)
+    auto scaleA_layout = make_ordered_layout(scaleA_shape,  Step<_0, _1, _2>{});
+    auto scaleB_shape = make_shape(tN, tK, L); // (n,k,l)
+    auto scaleB_layout = make_ordered_layout(scaleB_shape, Step<_1, _0, _2>{});
 
     // Note that mScaleA_mkl and mScaleB_nkl are already blocked tiled in the `m` host and 
     // gScaleA_mkl and gScaleB_nkl in `g` global memory are same as mScaleA_mkl and mScaleB_nkl.
-    Tensor mScaleA_mkl = make_tensor(make_gmem_ptr(mainloop_params.ptr_scale_A), scaleA_layout); // (m,ScaleMsPerTile,k,l)
+    Tensor mScaleA_mkl = make_tensor(make_gmem_ptr(mainloop_params.ptr_scale_A), scaleA_layout); // (scale_m,k,l)
     Tensor mScaleB_nkl = make_tensor(make_gmem_ptr(mainloop_params.ptr_scale_B), scaleB_layout); // (n,k,l)
 
     return cute::make_tuple(gA_mkl, gB_nkl, mScaleA_mkl, mScaleB_nkl);
@@ -363,102 +365,120 @@ struct CollectiveMma<
     int lane_predicate = cute::elect_one_sync();
 
     // Blockscaling: Tma loads for load_input and CpAsync for load_scale
-    if (lane_predicate) {
-      Tensor sA = make_tensor(make_smem_ptr(shared_tensors.smem_A.data()), SmemLayoutA{});        // (BLK_M,BLK_K,PIPE)
-      Tensor sB = make_tensor(make_smem_ptr(shared_tensors.smem_B.data()), SmemLayoutB{});        // (BLK_N,BLK_K,PIPE)
-      Tensor sScaleA = make_tensor(cute::make_smem_ptr(shared_tensors.smem_scale_A.data()), SmemLayoutScaleA{}); // (ScaleMsPerTile,k)
-      Tensor sScaleB = make_tensor(cute::make_smem_ptr(shared_tensors.smem_scale_B.data()), SmemLayoutScaleB{}); // (k)
+    Tensor sA = make_tensor(make_smem_ptr(shared_tensors.smem_A.data()), SmemLayoutA{});        // (BLK_M,BLK_K,PIPE)
+    Tensor sB = make_tensor(make_smem_ptr(shared_tensors.smem_B.data()), SmemLayoutB{});        // (BLK_N,BLK_K,PIPE)
+    Tensor sScaleA = make_tensor(cute::make_smem_ptr(shared_tensors.smem_scale_A.data()), SmemLayoutScaleA{}); // (ScaleMsPerTile,k)
+    Tensor sScaleB = make_tensor(cute::make_smem_ptr(shared_tensors.smem_scale_B.data()), SmemLayoutScaleB{}); // (k)
+
+    //
+    // Prepare the TMA loads for A and B
+    //
+
+    constexpr uint32_t cluster_shape_x = get<0>(ClusterShape());
+    uint2 cluster_local_block_id = {block_rank_in_cluster % cluster_shape_x, block_rank_in_cluster / cluster_shape_x};
+
+    Tensor gA_mkl = get<0>(load_inputs);
+    Tensor gB_nkl = get<1>(load_inputs);
+
+    auto block_tma_a = mainloop_params.tma_load_a.get_slice(cluster_local_block_id.y);
+    auto block_tma_b = mainloop_params.tma_load_b.get_slice(cluster_local_block_id.x);
+
+    // Partition the inputs based on the current block coordinates.
+    auto [m_coord, n_coord, k_coord, l_coord] = blk_coord;
+    Tensor gA = gA_mkl(_,_,m_coord,_,l_coord);                                                     // (BLK_M,BLK_K,k)
+    Tensor gB = gB_nkl(_,_,n_coord,_,l_coord);                                                     // (BLK_N,BLK_K,k)
+
+
+    // Block scaling: load_scale has scaling tensors in global memory which are not tiled
+    Tensor mScaleA_mkl = get<2>(load_inputs);
+    Tensor mScaleB_nkl = get<3>(load_inputs);
+    auto scales_m = get<0>(mScaleA_mkl.shape());
+
+    Tensor cScaleA_mkl = make_identity_tensor(mScaleA_mkl.shape());
+
+    Tensor gScaleA = local_tile( 
+      mScaleA_mkl, make_tile(Int<ScaleMsPerTile>{}), 
+      make_coord(m_coord,_,l_coord));                   // (ScaleMsPerTile,k,1)
+    Tensor cScaleA = local_tile( 
+      cScaleA_mkl, make_tile(Int<ScaleMsPerTile>{}), 
+      make_coord(m_coord,_,l_coord));
+    Tensor gScaleB = mScaleB_nkl(n_coord,_,l_coord);                                           // (1,k,1)
+
+    // TODO: test `scale_copy_a` with `ScaleMsPerTile` < 128
+    TiledCopy scale_copy_a = make_tiled_copy(SmemBlockScalingCopyAtomA{}, 
+      Layout<Shape<_32, _1>>{}, Layout<Shape<_4, _1>>{}); // (1,1,1)
+    TiledCopy scale_copy_b = make_tiled_copy(SmemBlockScalingCopyAtomB{}, 
+      Layout<Shape<_1>>{}, Layout<Shape<_1>>{}); // (1,1,1)
+    ThrCopy thr_scale_copy_a = scale_copy_a.get_slice(threadIdx.x);
+    ThrCopy thr_scale_copy_b = scale_copy_b.get_slice(threadIdx.x);
+    
+    Tensor tAgA_ScaleA = thr_scale_copy_a.partition_S(gScaleA);
+    Tensor tAcA_ScaleA = thr_scale_copy_a.partition_S(cScaleA);
+    Tensor tAsA_ScaleA = thr_scale_copy_a.partition_D(sScaleA);
+    
+    Tensor tBgB_ScaleB = thr_scale_copy_b.partition_S(gScaleB);
+    Tensor tBsB_ScaleB = thr_scale_copy_b.partition_D(sScaleB);
+
+    // Applies the mapping from block_tma_a
+    Tensor tAgA = block_tma_a.partition_S(gA);                                              // (TMA,TMA_M,TMA_K,k)
+    Tensor tAsA = block_tma_a.partition_D(sA);                                              // (TMA,TMA_M,TMA_K,PIPE)
+
+    Tensor tBgB = block_tma_b.partition_S(gB);                                              // (TMA,TMA_N,TMA_K,k)
+    Tensor tBsB = block_tma_b.partition_D(sB);                                              // (TMA,TMA_N,TMA_K,PIPE)
+
+    uint16_t mcast_mask_a = 0;
+    uint16_t mcast_mask_b = 0;
+
+    // Issue TmaLoads for GEMM operands A/B and CpAsync for scale tensors
+    // Maps the tile -> block, value
+    if constexpr (cute::is_same_v<GmemTiledCopyA, SM90_TMA_LOAD_MULTICAST>) {
+      auto block_layout = Layout<typename DispatchPolicy::ClusterShape>{};                       // (m,n) -> block_id
+      for (int n = 0; n < size<1>(block_layout); ++n) {
+        mcast_mask_a |= (uint16_t(1) << block_layout(cluster_local_block_id.x,n,Int<0>{}));
+      }
+    }
+
+    if constexpr (cute::is_same_v<GmemTiledCopyB, SM90_TMA_LOAD_MULTICAST>) {
+      auto block_layout = Layout<typename DispatchPolicy::ClusterShape>{};                       // (m,n) -> block_id
+      for (int m = 0; m < size<0>(block_layout); ++m) {
+        mcast_mask_b |= (uint16_t(1) << block_layout(m,cluster_local_block_id.y,Int<0>{}));
+      }
+    }
+
+    // Allocate predicate tensors for a_scales (since we can't gaurantee that 
+    // all scales are valid, since we could have a partial tiles along M)
+    Tensor tApA_ScaleA = make_tensor<bool>(shape(tAsA_ScaleA(_,_,0)));
+    #pragma unroll
+    for (int i = 0; i < size(tApA_ScaleA); ++i) {
+      tApA_ScaleA(i) = get<0>(tAcA_ScaleA(i)) < scales_m;
+    }
+
+    // Mainloop
+    CUTLASS_PRAGMA_NO_UNROLL
+    for ( ; k_tile_count > 0; --k_tile_count) {
+      // LOCK smem_pipe_write for _writing_
+      pipeline.producer_acquire(smem_pipe_write);
 
       //
-      // Prepare the TMA loads for A and B
+      // Copy gmem to smem for *k_tile_iter
       //
+      int write_stage = smem_pipe_write.index();
+      using BarrierType = typename MainloopPipeline::ProducerBarrierType;
+      BarrierType* tma_barrier = pipeline.producer_get_barrier(smem_pipe_write);
 
-      constexpr uint32_t cluster_shape_x = get<0>(ClusterShape());
-      uint2 cluster_local_block_id = {block_rank_in_cluster % cluster_shape_x, block_rank_in_cluster / cluster_shape_x};
+      // Copy operands A and B from global memory to shared memory
+      if (lane_predicate) copy(mainloop_params.tma_load_a.with(*tma_barrier, mcast_mask_a), tAgA(_,_,_,*k_tile_iter), tAsA(_,_,_,write_stage));
+      if (lane_predicate) copy(mainloop_params.tma_load_b.with(*tma_barrier, mcast_mask_b), tBgB(_,_,_,*k_tile_iter), tBsB(_,_,_,write_stage));
 
-      Tensor gA_mkl = get<0>(load_inputs);
-      Tensor gB_nkl = get<1>(load_inputs);
+      // Copy scale tensors from global memory to shared memory
+      copy_if(scale_copy_a, tApA_ScaleA, tAgA_ScaleA(_,_,*k_tile_iter), tAsA_ScaleA(_,_,write_stage));
+      copy(scale_copy_b, tBgB_ScaleB(_,*k_tile_iter), tBsB_ScaleB(_,write_stage));
+      pipeline.producer_commit(smem_pipe_write, cutlass::arch::cpasync_barrier_arrive_noinc);
 
-      auto block_tma_a = mainloop_params.tma_load_a.get_slice(cluster_local_block_id.y);
-      auto block_tma_b = mainloop_params.tma_load_b.get_slice(cluster_local_block_id.x);
+      ++k_tile_iter;
 
-      // Partition the inputs based on the current block coordinates.
-      auto [m_coord, n_coord, k_coord, l_coord] = blk_coord;
-      Tensor gA = gA_mkl(_,_,m_coord,_,l_coord);                                                     // (BLK_M,BLK_K,k)
-      Tensor gB = gB_nkl(_,_,n_coord,_,l_coord);                                                     // (BLK_N,BLK_K,k)
-
-
-      // Block scaling: load_scale has scaling tensors in global memory which are not tiled
-      Tensor mScaleA_mkl = get<2>(load_inputs);
-      Tensor mScaleB_nkl = get<3>(load_inputs);
-
-      Tensor gScaleA = mScaleA_mkl(m_coord,_,_,l_coord);                                         // (1,ScaleMsPerTile,k,1)
-      Tensor gScaleB = mScaleB_nkl(n_coord,_,l_coord);                                           // (1,k,1)
-      
-      TiledCopy scale_copy_a = make_tiled_copy(SmemBlockScalingCopyAtomA{}, Layout<Shape<_1>>{}, Layout<Shape<Int<ScaleMsPerTile>>>{}); // (1,ScaleMsPerTile,1)
-      TiledCopy scale_copy_b = make_tiled_copy(SmemBlockScalingCopyAtomB{}, Layout<Shape<_1>>{}, Layout<Shape<_1>>{}); // (1,1,1)
-      ThrCopy thr_scale_copy_a = scale_copy_a.get_slice(threadIdx.x);
-      ThrCopy thr_scale_copy_b = scale_copy_b.get_slice(threadIdx.x);
-      
-      Tensor tAgA_ScaleA = thr_scale_copy_a.partition_S(gScaleA);
-      Tensor tAsA_ScaleA = thr_scale_copy_a.partition_D(sScaleA);
-      
-      Tensor tBgB_ScaleB = thr_scale_copy_b.partition_S(gScaleB);
-      Tensor tBsB_ScaleB = thr_scale_copy_b.partition_D(sScaleB);
-
-      // Applies the mapping from block_tma_a
-      Tensor tAgA = block_tma_a.partition_S(gA);                                              // (TMA,TMA_M,TMA_K,k)
-      Tensor tAsA = block_tma_a.partition_D(sA);                                              // (TMA,TMA_M,TMA_K,PIPE)
-
-      Tensor tBgB = block_tma_b.partition_S(gB);                                              // (TMA,TMA_N,TMA_K,k)
-      Tensor tBsB = block_tma_b.partition_D(sB);                                              // (TMA,TMA_N,TMA_K,PIPE)
-
-      uint16_t mcast_mask_a = 0;
-      uint16_t mcast_mask_b = 0;
-
-      // Issue TmaLoads for GEMM operands A/B and CpAsync for scale tensors
-      // Maps the tile -> block, value
-      if constexpr (cute::is_same_v<GmemTiledCopyA, SM90_TMA_LOAD_MULTICAST>) {
-        auto block_layout = Layout<typename DispatchPolicy::ClusterShape>{};                       // (m,n) -> block_id
-        for (int n = 0; n < size<1>(block_layout); ++n) {
-          mcast_mask_a |= (uint16_t(1) << block_layout(cluster_local_block_id.x,n,Int<0>{}));
-        }
-      }
-
-      if constexpr (cute::is_same_v<GmemTiledCopyB, SM90_TMA_LOAD_MULTICAST>) {
-        auto block_layout = Layout<typename DispatchPolicy::ClusterShape>{};                       // (m,n) -> block_id
-        for (int m = 0; m < size<0>(block_layout); ++m) {
-          mcast_mask_b |= (uint16_t(1) << block_layout(m,cluster_local_block_id.y,Int<0>{}));
-        }
-      }
-
-      // Mainloop
-      CUTLASS_PRAGMA_NO_UNROLL
-      for ( ; k_tile_count > 0; --k_tile_count) {
-        // LOCK smem_pipe_write for _writing_
-        pipeline.producer_acquire(smem_pipe_write);
-
-        //
-        // Copy gmem to smem for *k_tile_iter
-        //
-        int write_stage = smem_pipe_write.index();
-        using BarrierType = typename MainloopPipeline::ProducerBarrierType;
-        BarrierType* tma_barrier = pipeline.producer_get_barrier(smem_pipe_write);
-
-        // Copy operands A and B from global memory to shared memory
-        copy(mainloop_params.tma_load_a.with(*tma_barrier, mcast_mask_a), tAgA(_,_,_,*k_tile_iter), tAsA(_,_,_,write_stage));
-        copy(mainloop_params.tma_load_b.with(*tma_barrier, mcast_mask_b), tBgB(_,_,_,*k_tile_iter), tBsB(_,_,_,write_stage));
-
-        // Copy scale tensors from global memory to shared memory
-        copy(scale_copy_a, tAgA_ScaleA(_,_,*k_tile_iter), tAsA_ScaleA(_,_,write_stage));
-        copy(scale_copy_b, tBgB_ScaleB(_,*k_tile_iter), tBsB_ScaleB(_,write_stage));
-        pipeline.producer_commit(smem_pipe_write, cutlass::arch::cpasync_barrier_arrive_noinc);
-
-        ++k_tile_iter;
-
-        // Advance smem_pipe_write
-        ++smem_pipe_write;
-      }
+      // Advance smem_pipe_write
+      ++smem_pipe_write;
     }
   }
 
