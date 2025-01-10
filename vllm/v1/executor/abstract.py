@@ -3,6 +3,7 @@ from typing import Tuple, Type
 
 from vllm.config import VllmConfig
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.platforms import current_platform
 
 
 class Executor(ABC):
@@ -21,8 +22,12 @@ class Executor(ABC):
             executor_class = MultiprocExecutor
         else:
             assert (distributed_executor_backend is None)
-            from vllm.v1.executor.uniproc_executor import UniprocExecutor
-            executor_class = UniprocExecutor
+            if current_platform.is_tpu():
+                from vllm.v1.executor.uniproc_tpu_executor import UniprocTPUExecutor
+                executor_class = UniprocTPUExecutor
+            else:
+                from vllm.v1.executor.uniproc_executor import UniprocExecutor
+                executor_class = UniprocExecutor
         return executor_class
 
     @abstractmethod

@@ -72,3 +72,9 @@ class TpuPlatform(Platform):
                     "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker"
             else:
                 parallel_config.worker_cls = "vllm.worker.tpu_worker.TPUWorker"
+
+    @classmethod
+    def is_pin_memory_available(cls):
+        # TODO: Verify if it is indeed the case
+        logger.warning("Pin memory is not supported on TPU.")
+        return False

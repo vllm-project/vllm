@@ -27,6 +27,10 @@ class Scheduler:
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
     ) -> None:
+        # TODO: Refactor! Properly handle for TPU.
+        cache_config.enable_prefix_caching = False
+        scheduler_config.chunked_prefill_enabled = False
+
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
@@ -205,6 +209,13 @@ class Scheduler:
                     num_computed_tokens -= self.block_size
                     num_new_tokens = self.block_size
                     computed_blocks.pop()
+                
+                # If chunked prefill is not enabled, breakout of the loop.
+                # TODO: Verify if needed
+                if (not self.scheduler_config.chunked_prefill_enabled
+                        and num_new_tokens > token_budget):
+                    break
+
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
