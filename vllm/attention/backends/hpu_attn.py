@@ -163,13 +163,14 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
-        
+
         self.attn_type = attn_type
         if (self.attn_type != AttentionType.DECODER
                 and self.attn_type != AttentionType.ENCODER_DECODER):
             raise NotImplementedError("Encoder self-attention "
                                       "is not implemented for "
                                       "HPUAttentionImpl")
+
     def forward(
         self,
         query: torch.Tensor,

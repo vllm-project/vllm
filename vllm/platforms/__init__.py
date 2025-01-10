@@ -66,7 +66,7 @@ def rocm_platform_plugin() -> Optional[str]:
     except Exception:
         pass
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
-    
+
 
 is_hpu = False
 try:
