@@ -103,7 +103,7 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/offline_inference_classification.py>
+A code example can be found here: <gh-file:examples/offline_inference/classification.py>
 
 ### `LLM.score`
 
