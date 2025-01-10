@@ -131,7 +131,7 @@ Full example: <gh-file:examples/offline_inference/offline_inference_vision_langu
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
 
-Full example: <gh-file:examples/offline_inference/offline_inference_audio_language.py>
+Full example: <gh-file:examples/offline_inference/audio_language.py>
 
 ### Embedding
 
