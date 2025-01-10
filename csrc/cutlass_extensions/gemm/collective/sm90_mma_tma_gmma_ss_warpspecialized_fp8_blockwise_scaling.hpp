@@ -445,7 +445,7 @@ struct CollectiveMma<
       }
     }
 
-    // Allocate predicate tensors for a_scales (since we can't gaurantee that 
+    // Allocate predicate tensors for a_scales (since we can't guarantee that 
     // all scales are valid, since we could have a partial tiles along M)
     Tensor tApA_ScaleA = make_tensor<bool>(shape(tAsA_ScaleA(_,_,0)));
     #pragma unroll
