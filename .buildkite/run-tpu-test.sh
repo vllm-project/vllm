@@ -23,4 +23,4 @@ docker run --privileged --net host --shm-size=16G -it \
     && pytest -v -s /workspace/vllm/tests/tpu/test_custom_dispatcher.py \
     && python3 /workspace/vllm/tests/tpu/test_compilation.py \
     && python3 /workspace/vllm/tests/tpu/test_quantization_accuracy.py \
-    && python3 /workspace/vllm/examples/offline_inference/offline_inference_tpu.py"
+    && python3 /workspace/vllm/examples/offline_inference/tpu.py"

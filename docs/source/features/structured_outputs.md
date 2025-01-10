@@ -257,4 +257,4 @@ outputs = llm.generate(
 print(outputs[0].outputs[0].text)
 ```
 
-Full example: <gh-file:examples/offline_inference/offline_inference_structured_outputs.py>
+Full example: <gh-file:examples/offline_inference/structured_outputs.py>

@@ -363,7 +363,7 @@ Profile a model
 
     example:
     ```
-    python examples/offline_inference/offline_profile.py \\
+    python examples/offline_inference/profiling.py \\
         --model neuralmagic/Meta-Llama-3.1-8B-Instruct-FP8 --batch-size 4 \\
         --prompt-len 512 --max-num-batched-tokens 8196 --json Llama31-8b-FP8 \\
         --enforce-eager run_num_steps -n 2
