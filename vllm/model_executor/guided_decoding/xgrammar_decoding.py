@@ -1,6 +1,7 @@
 # noqa: UP007
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -14,8 +15,8 @@ try:
 except ImportError:
     pass
 
-from vllm.model_executor.guided_decoding.xgrammar_utils import (
-    convert_lark_to_gbnf, grammar_is_likely_lark)
+from vllm.model_executor.guided_decoding.utils import (convert_lark_to_gbnf,
+                                                       grammar_is_likely_lark)
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 if TYPE_CHECKING:
@@ -309,3 +310,7 @@ class XGrammarLogitsProcessor:
             scores = scores.to(device_type).squeeze()
 
         return scores
+
+    def clone(self) -> XGrammarLogitsProcessor:
+        """Deepcopy due to per-sequence state in the matchers"""
+        return copy.deepcopy(self)

@@ -13,6 +13,7 @@ from vllm.model_executor.guided_decoding.outlines_logits_processors import (
 from vllm.sampling_params import GuidedDecodingParams
 
 MODEL_NAME = 'HuggingFaceH4/zephyr-7b-beta'
+GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
 
 
 def test_guided_logits_processors(sample_regex, sample_json_schema):
@@ -42,8 +43,7 @@ def test_guided_logits_processors(sample_regex, sample_json_schema):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend",
-                         ["outlines", "lm-format-enforcer", "xgrammar"])
+@pytest.mark.parametrize("backend", GUIDED_DECODING_BACKENDS)
 @pytest.mark.parametrize("is_local", [True, False])
 async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
                                                  sample_regex,

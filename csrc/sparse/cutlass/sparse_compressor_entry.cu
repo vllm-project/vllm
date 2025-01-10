@@ -5,7 +5,7 @@
 
 #include "cutlass_extensions/common.hpp"
 
-#if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
+#if defined ENABLE_SPARSE_SCALED_MM_C3X && ENABLE_SPARSE_SCALED_MM_C3X
 bool cutlass_sparse_compress_sm90(torch::Tensor& a_nzs, torch::Tensor& a_meta,
                                   torch::Tensor const& a);
 #endif
@@ -28,7 +28,7 @@ bool cutlass_sparse_compress_entry(torch::Tensor& a_nzs, torch::Tensor& a_meta,
   int32_t version_num = get_sm_version_num();
 
   // Guard against compilation issues for sm90 kernels
-#if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
+#if defined ENABLE_SPARSE_SCALED_MM_C3X && ENABLE_SPARSE_SCALED_MM_C3X
   if (version_num >= 90) {
     return cutlass_sparse_compress_sm90(a_nzs, a_meta, a);
   }

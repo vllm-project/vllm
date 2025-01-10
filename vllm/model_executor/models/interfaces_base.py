@@ -35,6 +35,7 @@ T_co = TypeVar("T_co", default=torch.Tensor, covariant=True)
 
 @runtime_checkable
 class VllmModel(Protocol[C_co, T_co]):
+    """The interface required for all models in vLLM."""
 
     def __init__(
         self,
@@ -97,6 +98,7 @@ def is_vllm_model(
 
 @runtime_checkable
 class VllmModelForTextGeneration(VllmModel[C_co, T], Protocol[C_co, T]):
+    """The interface required for all generative models in vLLM."""
 
     def compute_logits(
         self,
@@ -142,6 +144,7 @@ def is_text_generation_model(
 
 @runtime_checkable
 class VllmModelForPooling(VllmModel[C_co, T], Protocol[C_co, T]):
+    """The interface required for all pooling models in vLLM."""
 
     def pooler(
         self,

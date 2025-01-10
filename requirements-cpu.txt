@@ -2,7 +2,7 @@
 -r requirements-common.txt
 
 # Dependencies for CPUs
-torch==2.5.1+cpu; platform_machine != "ppc64le" and platform_machine != "aarch64" 
-torch==2.5.1; platform_machine == "aarch64"
+torch==2.5.1+cpu; platform_machine != "ppc64le" and platform_machine != "aarch64" and platform_system != "Darwin"
+torch==2.5.1; platform_machine == "aarch64" or platform_system == "Darwin" 
 torchvision; platform_machine != "ppc64le"  # required for the image processor of phi3v, this must be updated alongside torch
 datasets # for benchmark scripts

@@ -1,6 +1,6 @@
 import os
 from functools import lru_cache
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
 
@@ -33,6 +33,31 @@ if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) in ["fork", None]:
                    " `spawn` instead.")
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+# Models not supported by ROCm.
+_ROCM_UNSUPPORTED_MODELS: List[str] = []
+
+# Models partially supported by ROCm.
+# Architecture -> Reason.
+_ROCM_SWA_REASON = ("Sliding window attention (SWA) is not yet supported in "
+                    "Triton flash attention. For half-precision SWA support, "
+                    "please use CK flash attention by setting "
+                    "`VLLM_USE_TRITON_FLASH_ATTN=0`")
+_ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
+    "Qwen2ForCausalLM":
+    _ROCM_SWA_REASON,
+    "MistralForCausalLM":
+    _ROCM_SWA_REASON,
+    "MixtralForCausalLM":
+    _ROCM_SWA_REASON,
+    "PaliGemmaForConditionalGeneration":
+    ("ROCm flash attention does not yet "
+     "fully support 32-bit precision on PaliGemma"),
+    "Phi3VForCausalLM":
+    ("ROCm Triton flash attention may run into compilation errors due to "
+     "excessive use of shared memory. If this happens, disable Triton FA "
+     "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`")
+}
+
 
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
@@ -45,7 +70,8 @@ class RocmPlatform(Platform):
     ]
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
+    def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
+                             kv_cache_dtype, block_size, use_v1) -> str:
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if selected_backend == _Backend.ROCM_FLASH:
@@ -54,7 +80,8 @@ class RocmPlatform(Platform):
                 logger.info("flash_attn is not supported on NAVI GPUs.")
         else:
             logger.info("%s is not supported in AMD GPUs.", selected_backend)
-        return _Backend.ROCM_FLASH
+        logger.info("Using ROCmFlashAttention backend.")
+        return "vllm.attention.backends.rocm_flash_attn.ROCmFlashAttentionBackend"  # noqa: E501
 
     @classmethod
     @lru_cache(maxsize=8)
@@ -101,6 +128,18 @@ class RocmPlatform(Platform):
                     "vllm.worker.worker.Worker"
             else:
                 parallel_config.worker_cls = "vllm.worker.worker.Worker"
+
+    @classmethod
+    def verify_model_arch(cls, model_arch: str) -> None:
+        if model_arch in _ROCM_UNSUPPORTED_MODELS:
+            raise ValueError(f"Model architecture '{model_arch}' is not "
+                             "supported by ROCm for now.")
+
+        if model_arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
+            msg = _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch]
+            logger.warning(
+                "Model architecture '%s' is partially "
+                "supported by ROCm: %s", model_arch, msg)
 
     @classmethod
     def verify_quantization(cls, quant: str) -> None:
