@@ -16,7 +16,7 @@
 """ PyTorch Fuyu model."""
 import math
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict)
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -149,14 +149,10 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-
         if not mm_data:
             # Avoid warning from HF logger for text-only input
-            # Input_ids format: bos_token_id + prompt_token_ids + boa_token_id
-            # Tokenizer won't add boa_token_id by default, we add it manually.
-            tokenizer = self.info.get_tokenizer()
-            boa_token_id: int = tokenizer.vocab["<0x04>"]  # type: ignore
-            prompt_ids = tokenizer.encode(prompt) + [boa_token_id]
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         processed_outputs = super()._call_hf_processor(
@@ -180,6 +176,16 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
             processed_outputs["image_patches"] = image_patches[0]
 
         return processed_outputs
+
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        # HF processor adds boa_token_id
+        tokenizer = self.info.get_tokenizer()
+        boa_token_id: int = tokenizer.vocab["<0x04>"]  # type: ignore
+
+        return prompt_tokens + [boa_token_id]
 
     def _get_mm_fields_config(
         self,
@@ -223,11 +229,11 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
 
     def apply(
         self,
-        prompt_text: str,
+        prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputsV2:
-        result = super().apply(prompt_text, mm_data, hf_processor_mm_kwargs)
+        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
 
         # Only |SPEAKER| (image) tokens should be considered as placeholders,
         # so we ignore the trailing bos_token_id

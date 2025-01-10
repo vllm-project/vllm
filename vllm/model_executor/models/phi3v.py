@@ -481,11 +481,11 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 
     def apply(
         self,
-        prompt_text: str,
+        prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputsV2:
-        result = super().apply(prompt_text, mm_data, hf_processor_mm_kwargs)
+        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
 
         # Only <|image|> tokens should be considered as placeholders,
         # so we ignore the trailing bos_token_id

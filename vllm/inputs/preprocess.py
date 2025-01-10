@@ -279,10 +279,6 @@ class InputPreprocessor:
 
         mm_processor = self.mm_registry.create_processor(
             self.model_config, tokenizer)
-        if isinstance(prompt, list):
-            logger.warning("Passing `multi_modal_data` in TokensPrompt is"
-                           "deprecated and will be removed in a future update")
-            prompt = tokenizer.decode(prompt)
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 

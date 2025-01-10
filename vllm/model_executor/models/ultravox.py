@@ -138,12 +138,8 @@ class UltravoxMultiModalProcessor(
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not mm_data:
-            tokenizer = self.info.get_tokenizer()
-
-            prompt_ids = tokenizer.encode(
-                prompt,
-                add_special_tokens=False,  # type: ignore
-            )
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         mm_data = dict(mm_data)
@@ -187,6 +183,16 @@ class UltravoxMultiModalProcessor(
             audio_token_len=audio_token_len,
         )
         return BatchFeature(combined_outputs)
+
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        # HF processor omits bos_token_id by setting add_special_tokens=False
+        tokenizer = self.info.get_tokenizer()
+        assert prompt_tokens[0] == tokenizer.bos_token_id
+
+        return prompt_tokens[1:]
 
     def _get_mm_fields_config(
         self,

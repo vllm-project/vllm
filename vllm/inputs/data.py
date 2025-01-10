@@ -44,13 +44,13 @@ class TokensPrompt(TypedDict):
 
     multi_modal_data: NotRequired["MultiModalDataDict"]
     """
-    DEPRECATED: Optional multi-modal data to pass to the model,
+    Optional multi-modal data to pass to the model,
     if the model supports it.
     """
 
     mm_processor_kwargs: NotRequired[Dict[str, Any]]
     """
-    DEPRECATED: Optional multi-modal processor kwargs to be forwarded to the
+    Optional multi-modal processor kwargs to be forwarded to the
     multimodal input mapper & processor. Note that if multiple modalities
     have registered mappers etc for the model being considered, we attempt
     to pass the mm_processor_kwargs to each of them.
