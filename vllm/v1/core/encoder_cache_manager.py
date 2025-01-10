@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Dict, List, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -74,10 +74,36 @@ def compute_encoder_cache_budget(
 
     encoder_cache_budget = 0
 
-    # TODO: handle encoder-decoder models once we support them.
     if not model_config.is_multimodal_model:
         return encoder_cache_budget
 
+    # TODO: handle encoder-decoder models once we support them.
+    encoder_cache_budget, _, _ = compute_encoder_cache_budget_multimodal(
+        model_config, scheduler_config)
+
+    return encoder_cache_budget
+
+
+def compute_encoder_cache_budget_multimodal(
+    model_config: "ModelConfig",
+    scheduler_config: "SchedulerConfig",
+) -> tuple[int, Optional[str], int]:
+    """Compute the encoder cache budget based on the model and scheduler 
+    configurations for a multimodal model.
+
+    Args:
+        model_config: Model configuration.
+        scheduler_config: Scheduler configuration.
+
+    Returns:
+        - The encoder cache budget, in unit of number of tokens in the 
+            input sequence.
+        - The modality of the multimodal item that requires the most tokens.
+        - The number of multimodal items used to compute the encoder cache 
+            budget.
+    """
+
+    encoder_cache_budget = 0
     max_tokens_by_modality_dict = MULTIMODAL_REGISTRY.get_max_tokens_per_item_by_nonzero_modality(  # noqa: E501
         model_config)
 
@@ -86,7 +112,7 @@ def compute_encoder_cache_budget(
             "All non-text modalities supported by the model have been "
             "explicitly disabled via limit_mm_per_prompt. Encoder cache will "
             "not be initialized.")
-        return encoder_cache_budget
+        return encoder_cache_budget, None, 0
 
     modality, max_tokens_per_mm_item = max(max_tokens_by_modality_dict.items(),
                                            key=lambda item: item[1])
@@ -129,4 +155,4 @@ def compute_encoder_cache_budget(
         " and profiled with %s %s items of the maximum feature size.",
         encoder_cache_budget, num_items, modality)
 
-    return encoder_cache_budget
+    return encoder_cache_budget, modality, num_items

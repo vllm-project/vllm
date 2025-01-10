@@ -19,7 +19,8 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
-from vllm.v1.core.encoder_cache_manager import compute_encoder_cache_budget
+from vllm.v1.core.encoder_cache_manager import (
+    compute_encoder_cache_budget, compute_encoder_cache_budget_multimodal)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -727,13 +728,10 @@ class GPUModelRunner:
             # NOTE: Currently model is profiled with a single non-text
             # modality with the max possible input tokens even when
             # it supports multiple.
-            max_tokens_by_modality_dict = self.mm_registry.get_max_tokens_per_item_by_nonzero_modality(  # noqa: E501
-                self.model_config)
-
-            dummy_data_modality, max_tokens_per_mm_item = max(
-                max_tokens_by_modality_dict.items(), key=lambda item: item[1])
-
-            max_num_mm_items = self.encoder_cache_budget // max_tokens_per_mm_item  # noqa: E501
+            _, dummy_data_modality, max_num_mm_items = compute_encoder_cache_budget_multimodal(  # noqa: E501
+                self.model_config,
+                self.scheduler_config,
+            )
 
             # Create dummy batch of multimodal inputs.
             dummy_request_data = self.input_registry.dummy_data_for_profiling(
