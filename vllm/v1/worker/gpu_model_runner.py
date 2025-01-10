@@ -208,7 +208,7 @@ class GPUModelRunner:
                 num_new_blocks = len(new_block_ids)
                 if num_new_blocks == 0:
                     continue
-                start_index = len(req_state.block_ids)
+                start_index = len(req_state.block_ids[group_id])
                 end_index = start_index + num_new_blocks
                 req_state.block_ids[group_id].extend(new_block_ids)
                 self.input_batch.block_table_cpu[

@@ -136,10 +136,11 @@ class KVCacheManager:
         # find the common cached prefix of all groups
         num_computed_tokens = self.get_common_computed_tokens(computed_tokens)
 
-        for i, blocks in enumerate(computed_blocks):
-            blocks = blocks[:num_computed_tokens //
-                            self.managers[i].block_size]
-            self.managers[i].remove_useless_blocks(blocks, num_computed_tokens)
+        for i, manager in enumerate(self.managers):
+            computed_blocks[i] = computed_blocks[:num_computed_tokens //
+                                                 manager.block_size]
+            manager.remove_useless_blocks(computed_blocks[i],
+                                          num_computed_tokens)
 
         return num_computed_tokens, computed_blocks
 
@@ -160,6 +161,9 @@ class KVCacheManager:
             A list of new blocks if new blocks are allocated, or None
             if new blocks are required but cannot be allocated.
         """
+        # we can free blocks even if we cannot schedule it
+        self.free_blocks_for_sliding_window(request)
+
         req_blocks = self.req_to_blocks[request.request_id]
         num_new_blocks = [
             manager.get_num_new_blocks(request.num_computed_tokens, num_tokens,
@@ -179,16 +183,6 @@ class KVCacheManager:
             (self.free_block_queue.num_free_blocks - total_new_blocks) //
             len(self.managers))
 
-        # NOTE(Chen): do all free before allocation to make less eviction
-        removed_blocks = []
-        for manager, req_blocks_of_group in zip(self.managers, req_blocks):
-            removed_blocks.append(
-                manager.remove_useless_blocks(req_blocks_of_group,
-                                              request.num_computed_tokens))
-        # TODO: better handling of free order (e.g., this order have problem
-        # when different layer has different sliding window size)
-        self._free_blocks(removed_blocks)
-
         new_blocks = []
 
         for i in range(len(self.managers)):
@@ -199,8 +193,7 @@ class KVCacheManager:
                 # Get new blocks from the free block pool considering
                 # preallocated blocks.
                 num_block_to_allocate = min(
-                    num_new_blocks[i] + len(removed_blocks[i]) +
-                    num_preallocate_blocks,
+                    num_new_blocks[i] + num_preallocate_blocks,
                     # Should not exceed the maximum number of blocks per request.
                     # This is especially because the block table has the shape
                     # [..., max_num_blocks_per_req].
@@ -211,7 +204,6 @@ class KVCacheManager:
                     len(req_blocks[i]),
                 )
                 assert total_new_blocks > 0
-                print("allocate block", i, num_block_to_allocate)
 
                 new_blocks_of_group = self._get_new_blocks(
                     num_block_to_allocate)
@@ -311,6 +303,8 @@ class KVCacheManager:
                 cdiv(self.max_model_len, self.managers[i].block_size) -
                 len(computed_blocks[i]),
             )
+            if num_block_to_allocate < 0:
+                return
             assert num_block_to_allocate > 0
 
             new_blocks_of_group = self._get_new_blocks(num_block_to_allocate)
@@ -318,7 +312,6 @@ class KVCacheManager:
             # Concatenate the computed block IDs and the new block IDs.
             req_to_blocks.append(computed_blocks[i] + new_blocks_of_group)
 
-        print("req_to_blocks", [len(blocks) for blocks in req_to_blocks])
         self.req_to_blocks[request.request_id] = req_to_blocks
 
         if not self.enable_caching:
@@ -339,6 +332,7 @@ class KVCacheManager:
                     full_blocks=new_full_blocks,
                     prev_block=computed_blocks[i][-1]
                     if computed_blocks[i] else None,
+                    group_id=i,
                 )
 
         return new_blocks
@@ -358,6 +352,18 @@ class KVCacheManager:
             return
         else:
             self._free_blocks(blocks)
+
+    def free_blocks_for_sliding_window(self, request: Request) -> None:
+        # NOTE(Chen): do all free before allocation to make less eviction
+        req_blocks = self.req_to_blocks[request.request_id]
+        removed_blocks = []
+        for manager, req_blocks_of_group in zip(self.managers, req_blocks):
+            removed_blocks.append(
+                manager.remove_useless_blocks(req_blocks_of_group,
+                                              request.num_computed_tokens))
+        # TODO: better handling of free order (e.g., this order have problem
+        # when different layer has different sliding window size)
+        self._free_blocks(removed_blocks)
 
     def _free_blocks(self, blocks: KVCacheBlocks) -> None:
         # Fast path: if all blocks are empty, return. This will happen during
@@ -544,8 +550,6 @@ class KVCacheManager:
         if len(block_size_set) == 1:
             # O(n) time complexity if block_size of all groups are the same
             ordered_blocks = []
-            print("block length",
-                  [len(blocks_of_group) for blocks_of_group in blocks])
             for i in range(len(blocks[0]) - 1, -1, -1):
                 for blocks_of_group in blocks:
                     ordered_blocks.append(blocks_of_group[i])

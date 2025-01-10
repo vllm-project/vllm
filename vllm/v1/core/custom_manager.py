@@ -81,7 +81,7 @@ class FullAttentionManager(CustomManager):
         return []
 
 
-class SlidingWindowManager(CustomManager):
+class SlidingWindowManager(FullAttentionManager):
 
     def __init__(self, layer_spec: SlidingWindowSpec,
                  memory_pool_operations: MemoryPoolOperations):
@@ -119,20 +119,6 @@ class SlidingWindowManager(CustomManager):
                     self.memory_pool_operations.get_null_block())
                 start = i + 1
         return ranges, computed_blocks
-
-    def get_num_new_blocks(self, num_computed_tokens: int,
-                           num_append_tokens: int,
-                           num_allocated_blocks: int) -> int:
-        # TODO: need test on we can get the correct number
-        # TODO: need test on the assumption that freeing blocks outside sliding
-        # window before allocating new blocks
-        # NOTE: may be 1 more block than required
-        num_computed_blocks = min(cdiv(num_computed_tokens, self.block_size),
-                                  self.num_block_sliding_window)
-        num_append_blocks = cdiv(num_append_tokens, self.block_size)
-        num_required_blocks = num_computed_blocks + num_append_blocks
-        num_new_blocks = num_required_blocks - num_allocated_blocks
-        return num_new_blocks
 
     def remove_useless_blocks(self, block_table: List[KVCacheBlock],
                               num_computed_tokens: int) -> List[KVCacheBlock]:

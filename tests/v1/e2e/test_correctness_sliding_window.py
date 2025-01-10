@@ -14,12 +14,10 @@ def test_sliding_window_retrival(monkeypatch, model, batch_size, seed):
     If we tell it upfront which we are going to be looking for, then
     it answers correctly (mostly).
     """
-    prompt = "\n<User>: Implement fibonacci sequence in Python.\n<Claude>:"
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        llm = LLM(model="Qwen/Qwen2-1.5B-Instruct")
+        llm = LLM(model=model)
         sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
 
         prompts, answer, indices = prep_prompts(batch_size)

@@ -259,7 +259,7 @@ def hash_block_tokens(
         The entire tuple is used as the hash key of the block.
     """
     return BlockHashType(hash((parent_block_hash, *curr_block_token_ids)),
-                         tuple(curr_block_token_ids), extra_keys)
+                         tuple(curr_block_token_ids), tuple(extra_keys))
 
 
 def hash_request_tokens(block_size: int, request: Request,
