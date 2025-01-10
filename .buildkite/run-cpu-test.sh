@@ -80,7 +80,7 @@ function cpu_tests() {
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" bash -c "
     set -e
     pytest -s -v \
-    tests/lora/test_qwen2vl.py \
+    tests/lora/test_qwen2vl.py
 }
 
 # All of CPU tests are expected to be finished less than 25 mins.
