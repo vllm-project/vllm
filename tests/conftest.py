@@ -888,9 +888,11 @@ class VllmRunner:
         max_tokens: int,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if isinstance(prompts[0], str):
-            prompts = [TextPrompt(prompt) for prompt in prompts]
+            prompts = [TextPrompt(prompt=prompt) for prompt in prompts]
         else:
-            prompts = [TokensPrompt(tokens) for tokens in prompts]
+            prompts = [
+                TokensPrompt(prompt_token_ids=tokens) for tokens in prompts
+            ]
         outputs = self.model.beam_search(
             prompts,
             BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
