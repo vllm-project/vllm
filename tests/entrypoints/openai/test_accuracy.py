@@ -20,7 +20,7 @@ TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 RTOL = 0.03
 EXPECTED_VALUE = 0.58
-DEFAULT_ARGS = ["--max-model-len", "2048", "--disable-log-requests", "-O", "2"]
+DEFAULT_ARGS = ["--max-model-len", "2048", "--disable-log-requests", "-O2", "--max-num-seqs", "128"]
 MORE_ARGS_LIST = [
     [],  # Default
     ["--enable-chunked-prefill"],  # Chunked

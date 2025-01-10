@@ -75,6 +75,14 @@ class TPUWorker:
         else:
             self.profiler = None
 
+        assert self.device_config.device_type == "tpu"
+        if self.cache_config.cache_dtype == "auto":
+            self.cache_dtype = self.model_config.dtype
+        else:
+            self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
+                self.cache_config.cache_dtype]
+
+
     def initialize(self):
         os.environ["PJRT_DEVICE"] = "TPU"
         torch.set_grad_enabled(False)
@@ -124,7 +132,7 @@ class TPUWorker:
     def load_model(self) -> None:
         self.model_runner.load_model()
 
-    @torch.inference_mode()
+    # @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         head_size = self.model_config.get_head_size()
@@ -207,7 +215,7 @@ class TPUWorker:
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-    @torch.inference_mode()
+    # @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",

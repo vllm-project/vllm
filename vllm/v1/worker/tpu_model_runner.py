@@ -160,7 +160,7 @@ class TPUModelRunner:
                                               dtype=torch.int32).reshape(
                                                   1, -1)
 
-        self.new_req_ids = None
+        self.num_new_reqs = None
 
         # TODO: Remove this
         # self.use_cuda_graph = (self.vllm_config.compilation_config.level
@@ -313,7 +313,7 @@ class TPUModelRunner:
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
             self.input_batch.add_request(req_state, None)  # Append last
-        self.new_req_ids = req_ids_to_add
+        self.num_new_reqs = len(req_ids_to_add)
 
     def _prepare_prefill_inputs(
         self,
@@ -331,7 +331,7 @@ class TPUModelRunner:
         # DECODES are the first num_decodes REQUESTS.
         # PREFILLS are the next num_reqs - num_decodes REQUESTS.
         num_reqs = self.input_batch.num_reqs
-        num_decodes = num_reqs - self.new_req_ids
+        num_decodes = num_reqs - self.num_new_reqs
         for idx in range(num_decodes, num_reqs):
             prefill_request_ids.append(self.input_batch.req_ids[idx])
 
@@ -397,7 +397,7 @@ class TPUModelRunner:
         # DECODES are the first num_decodes REQUESTS.
         # PREFILLS are the next num_reqs - num_decodes REQUESTS.
         num_reqs = self.input_batch.num_reqs
-        num_decodes = num_reqs - self.new_req_ids
+        num_decodes = num_reqs - self.num_new_reqs
 
         if num_decodes == 0:
             return DecodeInputData(num_decodes=0)
@@ -460,7 +460,7 @@ class TPUModelRunner:
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
-        num_decodes = num_reqs - self.new_req_ids
+        num_decodes = num_reqs - self.num_new_reqs
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -773,7 +773,7 @@ class TPUModelRunner:
                 encoder_outputs.append(encoder_output[start_idx:end_idx])
         return encoder_outputs
 
-    @torch.inference_mode()
+    # @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -970,7 +970,7 @@ class TPUModelRunner:
                                    fullgraph=True,
                                    dynamic=False)
 
-    @torch.inference_mode()
+    # @torch.inference_mode()
     def _dummy_run(
         self,
         batch_size: int,
@@ -1155,9 +1155,9 @@ class TPUModelRunner:
                             self.kv_caches,
                             exec_mode=ExecutionMode.DECODE)
             xm.wait_device_ops()
-            logger.info("  -- batch_size: %d, seq_len: %d", batch_size,
-                        seq_len)
-
+            logger.info("  -- batch_size: %d, seq_len: %d, max_num_seqs = %d", batch_size,
+                        seq_len, self.scheduler_config.max_num_seqs)
+            
             if batch_size >= self.scheduler_config.max_num_seqs:
                 break
 

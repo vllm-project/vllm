@@ -30,6 +30,7 @@ class Scheduler:
         # TODO: Refactor! Properly handle for TPU.
         cache_config.enable_prefix_caching = False
         scheduler_config.chunked_prefill_enabled = False
+        print(" --- scheduler_config.max_num_seqs = {}".format(scheduler_config.max_num_seqs))
 
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
