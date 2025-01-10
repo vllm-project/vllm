@@ -8,13 +8,13 @@ In vLLM, generative models implement the {class}`~vllm.model_executor.models.Vll
 Based on the final hidden states of the input, these models output log probabilities of the tokens to generate,
 which are then passed through {class}`~vllm.model_executor.layers.Sampler` to obtain the final text.
 
+For generative models, the only supported `--task` option is `"generate"`.
+Usually, this is automatically inferred so you don't have to specify it.
+
 ## Offline Inference
 
 The {class}`~vllm.LLM` class provides various methods for offline inference.
 See [Engine Arguments](#engine-args) for a list of options when initializing the model.
-
-For generative models, the only supported {code}`task` option is {code}`"generate"`.
-Usually, this is automatically inferred so you don't have to specify it.
 
 ### `LLM.generate`
 
@@ -33,7 +33,7 @@ for output in outputs:
 ```
 
 You can optionally control the language generation by passing {class}`~vllm.SamplingParams`.
-For example, you can use greedy sampling by setting {code}`temperature=0`:
+For example, you can use greedy sampling by setting `temperature=0`:
 
 ```python
 llm = LLM(model="facebook/opt-125m")
