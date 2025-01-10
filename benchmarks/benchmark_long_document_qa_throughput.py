@@ -2,7 +2,7 @@
 Offline benchmark to test the long document QA throughput.
 
 Example usage:
-    # The workload samples 8 different prompts with a default input
+    # This workload samples 8 different prompts with a default input
     # length of 20000 tokens, then replicates each prompt 2 times 
     # in random order.
     python benchmark_long_document_qa_throughput.py \
