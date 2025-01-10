@@ -17,7 +17,7 @@ ARM CPU backend currently supports Float32, FP16 and BFloat16 datatypes.
 
 ### Build wheel from source
 
-:::{include} build.md
+:::{include} build.inc.md
 :::
 
 Testing has been conducted on AWS Graviton3 instances for compatibility.
