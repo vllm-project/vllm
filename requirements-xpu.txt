@@ -11,8 +11,8 @@ wheel
 jinja2
 datasets
 
-torch @ https://intel-optimized-pytorch.s3.cn-north-1.amazonaws.com.cn/ipex_dev/xpu/torch-2.5.0a0%2Bgite84e33f-cp310-cp310-linux_x86_64.whl
-intel-extension-for-pytorch @ https://intel-optimized-pytorch.s3.cn-north-1.amazonaws.com.cn/ipex_dev/xpu/intel_extension_for_pytorch-2.5.10%2Bgit9d489a8-cp310-cp310-linux_x86_64.whl
-oneccl_bind_pt @ https://intel-optimized-pytorch.s3.cn-north-1.amazonaws.com.cn/ipex_dev/xpu/oneccl_bind_pt-2.5.0%2Bxpu-cp310-cp310-linux_x86_64.whl
+torch @ https://download.pytorch.org/whl/nightly/xpu/torch-2.6.0.dev20241231%2Bxpu-cp310-cp310-linux_x86_64.whl
+intel-extension-for-pytorch @ https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local/gpu/new/validation/IPEX/weekly/PVC/2025/ww01_Stock_test/py310/intel_extension_for_pytorch-2.6.10+gite4ef6fe-cp310-cp310-linux_x86_64.whl
+oneccl_bind_pt @ https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local/gpu/new/validation/IPEX/weekly/PVC/2025/ww01_Stock_test/py310/oneccl_bind_pt-2.5.0+xpu-cp310-cp310-linux_x86_64.whl
 
-triton-xpu == 3.0.0b1
+pytorch_triton_xpu @ https://download.pytorch.org/whl/nightly/pytorch_triton_xpu-3.2.0%2Bgite98b6fcb-cp310-cp310-linux_x86_64.whl
