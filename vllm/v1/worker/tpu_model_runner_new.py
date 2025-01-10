@@ -1,13 +1,20 @@
 import gc
 import time
+import enum
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Tuple, cast, Optional
+from unittest.mock import patch
 
 import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
 
+# TPU XLA related
+import torch_xla.core.xla_model as xm
+import torch_xla.runtime as xr
+
+from vllm.attention import AttentionMetadata
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
@@ -18,7 +25,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
-from vllm.v1.attention.backends.pallas import PallasMetadata
+from vllm.v1.attention.backends.pallas import PallasMetadata, PallasAttentionBackend
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -30,8 +37,22 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # Here we utilize the behavior that out-of-bound index is ignored.
-# FIXME: Find a more reliable way to prevent possible bugs.
+# FIXME(woosuk): Find a more reliable way to prevent possible bugs.
 _PAD_SLOT_ID = 1_000_000_000
+# FIXME(woosuk): Temporarily disabled top-p sampling since it's too slow.
+_ENABLE_TOP_P = False
+# FIXME(woosuk): A temporary hack to support `n > 1`.
+# This can significantly affect the performance if too large.
+_MAX_NUM_SAMPLES = 128
+
+
+class ExecutionMode(enum.Enum):
+    PREFILL = enum.auto()
+    DECODE = enum.auto()
+    PREFIX_PREFILL = enum.auto()
+
+    def is_prefill(self) -> bool:
+        return self in (ExecutionMode.PREFILL, ExecutionMode.PREFIX_PREFILL)
 
 
 @dataclass
@@ -74,6 +95,7 @@ class TPUModelRunner:
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.device_config = vllm_config.device_config
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -753,6 +775,84 @@ class TPUModelRunner:
                 encoder_outputs.append(encoder_output[start_idx:end_idx])
         return encoder_outputs
 
+    def execute_model_xxx():
+        prefill_data, decode_data = self._prepare_inputs(scheduler_output)
+        num_reqs = self.input_batch.num_reqs
+        sampled_token_ids = torch.empty(num_reqs, dtype=torch.int32)
+
+        ######################### DECODES #########################
+        # Decodes run as one single batch with [padded_batch, 1]
+        if decode_data.num_decodes > 0:
+
+            # FORWARD.
+            selected_token_ids = self.model(decode_data.token_ids,
+                                            decode_data.position_ids,
+                                            decode_data.attn_metadata,
+                                            self.kv_caches,
+                                            is_prompt=False)
+
+            # NOTE: TPU<>CPU sync happens here.
+            # We need to call .cpu() first to avoid recompilation.
+            token_ids = selected_token_ids.cpu()[:decode_data.num_decodes]
+            sampled_token_ids_list = token_ids.tolist()
+            sampled_token_ids[:decode_data.num_decodes] = token_ids
+
+            # UPDATE REQUEST STATE.
+            for i, req_id in enumerate(
+                    self.input_batch.req_ids[:decode_data.num_decodes]):
+                req_state = self.requests[req_id]
+
+                # TODO: ASSERT NO CHUNKED PREFILL.
+                assert scheduler_output.num_scheduled_tokens[req_id] == 1
+                seq_len = (req_state.num_computed_tokens +
+                           scheduler_output.num_scheduled_tokens[req_id])
+                assert seq_len == req_state.num_tokens
+
+                token_id = sampled_token_ids_list[i]
+                self.input_batch.token_ids_cpu[i, seq_len] = token_id
+                req_state.output_token_ids.append(token_id)
+
+        ######################### PREFILLS #########################
+        # Prefills run separately with shape [1, padded_prefill_len],
+        # due to lack of variable length attention kernel so far.
+        for idx, (req_id, prompt_len, token_ids, position_ids,
+                  attn_metadata) in enumerate(prefill_data.zipped()):
+
+            # FORWARD.
+            selected_token_ids = self.model(token_ids,
+                                            position_ids,
+                                            attn_metadata,
+                                            self.kv_caches,
+                                            is_prompt=True)
+
+            # NOTE: TPU<>CPU sync happens here.
+            # We need to call .cpu() first to avoid recompilation.
+            token_id = selected_token_ids.cpu()[prompt_len - 1].item()
+            sampled_token_ids[decode_data.num_decodes + idx] = token_id
+            req_state = self.requests[req_id]
+
+            # TODO: ASSERT NO PREFIX CACHING.
+            assert req_state.num_computed_tokens == 0
+            seq_len = (req_state.num_computed_tokens +
+                       scheduler_output.num_scheduled_tokens[req_id])
+
+            # TODO: ASSERT NO CHUNKED PREFILL.
+            assert seq_len == req_state.num_tokens
+            assert prompt_len == seq_len
+
+            # UPDATE REQUEST STATE.
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            self.input_batch.token_ids_cpu[req_idx, seq_len] = token_id
+            req_state.output_token_ids.append(token_id)
+
+        return ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids[:num_reqs],
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids_cpu=sampled_token_ids,
+            logprob_token_ids_cpu=None,
+            logprobs_cpu=None,
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -760,102 +860,152 @@ class TPUModelRunner:
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
 
-        if self.is_multimodal_model:
-            # Run the multimodal encoder if any.
-            self._execute_encoder(scheduler_output)
-            encoder_outputs = self._gather_encoder_outputs(scheduler_output)
-        else:
-            encoder_outputs = []
+        # TODO: Ressurect this code
+        # if self.is_multimodal_model:
+        #     # Run the multimodal encoder if any.
+        #     self._execute_encoder(scheduler_output)
+        #     encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+        # else:
+        #     encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if (self.use_cuda_graph
-                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
-            # Use piecewise CUDA graphs.
-            # Add padding to the batch size.
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                num_scheduled_tokens)
-        else:
-            # Eager mode.
-            num_input_tokens = num_scheduled_tokens
-        attn_metadata.num_input_tokens = num_input_tokens
+        prefill_data, decode_data = self._prepare_inputs(scheduler_output)
 
-        if self.is_multimodal_model:
-            # NOTE(woosuk): To unify token ids and soft tokens (vision
-            # embeddings), we always use embeddings (rather than token ids)
-            # as input to the multimodal model, even when the input is text.
-            input_ids = self.input_ids[:num_scheduled_tokens]
-            if encoder_outputs:
-                inputs_embeds = self.model.get_input_embeddings(
-                    input_ids, encoder_outputs)
-            else:
-                inputs_embeds = self.model.get_input_embeddings(input_ids)
-            # TODO(woosuk): Avoid the copy. Optimize.
-            self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
-            input_ids = None
-        else:
-            # For text-only models, we use token ids as input.
-            # While it is possible to use embeddings as input just like the
-            # multimodal models, it is not desirable for performance since
-            # then the embedding layer is not included in the CUDA graph.
-            input_ids = self.input_ids[:num_input_tokens]
-            inputs_embeds = None
-
-        # Run the decoder.
-        # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
-                input_ids=input_ids,
-                positions=self.positions[:num_input_tokens],
-                kv_caches=self.kv_caches,
-                attn_metadata=None,
-                inputs_embeds=inputs_embeds,
-            )
-        hidden_states = hidden_states[:num_scheduled_tokens]
-        hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(hidden_states, None)
-
-        # Sample the next token and get logprobs if needed.
-        sampling_metadata = self._prepare_sampling(scheduler_output)
-        sampler_output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
-
-        sampled_token_ids = sampler_output.sampled_token_ids
-        # TODO(woosuk): The following loop can be slow since it iterates over
-        # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
-        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            assert req_id is not None
+        sampled_token_ids = torch.empty(num_reqs, dtype=torch.int32)
+
+        # attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        num_input_tokens = num_scheduled_tokens
+        # attn_metadata.num_input_tokens = num_input_tokens
+
+        # TODO: Resurrect this code
+        # if self.is_multimodal_model:
+        #     # NOTE(woosuk): To unify token ids and soft tokens (vision
+        #     # embeddings), we always use embeddings (rather than token ids)
+        #     # as input to the multimodal model, even when the input is text.
+        #     input_ids = self.input_ids[:num_scheduled_tokens]
+        #     if encoder_outputs:
+        #         inputs_embeds = self.model.get_input_embeddings(
+        #             input_ids, encoder_outputs)
+        #     else:
+        #         inputs_embeds = self.model.get_input_embeddings(input_ids)
+        #     # TODO(woosuk): Avoid the copy. Optimize.
+        #     self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+        #     inputs_embeds = self.inputs_embeds[:num_input_tokens]
+        #     input_ids = None
+        # else:
+        #     # For text-only models, we use token ids as input.
+        #     # While it is possible to use embeddings as input just like the
+        #     # multimodal models, it is not desirable for performance since
+        #     # then the embedding layer is not included in the CUDA graph.
+        #     input_ids = self.input_ids[:num_input_tokens]
+        #     inputs_embeds = None
+
+        ######################### DECODES #########################
+        # Decodes run as one single batch with [padded_batch, 1]
+        if decode_data.num_decodes > 0:
+            # FORWARD.
+            selected_token_ids = self.model(decode_data.token_ids,
+                                            decode_data.position_ids,
+                                            decode_data.attn_metadata,
+                                            self.kv_caches,
+                                            is_prompt=False)
+
+            # NOTE: TPU<>CPU sync happens here.
+            # We need to call .cpu() first to avoid recompilation.
+            token_ids = selected_token_ids.cpu()[:decode_data.num_decodes]
+            sampled_token_ids_list = token_ids.tolist()
+            sampled_token_ids[:decode_data.num_decodes] = token_ids
+
+            # UPDATE REQUEST STATE.
+            for i, req_id in enumerate(
+                    self.input_batch.req_ids[:decode_data.num_decodes]):
+                req_state = self.requests[req_id]
+
+                # TODO: ASSERT NO CHUNKED PREFILL.
+                assert scheduler_output.num_scheduled_tokens[req_id] == 1
+                seq_len = (req_state.num_computed_tokens +
+                           scheduler_output.num_scheduled_tokens[req_id])
+                assert seq_len == req_state.num_tokens
+
+                # TODO: Verify if req_id_to_index mapping is needed here!
+                token_id = sampled_token_ids_list[i]
+                self.input_batch.token_ids_cpu[i, seq_len] = token_id
+                req_state.output_token_ids.append(token_id)
+
+        ######################### PREFILLS #########################
+        # Prefills run separately with shape [1, padded_prefill_len],
+        # due to lack of variable length attention kernel so far.
+        for idx, (req_id, prompt_len, token_ids, position_ids,
+                  attn_metadata) in enumerate(prefill_data.zipped()):
+            # FORWARD.
+            selected_token_ids = self.model(token_ids,
+                                            position_ids,
+                                            attn_metadata,
+                                            self.kv_caches,
+                                            is_prompt=True)
+
+            # NOTE: TPU<>CPU sync happens here.
+            # We need to call .cpu() first to avoid recompilation.
+            token_id = selected_token_ids.cpu()[prompt_len - 1].item()
+            sampled_token_ids[decode_data.num_decodes + idx] = token_id
             req_state = self.requests[req_id]
+
+            # TODO: ASSERT NO PREFIX CACHING.
+            assert req_state.num_computed_tokens == 0
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
-            assert seq_len <= req_state.num_tokens
-            if seq_len == req_state.num_tokens:
-                # Append the sampled token to the output token ids.
-                token_id = sampled_token_ids[i]
-                self.input_batch.token_ids_cpu[i, seq_len] = token_id
-                self.input_batch.num_tokens[i] += 1
-                req_state.output_token_ids.append(token_id)
-            else:
-                # Ignore the sampled token from the partial request.
-                # Rewind the generator state as if the token was not sampled.
-                generator = self.input_batch.generators.get(i)
-                if generator is not None:
-                    # This relies on cuda-specific torch-internal impl details
-                    generator.set_offset(generator.get_offset() - 4)
 
-        if sampler_output.logprob_token_ids is None:
-            logprob_token_ids = None
-        else:
-            logprob_token_ids = sampler_output.logprob_token_ids.cpu()
-        if sampler_output.logprobs is None:
-            logprobs = None
-        else:
-            logprobs = sampler_output.logprobs.cpu()
+            # TODO: ASSERT NO CHUNKED PREFILL.
+            assert seq_len == req_state.num_tokens
+            assert prompt_len == seq_len
+
+            # UPDATE REQUEST STATE.
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            self.input_batch.token_ids_cpu[req_idx, seq_len] = token_id
+            req_state.output_token_ids.append(token_id)
+
+        # TODO: Remove
+        # # Sample the next token and get logprobs if needed.
+        # sampling_metadata = self._prepare_sampling(scheduler_output)
+        # sampler_output = self.model.sample(
+        #     logits=logits,
+        #     sampling_metadata=sampling_metadata,
+        # )
+
+        # sampled_token_ids = sampler_output.sampled_token_ids
+        # # TODO(woosuk): The following loop can be slow since it iterates over
+        # # the requests one by one. Optimize.
+        # num_reqs = self.input_batch.num_reqs
+        # for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+        #     assert req_id is not None
+        #     req_state = self.requests[req_id]
+        #     seq_len = (req_state.num_computed_tokens +
+        #                scheduler_output.num_scheduled_tokens[req_id])
+        #     assert seq_len <= req_state.num_tokens
+        #     if seq_len == req_state.num_tokens:
+        #         # Append the sampled token to the output token ids.
+        #         token_id = sampled_token_ids[i]
+        #         self.input_batch.token_ids_cpu[i, seq_len] = token_id
+        #         self.input_batch.num_tokens[i] += 1
+        #         req_state.output_token_ids.append(token_id)
+        #     else:
+        #         # Ignore the sampled token from the partial request.
+        #         # Rewind the generator state as if the token was not sampled.
+        #         generator = self.input_batch.generators.get(i)
+        #         if generator is not None:
+        #             # This relies on cuda-specific torch-internal impl details
+        #             generator.set_offset(generator.get_offset() - 4)
+
+        # if sampler_output.logprob_token_ids is None:
+        #     logprob_token_ids = None
+        # else:
+        #     logprob_token_ids = sampler_output.logprob_token_ids.cpu()
+        # if sampler_output.logprobs is None:
+        #     logprobs = None
+        # else:
+        #     logprobs = sampler_output.logprobs.cpu()
 
         # num_reqs entries should be non-None
         assert all(
@@ -866,45 +1016,161 @@ class TPUModelRunner:
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=sampled_token_ids,
-            logprob_token_ids_cpu=logprob_token_ids,
-            logprobs_cpu=logprobs,
+            sampled_token_ids_cpu=sampled_token_ids,
+            logprob_token_ids_cpu=None,
+            logprobs_cpu=None,
         )
+
         return model_runner_output
 
     def load_model(self) -> None:
-        logger.info("Starting to load model %s...", self.model_config.model)
-        with DeviceMemoryProfiler() as m:  # noqa: SIM117
-            self.model = get_model(vllm_config=self.vllm_config)
+        self.device = self.device_config.device
 
-        self.model_memory_usage = m.consumed_memory
-        logger.info("Loading model weights took %.4f GB",
-                    self.model_memory_usage / float(2**30))
+        # NOTE(woosuk): While the executor assigns the TP ranks to the worker
+        # process, the ranks can be different from the ranks internally assigned
+        # by the xm runtime. Therefore, there is a mismatch in the rank
+        # assignment between the gloo (cpu) runtime and the xm (tpu) runtime.
+        # This is not a problem in linear layers because all-reduce is
+        # rank-agnostic. However, it matters for all-gather as the ranks
+        # determine the order of concatenating the output tensors.
+        # As a workaround, we use the xm's rank assignment only when loading
+        # the embedding weights.
+        xm_tp_rank = xr.global_ordinal()
+        with patch(
+                "vllm.model_executor.layers.vocab_parallel_embedding."
+                "get_tensor_model_parallel_rank",
+                return_value=xm_tp_rank):
+            model = get_model(vllm_config=self.vllm_config)
+        model = model.eval()
+        xm.wait_device_ops()
+        model = ModelWrapper(model)
+        self.model = torch.compile(model,
+                                   backend="openxla",
+                                   fullgraph=True,
+                                   dynamic=False)
 
     @torch.inference_mode()
     def _dummy_run(
         self,
-        model: nn.Module,
-        num_tokens: int,
-        kv_caches: List[torch.Tensor],
-    ) -> torch.Tensor:
-        if self.is_multimodal_model:
-            input_ids = None
-            inputs_embeds = self.inputs_embeds[:num_tokens]
+        batch_size: int,
+        seq_len: int,
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        exec_mode: ExecutionMode,
+    ) -> None:
+        exec_mode = ExecutionMode(exec_mode)
+        if exec_mode.is_prefill():
+            seq_len = (seq_len + 15) // 16 * 16
+            token_ids = torch.zeros((batch_size, seq_len),
+                                    dtype=torch.int32,
+                                    device=self.device)
+            position_ids = torch.zeros((batch_size, seq_len),
+                                       dtype=torch.int32,
+                                       device=self.device)
+            slot_mapping = torch.zeros((batch_size, seq_len),
+                                       dtype=torch.int64,
+                                       device=self.device)
+            input_lens = torch.ones((batch_size, ),
+                                    dtype=torch.int32,
+                                    device=self.device)
+            if exec_mode == ExecutionMode.PREFILL:
+                attn_metadata = PallasMetadata(
+                    num_prefills=batch_size,
+                    num_prefill_tokens=batch_size * seq_len,
+                    num_decode_tokens=0,
+                    slot_mapping=slot_mapping,
+                    multi_modal_placeholder_index_maps=None,
+                    block_tables=None,
+                    context_lens=None,
+                    effective_query_lens=None,
+                )
+
+            else:
+                context_lens = torch.ones((batch_size, ),
+                                          dtype=torch.int32,
+                                          device=self.device)
+
+                block_tables = torch.zeros(
+                    (batch_size, self.max_num_blocks_per_req),
+                    dtype=torch.int32,
+                    device=self.device)
+
+                effective_query_lens = torch.ones_like(context_lens)
+
+                attn_metadata = PallasMetadata(
+                    num_prefills=batch_size,
+                    num_prefill_tokens=batch_size * seq_len,
+                    num_decode_tokens=0,
+                    slot_mapping=slot_mapping,
+                    multi_modal_placeholder_index_maps=None,
+                    block_tables=block_tables,
+                    context_lens=context_lens,
+                    effective_query_lens=effective_query_lens,
+                )
         else:
-            input_ids = self.input_ids[:num_tokens]
-            inputs_embeds = None
-        with set_forward_context(None, self.vllm_config):
-            hidden_states = model(
-                input_ids=input_ids,
-                positions=self.positions[:num_tokens],
-                kv_caches=kv_caches,
-                attn_metadata=None,
-                inputs_embeds=inputs_embeds,
+            assert seq_len == 1
+            token_ids = torch.zeros((batch_size, seq_len),
+                                    dtype=torch.int32,
+                                    device=self.device)
+            position_ids = torch.zeros((batch_size, seq_len),
+                                       dtype=torch.int32,
+                                       device=self.device)
+            slot_mapping = torch.zeros((batch_size, seq_len),
+                                       dtype=torch.int64,
+                                       device=self.device)
+            block_tables = torch.zeros(
+                (batch_size, self.max_num_blocks_per_req),
+                dtype=torch.int32,
+                device=self.device)
+            context_lens = torch.ones((batch_size, ),
+                                      dtype=torch.int32,
+                                      device=self.device)
+            input_lens = torch.ones((batch_size, ),
+                                    dtype=torch.int32,
+                                    device=self.device)
+            attn_metadata = PallasMetadata(
+                num_prefills=0,
+                num_prefill_tokens=0,
+                num_decode_tokens=batch_size * seq_len,
+                slot_mapping=slot_mapping,
+                multi_modal_placeholder_index_maps=None,
+                block_tables=block_tables,
+                context_lens=context_lens,
             )
-        return hidden_states
+
+        t = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
+        p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
+        num_samples = _MAX_NUM_SAMPLES if exec_mode.is_prefill() else 1
+
+        # NOTE(woosuk): There are two stages of compilation: torch.compile and
+        # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
+        # overhead by reusing the FX graph for different shapes.
+        # However, the XLA graph will still require static shapes and needs to
+        # be re-compiled for every different shapes. This overhead is inevitable
+        # in the first run, but can be skipped afterwards as we cache the XLA
+        # graphs in the disk (VLLM_XLA_CACHE_PATH).
+        if exec_mode.is_prefill():
+            # Prefll
+            torch._dynamo.mark_dynamic(token_ids, 1)
+            torch._dynamo.mark_dynamic(position_ids, 1)
+            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
+        else:
+            # Decode
+            torch._dynamo.mark_dynamic(token_ids, 0)
+            torch._dynamo.mark_dynamic(position_ids, 0)
+            torch._dynamo.mark_dynamic(input_lens, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
+            torch._dynamo.mark_dynamic(t, 0)
+            torch._dynamo.mark_dynamic(p, 0)
+
+        # Dummy run.
+        self.model(token_ids, position_ids, attn_metadata, input_lens, t, p,
+                   num_samples, kv_caches)
 
     def profile_run(self) -> None:
+        """Profile to measure peak memory during forward pass."""
+
         # use an empty tensor instead of `None`` to force Dynamo to pass
         # it by reference, rather by specializing on the value `None`.
         # the `dtype` argument does not matter, and we use `float32` as
@@ -912,152 +1178,184 @@ class TPUModelRunner:
         # it is important to create tensors inside the loop, rather than
         # multiplying the list, to avoid Dynamo from treating them as
         # tensor aliasing.
-        dummy_kv_caches = [
-            torch.tensor([], dtype=torch.float32, device=self.device)
-            for _ in range(self.num_attn_layers)
-        ]
+        dummy_kv_caches = [(
+            torch.tensor([], dtype=torch.float32, device=self.device),
+            torch.tensor([], dtype=torch.float32, device=self.device),
+        ) for _ in range(self.num_attn_layers)]
 
-        # Profile with multimodal encoder & encoder cache.
-        if self.is_multimodal_model:
-
-            # Create dummy batch of multimodal inputs.
-            dummy_request_data = self.input_registry.dummy_data_for_profiling(
-                model_config=self.model_config,
-                seq_len=self.max_num_tokens,
-                mm_registry=self.mm_registry,
-            )
-            dummy_mm_data = dummy_request_data.multi_modal_data
-
-            # NOTE: Currently model is profiled with a single non-text
-            # modality with the max possible input tokens even when
-            # it supports multiple.
-            max_tokens_by_modality_dict = self.mm_registry.get_max_tokens_per_item_by_modality(  # noqa: E501
-                self.model_config)
-
-            dummy_data_modality, max_tokens_per_mm_item = max(
-                max_tokens_by_modality_dict.items(), key=lambda item: item[1])
-
-            # Check how many items of this modality can be supported by
-            # the encoder cache budget.
-            encoder_cache_budget = min(self.max_num_encoder_input_tokens,
-                                       self.encoder_cache_size)
-            max_num_mm_items_encoder_budget = encoder_cache_budget // \
-                max_tokens_per_mm_item
-
-            # TODO: Allow users to set encoder_cache_budget in case this
-            # happens.
-            assert max_num_mm_items_encoder_budget > 0, (
-                f"Encoder cache budget={encoder_cache_budget} is too small to "
-                f"support the maximum possible size of multimodal embeddings"
-                f"={max_tokens_per_mm_item}.")
-
-            # Check how many items of this modality can be supported by
-            # the decoder budget.
-            max_mm_items_per_req = max(
-                self.mm_registry.get_mm_limits_per_prompt(
-                    self.model_config).values())
-
-            # NOTE: We do not consider max_num_batched_tokens on purpose
-            # because the multimodal embeddings can be generated in advance
-            # and chunked prefilled.
-            max_num_mm_items_decoder_budget = self.max_num_reqs * \
-                max_mm_items_per_req
-
-            max_num_mm_items = min(max_num_mm_items_encoder_budget,
-                                   max_num_mm_items_decoder_budget)
-
-            # Dummy data definition in V0 may contain multiple multimodal items
-            # (e.g, multiple images) for a single request, therefore here we
-            # always replicate first item by max_num_mm_items times since in V1
-            # they are scheduled to be processed separately.
-
-            # Case when models have a merged processor, their dummy data is
-            # already batched `MultiModalKwargs`, therefore we take the first
-            # `MultiModalKwargsItem` from the desired modality to profile on.
-            if isinstance(dummy_mm_data, MultiModalKwargs):
-                dummy_mm_item = dummy_mm_data.get_item(
-                    modality=dummy_data_modality, item_index=0)
-                dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
-
-            # Case when models have dummy data explicitly defined as
-            # `MultiModalDataDict`, so they need to be processed through input
-            # mapper.
-            # TODO (ywang96): deprecate this path once merged processor is
-            # supported on all models.
-            else:
-                mm_kwargs_list = self.mm_input_mapper_profiling.process_inputs(
-                    mm_data=dummy_mm_data,
-                    mm_hashes=None,
-                    mm_processor_kwargs=None,
-                    precomputed_mm_inputs=None)
-                dummy_mm_kwargs = mm_kwargs_list[0]
-
-            batched_dummy_mm_inputs = MultiModalKwargs.batch(
-                [dummy_mm_kwargs] * max_num_mm_items)
-            batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
-                batched_dummy_mm_inputs, device=self.device)
-
-            # Run multimodal encoder.
-            dummy_encoder_outputs = self.model.get_multimodal_embeddings(
-                **batched_dummy_mm_inputs)
-            assert len(dummy_encoder_outputs) == max_num_mm_items, (
-                "Expected dimension 0 of encoder outputs to match the number "
-                f"of multimodal data items: {max_num_mm_items}, got "
-                f"{len(dummy_encoder_outputs)=} instead. This is most likely "
-                "due to the 'get_multimodal_embeddings' method of the model "
-                "not implemented correctly.")
-
-            # Cache the dummy encoder outputs.
-            self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
-
-        # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.model, self.max_num_tokens,
-                                        dummy_kv_caches)
-        logits = self.model.compute_logits(hidden_states, None)
-        logits = logits[:self.max_num_tokens]
-        # TODO(woosuk): Consider the memory usage of the sampler.
-        torch.cuda.synchronize()
-        del hidden_states, logits
-        self.encoder_cache.clear()
-        gc.collect()
+        # Run empty forward.
+        self._dummy_run(
+            batch_size=1,
+            seq_len=self.max_num_tokens,  # Will be rounded to 16 multiple
+            kv_caches=dummy_kv_caches,
+            exec_mode=ExecutionMode.PREFILL)
 
     def capture_model(self) -> None:
-        if not self.use_cuda_graph:
-            logger.warning(
-                "Skipping CUDA graph capture. Please add "
-                "-O %s to use CUDA graphs.", CompilationLevel.PIECEWISE)
-            return
+        """Compile the model."""
 
-        start_time = time.perf_counter()
-        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
+        logger.info("Compiling the model with different input shapes.")
 
-        # Trigger CUDA graph capture for specific shapes.
-        # Capture the large shapes first so that the smaller shapes
-        # can reuse the memory pool allocated for the large shapes.
-        with graph_capture(device=self.device):
-            for num_tokens in reversed(self.cudagraph_batch_sizes):
-                for _ in range(self.vllm_config.compilation_config.
-                               cudagraph_num_of_warmups):
-                    self._dummy_run(self.model, num_tokens, self.kv_caches)
-                self._dummy_run(self.model, num_tokens, self.kv_caches)
+        # Capture prefill shapes
+        start = time.perf_counter()
+        for batch_size in [1]:
+            seq_len = 16
+            while True:
+                self._dummy_run(batch_size,
+                                seq_len,
+                                self.kv_caches,
+                                exec_mode=ExecutionMode.PREFILL)
+                xm.wait_device_ops()
+                logger.info("  -- batch_size: %d, seq_len: %d", batch_size,
+                            seq_len)
 
-        end_time = time.perf_counter()
-        end_free_gpu_memory = torch.cuda.mem_get_info()[0]
-        elapsed_time = end_time - start_time
-        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
-        # This usually takes 5~20 seconds.
-        logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
-                    elapsed_time, cuda_graph_size / (1 << 30))
+                if seq_len >= self.model_config.max_model_len:
+                    break
+
+                num_tokens = batch_size * seq_len
+                if num_tokens >= self.scheduler_config.max_num_batched_tokens:
+                    break
+
+                # Move to next seq_len
+                seq_len = seq_len * 2
+
+        end = time.perf_counter()
+        logger.info("Compilation for prefill shapes is done in %.2f [secs].",
+                    end - start)
+
+        # Capture decode shapes.
+        start = time.time()
+        seq_len = 1
+        batch_size = 8  # Must be in sync with _get_padded_batch_size()
+        while True:
+            self._dummy_run(batch_size,
+                            seq_len,
+                            self.kv_caches,
+                            exec_mode=ExecutionMode.DECODE)
+            xm.wait_device_ops()
+            logger.info("  -- batch_size: %d, seq_len: %d", batch_size,
+                        seq_len)
+
+            if batch_size >= self.scheduler_config.max_num_seqs:
+                break
+
+            batch_size = batch_size + 16 if batch_size >= 16 else batch_size * 2
+
+        end = time.time()
+        logger.info("Compilation for decode shapes is done in %.2f [secs].",
+                    end - start)
 
     def initialize_kv_cache(self, num_blocks: int) -> None:
         assert len(self.kv_caches) == 0
-        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+        kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
         for _ in range(self.num_attn_layers):
-            self.kv_caches.append(
+            self.kv_caches.append((
                 torch.zeros(kv_cache_shape,
                             dtype=self.kv_cache_dtype,
-                            device=self.device))
+                            device=self.device),
+                torch.zeros(kv_cache_shape,
+                            dtype=self.kv_cache_dtype,
+                            device=self.device),
+            ))
+
+
+# TODO: This is duplicate from V0, refactor
+class ModelWrapper(nn.Module):
+
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(
+        self,
+        token_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        input_lens: torch.Tensor,
+        t: torch.Tensor,
+        p: torch.Tensor,
+        num_samples: int,
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+    ) -> torch.Tensor:
+        """Executes the forward pass of the model and samples the next token.
+
+        Args:
+            token_ids: The input token IDs of shape [batch_size, seq_len].
+            position_ids: The input position IDs of shape [batch_size, seq_len].
+            attn_metadata: The Pallas attention metadata.
+            input_lens: The actual input lengths of shape [batch_size].
+            t: The sampling temperature of shape [batch_size].
+            p: The top-p probability of shape [batch_size].
+            num_samples: Number of samples to draw from each logits vector.
+            kv_caches: The key and value caches. They can be None during the
+                memory profiling at initialization.
+        """
+        batch_size, seq_len = token_ids.shape
+        # Calculate the positions to sample from.
+        start_indicies = torch.arange(
+            batch_size, dtype=torch.int32, device=input_lens.device) * seq_len
+        logits_indices = start_indicies + input_lens - 1
+
+        # FIXME(woosuk): This is a temporary hack to avoid using the existing
+        # sampler and sampling metadata.
+        sampling_metadata = SamplingMetadata(
+            seq_groups=[],
+            selected_token_indices=logits_indices,
+            categorized_sample_indices={},
+            num_prompts=attn_metadata.num_prefills,
+        )
+
+        # Skip this in memory profiling at initialization.
+        if kv_caches[0][0].numel() > 0:
+            # index_copy_(slot_mapping) only works when the inserted dimension
+            # is 0. However, the KV cache in the Pallas backend has the shape
+            # [num_kv_heads, num_blocks, block_size, head_size]. To make it
+            # work, we need to flatten the first three dimensions and modify
+            # the slot_mapping accordingly.
+            num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
+            slot_mapping = attn_metadata.slot_mapping
+            slot_mapping = slot_mapping.flatten()
+            head_indicies = torch.arange(0,
+                                         num_kv_heads,
+                                         device=slot_mapping.device,
+                                         dtype=slot_mapping.dtype)
+            head_indicies *= block_size * num_blocks
+            slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
+                -1, num_kv_heads)
+            slot_mapping = slot_mapping + head_indicies.view(1, -1)
+            slot_mapping = slot_mapping.flatten()
+            attn_metadata.slot_mapping = slot_mapping
+
+        hidden_states = self.model(
+            token_ids,
+            position_ids,
+            kv_caches,
+            attn_metadata,
+        )
+        hidden_states = hidden_states.flatten(0, 1)
+        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+
+        # Argmax sampling.
+        argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
+        argmax_token_ids = argmax_token_ids.repeat(1, num_samples)
+
+        # Zero temperature means greedy decoding. Avoid division by zero.
+        nonzero_t = torch.where(t != 0, t, 1.0)
+        logits = logits / nonzero_t.unsqueeze(dim=1)
+        if _ENABLE_TOP_P:
+            logits = _apply_top_p(logits, p.unsqueeze(dim=1))
+
+        # Random sampling.
+        probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
+        sampled_token_ids = torch.multinomial(probs,
+                                              num_samples,
+                                              replacement=True)
+        if num_samples == 1:
+            argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
+            sampled_token_ids = sampled_token_ids.squeeze(dim=-1)
+        next_token_ids = torch.where(t != 0, sampled_token_ids,
+                                     argmax_token_ids)
+        return next_token_ids
 
 
 # TODO: Duplicate with V0, refactor
@@ -1079,3 +1377,13 @@ def _get_padded_batch_size(batch_size: int) -> int:
         return 8
     else:
         return ((batch_size + 15) // 16) * 16
+
+
+# TODO: Duplicate with V0, refactor
+def _apply_top_p(logits: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+    logits_sorted = torch.sort(logits, dim=-1, descending=True).values
+    sorted_cum_probs = torch.cumsum(logits_sorted.softmax(dim=-1), dim=-1)
+    cutoff_index = torch.sum(sorted_cum_probs < p, dim=-1, keepdim=True)
+    cutoff_logit = torch.gather(logits_sorted, -1, cutoff_index)
+    logits = logits.masked_fill_(logits < cutoff_logit, -float("inf"))
+    return logits
