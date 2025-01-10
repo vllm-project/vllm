@@ -4,7 +4,7 @@ from typing import Dict, Iterable, List, Optional
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock,
+                                         KVCacheBlock, PrefixCachingMetrics,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens)
@@ -69,6 +69,12 @@ class KVCacheManager:
         # is finished.
         self.req_to_blocks: Dict[str, List[KVCacheBlock]] = {}
 
+        # Prefix cache metrics.
+        self.prefix_caching_metrics: PrefixCachingMetrics = {
+            "query_total": 0,
+            "query_hit": 0,
+        }
+
     def get_computed_blocks(self, request: Request) -> List[KVCacheBlock]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
@@ -101,6 +107,8 @@ class KVCacheManager:
             else:
                 break
 
+        self.prefix_caching_metrics["query_total"] += len(block_hashes)
+        self.prefix_caching_metrics["query_hit"] += len(computed_blocks)
         return computed_blocks
 
     def append_slots(
@@ -327,6 +335,17 @@ class KVCacheManager:
             else:
                 break
         return num_common_blocks
+
+    def get_prefix_caching_hit_rate(self) -> float:
+        """Get the hit rate of prefix caching.
+
+        Returns:
+            The hit rate of prefix caching.
+        """
+        if self.prefix_caching_metrics["query_total"] == 0:
+            return 0.0
+        return self.prefix_caching_metrics[
+            "query_hit"] / self.prefix_caching_metrics["query_total"]
 
     def _get_new_blocks(self, num_blocks: int) -> List[KVCacheBlock]:
         """Get new blocks from the free block pool.

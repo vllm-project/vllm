@@ -244,10 +244,17 @@ class EngineCoreProc(EngineCore):
         now = time.time()
 
         if now - self._last_logging_time > LOGGING_TIME_S:
+            prefix_caching_hit_rate = ""
+            if (hit_rate := self.scheduler.kv_cache_manager.
+                    get_prefix_caching_hit_rate()) > 0:
+                prefix_caching_hit_rate = (
+                    f" | PrefixCachingHitRate: {hit_rate:.2f}")
+
             logger.info(
-                "RUNNING: %s | WAITING: %s",
+                "RUNNING: %s | WAITING: %s%s",
                 len(self.scheduler.running),
                 len(self.scheduler.waiting),
+                prefix_caching_hit_rate,
             )
 
             self._last_logging_time = now
