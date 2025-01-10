@@ -100,8 +100,7 @@ class _MultiModalLimits(UserDict["ModelConfig", Dict[str, int]]):
 
 class MultiModalRegistry:
     """
-    A registry that dispatches data processing to the
-    :class:`~vllm.multimodal.MultiModalPlugin` for each modality.
+    A registry that dispatches data processing according to the model.
     """
 
     DEFAULT_PLUGINS = (ImagePlugin(), AudioPlugin(), VideoPlugin())
@@ -367,8 +366,7 @@ class MultiModalRegistry:
         invoked to transform the data into a dictionary of model inputs.
 
         See also:
-            - :ref:`input-processing-pipeline`
-            - :ref:`enabling-multimodal-inputs`
+            :ref:`mm-processing`
         """
 
         def wrapper(model_cls: N) -> N:
@@ -398,6 +396,9 @@ class MultiModalRegistry:
     def has_processor(self, model_config: "ModelConfig") -> bool:
         """
         Test whether a multi-modal processor is defined for a specific model.
+
+        See also:
+            :ref:`mm-processing`
         """
         return self._get_model_cls(model_config) in self._processor_factories
 
@@ -408,6 +409,9 @@ class MultiModalRegistry:
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
         Create a multi-modal processor for a specific model and tokenizer.
+
+        See also:
+            :ref:`mm-processing`
         """
         model_cls = self._get_model_cls(model_config)
         factories = self._processor_factories[model_cls]

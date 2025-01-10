@@ -43,6 +43,7 @@ extensions = [
     "sphinx.ext.autosummary",
     "myst_parser",
     "sphinxarg.ext",
+    "sphinx_design",
     "sphinx_togglebutton",
 ]
 myst_enable_extensions = [
