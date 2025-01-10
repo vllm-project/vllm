@@ -13,14 +13,16 @@ from vllm.utils import is_list_of
 
 from .audio import resample_audio
 from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfVideoItem,
-                     ImageItem, ModalityData, MultiModalDataDict,
-                     NestedTensors, VideoItem)
+                     ImageItem, ModalityData, MultiModalDataDict, VideoItem)
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
 
 
 class ModalityDataItems(ABC, Generic[_T, _I]):
+    """
+    Represents data items for a modality in :class:`MultiModalDataItems`.
+    """
 
     def __init__(self, data: _T, modality: str) -> None:
         super().__init__()
@@ -69,6 +71,7 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
 
 
 class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
+    """Base class for data items that are arranged in a list."""
 
     def get_count(self) -> int:
         return len(self.data)
@@ -83,7 +86,12 @@ class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
         return {}
 
 
-class EmbeddingItems(ModalityDataItems[NestedTensors, torch.Tensor]):
+class EmbeddingItems(ModalityDataItems[Union[torch.Tensor, list[torch.Tensor]],
+                                       torch.Tensor]):
+    """
+    Base class for data items that are expressed as a batched embedding tensor,
+    or a list of embedding tensors (one per item).
+    """
 
     def get_count(self) -> int:
         return len(self.data)
@@ -109,7 +117,7 @@ class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
 
 class AudioEmbeddingItems(EmbeddingItems):
 
-    def __init__(self, data: NestedTensors) -> None:
+    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]]) -> None:
         super().__init__(data, "audio")
 
 
@@ -137,7 +145,7 @@ class ImageProcessorItems(ProcessorBatchItems[HfImageItem]):
 
 class ImageEmbeddingItems(EmbeddingItems):
 
-    def __init__(self, data: NestedTensors) -> None:
+    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]]) -> None:
         super().__init__(data, "image")
 
 
@@ -146,10 +154,24 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
     def __init__(self, data: Sequence[HfVideoItem]) -> None:
         super().__init__(data, "video")
 
+    def get_num_frames(self, item_idx: int) -> int:
+        return len(self.get(item_idx))
+
+    def get_frame_size(self, item_idx: int) -> ImageSize:
+        image = self.get(item_idx)[0]  # Assume that the video isn't empty
+
+        if isinstance(image, Image):
+            return ImageSize(*image.size)
+        if isinstance(image, (np.ndarray, torch.Tensor)):
+            _, h, w = image.shape
+            return ImageSize(w, h)
+
+        assert_never(image)
+
 
 class VideoEmbeddingItems(EmbeddingItems):
 
-    def __init__(self, data: NestedTensors) -> None:
+    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]]) -> None:
         super().__init__(data, "video")
 
 
@@ -158,8 +180,8 @@ _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
     """
-    As :class:`MultiModalDataDict`, but normalized such that each entry
-    corresponds to a list.
+    As :data:`~vllm.multimodal.inputs.MultiModalDataDict`, but normalized
+    such that each entry corresponds to a list.
     """
 
     def get_count(self, modality: str, *, strict: bool = True) -> int:
@@ -212,7 +234,8 @@ ModalityDataParser: TypeAlias = Callable[[ModalityData[Any]],
 
 class MultiModalDataParser:
     """
-    Parses :class:`MultiModalDataDict` into :class:`MultiModalDataItems`.
+    Parses :data:`~vllm.multimodal.inputs.MultiModalDataDict` into
+    :class:`MultiModalDataItems`.
 
     Args:
         target_sr (float, optional): Enables automatic resampling of audio
@@ -224,7 +247,9 @@ class MultiModalDataParser:
 
         self.target_sr = target_sr
 
-    def _is_embeddings(self, data: object) -> TypeGuard[NestedTensors]:
+    def _is_embeddings(
+            self, data: object
+    ) -> TypeGuard[Union[torch.Tensor, list[torch.Tensor]]]:
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
         if is_list_of(data, torch.Tensor):

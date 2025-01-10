@@ -1,8 +1,7 @@
 """Compare the with and without prefix caching."""
 import pytest
 
-from vllm.inputs import token_inputs
-from vllm.multimodal.inputs import PlaceholderRange
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
@@ -13,12 +12,18 @@ def make_request(request_id,
                  prompt_token_ids,
                  mm_positions=None,
                  mm_hashes=None):
+    if mm_positions is None:
+        multi_modal_inputs = None
+    else:
+        multi_modal_inputs = [MultiModalKwargs({})] * len(mm_positions)
+
     return Request(
         request_id=request_id,
-        inputs=token_inputs(prompt_token_ids=prompt_token_ids,
-                            multi_modal_placeholders={"image": mm_positions}
-                            if mm_positions else None,
-                            multi_modal_hashes=mm_hashes),
+        prompt=None,
+        prompt_token_ids=prompt_token_ids,
+        multi_modal_inputs=multi_modal_inputs,
+        multi_modal_hashes=mm_hashes,
+        multi_modal_placeholders=mm_positions,
         sampling_params=SamplingParams(max_tokens=17),
         eos_token_id=100,
         arrival_time=0,

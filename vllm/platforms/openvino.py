@@ -28,10 +28,13 @@ class OpenVinoPlatform(Platform):
     dispatch_key: str = "CPU"
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool) -> str:
         if selected_backend != _Backend.OPENVINO:
             logger.info("Cannot use %s backend on OpenVINO.", selected_backend)
-        return _Backend.OPENVINO
+        logger.info("Using OpenVINO Attention backend.")
+        return "vllm.attention.backends.openvino.OpenVINOAttentionBackend"
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
