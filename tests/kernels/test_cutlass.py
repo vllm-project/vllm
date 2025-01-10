@@ -40,6 +40,11 @@ CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
 
+# -1 means full extent in that dimension
+TENSORWISE_GROUP_SHAPE = (-1, -1)
+PER_TOKEN_GROUP_SHAPE = (1, -1)
+PER_OUT_CH_GROUP_SHAPE = (-1, 1)
+
 capability = current_platform.get_device_capability()
 capability = capability[0] * 10 + capability[1]
 
@@ -173,104 +178,133 @@ def cutlass_int8_gemm_helper(m: int,
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
-@pytest.mark.parametrize("per_act_token", [True, False])
-@pytest.mark.parametrize("per_out_ch", [True, False])
+@pytest.mark.parametrize("scale_group_shape_a",
+                         [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
+@pytest.mark.parametrize("scale_group_shape_b",
+                         [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.skipif(not current_platform.has_device_capability(89),
                     reason="FP8 is not supported on this GPU type.")
-def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
-                          per_out_ch: bool, use_bias: bool):
-    cutlass_fp8_gemm_helper(m, n, k, (1, -1) if per_act_token else (-1, -1),
-                            (-1, 1) if per_out_ch else (-1, -1), use_bias)
+def test_cutlass_fp8_gemm(m: int, n: int, k: int, scale_group_shape_a,
+                          scale_group_shape_b, use_bias: bool):
+    cutlass_fp8_gemm_helper(m, n, k, scale_group_shape_a, scale_group_shape_b,
+                            use_bias)
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
-@pytest.mark.parametrize("per_act_token", [True, False])
-@pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("use_bias", [True, False])
-def test_cutlass_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
-                           per_out_ch: bool, use_bias: bool):
-    cutlass_int8_gemm_helper(m, n, k, (1, -1) if per_act_token else (-1, -1),
-                             (-1, 1) if per_out_ch else (-1, -1), use_bias)
-
-
-@pytest.mark.parametrize("per_act_token", [True, False])
-@pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("use_bias", [True, False])
-def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
-                                        out_dtype: Type[torch.dtype],
-                                        use_bias: bool):
-    cutlass_int8_gemm_helper(512,
-                             512,
-                             512, (1, -1) if per_act_token else (-1, -1),
-                             (-1, 1) if per_out_ch else (-1, -1),
-                             use_bias,
-                             out_dtype=out_dtype)
-
-
-@pytest.mark.parametrize("per_act_token", [True, False])
-@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("use_bias", [True, False])
-@pytest.mark.skipif(not current_platform.has_device_capability(89),
-                    reason="FP8 is not supported on this GPU type.")
-def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
-                                       out_dtype: Type[torch.dtype],
-                                       use_bias: bool):
-    cutlass_fp8_gemm_helper(512,
-                            512,
-                            512, (1, -1) if per_act_token else (-1, -1),
-                            (-1, 1) if per_out_ch else (-1, -1),
-                            use_bias,
-                            out_dtype=out_dtype)
-
-
-@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
-@pytest.mark.parametrize("scale_group_shape_a,scale_group_shape_b", 
+@pytest.mark.parametrize("scale_group_shape_a,scale_group_shape_b",
                          [((1, 128), (128, 128))])
-@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [False])
 @pytest.mark.skipif(not current_platform.has_device_capability(90),
                     reason="FP8 blockwise is not supported on this GPU type.")
-def test_cutlass_fp8_blockwise_scale_gemm_dtype(m: int, n: int, k: int,
-                                                scale_group_shape_a,
-                                                scale_group_shape_b,
-                                                out_dtype: Type[torch.dtype],
-                                                use_bias: bool):
+def test_cutlass_fp8_blockwise_scale_gemm(m: int, n: int, k: int,
+                                          scale_group_shape_a,
+                                          scale_group_shape_b, use_bias: bool):
     if k % scale_group_shape_b[0] != 0 or n % scale_group_shape_b[1] != 0:
         return
     if m % scale_group_shape_a[0] != 0 or k % scale_group_shape_a[1] != 0:
         return
-    cutlass_fp8_gemm_helper(m, n, k,
+    cutlass_fp8_gemm_helper(m, n, k, scale_group_shape_a, scale_group_shape_b,
+                            use_bias)
+
+
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
+@pytest.mark.parametrize("scale_group_shape_a",
+                         [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
+@pytest.mark.parametrize("scale_group_shape_b",
+                         [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
+@pytest.mark.parametrize("use_bias", [True, False])
+def test_cutlass_int8_gemm(m: int, n: int, k: int, scale_group_shape_a,
+                           scale_group_shape_b, use_bias: bool):
+    cutlass_int8_gemm_helper(m, n, k, scale_group_shape_a, scale_group_shape_b,
+                             use_bias)
+
+
+@pytest.mark.parametrize("scale_group_shape_a",
+                         [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
+@pytest.mark.parametrize("scale_group_shape_b",
+                         [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("use_bias", [True, False])
+def test_cutlass_int8_gemm_output_dtype(scale_group_shape_a,
+                                        scale_group_shape_b,
+                                        out_dtype: Type[torch.dtype],
+                                        use_bias: bool):
+    cutlass_int8_gemm_helper(512,
+                             512,
+                             512,
+                             scale_group_shape_a,
+                             scale_group_shape_b,
+                             use_bias,
+                             out_dtype=out_dtype)
+
+
+@pytest.mark.parametrize("scale_group_shape_a",
+                         [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("use_bias", [True, False])
+@pytest.mark.skipif(not current_platform.has_device_capability(89),
+                    reason="FP8 is not supported on this GPU type.")
+def test_cutlass_fp8_gemm_output_dtype(scale_group_shape_a,
+                                       scale_group_shape_b,
+                                       out_dtype: Type[torch.dtype],
+                                       use_bias: bool):
+    cutlass_fp8_gemm_helper(512,
+                            512,
+                            512,
                             scale_group_shape_a,
                             scale_group_shape_b,
                             use_bias,
                             out_dtype=out_dtype)
 
 
-@pytest.mark.parametrize("per_act_token", [True, False])
-@pytest.mark.parametrize("per_out_ch", [True, False])
+@pytest.mark.parametrize("scale_group_shape_a,scale_group_shape_b",
+                         [((1, 128), (128, 128))])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("use_bias", [False])
+@pytest.mark.skipif(not current_platform.has_device_capability(90),
+                    reason="FP8 blockwise is not supported on this GPU type.")
+def test_cutlass_fp8_blockwise_scale_gemm_dtype(scale_group_shape_a,
+                                                scale_group_shape_b,
+                                                out_dtype: Type[torch.dtype],
+                                                use_bias: bool):
+    cutlass_fp8_gemm_helper(512,
+                            512,
+                            512,
+                            scale_group_shape_a,
+                            scale_group_shape_b,
+                            use_bias,
+                            out_dtype=out_dtype)
+
+
+@pytest.mark.parametrize("scale_group_shape_a",
+                         [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
+@pytest.mark.parametrize("scale_group_shape_b",
+                         [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.skipif(not current_platform.has_device_capability(89),
                     reason="FP8 is not supported on this GPU type.")
-def test_cutlass_fp8_gemm_devices(per_act_token: bool, per_out_ch: bool,
+def test_cutlass_fp8_gemm_devices(scale_group_shape_a, scale_group_shape_b,
                                   use_bias: bool, device: str):
-    cutlass_fp8_gemm_helper(512, 512, 512, (1, -1) if per_act_token else
-                            (-1, -1), (-1, 1) if per_out_ch else (-1, -1),
-                            use_bias, torch.bfloat16, device)
+    cutlass_fp8_gemm_helper(512, 512, 512, scale_group_shape_a,
+                            scale_group_shape_b, use_bias, torch.bfloat16,
+                            device)
 
 
-@pytest.mark.parametrize("per_act_token", [True, False])
-@pytest.mark.parametrize("per_out_ch", [True, False])
+@pytest.mark.parametrize("scale_group_shape_a",
+                         [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
+@pytest.mark.parametrize("scale_group_shape_b",
+                         [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_cutlass_int8_gemm_devices(per_act_token: bool, per_out_ch: bool,
+def test_cutlass_int8_gemm_devices(scale_group_shape_a, scale_group_shape_b,
                                    use_bias: bool, device: str):
     cutlass_int8_gemm_helper(512,
                              512,
-                             512, (1, -1) if per_act_token else (-1, -1),
-                             (-1, 1) if per_out_ch else (-1, -1),
+                             512,
+                             scale_group_shape_a,
+                             scale_group_shape_b,
                              use_bias,
                              out_dtype=torch.bfloat16,
                              device=device)
@@ -281,30 +315,32 @@ def test_cutlass_int8_gemm_devices(per_act_token: bool, per_out_ch: bool,
 # of a large power of two. In any case, the kernel will have a naive fallback
 # when N and K are not divisible by 16. But M is the number of tokens and the
 # kernel must handle any M thrown at it.
-@pytest.mark.parametrize("per_act_token", [True, False])
-@pytest.mark.parametrize("per_out_ch", [True, False])
+@pytest.mark.parametrize("scale_group_shape_a",
+                         [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
+@pytest.mark.parametrize("scale_group_shape_b",
+                         [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.skipif(not current_platform.has_device_capability(89),
                     reason="FP8 is not supported on this GPU type.")
-def test_cutlass_fp8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
+def test_cutlass_fp8_gemm_m_sweep(scale_group_shape_a, scale_group_shape_b,
                                   use_bias: bool):
     for nk in range(32, 128, 32):
         for m in range(1, 128):
-            cutlass_fp8_gemm_helper(m, nk, nk, (1, -1) if per_act_token else
-                                    (-1, -1), (-1, 1) if per_out_ch else
-                                    (-1, -1), use_bias)
+            cutlass_fp8_gemm_helper(m, nk, nk, scale_group_shape_a,
+                                    scale_group_shape_b, use_bias)
 
 
-@pytest.mark.parametrize("per_act_token", [True, False])
-@pytest.mark.parametrize("per_out_ch", [True, False])
+@pytest.mark.parametrize("scale_group_shape_a",
+                         [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
+@pytest.mark.parametrize("scale_group_shape_b",
+                         [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
 @pytest.mark.parametrize("use_bias", [True, False])
-def test_cutlass_int8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
+def test_cutlass_int8_gemm_m_sweep(scale_group_shape_a, scale_group_shape_b,
                                    use_bias: bool):
     for nk in range(32, 128, 32):
         for m in range(1, 128):
-            cutlass_int8_gemm_helper(m, nk, nk, (1, -1) if per_act_token else
-                                     (-1, -1), (-1, 1) if per_out_ch else
-                                     (-1, -1), use_bias)
+            cutlass_int8_gemm_helper(m, nk, nk, scale_group_shape_a,
+                                     scale_group_shape_b, use_bias)
 
 
 @pytest.mark.parametrize("m", [32, 64, 128])

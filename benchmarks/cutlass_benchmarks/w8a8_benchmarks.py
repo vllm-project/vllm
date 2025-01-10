@@ -12,8 +12,9 @@ from utils import make_rand_tensors
 from weight_shapes import WEIGHT_SHAPES
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    w8a8_block_fp8_matmul)
 from vllm.utils import FlexibleArgumentParser
-from vllm.model_executor.layers.quantization.utils.fp8_utils import w8a8_block_fp8_matmul
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
@@ -100,60 +101,61 @@ def bench_fp8(dtype: torch.dtype,
     a_cont = a.contiguous()
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
-    block_scale_a = torch.rand((m, k // 128), device="cuda", 
-                                 dtype=torch.float32)
-    block_scale_b = torch.rand((k // 128, n // 128), device="cuda", 
-                                 dtype=torch.float32)
+    block_scale_a = torch.rand((m, k // 128),
+                               device="cuda",
+                               dtype=torch.float32)
+    block_scale_b = torch.rand((k // 128, n // 128),
+                               device="cuda",
+                               dtype=torch.float32)
     block_scale_a_M_major = block_scale_a.t().contiguous().t()
     block_scale_b_K_major = block_scale_b.t().contiguous().t()
     bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
-    
+
     print(m, k, n)
 
     timers = []
 
     bench_fns = {
-        # "pytorch_bf16_bf16_bf16_matmul-no-scales":
-        # lambda: torch.mm(a.to(dtype=torch.bfloat16), b.to(dtype=torch.bfloat16)
-        #                  ),
-        # "pytorch_fp16_fp16_fp16_matmul-no-scales":
-        # lambda: torch.mm(a.to(dtype=torch.float16), b.to(dtype=torch.float16)),
-        # "pytorch_fp8_fp8_fp16_scaled_mm":
-        # lambda: torch._scaled_mm(
-        #     a, b, scale_a, scale_b, out_dtype=torch.float16),
-        # "pytorch_fp8_fp8_fp16_scaled_mm_fast_accum":
-        # lambda: torch._scaled_mm(a,
-        #                          b,
-        #                          scale_a,
-        #                          scale_b,
-        #                          out_dtype=torch.float16,
-        #                          use_fast_accum=True),
-        # "pytorch_fp8_fp8_bf16_scaled_mm":
-        # lambda: torch._scaled_mm(
-        #     a, b, scale_a, scale_b, out_dtype=torch.bfloat16),
-        # "pytorch_fp8_fp8_bf16_scaled_mm_fast_accum":
-        # lambda: torch._scaled_mm(a,
-        #                          b,
-        #                          scale_a,
-        #                          scale_b,
-        #                          out_dtype=torch.bfloat16,
-        #                          use_fast_accum=True),
-        # "cutlass_fp8_fp8_bf16_scaled_mm":
-        # lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16),
-        # "cutlass_fp8_fp8_fp16_scaled_mm":
-        # lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.float16),
-        # "cutlass_fp8_fp8_bf16_scaled_mm_bias":
-        # lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16,
-        #                               bias),
-        # "cutlass_fp8_fp8_fp16_scaled_mm_bias":
-        # lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.float16,
-        #                               bias.to(dtype=torch.float16)),
+        "pytorch_bf16_bf16_bf16_matmul-no-scales":
+        lambda: torch.mm(a.to(dtype=torch.bfloat16), b.to(dtype=torch.bfloat16)
+                         ),
+        "pytorch_fp16_fp16_fp16_matmul-no-scales":
+        lambda: torch.mm(a.to(dtype=torch.float16), b.to(dtype=torch.float16)),
+        "pytorch_fp8_fp8_fp16_scaled_mm":
+        lambda: torch._scaled_mm(
+            a, b, scale_a, scale_b, out_dtype=torch.float16),
+        "pytorch_fp8_fp8_fp16_scaled_mm_fast_accum":
+        lambda: torch._scaled_mm(a,
+                                 b,
+                                 scale_a,
+                                 scale_b,
+                                 out_dtype=torch.float16,
+                                 use_fast_accum=True),
+        "pytorch_fp8_fp8_bf16_scaled_mm":
+        lambda: torch._scaled_mm(
+            a, b, scale_a, scale_b, out_dtype=torch.bfloat16),
+        "pytorch_fp8_fp8_bf16_scaled_mm_fast_accum":
+        lambda: torch._scaled_mm(a,
+                                 b,
+                                 scale_a,
+                                 scale_b,
+                                 out_dtype=torch.bfloat16,
+                                 use_fast_accum=True),
+        "cutlass_fp8_fp8_bf16_scaled_mm":
+        lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16),
+        "cutlass_fp8_fp8_fp16_scaled_mm":
+        lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.float16),
+        "cutlass_fp8_fp8_bf16_scaled_mm_bias":
+        lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16,
+                                      bias),
+        "cutlass_fp8_fp8_fp16_scaled_mm_bias":
+        lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.float16,
+                                      bias.to(dtype=torch.float16)),
         "triton_fp8_fp8_fp16_scaled_mm_blockwise":
-        lambda: w8a8_block_fp8_matmul(
-            a_cont, b.t(), block_scale_a, block_scale_b.t(), (128, 128)),
+        lambda: w8a8_block_fp8_matmul(a_cont, b.t(), block_scale_a,
+                                      block_scale_b.t(), (128, 128)),
         "cutlass_fp8_fp8_fp16_scaled_mm_blockwise":
-        lambda: ops.cutlass_scaled_mm(a, b, 
-                                      block_scale_a_M_major, 
+        lambda: ops.cutlass_scaled_mm(a, b, block_scale_a_M_major,
                                       block_scale_b_K_major, torch.float16),
     }
 
