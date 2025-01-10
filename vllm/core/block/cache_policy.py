@@ -161,12 +161,10 @@ class CachePolicyBase(CachePolicy):
         physical_block_table = PhysicalBlockTable(
             self._allocator.fork(self._physical_block_table[-1]))
         virtual_block_table = self._virtual_block_table.fork()
-        return CachePolicyBase.create_from_fork(
-            block_size=self._block_size,
-            block_allocator=self._allocator,
+        return CachePolicyFactory.fork(
+            self,
             physical_block_table=physical_block_table,
-            virtual_block_table=virtual_block_table,
-        )
+            virtual_block_table=virtual_block_table)
 
     def free(self) -> None:
         """Frees the memory occupied by the blocks in the PhysicalBlockTable.
@@ -335,30 +333,6 @@ class CachePolicyBase(CachePolicy):
             chunk_list(token_ids[first_chunk_size:], self._block_size))
         return token_blocks
 
-    @staticmethod
-    def create_from_config(
-        block_size: int,
-        block_allocator: DeviceAwareBlockAllocator,
-    ) -> "CachePolicy":
-        return CachePolicyBase(
-            block_size=block_size,
-            block_allocator=block_allocator,
-        )
-
-    @staticmethod
-    def create_from_fork(
-        block_size: int,
-        block_allocator: DeviceAwareBlockAllocator,
-        physical_block_table: Optional[PhysicalBlockTable] = None,
-        virtual_block_table: Optional[VirtualBlockTable] = None,
-    ) -> "CachePolicy":
-        return CachePolicyBase(
-            block_size=block_size,
-            block_allocator=block_allocator,
-            physical_block_table=physical_block_table,
-            virtual_block_table=virtual_block_table,
-        )
-
 
 class CachePolicySlidingWindow(CachePolicyBase):
     """A class to manage blocks for a specific sequence.
@@ -512,25 +486,48 @@ class CachePolicySlidingWindow(CachePolicyBase):
             self._virtual_block_table.insert_tokens(block, slot_offset,
                                                     len(token_block))
 
-    @staticmethod
-    def create_from_config(block_size: int,
-                           block_allocator: DeviceAwareBlockAllocator,
-                           num_sliding_window_blocks: int) -> "CachePolicy":
-        return CachePolicySlidingWindow(
-            block_size=block_size,
-            block_allocator=block_allocator,
-            num_sliding_window_blocks=num_sliding_window_blocks)
+
+class CachePolicyFactory:
 
     @staticmethod
-    def create_from_fork(
+    def create(
+        num_sliding_window_blocks: Optional[int],
         block_size: int,
         block_allocator: DeviceAwareBlockAllocator,
         physical_block_table: Optional[PhysicalBlockTable] = None,
         virtual_block_table: Optional[VirtualBlockTable] = None,
     ) -> "CachePolicy":
-        return CachePolicySlidingWindow(
-            block_size=block_size,
-            block_allocator=block_allocator,
+        if num_sliding_window_blocks is None:
+            return CachePolicyBase(
+                block_size=block_size,
+                block_allocator=block_allocator,
+                physical_block_table=physical_block_table,
+                virtual_block_table=virtual_block_table,
+            )
+        else:
+            return CachePolicySlidingWindow(
+                block_size=block_size,
+                block_allocator=block_allocator,
+                num_sliding_window_blocks=num_sliding_window_blocks,
+                physical_block_table=physical_block_table,
+                virtual_block_table=virtual_block_table,
+            )
+
+    @staticmethod
+    def fork(
+        instance: CachePolicy,
+        physical_block_table: PhysicalBlockTable,
+        virtual_block_table: VirtualBlockTable,
+    ) -> "CachePolicy":
+        if hasattr(instance, "_num_sliding_window_blocks"):
+            num_sliding_window_blocks = instance._num_sliding_window_blocks  # type: ignore
+        else:
+            num_sliding_window_blocks = None
+
+        return CachePolicyFactory.create(
+            block_size=instance._block_size,  # type: ignore
+            block_allocator=instance._allocator,  # type: ignore
+            num_sliding_window_blocks=num_sliding_window_blocks,
             physical_block_table=physical_block_table,
             virtual_block_table=virtual_block_table,
         )

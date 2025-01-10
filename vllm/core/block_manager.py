@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple
 
-from vllm.core.block.cache_policy import CachePolicyBase, CachePolicySlidingWindow
+from vllm.core.block.cache_policy import CachePolicyFactory
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import Block, CachePolicy
 from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
@@ -140,7 +140,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             return AllocStatus.LATER
 
     def _allocate_sequence(self, seq: Sequence) -> "CachePolicy":
-        cache_policy = CachePolicySlidingWindow.create_from_config(
+        cache_policy = CachePolicyFactory.create(
             block_size=self.block_size,
             block_allocator=self.block_allocator,
             num_sliding_window_blocks=self.num_sliding_window_blocks
