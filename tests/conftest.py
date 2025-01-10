@@ -28,7 +28,8 @@ from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
 from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
-                         to_enc_dec_tuple_list, zip_enc_dec_prompts)
+                         TokensPrompt, to_enc_dec_tuple_list,
+                         zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
@@ -886,6 +887,10 @@ class VllmRunner:
         beam_width: int,
         max_tokens: int,
     ) -> List[Tuple[List[List[int]], List[str]]]:
+        if isinstance(prompts[0], str):
+            prompts = [TextPrompt(prompt) for prompt in prompts]
+        else:
+            prompts = [TokensPrompt(tokens) for tokens in prompts]
         outputs = self.model.beam_search(
             prompts,
             BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
