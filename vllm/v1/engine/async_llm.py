@@ -21,8 +21,8 @@ from vllm.utils import kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
-from vllm.v1.executor.abstract import Executor
 from vllm.v1.engine.utils import STR_ASYNC_LLM_PROMPT_LP_APC_UNSUPPORTED
+from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
 
