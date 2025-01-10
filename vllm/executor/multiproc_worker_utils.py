@@ -1,5 +1,4 @@
 import asyncio
-import multiprocessing
 import os
 import sys
 import threading
@@ -13,11 +12,10 @@ from typing import (Any, Callable, Dict, Generic, List, Optional, TextIO,
 
 import torch
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils.importing import HAS_TRITON
-from vllm.utils import cuda_is_initialized
+from vllm.utils import _check_multiproc_method, get_mp_context
 
 if HAS_TRITON:
     from vllm.triton_utils import maybe_set_triton_cache_manager
@@ -275,22 +273,12 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     file.write = write_with_prefix  # type: ignore[method-assign]
 
 
-def get_mp_context():
-    mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
-    return multiprocessing.get_context(mp_method)
-
-
 def set_multiprocessing_worker_envs(parallel_config):
     """ Set up environment variables that should be used when there are workers
     in a multiprocessing environment. This should be called by the parent 
     process before worker processes are created"""
 
-    if (cuda_is_initialized()
-            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
-        logger.warning("CUDA was previously initialized. We must use "
-                       "the `spawn` multiprocessing start method. Setting "
-                       "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'.")
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    _check_multiproc_method()
 
     if (current_platform.is_hpu()
             and parallel_config.distributed_executor_backend == 'mp'

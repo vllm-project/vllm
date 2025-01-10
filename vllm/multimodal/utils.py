@@ -1,298 +1,257 @@
-import base64
-import os
 from functools import lru_cache
-from io import BytesIO
-from typing import Any, List, Optional, Tuple, TypeVar, Union
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional, TypeVar, Union
+from urllib.parse import ParseResult, urlparse
 
 import numpy as np
 import numpy.typing as npt
-import torch
 from PIL import Image
 
 import vllm.envs as envs
-from vllm.connections import global_http_connection
+from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
-from .inputs import MultiModalDataDict, PlaceholderRange
+from .audio import AudioMediaIO
+from .base import MediaIO
+from .image import ImageMediaIO
+from .inputs import PlaceholderRange
+from .video import VideoMediaIO
 
 logger = init_logger(__name__)
 
 cached_get_tokenizer = lru_cache(get_tokenizer)
 
+_M = TypeVar("_M")
 
-def _load_image_from_bytes(b: bytes) -> Image.Image:
-    image = Image.open(BytesIO(b))
-    image.load()
-    return image
-
-
-def _is_subpath(image_path: str, allowed_local_media_path: str) -> bool:
-    # Get the common path
-    common_path = os.path.commonpath([
-        os.path.abspath(image_path),
-        os.path.abspath(allowed_local_media_path)
-    ])
-    # Check if the common path is the same as allowed_local_media_path
-    return common_path == os.path.abspath(allowed_local_media_path)
+if TYPE_CHECKING:
+    from .hasher import MultiModalHashDict
+    from .inputs import MultiModalPlaceholderDict
 
 
-def _load_image_from_file(image_url: str,
-                          allowed_local_media_path: str) -> Image.Image:
-    if not allowed_local_media_path:
-        raise ValueError("Invalid 'image_url': Cannot load local files without"
-                         "'--allowed-local-media-path'.")
-    if allowed_local_media_path:
-        if not os.path.exists(allowed_local_media_path):
+class MediaConnector:
+
+    def __init__(
+        self,
+        connection: HTTPConnection = global_http_connection,
+        *,
+        allowed_local_media_path: str = "",
+    ) -> None:
+        super().__init__()
+
+        self.connection = connection
+
+        if allowed_local_media_path:
+            allowed_local_media_path_ = Path(allowed_local_media_path)
+
+            if not allowed_local_media_path_.exists():
+                raise ValueError(
+                    "Invalid `--allowed-local-media-path`: The path "
+                    f"{allowed_local_media_path_} does not exist.")
+            if not allowed_local_media_path_.is_dir():
+                raise ValueError(
+                    "Invalid `--allowed-local-media-path`: The path "
+                    f"{allowed_local_media_path_} must be a directory.")
+        else:
+            allowed_local_media_path_ = None
+
+        self.allowed_local_media_path = allowed_local_media_path_
+
+    def _load_data_url(
+        self,
+        url_spec: ParseResult,
+        media_io: MediaIO[_M],
+    ) -> _M:
+        data_spec, data = url_spec.path.split(",", 1)
+        media_type, data_type = data_spec.split(";", 1)
+
+        if data_type != "base64":
+            msg = "Only base64 data URLs are supported for now."
+            raise NotImplementedError(msg)
+
+        return media_io.load_base64(media_type, data)
+
+    def _load_file_url(
+        self,
+        url_spec: ParseResult,
+        media_io: MediaIO[_M],
+    ) -> _M:
+        allowed_local_media_path = self.allowed_local_media_path
+        if allowed_local_media_path is None:
+            raise RuntimeError("Cannot load local files without "
+                               "`--allowed-local-media-path`.")
+
+        filepath = Path(url_spec.path)
+        if allowed_local_media_path not in filepath.resolve().parents:
             raise ValueError(
-                "Invalid '--allowed-local-media-path': "
-                f"The path {allowed_local_media_path} does not exist.")
-        if not os.path.isdir(allowed_local_media_path):
-            raise ValueError(
-                "Invalid '--allowed-local-media-path': "
-                f"The path {allowed_local_media_path} must be a directory.")
+                f"The file path {filepath} must be a subpath "
+                f"of `--allowed-local-media-path` {allowed_local_media_path}.")
 
-    # Only split once and assume the second part is the image path
-    _, image_path = image_url.split("file://", 1)
-    if not _is_subpath(image_path, allowed_local_media_path):
-        raise ValueError(
-            f"Invalid 'image_url': The file path {image_path} must"
-            " be a subpath of '--allowed-local-media-path'"
-            f" '{allowed_local_media_path}'.")
+        return media_io.load_file(filepath)
 
-    image = Image.open(image_path)
-    image.load()
-    return image
+    def load_from_url(
+        self,
+        url: str,
+        media_io: MediaIO[_M],
+        *,
+        fetch_timeout: Optional[int] = None,
+    ) -> _M:
+        url_spec = urlparse(url)
 
+        if url_spec.scheme.startswith("http"):
+            connection = self.connection
+            data = connection.get_bytes(url, timeout=fetch_timeout)
 
-def _load_image_from_data_url(image_url: str) -> Image.Image:
-    # Only split once and assume the second part is the base64 encoded image
-    _, image_base64 = image_url.split(",", 1)
-    return load_image_from_base64(image_base64)
+            return media_io.load_bytes(data)
 
+        if url_spec.scheme == "data":
+            return self._load_data_url(url_spec, media_io)
 
-def fetch_image(image_url: str,
-                *,
-                image_mode: str = "RGB",
-                allowed_local_media_path: str = "") -> Image.Image:
-    """
-    Load a PIL image from a HTTP or base64 data URL.
+        if url_spec.scheme == "file":
+            return self._load_file_url(url_spec, media_io)
 
-    By default, the image is converted into RGB format.
-    """
-    if image_url.startswith('http'):
-        image_raw = global_http_connection.get_bytes(
-            image_url,
-            timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-        )
-        image = _load_image_from_bytes(image_raw)
+        msg = "The URL must be either a HTTP, data or file URL."
+        raise ValueError(msg)
 
-    elif image_url.startswith('data:image'):
-        image = _load_image_from_data_url(image_url)
-    elif image_url.startswith('file://'):
-        image = _load_image_from_file(image_url, allowed_local_media_path)
-    else:
-        raise ValueError("Invalid 'image_url': A valid 'image_url' must start "
-                         "with either 'data:image', 'file://' or 'http'.")
+    async def load_from_url_async(
+        self,
+        url: str,
+        media_io: MediaIO[_M],
+        *,
+        fetch_timeout: Optional[int] = None,
+    ) -> _M:
+        url_spec = urlparse(url)
 
-    return image.convert(image_mode)
+        if url_spec.scheme.startswith("http"):
+            connection = self.connection
+            data = await connection.async_get_bytes(url, timeout=fetch_timeout)
 
+            return media_io.load_bytes(data)
 
-async def async_fetch_image(image_url: str,
-                            *,
-                            image_mode: str = "RGB",
-                            allowed_local_media_path: str = "") -> Image.Image:
-    """
-    Asynchronously load a PIL image from a HTTP or base64 data URL.
+        if url_spec.scheme == "data":
+            return self._load_data_url(url_spec, media_io)
 
-    By default, the image is converted into RGB format.
-    """
-    if image_url.startswith('http'):
-        image_raw = await global_http_connection.async_get_bytes(
-            image_url,
-            timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-        )
-        image = _load_image_from_bytes(image_raw)
+        if url_spec.scheme == "file":
+            return self._load_file_url(url_spec, media_io)
 
-    elif image_url.startswith('data:image'):
-        image = _load_image_from_data_url(image_url)
-    elif image_url.startswith('file://'):
-        image = _load_image_from_file(image_url, allowed_local_media_path)
-    else:
-        raise ValueError("Invalid 'image_url': A valid 'image_url' must start "
-                         "with either 'data:image', 'file://' or 'http'.")
+        msg = "The URL must be either a HTTP, data or file URL."
+        raise ValueError(msg)
 
-    return image.convert(image_mode)
+    def fetch_audio(
+        self,
+        audio_url: str,
+    ) -> tuple[np.ndarray, Union[int, float]]:
+        """
+        Load audio from a URL.
+        """
+        audio_io = AudioMediaIO()
 
-
-def _load_video_frames_from_bytes(b: bytes):
-    frame = Image.open(BytesIO(b))
-    return np.array(frame)
-
-
-def load_video_frames_from_base64(frame: Union[bytes, str]):
-    """Load frame from base64 format."""
-    return _load_video_frames_from_bytes(base64.b64decode(frame))
-
-
-def _load_video_from_bytes(b: bytes, num_frames: int = 32):
-    _, decord = try_import_video_packages()
-
-    video_path = BytesIO(b)
-    vr = decord.VideoReader(video_path, num_threads=1)
-    total_frame_num = len(vr)
-
-    if total_frame_num > num_frames:
-        uniform_sampled_frames = np.linspace(0,
-                                             total_frame_num - 1,
-                                             num_frames,
-                                             dtype=int)
-        frame_idx = uniform_sampled_frames.tolist()
-    else:
-        frame_idx = [i for i in range(0, total_frame_num)]
-    frames = vr.get_batch(frame_idx).asnumpy()
-
-    return frames
-
-
-def _load_video_from_data_url(video_url: str):
-    # Only split once and assume the second part is the base64 encoded image
-    frames_base64 = video_url.split(",")[1:]
-    return np.stack([
-        load_video_frames_from_base64(frame_base64)
-        for frame_base64 in frames_base64
-    ])
-
-
-def fetch_video(video_url: str, *, num_frames: int = 32) -> npt.NDArray:
-    """
-    Load video from a HTTP or base64 data URL.
-    """
-    if video_url.startswith('http') or video_url.startswith('https'):
-        video_raw = global_http_connection.get_bytes(
-            video_url,
-            timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
-        )
-        video = _load_video_from_bytes(video_raw, num_frames)
-    elif video_url.startswith('data:video'):
-        video = _load_video_from_data_url(video_url)
-    else:
-        raise ValueError("Invalid 'video_url': A valid 'video_url' must start "
-                         "with either 'data:video' or 'http'.")
-    return video
-
-
-async def async_fetch_video(video_url: str,
-                            *,
-                            num_frames: int = 32) -> npt.NDArray:
-    """
-    Asynchronously load video from a HTTP or base64 data URL.
-
-    By default, the image is converted into RGB format.
-    """
-    if video_url.startswith('http') or video_url.startswith('https'):
-        video_raw = await global_http_connection.async_get_bytes(
-            video_url,
-            timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
-        )
-        video = _load_video_from_bytes(video_raw, num_frames)
-    elif video_url.startswith('data:video'):
-        video = _load_video_from_data_url(video_url)
-    else:
-        raise ValueError("Invalid 'video_url': A valid 'video_url' must start "
-                         "with either 'data:video' or 'http'.")
-    return video
-
-
-def try_import_audio_packages() -> Tuple[Any, Any]:
-    try:
-        import librosa
-        import soundfile
-    except ImportError as exc:
-        raise ImportError(
-            "Please install vllm[audio] for audio support.") from exc
-    return librosa, soundfile
-
-
-def fetch_audio(audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
-    """
-    Load audio from a URL.
-    """
-    librosa, _ = try_import_audio_packages()
-
-    if audio_url.startswith("http"):
-        audio_bytes = global_http_connection.get_bytes(
+        return self.load_from_url(
             audio_url,
-            timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+            audio_io,
+            fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
         )
-    elif audio_url.startswith("data:audio"):
-        _, audio_base64 = audio_url.split(",", 1)
-        audio_bytes = base64.b64decode(audio_base64)
-    else:
-        raise ValueError("Invalid 'audio_url': A valid 'audio_url' must start "
-                         "with either 'data:audio' or 'http'.")
 
-    return librosa.load(BytesIO(audio_bytes), sr=None)
+    async def fetch_audio_async(
+        self,
+        audio_url: str,
+    ) -> tuple[np.ndarray, Union[int, float]]:
+        """
+        Asynchronously fetch audio from a URL.
+        """
+        audio_io = AudioMediaIO()
 
-
-async def async_fetch_audio(
-        audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
-    """
-    Asynchronously fetch audio from a URL.
-    """
-    librosa, _ = try_import_audio_packages()
-
-    if audio_url.startswith("http"):
-        audio_bytes = await global_http_connection.async_get_bytes(
+        return await self.load_from_url_async(
             audio_url,
-            timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+            audio_io,
+            fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
         )
-    elif audio_url.startswith("data:audio"):
-        _, audio_base64 = audio_url.split(",", 1)
-        audio_bytes = base64.b64decode(audio_base64)
-    else:
-        raise ValueError("Invalid 'audio_url': A valid 'audio_url' must start "
-                         "with either 'data:audio' or 'http'.")
 
-    return librosa.load(BytesIO(audio_bytes), sr=None)
-
-
-def get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
-    audio, sr = fetch_audio(audio_url)
-    return {"audio": (audio, sr)}
-
-
-def get_and_parse_image(
+    def fetch_image(
+        self,
         image_url: str,
         *,
-        allowed_local_media_path: str = "") -> MultiModalDataDict:
-    image = fetch_image(image_url,
-                        allowed_local_media_path=allowed_local_media_path)
-    return {"image": image}
+        image_mode: str = "RGB",
+    ) -> Image.Image:
+        """
+        Load a PIL image from a HTTP or base64 data URL.
 
+        By default, the image is converted into RGB format.
+        """
+        image_io = ImageMediaIO(image_mode=image_mode)
 
-def get_and_parse_video(video_url: str) -> MultiModalDataDict:
-    video = fetch_video(video_url)
-    return {"video": video}
+        return self.load_from_url(
+            image_url,
+            image_io,
+            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        )
 
-
-async def async_get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
-    audio, sr = await async_fetch_audio(audio_url)
-    return {"audio": (audio, sr)}
-
-
-async def async_get_and_parse_image(
+    async def fetch_image_async(
+        self,
         image_url: str,
         *,
-        allowed_local_media_path: str = "") -> MultiModalDataDict:
-    image = await async_fetch_image(
-        image_url, allowed_local_media_path=allowed_local_media_path)
-    return {"image": image}
+        image_mode: str = "RGB",
+    ) -> Image.Image:
+        """
+        Asynchronously load a PIL image from a HTTP or base64 data URL.
+
+        By default, the image is converted into RGB format.
+        """
+        image_io = ImageMediaIO(image_mode=image_mode)
+
+        return await self.load_from_url_async(
+            image_url,
+            image_io,
+            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        )
+
+    def fetch_video(
+        self,
+        video_url: str,
+        *,
+        image_mode: str = "RGB",
+        num_frames: int = 32,
+    ) -> npt.NDArray:
+        """
+        Load video from a HTTP or base64 data URL.
+        """
+        image_io = ImageMediaIO(image_mode=image_mode)
+        video_io = VideoMediaIO(image_io, num_frames=num_frames)
+
+        return self.load_from_url(
+            video_url,
+            video_io,
+            fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+        )
+
+    async def fetch_video_async(
+        self,
+        video_url: str,
+        *,
+        image_mode: str = "RGB",
+        num_frames: int = 32,
+    ) -> npt.NDArray:
+        """
+        Asynchronously load video from a HTTP or base64 data URL.
+
+        By default, the image is converted into RGB format.
+        """
+        image_io = ImageMediaIO(image_mode=image_mode)
+        video_io = VideoMediaIO(image_io, num_frames=num_frames)
+
+        return await self.load_from_url_async(
+            video_url,
+            video_io,
+            fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+        )
 
 
-async def async_get_and_parse_video(video_url: str) -> MultiModalDataDict:
-    video = await async_fetch_video(video_url)
-    return {"video": video}
+global_media_connector = MediaConnector()
+"""The global :class:`MediaConnector` instance used by vLLM."""
+
+fetch_audio = global_media_connector.fetch_audio
+fetch_image = global_media_connector.fetch_image
+fetch_video = global_media_connector.fetch_video
 
 
 def encode_audio_base64(
@@ -300,12 +259,8 @@ def encode_audio_base64(
     sampling_rate: int,
 ) -> str:
     """Encode audio as base64."""
-    _, soundfile = try_import_audio_packages()
-
-    buffered = BytesIO()
-    soundfile.write(buffered, audio, sampling_rate, format="WAV")
-
-    return base64.b64encode(buffered.getvalue()).decode('utf-8')
+    audio_io = AudioMediaIO()
+    return audio_io.encode_base64((audio, sampling_rate))
 
 
 def encode_image_base64(
@@ -319,121 +274,14 @@ def encode_image_base64(
 
     By default, the image is converted into RGB format before being encoded.
     """
-    buffered = BytesIO()
-    image = image.convert(image_mode)
-    image.save(buffered, format)
-    return base64.b64encode(buffered.getvalue()).decode('utf-8')
+    image_io = ImageMediaIO(image_mode=image_mode)
+    return image_io.encode_base64(image, image_format=format)
 
 
-def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
-    """Load image from base64 format."""
-    return _load_image_from_bytes(base64.b64decode(image))
-
-
-def rescale_image_size(image: Image.Image,
-                       size_factor: float,
-                       transpose: int = -1) -> Image.Image:
-    """Rescale the dimensions of an image by a constant factor."""
-    new_width = int(image.width * size_factor)
-    new_height = int(image.height * size_factor)
-    image = image.resize((new_width, new_height))
-    if transpose >= 0:
-        image = image.transpose(Image.Transpose(transpose))
-    return image
-
-
-def try_import_video_packages() -> Any:
-    try:
-        import cv2
-        import decord
-    except ImportError as exc:
-        raise ImportError(
-            "Please install vllm[video] for video support.") from exc
-    return cv2, decord
-
-
-def resize_video(frames: npt.NDArray, size: Tuple[int, int]) -> npt.NDArray:
-    cv2, _ = try_import_video_packages()
-
-    num_frames, _, _, channels = frames.shape
-    new_height, new_width = size
-    resized_frames = np.empty((num_frames, new_height, new_width, channels),
-                              dtype=frames.dtype)
-    for i, frame in enumerate(frames):
-        resized_frame = cv2.resize(frame, (new_width, new_height))
-        resized_frames[i] = resized_frame
-    return resized_frames
-
-
-def rescale_video_size(frames: npt.NDArray, size_factor: float) -> npt.NDArray:
-    _, height, width, _ = frames.shape
-    new_height = int(height * size_factor)
-    new_width = int(width * size_factor)
-
-    return resize_video(frames, (new_height, new_width))
-
-
-def sample_frames_from_video(frames: npt.NDArray,
-                             num_frames: int) -> npt.NDArray:
-    total_frames = frames.shape[0]
-    if num_frames == -1:
-        return frames
-    else:
-        frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
-        sampled_frames = frames[frame_indices, ...]
-        return sampled_frames
-
-
-def encode_video_base64(frames: npt.NDArray):
-    base64_frames = []
-    frames_list = [frames[i] for i in range(frames.shape[0])]
-    for frame in frames_list:
-        img_base64 = encode_image_base64(Image.fromarray(frame))
-        base64_frames.append(img_base64)
-    return ",".join(base64_frames)
-
-
-def resolve_visual_encoder_outputs(
-    encoder_outputs: Union[torch.Tensor, list[torch.Tensor]],
-    feature_sample_layers: Optional[list[int]],
-    post_layer_norm: Optional[torch.nn.LayerNorm],
-    max_possible_layers: int,
-) -> torch.Tensor:
-    """Given the outputs a visual encoder module that may correspond to the
-    output of the last layer, or a list of hidden states to be stacked,
-    handle post normalization and resolve it into a single output tensor.
-
-    Args:
-        encoder_outputs: Output of encoder's last layer or all hidden states.
-        feature_sample_layers: Optional layer indices to grab from the encoder
-            outputs; if provided, encoder outputs must be a list.
-        post_layer_norm: Post norm to apply to the output of the encoder.
-        max_possible_layers: Total layers in the fully loaded visual encoder.
-
-    """
-    if feature_sample_layers is None:
-        if post_layer_norm is not None:
-            return post_layer_norm(encoder_outputs)
-        return encoder_outputs
-
-    # Get the hidden states corresponding to the layer indices.
-    # Negative values are relative to the full visual encoder,
-    # so offset them depending on how many layers were loaded.
-    # NOTE: this assumes that encoder_outputs contains a list
-    # of hidden states in the same order as the encoder layers
-    # that produced them.
-    offset = max_possible_layers - len(encoder_outputs)
-    hs_pool = [
-        encoder_outputs[layer_idx]
-        if layer_idx >= 0 else encoder_outputs[layer_idx + offset]
-        for layer_idx in feature_sample_layers
-    ]
-
-    # Apply post-norm on the final hidden state if we are using it
-    uses_last_layer = feature_sample_layers[-1] in (len(hs_pool) - 1, -1)
-    if post_layer_norm is not None and uses_last_layer:
-        hs_pool[-1] = post_layer_norm(encoder_outputs)
-    return torch.cat(hs_pool, dim=-1)
+def encode_video_base64(frames: npt.NDArray) -> str:
+    image_io = ImageMediaIO()
+    video_io = VideoMediaIO(image_io)
+    return video_io.encode_base64(frames)
 
 
 # Utilities for input processors
@@ -446,7 +294,7 @@ def repeat_and_pad_token(
     repeat_count: int = 1,
     pad_token_left: Optional[_T] = None,
     pad_token_right: Optional[_T] = None,
-) -> List[_T]:
+) -> list[_T]:
     replacement = [token] * repeat_count
     if pad_token_left is not None:
         replacement = [pad_token_left] + replacement
@@ -459,13 +307,13 @@ def repeat_and_pad_token(
 def repeat_and_pad_placeholder_tokens(
     tokenizer: AnyTokenizer,
     prompt: Optional[str],
-    prompt_token_ids: List[int],
+    prompt_token_ids: list[int],
     *,
     placeholder_token_id: int,
-    repeat_count: Union[int, List[int]],
+    repeat_count: Union[int, list[int]],
     pad_token_left: Optional[int] = None,
     pad_token_right: Optional[int] = None,
-) -> Tuple[Optional[str], List[int], List[PlaceholderRange]]:
+) -> tuple[Optional[str], list[int], list[PlaceholderRange]]:
     if isinstance(repeat_count, int):
         repeat_count = [repeat_count]
 
@@ -507,20 +355,24 @@ def repeat_and_pad_placeholder_tokens(
             new_prompt += prompt_parts[i] + replacement_str
         new_prompt += prompt_parts[-1]
 
-    new_token_ids: List[int] = []
-    placeholder_ranges: List[PlaceholderRange] = []
+    new_token_ids = list[int]()
+    placeholder_ranges = list[PlaceholderRange]()
     placeholder_token_idx = 0
     for i, token in enumerate(prompt_token_ids):
         if token == placeholder_token_id:
+            curr_repeat_count = repeat_count[placeholder_token_idx]
             replacement_ids = repeat_and_pad_token(
                 placeholder_token_id,
-                repeat_count=repeat_count[placeholder_token_idx],
+                repeat_count=curr_repeat_count,
                 pad_token_left=pad_token_left,
                 pad_token_right=pad_token_right,
             )
+            offset = len(new_token_ids)
+            if pad_token_left is not None:
+                offset += 1
             placeholder_ranges.append({
-                "offset": len(new_token_ids),
-                "length": len(replacement_ids)
+                "offset": offset,
+                "length": curr_repeat_count,
             })
             new_token_ids.extend(replacement_ids)
             placeholder_token_idx += 1
@@ -538,10 +390,90 @@ def repeat_and_pad_placeholder_tokens(
 def consecutive_placeholder_ranges(
         num_items: int,
         item_size: int,
-        initial_offset: int = 0) -> List[PlaceholderRange]:
+        initial_offset: int = 0) -> list[PlaceholderRange]:
     """Returns a list of consecutive PlaceholderRanges of a fixed size"""
 
     return [
         PlaceholderRange(offset=initial_offset + i * item_size,
                          length=item_size) for i in range(num_items)
     ]
+
+
+def merge_and_sort_multimodal_metadata(
+    mm_positions: "MultiModalPlaceholderDict",
+    mm_hashes: Optional["MultiModalHashDict"],
+) -> tuple[list[str], list[PlaceholderRange], Optional[list[str]]]:
+    """Given a MultiModalPlaceholderDict, merge all PlaceholderRange
+    objects from all available modalities into a single list of 
+    PlaceholderRange, sorted by their offset (starting index in the input 
+    sequence) in the ascending order.
+
+    Optionally if a MultiModalHashDict is given, same operation will be 
+    applied to the object and the sorted list of hashes will be returned.
+
+    Raises:
+        ValueError: If the input prompt has interleaved placeholders from
+            different modalities (e.g, "<image><audio><image> Describe the 
+            content.")
+    
+    Returns:
+        list[str]: Sorted list of involved modalities.
+        list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from 
+            mm_positions.
+        Optional[list[str]]: Sorted list of all hashes from mm_hashes if 
+            given, None otherwise.
+    """
+
+    modalities = list(mm_positions.keys())
+
+    assert len(modalities) > 0, "No modalities found in the mm_positions."
+
+    # For single modality, placeholder ranges and hashes are already sorted
+    # so we can return the list directly.
+    if len(modalities) == 1:
+        if mm_hashes is None:
+            return modalities, list(mm_positions[modalities[0]]), None
+        else:
+            return modalities, list(mm_positions[modalities[0]]), list(
+                mm_hashes[modalities[0]])
+
+    placeholder_lists_with_modality = [(modality, mm_positions[modality])
+                                       for modality in modalities]
+
+    if mm_hashes is None:
+        sorted_placeholder_lists = sorted(placeholder_lists_with_modality,
+                                          key=lambda x: x[1][0]['offset'])
+        sorted_hash_lists = None
+    else:
+        hashes_lists = [
+            mm_hashes[modality] for modality in modalities
+            if modality in mm_hashes
+        ]
+        sorted_pairs = sorted(zip(placeholder_lists_with_modality,
+                                  hashes_lists),
+                              key=lambda x: x[0][1][0]['offset'])
+        sorted_placeholder_tuple, sorted_hash_tuple = zip(*sorted_pairs)
+        sorted_placeholder_lists = list(sorted_placeholder_tuple)
+        sorted_hash_lists = list(sorted_hash_tuple)
+
+    sorted_modalities = [modality for modality, _ in sorted_placeholder_lists]
+
+    # Flatten sorted list of lists to a single list and verify there is no
+    # interleaving of placeholders from different modalities.
+    merged_placeholders: list[PlaceholderRange] = []
+    for modality, placeholder_list in sorted_placeholder_lists:
+        if merged_placeholders and placeholder_list[0][
+                'offset'] < merged_placeholders[-1]['offset']:
+            raise ValueError(
+                "Interleaved mixed-modality inference is currently not "
+                "supported.")
+        merged_placeholders.extend(placeholder_list)
+
+    if sorted_hash_lists is not None:
+        merged_hashes = []
+        for hash_list in sorted_hash_lists:
+            merged_hashes.extend(hash_list)
+    else:
+        merged_hashes = None
+
+    return sorted_modalities, merged_placeholders, merged_hashes

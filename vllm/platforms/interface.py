@@ -1,6 +1,7 @@
 import enum
 import platform
 import random
+from platform import uname
 from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
@@ -14,6 +15,11 @@ else:
     VllmConfig = None
 
 logger = init_logger(__name__)
+
+
+def in_wsl() -> bool:
+    # Reference: https://github.com/microsoft/WSL/issues/4071
+    return "microsoft" in " ".join(uname()).lower()
 
 
 class _Backend(enum.Enum):
@@ -39,6 +45,7 @@ class PlatformEnum(enum.Enum):
     CPU = enum.auto()
     NEURON = enum.auto()
     OPENVINO = enum.auto()
+    OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
 
@@ -101,14 +108,19 @@ class Platform:
     def is_openvino(self) -> bool:
         return self._enum == PlatformEnum.OPENVINO
 
+    def is_out_of_tree(self) -> bool:
+        return self._enum == PlatformEnum.OOT
+
     def is_cuda_alike(self) -> bool:
         """Stateless version of :func:`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend):
-        """Get the default attention backend of a device."""
-        return None
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool) -> str:
+        """Get the attention backend class of a device."""
+        return ""
 
     @classmethod
     def get_device_capability(
@@ -194,6 +206,18 @@ class Platform:
         pass
 
     @classmethod
+    def verify_model_arch(cls, model_arch: str) -> None:
+        """
+        Verify whether the current platform supports the specified model
+        architecture.
+
+        - This will raise an Error or Warning based on the model support on
+        the current platform.
+        - By default all models are considered supported.
+        """
+        pass
+
+    @classmethod
     def verify_quantization(cls, quant: str) -> None:
         """
         Verify whether the quantization is supported by the current platform.
@@ -220,6 +244,17 @@ class Platform:
             return CpuArchEnum.POWERPC
 
         return CpuArchEnum.OTHER if machine else CpuArchEnum.UNKNOWN
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        """Checks whether pin memory is available on the current platform."""
+        if in_wsl():
+            # Pinning memory in WSL is not supported.
+            # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
+            logger.warning("Using 'pin_memory=False' as WSL is detected. "
+                           "This may slow down the performance.")
+            return False
+        return True
 
 
 class UnspecifiedPlatform(Platform):

@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Tuple, cast
 
 import numpy as np
 import torch
@@ -10,15 +10,17 @@ import torch.nn as nn
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
-from vllm.inputs import INPUT_REGISTRY, InputRegistry
+from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
+                        LayerBlockType, bind_kv_cache, cdiv,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
+from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -35,7 +37,6 @@ class GPUModelRunner:
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        input_registry: InputRegistry = INPUT_REGISTRY,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -61,21 +62,34 @@ class GPUModelRunner:
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
+        self.is_multimodal_model = model_config.is_multimodal_model
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        self.max_num_reqs = scheduler_config.max_num_seqs
 
         # Model-related.
-        self.num_attn_layers = model_config.get_num_attention_layers(
+        self.num_attn_layers = model_config.get_num_layers_by_block_type(
+            parallel_config, LayerBlockType.attention)
+        self.num_query_heads = model_config.get_num_attention_heads(
             parallel_config)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
 
         # Multi-modal data support
-        self.input_registry = input_registry
+        self.input_registry = INPUT_REGISTRY
+        self.mm_registry = MULTIMODAL_REGISTRY
+
+        # NOTE: Initialized input mapper is only used for processing dummy
+        # multimodal data into multimodal kwargs for GPU memory profiling.
+        self.mm_input_mapper_profiling = MMInputMapperClient(self.model_config)
+        self.mm_input_mapper_profiling.use_cache = False
+
+        self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  # noqa: E501
+        self.encoder_cache_size = self.scheduler_config.encoder_cache_size
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
@@ -87,11 +101,12 @@ class GPUModelRunner:
         self.requests: Dict[str, CachedRequestState] = {}
         # Persistent batch.
         self.input_batch = InputBatch(
-            max_num_reqs=self.scheduler_config.max_num_seqs,
+            max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_blocks_per_req=self.max_num_blocks_per_req,
             device=self.device,
             pin_memory=self.pin_memory,
+            vocab_size=model_config.get_vocab_size(),
         )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
@@ -103,6 +118,15 @@ class GPUModelRunner:
         # The batch sizes in the config are in descending order.
         self.cudagraph_batch_sizes = list(
             reversed(self.vllm_config.compilation_config.capture_sizes))
+
+        # Cache the device properties.
+        self.device_properties = torch.cuda.get_device_properties(self.device)
+        self.num_sms = self.device_properties.multi_processor_count
+
+        # Persistent buffers for CUDA graphs.
+        self.input_ids = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int32,
+                                     device=self.device)
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
@@ -110,6 +134,39 @@ class GPUModelRunner:
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=self.device)
+
+        # OPTIMIZATION: Cache the tensors rather than creating them every step.
+        self.arange_np = np.arange(max(self.max_num_reqs + 1,
+                                       self.max_model_len),
+                                   dtype=np.int32)
+        # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
+        # a faster version of creating a new tensor every time. Thus, we should
+        # not make any assumptions about the values in these tensors.
+        self.input_ids_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int32,
+                                         device="cpu",
+                                         pin_memory=self.pin_memory)
+        self.input_ids_np = self.input_ids_cpu.numpy()
+        self.positions_cpu = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int64,
+                                         device="cpu",
+                                         pin_memory=self.pin_memory)
+        self.positions_np = self.positions_cpu.numpy()
+        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
+                                            dtype=torch.int32,
+                                            device="cpu",
+                                            pin_memory=self.pin_memory)
+        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
+        self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
+                                               dtype=torch.int32,
+                                               device="cpu",
+                                               pin_memory=self.pin_memory)
+        self.query_start_loc_np = self.query_start_loc_cpu.numpy()
+        self.seq_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
+                                             dtype=torch.int32,
+                                             device="cpu",
+                                             pin_memory=self.pin_memory)
+        self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
@@ -153,16 +210,15 @@ class GPUModelRunner:
             if num_new_blocks == 0:
                 continue
             start_index = len(req_state.block_ids)
-            end_index = start_index + num_new_blocks
             req_state.block_ids.extend(req_data.new_block_ids)
-            self.input_batch.block_table_cpu[
-                req_index, start_index:end_index] = req_data.new_block_ids
+            self.input_batch.block_table.append_row(req_index, start_index,
+                                                    req_data.new_block_ids)
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
-        for req_data in scheduler_output.scheduled_new_reqs:
-            req_id = req_data.req_id
-            sampling_params = req_data.sampling_params
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            req_id = new_req_data.req_id
+            sampling_params = new_req_data.sampling_params
             if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
@@ -171,25 +227,25 @@ class GPUModelRunner:
 
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
-                prompt_token_ids=req_data.prompt_token_ids,
-                prompt=req_data.prompt,
-                mm_inputs=req_data.mm_inputs,
-                mm_positions=req_data.mm_positions,
+                prompt_token_ids=new_req_data.prompt_token_ids,
+                prompt=new_req_data.prompt,
+                mm_inputs=new_req_data.mm_inputs,
+                mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
                 generator=generator,
-                block_ids=req_data.block_ids,
-                num_computed_tokens=req_data.num_computed_tokens,
+                block_ids=new_req_data.block_ids,
+                num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
             )
             req_ids_to_add.append(req_id)
 
         # Update the cached states of the resumed requests.
-        for req_data in scheduler_output.scheduled_resumed_reqs:
-            req_id = req_data.req_id
+        for res_req_data in scheduler_output.scheduled_resumed_reqs:
+            req_id = res_req_data.req_id
             req_state = self.requests[req_id]
 
-            req_state.block_ids = req_data.block_ids
-            req_state.num_computed_tokens = req_data.num_computed_tokens
+            req_state.block_ids = res_req_data.block_ids
+            req_state.num_computed_tokens = res_req_data.num_computed_tokens
             req_ids_to_add.append(req_id)
 
         # Add the new or resumed requests to the persistent batch.
@@ -217,15 +273,14 @@ class GPUModelRunner:
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table[:num_reqs].copy_(
-            self.input_batch.block_table_cpu_tensor[:num_reqs],
-            non_blocking=True)
+        self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens = []
         max_num_scheduled_tokens = 0
         for req_id in self.input_batch.req_ids[:num_reqs]:
+            assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_scheduled_tokens.append(num_tokens)
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
@@ -235,22 +290,16 @@ class GPUModelRunner:
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-        indices = np.arange(num_reqs)
-        req_indices = np.repeat(indices, num_scheduled_tokens)
+        req_indices = np.repeat(self.arange_np[:num_reqs],
+                                num_scheduled_tokens)
 
         # Get batched arange.
         # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        arange_matrix = np.tile(np.arange(max_num_scheduled_tokens),
-                                (num_reqs, 1))
-        mask = arange_matrix < num_scheduled_tokens[:, np.newaxis]
-        arange = arange_matrix[mask]
+        arange = np.concatenate(
+            [self.arange_np[:n] for n in num_scheduled_tokens])
 
         # Get positions.
-        positions = torch.empty((total_num_scheduled_tokens, ),
-                                dtype=torch.int32,
-                                device="cpu",
-                                pin_memory=self.pin_memory)
-        positions_np = positions.numpy()
+        positions_np = self.positions_np[:total_num_scheduled_tokens]
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
@@ -261,16 +310,13 @@ class GPUModelRunner:
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
-        token_indices = torch.from_numpy(token_indices)
-        input_ids = torch.empty((total_num_scheduled_tokens, ),
-                                dtype=torch.int32,
-                                device="cpu",
-                                pin_memory=self.pin_memory)
-        torch.index_select(torch.from_numpy(
-            self.input_batch.token_ids_cpu).flatten(),
+        # NOTE(woosuk): We use torch.index_select instead of np.take here
+        # because torch.index_select is much faster than np.take for large
+        # tensors.
+        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
-                           token_indices,
-                           out=input_ids)
+                           torch.from_numpy(token_indices),
+                           out=self.input_ids_cpu[:total_num_scheduled_tokens])
 
         # Calculate the slot mapping.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -278,52 +324,136 @@ class GPUModelRunner:
         # where K is the max_num_blocks_per_req and the block size is 2.
         # NOTE(woosuk): We can't simply use `token_indices // block_size` here
         # because M (max_model_len) is not necessarily divisible by block_size.
-        block_numbers = self.input_batch.block_table_cpu_tensor.flatten()[
-            req_indices * self.max_num_blocks_per_req +
-            positions_np // self.block_size]
-        block_offsets = torch.from_numpy(positions_np % self.block_size)
-        slot_mapping = torch.empty((total_num_scheduled_tokens, ),
-                                   dtype=torch.int32,
-                                   device="cpu",
-                                   pin_memory=self.pin_memory)
-        torch.add(block_numbers * self.block_size,
-                  block_offsets,
-                  out=slot_mapping)
+        block_table_indices = (req_indices * self.max_num_blocks_per_req +
+                               positions_np // self.block_size)
+        # NOTE(woosuk): We use torch.index_select instead of np.take here
+        # because torch.index_select is much faster than np.take for large
+        # tensors.
+        block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
+        block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
+        block_offsets = positions_np % self.block_size
+        np.add(block_numbers * self.block_size,
+               block_offsets,
+               out=self.slot_mapping_np[:total_num_scheduled_tokens])
 
         # Prepare the attention metadata.
-        query_start_loc = torch.empty((num_reqs + 1, ),
-                                      dtype=torch.int32,
-                                      device="cpu",
-                                      pin_memory=self.pin_memory)
-        query_start_loc_np = query_start_loc.numpy()
-        query_start_loc_np[0] = 0
-        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
+        self.query_start_loc_np[0] = 0
+        np.cumsum(num_scheduled_tokens,
+                  out=self.query_start_loc_np[1:num_reqs + 1])
 
         seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
                     num_scheduled_tokens)
         max_seq_len = seq_lens.max()
-        seq_start_loc = torch.empty((num_reqs + 1, ),
-                                    dtype=torch.int32,
-                                    device="cpu",
-                                    pin_memory=self.pin_memory)
-        seq_start_loc_np = seq_start_loc.numpy()
-        seq_start_loc_np[0] = 0
-        np.cumsum(seq_lens, out=seq_start_loc_np[1:])
+        self.seq_start_loc_np[0] = 0
+        np.cumsum(seq_lens, out=self.seq_start_loc_np[1:num_reqs + 1])
 
-        input_ids = input_ids.to(self.device, non_blocking=True)
-        self.positions[:total_num_scheduled_tokens].copy_(positions,
-                                                          non_blocking=True)
-        query_start_loc = query_start_loc.to(self.device, non_blocking=True)
-        seq_start_loc = seq_start_loc.to(self.device, non_blocking=True)
-        slot_mapping = slot_mapping.to(self.device, non_blocking=True).long()
+        # Copy the tensors to the GPU.
+        self.input_ids[:total_num_scheduled_tokens].copy_(
+            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        self.positions[:total_num_scheduled_tokens].copy_(
+            self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        query_start_loc = self.query_start_loc_cpu[:num_reqs + 1].to(
+            self.device, non_blocking=True)
+        seq_start_loc = self.seq_start_loc_cpu[:num_reqs + 1].to(
+            self.device, non_blocking=True)
+        slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
+            self.device, non_blocking=True).long()
+
+        # Prepare for cascade attention if needed.
+        common_prefix_len = (scheduler_output.num_common_prefix_blocks *
+                             self.block_size)
+        if common_prefix_len == 0:
+            # Common case.
+            use_cascade = False
+        else:
+            # NOTE(woosuk): Cascade attention uses two attention kernels: one
+            # for the common prefix and the other for the rest. For the first
+            # kernel, we concatenate all the query tokens (possibly from
+            # different requests) and treat them as if they are from the same
+            # request. Then, we use bi-directional attention to process the
+            # common prefix in the KV cache. Importantly, this means that the
+            # first kernel does not do any masking.
+
+            # Consider the following example:
+            # Request 1's input query: [D, E, X]
+            # Request 1's kv cache: [A, B, C, D, E, X]
+            # Request 1's num_computed_tokens: 3 (i.e., [A, B, C])
+            # Request 2's input query: [E, Y]
+            # Request 2's kv cache: [A, B, C, D, E, Y]
+            # Request 2's num_computed_tokens: 4 (i.e., [A, B, C, D])
+
+            # If we use [A, B, C, D, E] as the common prefix, then the
+            # first kernel will compute the bi-directional attention between
+            # input query [D, E, X, E, Y] and common prefix [A, B, C, D, E].
+            # However, this is wrong because D in Request 1 should not attend to
+            # E in the common prefix (i.e., we need masking).
+            # To avoid this, [A, B, C, D] should be the common prefix.
+            # That is, the common prefix should be capped by the minimum
+            # num_computed_tokens among the requests, and plus one to include
+            # the first token of the query.
+
+            # In practice, we use [A, B, C] as the common prefix, instead of
+            # [A, B, C, D] (i.e., the common prefix is capped by the minimum
+            # num_computed_tokens, without plus one).
+            # This is because of an implementation detail: We want to always
+            # use two kernels for cascade attention. Let's imagine:
+            # Request 3's input query: [D]
+            # Request 3's kv cache: [A, B, C, D]
+            # Request 3's num_computed_tokens: 4 (i.e., [A, B, C, D])
+            # If we use [A, B, C, D] as the common prefix for Request 1-3,
+            # then Request 3 will be processed only by the first kernel,
+            # and the second kernel will get an empty input. While this is not
+            # a fundamental problem, our current implementation does not support
+            # this case.
+            common_prefix_len = min(
+                common_prefix_len,
+                self.input_batch.num_computed_tokens_cpu[:num_reqs].min())
+            # common_prefix_len should be a multiple of the block size.
+            common_prefix_len = (common_prefix_len // self.block_size *
+                                 self.block_size)
+            use_cascade = FlashAttentionBackend.use_cascade_attention(
+                common_prefix_len=common_prefix_len,
+                query_lens=num_scheduled_tokens,
+                num_query_heads=self.num_query_heads,
+                num_kv_heads=self.num_kv_heads,
+                use_alibi=False,  # FIXME
+                use_sliding_window=self.sliding_window is not None,
+                num_sms=self.num_sms,
+            )
+
+        if use_cascade:
+            # TODO: Optimize.
+            cu_prefix_query_lens = torch.tensor(
+                [0, total_num_scheduled_tokens],
+                dtype=torch.int32,
+                device=self.device)
+            cu_prefix_kv_lens = torch.tensor([0, common_prefix_len],
+                                             dtype=torch.int32,
+                                             device=self.device)
+            cu_suffix_kv_lens = (
+                self.seq_start_loc_np[:num_reqs + 1] -
+                self.arange_np[:num_reqs + 1] * common_prefix_len)
+            cu_suffix_kv_lens = torch.from_numpy(cu_suffix_kv_lens).to(
+                self.device)
+        else:
+            cu_prefix_query_lens = None
+            cu_prefix_kv_lens = None
+            cu_suffix_kv_lens = None
+
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_start_loc=seq_start_loc,
-            block_table=self.input_batch.block_table[:num_reqs],
+            block_table=(
+                self.input_batch.block_table.get_device_tensor()[:num_reqs]),
             slot_mapping=slot_mapping,
+            use_cascade=use_cascade,
+            common_prefix_len=common_prefix_len,
+            cu_prefix_query_lens=cu_prefix_query_lens,
+            cu_prefix_kv_lens=cu_prefix_kv_lens,
+            cu_suffix_kv_lens=cu_suffix_kv_lens,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -331,7 +461,7 @@ class GPUModelRunner:
         # token from the partial request.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
-        return input_ids, attn_metadata, logits_indices
+        return attn_metadata, logits_indices
 
     def _prepare_sampling(
         self,
@@ -345,7 +475,12 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
-        sampling_metadata = self.input_batch.make_sampling_metadata(skip_copy)
+        req_id_output_token_ids: Dict[str, List[int]] = \
+            {req_id: req.output_token_ids \
+                for req_id, req in self.requests.items()}
+
+        sampling_metadata = self.input_batch.make_sampling_metadata(
+            req_id_output_token_ids, skip_copy)
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
@@ -355,7 +490,7 @@ class GPUModelRunner:
 
         # Batch the multi-modal inputs.
         mm_inputs: List[MultiModalKwargs] = []
-        req_input_ids: List[Tuple[int, int]] = []
+        req_input_ids: List[Tuple[str, int]] = []
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
             for input_id in encoder_input_ids:
@@ -388,6 +523,7 @@ class GPUModelRunner:
         encoder_outputs: List[torch.Tensor] = []
         num_reqs = self.input_batch.num_reqs
         for req_id in self.input_batch.req_ids[:num_reqs]:
+            assert req_id is not None
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             req_state = self.requests[req_id]
@@ -427,44 +563,58 @@ class GPUModelRunner:
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
 
-        # Run the encoder.
-        self._execute_encoder(scheduler_output)
-        encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+        if self.is_multimodal_model:
+            # Run the multimodal encoder if any.
+            self._execute_encoder(scheduler_output)
+            encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+        else:
+            encoder_outputs = []
 
         # Prepare the decoder inputs.
-        input_ids, attn_metadata, logits_indices = self._prepare_inputs(
-            scheduler_output)
+        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
             # Add padding to the batch size.
-            num_input_tokens = self._get_padded_batch_size(
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 num_scheduled_tokens)
         else:
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
+        attn_metadata.num_input_tokens = num_input_tokens
 
-        # Get the inputs embeds.
-        if encoder_outputs:
-            inputs_embeds = self.model.get_input_embeddings(
-                input_ids, encoder_outputs)
+        if self.is_multimodal_model:
+            # NOTE(woosuk): To unify token ids and soft tokens (vision
+            # embeddings), we always use embeddings (rather than token ids)
+            # as input to the multimodal model, even when the input is text.
+            input_ids = self.input_ids[:num_scheduled_tokens]
+            if encoder_outputs:
+                inputs_embeds = self.model.get_input_embeddings(
+                    input_ids, encoder_outputs)
+            else:
+                inputs_embeds = self.model.get_input_embeddings(input_ids)
+            # TODO(woosuk): Avoid the copy. Optimize.
+            self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            input_ids = None
         else:
-            inputs_embeds = self.model.get_input_embeddings(input_ids)
-        # NOTE(woosuk): To unify token ids and soft tokens (vision embeddings),
-        # always use embeddings (rather than token ids) as input to the model.
-        # TODO(woosuk): Avoid the copy. Optimize.
-        self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+            # For text-only models, we use token ids as input.
+            # While it is possible to use embeddings as input just like the
+            # multimodal models, it is not desirable for performance since
+            # then the embedding layer is not included in the CUDA graph.
+            input_ids = self.input_ids[:num_input_tokens]
+            inputs_embeds = None
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
-                input_ids=None,
+                input_ids=input_ids,
                 positions=self.positions[:num_input_tokens],
                 kv_caches=self.kv_caches,
                 attn_metadata=None,
-                inputs_embeds=self.inputs_embeds[:num_input_tokens],
+                inputs_embeds=inputs_embeds,
             )
         hidden_states = hidden_states[:num_scheduled_tokens]
         hidden_states = hidden_states[logits_indices]
@@ -482,6 +632,7 @@ class GPUModelRunner:
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            assert req_id is not None
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
@@ -490,6 +641,7 @@ class GPUModelRunner:
                 # Append the sampled token to the output token ids.
                 token_id = sampled_token_ids[i]
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
+                self.input_batch.num_tokens[i] += 1
                 req_state.output_token_ids.append(token_id)
             else:
                 # Ignore the sampled token from the partial request.
@@ -507,8 +659,15 @@ class GPUModelRunner:
             logprobs = None
         else:
             logprobs = sampler_output.logprobs.cpu()
+
+        # num_reqs entries should be non-None
+        assert all(
+            req_id is not None for req_id in
+            self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
+        req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
+
         model_runner_output = ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids[:num_reqs],
+            req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
             logprob_token_ids_cpu=logprob_token_ids,
@@ -532,18 +691,23 @@ class GPUModelRunner:
         num_tokens: int,
         kv_caches: List[torch.Tensor],
     ) -> torch.Tensor:
+        if self.is_multimodal_model:
+            input_ids = None
+            inputs_embeds = self.inputs_embeds[:num_tokens]
+        else:
+            input_ids = self.input_ids[:num_tokens]
+            inputs_embeds = None
         with set_forward_context(None, self.vllm_config):
             hidden_states = model(
-                input_ids=None,
+                input_ids=input_ids,
                 positions=self.positions[:num_tokens],
                 kv_caches=kv_caches,
                 attn_metadata=None,
-                inputs_embeds=self.inputs_embeds[:num_tokens])
+                inputs_embeds=inputs_embeds,
+            )
         return hidden_states
 
     def profile_run(self) -> None:
-        # TODO(woosuk): Profile the max memory usage of the encoder and
-        # the encoder cache.
         # use an empty tensor instead of `None`` to force Dynamo to pass
         # it by reference, rather by specializing on the value `None`.
         # the `dtype` argument does not matter, and we use `float32` as
@@ -555,6 +719,100 @@ class GPUModelRunner:
             torch.tensor([], dtype=torch.float32, device=self.device)
             for _ in range(self.num_attn_layers)
         ]
+
+        # Profile with multimodal encoder & encoder cache.
+        if self.is_multimodal_model:
+
+            # Create dummy batch of multimodal inputs.
+            dummy_request_data = self.input_registry.dummy_data_for_profiling(
+                model_config=self.model_config,
+                seq_len=self.max_num_tokens,
+                mm_registry=self.mm_registry,
+            )
+            dummy_mm_data = dummy_request_data.multi_modal_data
+
+            # NOTE: Currently model is profiled with a single non-text
+            # modality with the max possible input tokens even when
+            # it supports multiple.
+            max_tokens_by_modality_dict = self.mm_registry.get_max_tokens_per_item_by_modality(  # noqa: E501
+                self.model_config)
+
+            dummy_data_modality, max_tokens_per_mm_item = max(
+                max_tokens_by_modality_dict.items(), key=lambda item: item[1])
+
+            # Check how many items of this modality can be supported by
+            # the encoder cache budget.
+            encoder_cache_budget = min(self.max_num_encoder_input_tokens,
+                                       self.encoder_cache_size)
+            max_num_mm_items_encoder_budget = encoder_cache_budget // \
+                max_tokens_per_mm_item
+
+            # TODO: Allow users to set encoder_cache_budget in case this
+            # happens.
+            assert max_num_mm_items_encoder_budget > 0, (
+                f"Encoder cache budget={encoder_cache_budget} is too small to "
+                f"support the maximum possible size of multimodal embeddings"
+                f"={max_tokens_per_mm_item}.")
+
+            # Check how many items of this modality can be supported by
+            # the decoder budget.
+            max_mm_items_per_req = max(
+                self.mm_registry.get_mm_limits_per_prompt(
+                    self.model_config).values())
+
+            # NOTE: We do not consider max_num_batched_tokens on purpose
+            # because the multimodal embeddings can be generated in advance
+            # and chunked prefilled.
+            max_num_mm_items_decoder_budget = self.max_num_reqs * \
+                max_mm_items_per_req
+
+            max_num_mm_items = min(max_num_mm_items_encoder_budget,
+                                   max_num_mm_items_decoder_budget)
+
+            # Dummy data definition in V0 may contain multiple multimodal items
+            # (e.g, multiple images) for a single request, therefore here we
+            # always replicate first item by max_num_mm_items times since in V1
+            # they are scheduled to be processed separately.
+
+            # Case when models have a merged processor, their dummy data is
+            # already batched `MultiModalKwargs`, therefore we take the first
+            # `MultiModalKwargsItem` from the desired modality to profile on.
+            if isinstance(dummy_mm_data, MultiModalKwargs):
+                dummy_mm_item = dummy_mm_data.get_item(
+                    modality=dummy_data_modality, item_index=0)
+                dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
+
+            # Case when models have dummy data explicitly defined as
+            # `MultiModalDataDict`, so they need to be processed through input
+            # mapper.
+            # TODO (ywang96): deprecate this path once merged processor is
+            # supported on all models.
+            else:
+                mm_kwargs_list = self.mm_input_mapper_profiling.process_inputs(
+                    mm_data=dummy_mm_data,
+                    mm_hashes=None,
+                    mm_processor_kwargs=None,
+                    precomputed_mm_inputs=None)
+                dummy_mm_kwargs = mm_kwargs_list[0]
+
+            batched_dummy_mm_inputs = MultiModalKwargs.batch(
+                [dummy_mm_kwargs] * max_num_mm_items)
+            batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
+                batched_dummy_mm_inputs, device=self.device)
+
+            # Run multimodal encoder.
+            dummy_encoder_outputs = self.model.get_multimodal_embeddings(
+                **batched_dummy_mm_inputs)
+            assert len(dummy_encoder_outputs) == max_num_mm_items, (
+                "Expected dimension 0 of encoder outputs to match the number "
+                f"of multimodal data items: {max_num_mm_items}, got "
+                f"{len(dummy_encoder_outputs)=} instead. This is most likely "
+                "due to the 'get_multimodal_embeddings' method of the model "
+                "not implemented correctly.")
+
+            # Cache the dummy encoder outputs.
+            self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
+
         # Trigger compilation for general shape.
         hidden_states = self._dummy_run(self.model, self.max_num_tokens,
                                         dummy_kv_caches)
@@ -563,6 +821,7 @@ class GPUModelRunner:
         # TODO(woosuk): Consider the memory usage of the sampler.
         torch.cuda.synchronize()
         del hidden_states, logits
+        self.encoder_cache.clear()
         gc.collect()
 
     def capture_model(self) -> None:
@@ -578,7 +837,7 @@ class GPUModelRunner:
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
-        with graph_capture():
+        with graph_capture(device=self.device):
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
@@ -602,10 +861,6 @@ class GPUModelRunner:
                 torch.zeros(kv_cache_shape,
                             dtype=self.kv_cache_dtype,
                             device=self.device))
-
-    def _get_padded_batch_size(self, batch_size: int) -> Optional[int]:
-        # TODO: Optimize this?
-        for size in self.cudagraph_batch_sizes:
-            if batch_size <= size:
-                return size
-        return None
+        bind_kv_cache(
+            self.vllm_config.compilation_config.static_forward_context,
+            [self.kv_caches])
