@@ -108,7 +108,7 @@ $ cd ../..
 
 2. Optionally, if you choose to use CK flash attention, you can install [flash attention for ROCm](https://github.com/ROCm/flash-attention/tree/b7d29fb)
 
-Install ROCm's flash attention (v2.5.9.post1) following the instructions from [ROCm/flash-attention](https://github.com/ROCm/flash-attention/tree/b7d29fb#amd-rocm-support)
+Install ROCm's flash attention (v2.7.0-cktile) following the instructions from [ROCm/flash-attention](https://github.com/ROCm/flash-attention/tree/b7d29fb#amd-rocm-support)
 Alternatively, wheels intended for vLLM use can be accessed under the releases.
 
 For example, for ROCm 6.2, suppose your gfx arch is `gfx90a`. To get your gfx architecture, run `rocminfo |grep gfx`.
