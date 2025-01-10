@@ -708,7 +708,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     elif hidden_states.dtype == torch.float32:
         compute_type = tl.float32
     else:
-        logger.error(f"Unsupported compute_type for fused_experts_impl: {hidden_states.dtype} !")
+        raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
     if inplace:
         out_hidden_states = hidden_states
