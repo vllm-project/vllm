@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               LoadLoraAdapterRequest,
                                               UnloadLoraAdapterRequest)
@@ -21,13 +22,16 @@ LORA_UNLOADING_SUCCESS_MESSAGE = (
 
 async def _async_serving_models_init() -> OpenAIServingModels:
     mock_model_config = MagicMock(spec=ModelConfig)
+    mock_engine_client = MagicMock(spec=EngineClient)
     # Set the max_model_len attribute to avoid missing attribute
     mock_model_config.max_model_len = 2048
 
-    serving_models = OpenAIServingModels(base_model_paths=BASE_MODEL_PATHS,
+    serving_models = OpenAIServingModels(engine_client=mock_engine_client,
+                                         base_model_paths=BASE_MODEL_PATHS,
                                          model_config=mock_model_config,
                                          lora_modules=None,
                                          prompt_adapters=None)
+    await serving_models.init_static_loras()
 
     return serving_models
 
@@ -113,5 +117,5 @@ async def test_unload_lora_adapter_not_found():
     request = UnloadLoraAdapterRequest(lora_name="nonexistent_adapter")
     response = await serving_models.unload_lora_adapter(request)
     assert isinstance(response, ErrorResponse)
-    assert response.type == "InvalidUserInput"
-    assert response.code == HTTPStatus.BAD_REQUEST
+    assert response.type == "NotFoundError"
+    assert response.code == HTTPStatus.NOT_FOUND
