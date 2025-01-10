@@ -9,6 +9,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeStochasticBaseSampler)
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -368,7 +369,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 # Note that we always sample with replacement.
 # probs will be modified in place, but this is fine, as we pass
 # in a copy already.
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _multinomial(
     probs: torch.Tensor,
     num_samples: int,
