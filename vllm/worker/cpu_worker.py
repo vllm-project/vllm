@@ -293,9 +293,8 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             self.cache_engine[ve].cpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
-        for ve in range(self.parallel_config.pipeline_parallel_size):
-            bind_kv_cache(self.compilation_config.static_forward_context,
-                          self.cpu_cache[ve])
+        bind_kv_cache(self.compilation_config.static_forward_context,
+                      self.cpu_cache)
         self.model_runner.block_size = self.cache_engine[0].block_size
 
         assert all(
