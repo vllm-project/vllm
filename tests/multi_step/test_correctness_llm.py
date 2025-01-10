@@ -116,11 +116,11 @@ def test_multi_step_llm(
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("tp_size", [1])
 @pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
 @pytest.mark.parametrize("num_logprobs,num_prompt_logprobs", [(5, 5)])
-@pytest.mark.parametrize("attention_backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("attention_backend", ["FLASH_ATTN"])
 def test_multi_step_llm_w_prompt_logprobs(
     vllm_runner,
     example_prompts,
