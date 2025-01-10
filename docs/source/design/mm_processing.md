@@ -6,13 +6,13 @@ To enable various optimizations in vLLM such as [chunked prefill](#chunked-prefi
 
 Here are the main features of {class}`~vllm.multimodal.processing.BaseMultiModalProcessor`:
 
-## Prompt replacement detection
+## Prompt Replacement Detection
 
-One of the main responsibilies of HF processor is to replace input placeholder tokens (e.g. `<image>` for a single image) with feature placeholder tokens (e.g. `<image><image>...<image>`, the number of which equals to the feature size). This is referred to as *"`input_ids` expansion"* in HF Transformers. The information about which tokens have been replaced is key to finding the correspondence between placeholder feature tokens and multi-modal inputs.
+One of the main responsibilies of HF processor is to replace input placeholder tokens (e.g. `<image>` for a single image) with feature placeholder tokens (e.g. `<image><image>...<image>`, the number of which equals to the feature size). The information about which tokens have been replaced is key to finding the correspondence between placeholder feature tokens and multi-modal inputs.
 
 In vLLM, this information is specified using {class}`~vllm.multimodal.processing.PromptReplacement` in {meth}`~vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_replacements`. Given this specification, we can automatically detect whether HF has replaced the input placeholder tokens by checking whether the feature placeholder tokens exist in the prompt.
 
-## Support for tokenized prompts
+## Tokenized Prompt Inputs
 
 To enable tokenization in a separate process, we support passing input token IDs alongside multi-modal data.
 
@@ -55,7 +55,7 @@ We address the second issue by implementing model-agnostic code in
 
 With the help of dummy text and automatic prompt replacement, our multi-modal processor can finally accept both text and token prompts with multi-modal data. The detailed logic is shown in {meth}`~vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main`.
 
-## Caching of processor outputs
+## Processor Output Caching
 
 Some HF processors, such as the one for Qwen2-VL, are [very slow](gh-issue:9238). To alleviate this problem, we cache the multi-modal outputs of HF processor to avoid processing the same multi-modal input (e.g. image) again.
 
