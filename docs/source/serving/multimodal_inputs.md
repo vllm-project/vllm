@@ -91,7 +91,7 @@ for o in outputs:
     print(generated_text)
 ```
 
-Full example: <gh-file:examples/offline_inference/offline_inference_vision_language_multi_image.py>
+Full example: <gh-file:examples/offline_inference/vision_language_multi_image.py>
 
 Multi-image input can be extended to perform video captioning. We show this with [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos:
 
