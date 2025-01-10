@@ -25,7 +25,8 @@ class BlockHashType(NamedTuple):
 @dataclass
 class KVCacheBlock:
     """KV-cache block metadata."""
-    # Block ID, ranging from 0 to num_gpu_blocks - 1.
+    # Block ID, ranging from 0 to num_gpu_blocks - 1, and a special block_id -1
+    # for the null block.
     block_id: int
     # Reference count.
     ref_cnt: int = 0

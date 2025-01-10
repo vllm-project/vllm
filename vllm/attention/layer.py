@@ -102,6 +102,7 @@ class Attention(nn.Module):
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
+        print("sliding_window", sliding_window)
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
 

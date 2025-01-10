@@ -35,11 +35,14 @@ class KVCacheManager:
         # self.max_num_blocks_per_req = cdiv(max_model_len, block_size)
         self.enable_caching = enable_caching
 
+        self._null_block: KVCacheBlock = KVCacheBlock(-1)
+
         # TODO(Chen): add comments
         self.managers = get_managers(
             kv_cache_config,
-            MemoryPoolOperations(get_cached_block=self._get_cached_block
-                                 ))  # group_name -> manager
+            MemoryPoolOperations(get_cached_block=self._get_cached_block,
+                                 get_null_block=self.get_null_block),
+        )  # group_name -> manager
 
         # NOTE(woosuk): To avoid frequent block allocation, we preallocate some
         # blocks for each request. For example, when a request reaches the end
@@ -82,8 +85,6 @@ class KVCacheManager:
         # for each request, so that we can free the blocks when the request
         # is finished.
         self.req_to_blocks: Dict[str, KVCacheBlocks] = {}
-
-        self.null_block: Optional[KVCacheBlock] = None
 
     def get_computed_tokens(self,
                             request: Request) -> Tuple[int, KVCacheBlocks]:
@@ -138,9 +139,7 @@ class KVCacheManager:
         for i, blocks in enumerate(computed_blocks):
             blocks = blocks[:num_computed_tokens //
                             self.managers[i].block_size]
-            self.managers[i].remove_useless_blocks(blocks,
-                                                   num_computed_tokens,
-                                                   call_free=True)
+            self.managers[i].remove_useless_blocks(blocks, num_computed_tokens)
 
         return num_computed_tokens, computed_blocks
 
@@ -180,11 +179,16 @@ class KVCacheManager:
             (self.free_block_queue.num_free_blocks - total_new_blocks) //
             len(self.managers))
 
+        # NOTE(Chen): do all free before allocation to make less eviction
+        removed_blocks = []
         for manager, req_blocks_of_group in zip(self.managers, req_blocks):
-            # NOTE(Chen): do all free before allocation to make less eviction
-            manager.remove_useless_blocks(request.num_computed_tokens,
-                                          req_blocks_of_group,
-                                          call_free=True)
+            removed_blocks.append(
+                manager.remove_useless_blocks(req_blocks_of_group,
+                                              request.num_computed_tokens))
+        # TODO: better handling of free order (e.g., this order have problem
+        # when different layer has different sliding window size)
+        self._free_blocks(removed_blocks)
+
         new_blocks = []
 
         for i in range(len(self.managers)):
@@ -195,7 +199,8 @@ class KVCacheManager:
                 # Get new blocks from the free block pool considering
                 # preallocated blocks.
                 num_block_to_allocate = min(
-                    num_new_blocks[i] + num_preallocate_blocks,
+                    num_new_blocks[i] + len(removed_blocks[i]) +
+                    num_preallocate_blocks,
                     # Should not exceed the maximum number of blocks per request.
                     # This is especially because the block table has the shape
                     # [..., max_num_blocks_per_req].
@@ -206,6 +211,7 @@ class KVCacheManager:
                     len(req_blocks[i]),
                 )
                 assert total_new_blocks > 0
+                print("allocate block", i, num_block_to_allocate)
 
                 new_blocks_of_group = self._get_new_blocks(
                     num_block_to_allocate)
@@ -312,6 +318,7 @@ class KVCacheManager:
             # Concatenate the computed block IDs and the new block IDs.
             req_to_blocks.append(computed_blocks[i] + new_blocks_of_group)
 
+        print("req_to_blocks", [len(blocks) for blocks in req_to_blocks])
         self.req_to_blocks[request.request_id] = req_to_blocks
 
         if not self.enable_caching:
@@ -345,30 +352,34 @@ class KVCacheManager:
             request: The request to free the blocks.
         """
         # Default to {} in case a request is freed (aborted) before alloc.
-        blocks = self.req_to_blocks.pop(request.request_id, {})
+        blocks = self.req_to_blocks.pop(request.request_id, [])
         if len(blocks) == 0:
             # This request is freed before alloc. just return
             return
-        elif len(blocks) == 1:
-            ordered_blocks = blocks[0]
-            if self.enable_caching:
-                # Free blocks in reverse order so that the tail blocks are
-                # freed first.
-                ordered_blocks = reversed(ordered_blocks)
         else:
-            if self.enable_caching:
-                # TODO(Chen): add comments
-                ordered_blocks = self._merge_blocks_by_length_reversed(blocks)
-            else:
-                ordered_blocks = []
-                for block_list in blocks.values():
-                    ordered_blocks.extend(block_list)
+            self._free_blocks(blocks)
+
+    def _free_blocks(self, blocks: KVCacheBlocks) -> None:
+        # Fast path: if all blocks are empty, return. This will happen during
+        # append_slots
+        blocks = [b for b in blocks if len(b) > 0]
+        if len(blocks) == 0:
+            return
+        # Free blocks in reverse order so that the tail blocks are
+        # freed first.
+        if self.enable_caching:
+            # TODO(Chen): add comments
+            ordered_blocks = self._merge_blocks_by_length_reversed(blocks)
+        else:
+            ordered_blocks = []
+            for block_list in blocks.values():
+                ordered_blocks.extend(block_list)
 
         for block in ordered_blocks:
             block.decr_ref()
             # TODO(Chen): add comments: never free the null_block, so do not
             # need to track its ref_cnt carefully.
-            if block.ref_cnt == 0 and block != self.null_block:
+            if block.ref_cnt == 0 and block != self._null_block:
                 self.free_block_queue.append(block)
 
     def _get_new_blocks(self, num_blocks: int) -> List[KVCacheBlock]:
@@ -448,7 +459,7 @@ class KVCacheManager:
             for block in blocks_of_group:
                 # ref_cnt=0 means this block is in the free list (i.e. eviction
                 # candidate), so remove it.
-                if block.ref_cnt == 0 and block != self.null_block:
+                if block.ref_cnt == 0 and block != self._null_block:
                     self.free_block_queue.remove(block)
                 block.incr_ref()
 
@@ -533,12 +544,15 @@ class KVCacheManager:
         if len(block_size_set) == 1:
             # O(n) time complexity if block_size of all groups are the same
             ordered_blocks = []
+            print("block length",
+                  [len(blocks_of_group) for blocks_of_group in blocks])
             for i in range(len(blocks[0]) - 1, -1, -1):
                 for blocks_of_group in blocks:
                     ordered_blocks.append(blocks_of_group[i])
         else:
             # O(n * log(n)) time complexity
             # TODO(Chen): optimize it to O(n*len(self.managers)) time complexity
+            # NOTE: untested
             ordered_blocks_with_key = []
 
             for i, blocks_of_group in enumerate(blocks):
@@ -570,3 +584,6 @@ class KVCacheManager:
                 break
 
         return num_computed_tokens
+
+    def get_null_block(self) -> KVCacheBlock:
+        return self._null_block

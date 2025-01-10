@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple, TypedDict
 from vllm.utils import cdiv
@@ -10,6 +11,7 @@ from vllm.v1.utils import ConstantList
 @dataclass
 class MemoryPoolOperations:
     get_cached_block: Callable[[BlockHashType], Optional[KVCacheBlock]]
+    get_null_block: Callable[[], KVCacheBlock]
 
 
 class CustomManager(ABC):
@@ -38,7 +40,7 @@ class CustomManager(ABC):
 
     @abstractmethod
     def remove_useless_blocks(self, block_table: List[KVCacheBlock],
-                              num_computed_tokens: int, call_free: bool):
+                              num_computed_tokens: int):
         # update block_table inplace
         raise NotImplementedError
 
@@ -75,13 +77,74 @@ class FullAttentionManager(CustomManager):
         return num_new_blocks
 
     def remove_useless_blocks(self, block_table: List[KVCacheBlock],
-                              num_computed_tokens: int, call_free: bool):
-        pass
+                              num_computed_tokens: int) -> List[KVCacheBlock]:
+        return []
 
 
-class SlidingWindowManager(FullAttentionManager):
-    # TODO: implement the sliding window manager
-    pass
+class SlidingWindowManager(CustomManager):
+
+    def __init__(self, layer_spec: SlidingWindowSpec,
+                 memory_pool_operations: MemoryPoolOperations):
+        super().__init__(layer_spec, memory_pool_operations)
+        # +1 due to not aligned
+        self.num_block_sliding_window = cdiv(layer_spec.sliding_window,
+                                             self.block_size) + 1
+        self._null_block = memory_pool_operations.get_null_block()
+
+    def get_computed_tokens(
+        self, block_hashes: ConstantList[BlockHashType]
+    ) -> Tuple[ComputedTokens, List[KVCacheBlock]]:
+        # TODO: check the hit every num_block_sliding_window blocks, to optimize
+        # the time complexity from O(num_block) to
+        # O(num_block / num_block_sliding_window) + O(num_computed_block),
+        # which is good for low cache hit rate senarios.
+        start = 0
+        ranges = []
+        computed_blocks: List[KVCacheBlock] = []
+
+        for i, block_hash in enumerate(block_hashes):
+            if cached_block := self.memory_pool_operations.get_cached_block(
+                    block_hash):
+                computed_blocks.append(cached_block)
+            else:
+                if start == 0:
+                    ranges.append(
+                        ComputedTokenRange(start * self.block_size,
+                                           i * self.block_size))
+                elif i - start >= self.num_block_sliding_window:
+                    ranges.append((ComputedTokenRange(
+                        (start + self.num_block_sliding_window) *
+                        self.block_size, i * self.block_size)))
+                computed_blocks.append(
+                    self.memory_pool_operations.get_null_block())
+                start = i + 1
+        return ranges, computed_blocks
+
+    def get_num_new_blocks(self, num_computed_tokens: int,
+                           num_append_tokens: int,
+                           num_allocated_blocks: int) -> int:
+        # TODO: need test on we can get the correct number
+        # TODO: need test on the assumption that freeing blocks outside sliding
+        # window before allocating new blocks
+        # NOTE: may be 1 more block than required
+        num_computed_blocks = min(cdiv(num_computed_tokens, self.block_size),
+                                  self.num_block_sliding_window)
+        num_append_blocks = cdiv(num_append_tokens, self.block_size)
+        num_required_blocks = num_computed_blocks + num_append_blocks
+        num_new_blocks = num_required_blocks - num_allocated_blocks
+        return num_new_blocks
+
+    def remove_useless_blocks(self, block_table: List[KVCacheBlock],
+                              num_computed_tokens: int) -> List[KVCacheBlock]:
+        num_block_should_free = cdiv(num_computed_tokens, self.block_size) - \
+                self.num_block_sliding_window
+        removed_blocks = deque()
+        for i in range(num_block_should_free - 1, -1, -1):
+            if block_table[i] == self._null_block:
+                break
+            removed_blocks.appendleft(block_table[i])
+            block_table[i] = self._null_block
+        return removed_blocks
 
 
 spec_manager_map = {
