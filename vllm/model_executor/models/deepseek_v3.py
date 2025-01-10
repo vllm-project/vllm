@@ -598,7 +598,8 @@ class DeepseekV3ForCausalLM(nn.Module, SupportsPP):
                 continue
 
             # TODO(simon): support nextn predict layers
-            if self.config.num_nextn_predict_layers > 0:
+            if hasattr(self.config, "num_nextn_predict_layers"
+                       ) and self.config.num_nextn_predict_layers > 0:
                 assert self.config.num_nextn_predict_layers == 1
                 layer_idx = self.config.num_hidden_layers
                 if name.startswith(f"model.layers.{layer_idx}"):
