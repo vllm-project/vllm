@@ -60,7 +60,7 @@ for o in outputs:
     print(generated_text)
 ```
 
-Full example: <gh-file:examples/offline_inference/offline_inference_vision_language.py>
+Full example: <gh-file:examples/offline_inference/vision_language.py>
 
 To substitute multiple images inside the same text prompt, you can pass in a list of images instead:
 
@@ -125,7 +125,7 @@ for o in outputs:
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
 instead of using multi-image input.
 
-Full example: <gh-file:examples/offline_inference/offline_inference_vision_language.py>
+Full example: <gh-file:examples/offline_inference/vision_language.py>
 
 ### Audio
 
