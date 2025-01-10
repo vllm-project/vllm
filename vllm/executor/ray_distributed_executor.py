@@ -73,7 +73,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _init_executor(self) -> None:
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
-        if envs.VLLM_USE_V1:
+        if envs.VLLM_USE_V1 and not current_platform.is_xpu():
             # V1 uses SPMD worker and compiled DAG
             os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
             os.environ["VLLM_USE_RAY_COMPILED_DAG"] = "1"
