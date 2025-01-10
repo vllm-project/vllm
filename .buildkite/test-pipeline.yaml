@@ -187,7 +187,7 @@ steps:
   - examples/
   commands:
     - pip install tensorizer # for tensorizer test
-    - python3 offline_inference/offline_inference.py
+    - python3 offline_inference/basic.py
     - python3 offline_inference/cpu_offload.py
     - python3 offline_inference/offline_inference_chat.py
     - python3 offline_inference/offline_inference_with_prefix.py

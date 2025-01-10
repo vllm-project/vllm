@@ -46,7 +46,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/offline_inference.py>
+A code example can be found here: <gh-file:examples/offline_inference/basic.py>
 
 ### `LLM.beam_search`
 
