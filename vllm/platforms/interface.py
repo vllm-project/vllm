@@ -45,6 +45,7 @@ class PlatformEnum(enum.Enum):
     CPU = enum.auto()
     NEURON = enum.auto()
     OPENVINO = enum.auto()
+    OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
 
@@ -81,6 +82,12 @@ class Platform:
     # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134 # noqa
     # use "CPU" as a fallback for platforms not registered in PyTorch
     dispatch_key: str = "CPU"
+    # The torch.compile backend for compiling simple and
+    # standalone functions. The default value is "inductor" to keep
+    # the same behavior as PyTorch.
+    # NOTE: for the forward part of the model, vLLM has another separate
+    # compilation strategy.
+    simple_compile_backend: str = "inductor"
     supported_quantization: list[str] = []
 
     def is_cuda(self) -> bool:
@@ -106,6 +113,9 @@ class Platform:
 
     def is_openvino(self) -> bool:
         return self._enum == PlatformEnum.OPENVINO
+
+    def is_out_of_tree(self) -> bool:
+        return self._enum == PlatformEnum.OOT
 
     def is_cuda_alike(self) -> bool:
         """Stateless version of :func:`torch.cuda.is_available`."""

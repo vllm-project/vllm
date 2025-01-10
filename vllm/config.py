@@ -2124,8 +2124,7 @@ class MultiModalConfig:
 
     limit_per_prompt: Mapping[str, int] = field(default_factory=dict)
     """
-    The maximum number of multi-modal input instances allowed per prompt
-    for each :class:`~vllm.multimodal.MultiModalPlugin`.
+    The maximum number of input items allowed per prompt for each modality.
     """
 
     def compute_hash(self) -> str:
@@ -2780,7 +2779,6 @@ class CompilationConfig(BaseModel):
     compilation_time: float = PrivateAttr
 
     # Per-model forward context
-    # Mainly used to store attention cls
     # Map from layer name to the attention cls
     static_forward_context: Dict[str, Any] = PrivateAttr
 
