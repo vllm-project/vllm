@@ -198,7 +198,7 @@ steps:
     - python3 offline_inference/encoder_decoder.py
     - python3 offline_inference/classification.py
     - python3 offline_inference/embedding.py
-    - python3 offline_inference/offline_inference_scoring.py
+    - python3 offline_inference/scoring.py
     - python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Prefix Caching Test # 9min

@@ -125,7 +125,7 @@ score = output.outputs.score
 print(f"Score: {score}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/offline_inference_scoring.py>
+A code example can be found here: <gh-file:examples/offline_inference/scoring.py>
 
 ## Online Inference
 
