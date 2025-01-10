@@ -358,7 +358,9 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             vllm_config=vllm_config,
             hf_config=self.text_config,
             prefix=maybe_prefix(prefix, "language"),
-            architectures=["DeepseekV2ForCausalLM"],
+            architectures=["DeepseekV3ForCausalLM"]
+            if self.text_config.topk_method == "noaux_tc" else
+            ["DeepseekV2ForCausalLM"],
         )
 
         self.make_empty_intermediate_tensors = (
