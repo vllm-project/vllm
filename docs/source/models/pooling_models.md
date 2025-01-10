@@ -88,7 +88,7 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/offline_inference_embedding.py>
+A code example can be found here: <gh-file:examples/offline_inference/embedding.py>
 
 ### `LLM.classify`
 
