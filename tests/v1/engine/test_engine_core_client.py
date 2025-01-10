@@ -6,13 +6,14 @@ from typing import Dict, List
 import pytest
 from transformers import AutoTokenizer
 
+from tests.utils import fork_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.executor.abstract import Executor
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -75,6 +76,7 @@ async def loop_until_done_async(client: EngineCoreClient, outputs: Dict):
             break
 
 
+@fork_new_process_for_each_test
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
 def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
@@ -84,7 +86,7 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
         engine_args = EngineArgs(model=MODEL_NAME, compilation_config=3)
         vllm_config = engine_args.create_engine_config(
             UsageContext.UNKNOWN_CONTEXT)
-        executor_class = AsyncLLM._get_executor_cls(vllm_config)
+        executor_class = Executor.get_class(vllm_config)
         client = EngineCoreClient.make_client(
             multiprocess_mode=multiprocessing_mode,
             asyncio_mode=False,
@@ -143,6 +145,7 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
         client.abort_requests([request.request_id])
 
 
+@fork_new_process_for_each_test
 @pytest.mark.asyncio
 async def test_engine_core_client_asyncio(monkeypatch):
 
@@ -152,7 +155,7 @@ async def test_engine_core_client_asyncio(monkeypatch):
         engine_args = EngineArgs(model=MODEL_NAME)
         vllm_config = engine_args.create_engine_config(
             usage_context=UsageContext.UNKNOWN_CONTEXT)
-        executor_class = AsyncLLM._get_executor_cls(vllm_config)
+        executor_class = Executor.get_class(vllm_config)
         client = EngineCoreClient.make_client(
             multiprocess_mode=True,
             asyncio_mode=True,

@@ -19,13 +19,18 @@ class TpuPlatform(Platform):
     device_name: str = "tpu"
     device_type: str = "tpu"
     dispatch_key: str = "XLA"
-    supported_quantization: list[str] = ["tpu_int8"]
+    supported_quantization: list[str] = [
+        "tpu_int8", "compressed-tensors", "compressed_tensors"
+    ]
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool) -> str:
         if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
-        return _Backend.PALLAS
+        logger.info("Using Pallas backend.")
+        return "vllm.attention.backends.pallas.PallasAttentionBackend"
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:

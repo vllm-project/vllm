@@ -1,6 +1,3 @@
-import json
-import os
-
 import openai
 import pytest
 
@@ -10,16 +7,7 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B"
 
 
 @pytest.mark.asyncio
-async def test_shutdown_on_engine_failure(tmp_path):
-    # Use a bad adapter to crash the engine
-    # (This test will fail when that bug is fixed)
-    adapter_path = tmp_path / "bad_adapter"
-    os.mkdir(adapter_path)
-    with open(adapter_path / "adapter_model_config.json", "w") as f:
-        json.dump({"not": "real"}, f)
-    with open(adapter_path / "adapter_model.safetensors", "wb") as f:
-        f.write(b"this is fake")
-
+async def test_shutdown_on_engine_failure():
     # dtype, max-len etc set so that this can run in CI
     args = [
         "--dtype",
@@ -29,9 +17,6 @@ async def test_shutdown_on_engine_failure(tmp_path):
         "--enforce-eager",
         "--max-num-seqs",
         "128",
-        "--enable-lora",
-        "--lora-modules",
-        f"bad-adapter={tmp_path / 'bad_adapter'}",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -39,9 +24,13 @@ async def test_shutdown_on_engine_failure(tmp_path):
 
             with pytest.raises(
                 (openai.APIConnectionError, openai.InternalServerError)):
-                # This crashes the engine
-                await client.completions.create(model="bad-adapter",
-                                                prompt="Hello, my name is")
+                # Asking for lots of prompt logprobs will currently crash the
+                # engine. This may change in the future when that bug is fixed
+                prompt = "Hello " * 4000
+                await client.completions.create(
+                    model=MODEL_NAME,
+                    prompt=prompt,
+                    extra_body={"prompt_logprobs": 10})
 
             # Now the server should shut down
             return_code = remote_server.proc.wait(timeout=8)

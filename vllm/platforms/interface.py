@@ -45,6 +45,7 @@ class PlatformEnum(enum.Enum):
     CPU = enum.auto()
     NEURON = enum.auto()
     OPENVINO = enum.auto()
+    OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
 
@@ -107,14 +108,19 @@ class Platform:
     def is_openvino(self) -> bool:
         return self._enum == PlatformEnum.OPENVINO
 
+    def is_out_of_tree(self) -> bool:
+        return self._enum == PlatformEnum.OOT
+
     def is_cuda_alike(self) -> bool:
         """Stateless version of :func:`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend):
-        """Get the default attention backend of a device."""
-        return None
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool) -> str:
+        """Get the attention backend class of a device."""
+        return ""
 
     @classmethod
     def get_device_capability(

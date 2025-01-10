@@ -15,11 +15,13 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
                                    VideoEmbeddingItems, VideoProcessorItems)
-from vllm.multimodal.processing import (MultiModalFieldConfig, ProcessorInputs,
-                                        PromptReplacement)
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo, PromptReplacement)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
@@ -28,7 +30,7 @@ from .llava import init_vision_tower_for_llava
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import BaseVisionLanguageMultiModalProcessor
+from .vision import get_vision_encoder_info
 
 
 class LlavaNextVideoPixelInputs(TypedDict):
@@ -44,29 +46,35 @@ class LlavaNextVideoPixelInputs(TypedDict):
     """
 
 
-class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
+class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
 
-    def _get_hf_config(self) -> LlavaNextVideoConfig:
+    def get_hf_config(self):
         return self.ctx.get_hf_config(LlavaNextVideoConfig)
 
-    def _get_hf_processor(self) -> LlavaNextVideoProcessor:
+    def get_vision_encoder_info(self):
+        return get_vision_encoder_info(self.get_hf_config())
+
+    def get_hf_processor(self):
         return self.ctx.get_hf_processor(LlavaNextVideoProcessor)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"video": 1}
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        num_frames = self._get_dummy_num_frames(seq_len)
-        max_video_tokens = self._get_max_video_tokens(num_frames)
+        target_width, target_height = self.get_image_size_with_most_features()
+
+        max_video_tokens = self.get_num_video_tokens(
+            image_width=target_width,
+            image_height=target_height,
+            num_frames=self.get_num_frames_with_most_features(seq_len),
+        )
 
         return {"video": max_video_tokens}
 
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(pixel_values_videos=MultiModalFieldConfig.batched("video"))
+    def get_image_size_with_most_features(self) -> ImageSize:
+        vision_encoder_info = self.get_vision_encoder_info()
+        width = height = vision_encoder_info.get_image_size()
+        return ImageSize(width=width, height=height)
 
     def _get_num_frame_tokens(
         self,
@@ -74,15 +82,16 @@ class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
         image_width: int,
         image_height: int,
     ) -> int:
-        hf_config = self._get_hf_config()
+        hf_config = self.get_hf_config()
         spatial_pool_stride = hf_config.spatial_pool_stride
 
-        patch_grid_length = self._vision_encoder_info.get_patch_grid_length()
+        vision_encoder_info = self.get_vision_encoder_info()
+        patch_grid_length = vision_encoder_info.get_patch_grid_length()
         pooled_grid_length = math.ceil(patch_grid_length / spatial_pool_stride)
 
         return pooled_grid_length * pooled_grid_length
 
-    def _get_num_video_tokens(
+    def get_num_video_tokens(
         self,
         *,
         image_width: int,
@@ -96,25 +105,27 @@ class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
 
         return num_frame_tokens * num_frames
 
-    def _get_max_video_tokens(self, num_frames: int) -> int:
-        return self._get_num_video_tokens(image_width=999999,
-                                          image_height=999999,
-                                          num_frames=num_frames)
-
     def _get_max_video_frames(self, max_tokens: int) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
+
         num_frames = 0
 
         while True:
             next_num_frames = num_frames + 1
+            next_max_tokens = self.get_num_video_tokens(
+                image_width=target_width,
+                image_height=target_height,
+                num_frames=next_num_frames,
+            )
 
-            if self._get_max_video_tokens(next_num_frames) > max_tokens:
+            if next_max_tokens > max_tokens:
                 break
 
             num_frames = next_num_frames
 
         return num_frames
 
-    def _get_dummy_num_frames(self, seq_len: int) -> int:
+    def get_num_frames_with_most_features(self, seq_len: int) -> int:
         mm_config = self.ctx.get_mm_config()
         max_videos = mm_config.limit_per_prompt.get("video", 1)
 
@@ -122,12 +133,50 @@ class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
 
         return max(max_total_frames // max(max_videos, 1), 1)
 
-    def _get_dummy_image_size(self) -> ImageSize:
-        image_size = self._vision_encoder_info.get_image_size()
-        return ImageSize(image_size, image_size)
 
-    def _get_video_token(self) -> str:
-        return self._get_hf_processor().video_token
+class LlavaNextVideoDummyInputsBuilder(
+        BaseDummyInputsBuilder[LlavaNextVideoProcessingInfo]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_videos = mm_counts.get("video", 0)
+
+        processor = self.info.get_hf_processor()
+        video_token = processor.video_token
+
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+        target_num_frames = \
+            self.info.get_num_frames_with_most_features(seq_len)
+
+        mm_data = {
+            "video":
+            self._get_dummy_videos(
+                width=target_width,
+                height=target_height,
+                num_frames=target_num_frames,
+                num_videos=num_videos,
+            )
+        }
+
+        return ProcessorInputs(
+            prompt_text=video_token * num_videos,
+            mm_data=mm_data,
+        )
+
+
+class LlavaNextVideoMultiModalProcessor(
+        BaseMultiModalProcessor[LlavaNextVideoProcessingInfo]):
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(pixel_values_videos=MultiModalFieldConfig.batched("video"))
 
     def _get_prompt_replacements(
         self,
@@ -135,7 +184,7 @@ class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_config = self._get_hf_config()
+        hf_config = self.info.get_hf_config()
         video_token_id = hf_config.video_token_index
 
         def get_replacement(item_idx: int):
@@ -146,7 +195,7 @@ class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
                 num_video_tokens = videos.get_feature_size(item_idx)
             else:
                 image_size = videos.get_frame_size(item_idx)
-                num_video_tokens = self._get_num_video_tokens(
+                num_video_tokens = self.info.get_num_video_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     num_frames=videos.get_num_frames(item_idx),
@@ -162,36 +211,11 @@ class LlavaNextVideoMultiModalProcessor(BaseVisionLanguageMultiModalProcessor):
             ),
         ]
 
-    def _get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        num_videos = mm_counts.get("video", 0)
-
-        video_token = self._get_video_token()
-        target_width, target_height = self._get_dummy_image_size()
-
-        mm_data = {
-            "video":
-            self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
-                num_frames=self._get_dummy_num_frames(seq_len),
-                num_videos=num_videos,
-            )
-        }
-
-        return ProcessorInputs(
-            prompt_text=video_token * num_videos,
-            mm_data=mm_data,
-        )
-
 
 # adopted from transformers modeling_llava_next_video.py
 class LlavaNextVideoPooler(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config: LlavaNextVideoConfig):
         super().__init__()
 
         mode = config.spatial_pool_mode
@@ -209,7 +233,7 @@ class LlavaNextVideoPooler(nn.Module):
             raise ValueError(
                 f"Unknown pooling mode: {mode}. Expected [`average`, `max`]")
 
-    def forward(self, image_features):
+    def forward(self, image_features: torch.Tensor):
         ori_width = int(
             math.sqrt(image_features.shape[1] * self.image_size //
                       self.image_size))
@@ -245,7 +269,11 @@ class LlavaNextMultiModalProjector(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(LlavaNextVideoMultiModalProcessor)
+@MULTIMODAL_REGISTRY.register_processor(
+    LlavaNextVideoMultiModalProcessor,
+    info=LlavaNextVideoProcessingInfo,
+    dummy_inputs=LlavaNextVideoDummyInputsBuilder,
+)
 class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              SupportsPP):
 

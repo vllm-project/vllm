@@ -23,9 +23,10 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
+from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataItems, ProcessorInputs,
-                                        PromptReplacement)
+                                        BaseProcessingInfo, PromptReplacement)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.aria import (AriaMoELMConfig,
                                                   AriaVisionConfig)
@@ -444,17 +445,54 @@ def build_mm_projector(config: PretrainedConfig):
     )
 
 
-class AriaMultiModalProcessor(BaseMultiModalProcessor):
+class AriaProcessingInfo(BaseProcessingInfo):
+
+    def get_hf_config(self):
+        return self.ctx.get_hf_config()
+
+    def get_vision_config(self) -> AriaVisionConfig:
+        return self.get_hf_config().vision_config
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def _get_num_image_tokens(self) -> int:
-        hf_config = self.ctx.get_hf_config()
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        return {"image": self.get_num_image_tokens()}
+
+    def get_num_image_tokens(self) -> int:
+        hf_config = self.get_hf_config()
         return max(hf_config.projector_patch_to_query_dict.values())
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        return {"image": self._get_num_image_tokens()}
+
+class AriaDummyInputsBuilder(BaseDummyInputsBuilder[AriaProcessingInfo]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        vision_config = self.info.get_vision_config()
+
+        max_image_size = vision_config.image_size
+        num_images = mm_counts.get("image", 0)
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=max_image_size,
+                                   height=max_image_size,
+                                   num_images=num_images)
+        }
+
+        hf_processor = self.info.get_hf_processor()
+        image_token: str = hf_processor.image_token  # type: ignore
+
+        return ProcessorInputs(
+            prompt_text=image_token * num_images,
+            mm_data=mm_data,
+        )
+
+
+class AriaMultiModalProcessor(BaseMultiModalProcessor[AriaProcessingInfo]):
 
     def _get_mm_fields_config(
         self,
@@ -472,10 +510,10 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_config = self.ctx.get_hf_config()
+        hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
 
-        num_image_tokens = self._get_num_image_tokens()
+        num_image_tokens = self.info.get_num_image_tokens()
 
         return [
             PromptReplacement(
@@ -485,34 +523,10 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor):
             )
         ]
 
-    def _get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        hf_config = self.ctx.get_hf_config()
-        vision_config: AriaVisionConfig = hf_config.vision_config
 
-        max_image_size = vision_config.image_size
-        num_images = mm_counts.get("image", 0)
-
-        mm_data = {
-            "image":
-            self._get_dummy_images(width=max_image_size,
-                                   height=max_image_size,
-                                   num_images=num_images)
-        }
-
-        hf_processor = self._get_hf_processor()
-        image_token: str = hf_processor.image_token  # type: ignore
-
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data=mm_data,
-        )
-
-
-@MULTIMODAL_REGISTRY.register_processor(AriaMultiModalProcessor)
+@MULTIMODAL_REGISTRY.register_processor(AriaMultiModalProcessor,
+                                        info=AriaProcessingInfo,
+                                        dummy_inputs=AriaDummyInputsBuilder)
 class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     """
     Aria model for conditional generation tasks.

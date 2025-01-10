@@ -10,12 +10,17 @@ from PIL import Image
 from vllm.config import ModelConfig
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.processing import (ProcessingCache, PromptReplacement,
-                                        _PlaceholderInfo, find_mm_placeholders,
+# yapf conflicts with isort for this block
+# yapf: disable
+from vllm.multimodal.processing import (PlaceholderInfo, ProcessingCache,
+                                        PromptReplacement,
+                                        find_mm_placeholders,
                                         find_text_matches, find_token_matches,
                                         iter_token_matches,
                                         replace_text_matches,
                                         replace_token_matches)
+# yapf: enable
+from vllm.multimodal.profiling import MultiModalProfiler
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import full_groupby
@@ -431,7 +436,7 @@ def test_find_replace_tokens(
             [1, 9833, 28747, 32000, 9833, 28747, 32000, 32000, 918],
             {
                 "pattern_1": [
-                    _PlaceholderInfo(
+                    PlaceholderInfo(
                         modality="pattern_1",
                         item_idx=0,
                         start_idx=6,
@@ -445,13 +450,13 @@ def test_find_replace_tokens(
             [1, 32000, 32000, 9833, 28747, 32000, 32000, 1550, 918, 1550],
             {
                 "pattern_1": [
-                    _PlaceholderInfo(
+                    PlaceholderInfo(
                         modality="pattern_1",
                         item_idx=0,
                         start_idx=1,
                         replacement=[32000, 32000],
                     ),
-                    _PlaceholderInfo(
+                    PlaceholderInfo(
                         modality="pattern_1",
                         item_idx=1,
                         start_idx=5,
@@ -459,7 +464,7 @@ def test_find_replace_tokens(
                     ),
                 ],
                 "pattern_3": [
-                    _PlaceholderInfo(
+                    PlaceholderInfo(
                         modality="pattern_3",
                         item_idx=0,
                         start_idx=7,
@@ -472,13 +477,13 @@ def test_find_replace_tokens(
             [1, 32000, 32000, 32000, 32000, 32000, 1550, 918, 1550],
             {
                 "pattern_1": [
-                    _PlaceholderInfo(
+                    PlaceholderInfo(
                         modality="pattern_1",
                         item_idx=0,
                         start_idx=1,
                         replacement=[32000, 32000],
                     ),
-                    _PlaceholderInfo(
+                    PlaceholderInfo(
                         modality="pattern_1",
                         item_idx=1,
                         start_idx=3,
@@ -486,7 +491,7 @@ def test_find_replace_tokens(
                     ),
                 ],
                 "pattern_3": [
-                    _PlaceholderInfo(
+                    PlaceholderInfo(
                         modality="pattern_3",
                         item_idx=0,
                         start_idx=6,
@@ -577,18 +582,15 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
         revision=None,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
-    model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
 
-    processor_factory = MULTIMODAL_REGISTRY._processor_factories[model_cls]
-    ctx = InputProcessingContext(
+    processor = MULTIMODAL_REGISTRY.create_processor(
         model_config,
         tokenizer=cached_get_tokenizer(model_config.tokenizer),
     )
-
-    processor = processor_factory(ctx, cache=None)
+    profiler = MultiModalProfiler(processor)
 
     mock_supported_mm_limits = MagicMock(return_value={"image": num_supported})
-    processor.get_supported_mm_limits = mock_supported_mm_limits
+    processor.info.get_supported_mm_limits = mock_supported_mm_limits
 
     if is_valid:
         exc_ctx = nullcontext()
@@ -596,7 +598,7 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
         exc_ctx = pytest.raises(ValueError, match="this model only supports")
 
     with exc_ctx:
-        processor._get_and_validate_dummy_mm_counts()
+        profiler.get_dummy_data(model_config.max_model_len)
 
 
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
@@ -619,15 +621,11 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
         revision=None,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
-    model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
 
-    processor_factory = MULTIMODAL_REGISTRY._processor_factories[model_cls]
-    ctx = InputProcessingContext(
+    processor = MULTIMODAL_REGISTRY.create_processor(
         model_config,
         tokenizer=cached_get_tokenizer(model_config.tokenizer),
     )
-
-    processor = processor_factory(ctx, cache=None)
 
     rng = np.random.RandomState(0)
     image = _rand_img(rng, min_wh=128, max_wh=256)
@@ -651,7 +649,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
         )
 
 
-def _test_processing_cache_correctness(
+def _test_processing_correctness(
     model_id: str,
     modalities: dict[str, bool],
     hit_rate: float,
@@ -680,9 +678,9 @@ def _test_processing_cache_correctness(
         hf_overrides=hf_overrides,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
-    model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
 
-    processor_factory = MULTIMODAL_REGISTRY._processor_factories[model_cls]
+    model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
+    factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
     ctx = InputProcessingContext(
         model_config,
         tokenizer=cached_get_tokenizer(model_config.tokenizer),
@@ -690,8 +688,10 @@ def _test_processing_cache_correctness(
     # Ensure that it can fit all of the data
     cache = ProcessingCache(capacity=1 << 30)
 
-    baseline_processor = processor_factory(ctx, cache=None)
-    cached_processor = processor_factory(ctx, cache=cache)
+    baseline_processor = factories.build_processor(ctx, cache=None)
+    cached_processor = factories.build_processor(ctx, cache=cache)
+    dummy_inputs = baseline_processor.dummy_inputs
+    tokenizer = baseline_processor.info.get_tokenizer()
 
     rng = np.random.RandomState(0)
 
@@ -723,7 +723,7 @@ def _test_processing_cache_correctness(
         }
 
         mm_counts = {k: len(vs) for k, vs in mm_data.items()}
-        prompt = baseline_processor._get_dummy_processor_inputs(
+        prompt = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
         ).prompt_text
@@ -748,7 +748,25 @@ def _test_processing_cache_correctness(
         )
 
         assert baseline_result == cached_result, (
-            f"Failed ({batch_idx=}, {mm_data=})")
+            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+
+        baseline_tokenized_result = baseline_processor.apply(
+            tokenizer.encode(prompt),
+            mm_data=mm_data,
+            hf_processor_mm_kwargs={},
+        )
+
+        assert baseline_result == baseline_tokenized_result, (
+            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+
+        cached_tokenized_result = cached_processor.apply(
+            tokenizer.encode(prompt),
+            mm_data=mm_data,
+            hf_processor_mm_kwargs={},
+        )
+
+        assert cached_result == cached_tokenized_result, (
+            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
 
 
 # yapf: disable
@@ -772,14 +790,14 @@ def _test_processing_cache_correctness(
 @pytest.mark.parametrize("num_batches", [32])
 @pytest.mark.parametrize("simplify_rate", [1.0])
 # yapf: enable
-def test_processing_cache_correctness(
+def test_processing_correctness(
     model_id: str,
     modalities: dict[str, bool],
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
 ):
-    _test_processing_cache_correctness(
+    _test_processing_correctness(
         model_id,
         modalities,
         hit_rate=hit_rate,
@@ -796,7 +814,7 @@ def test_processing_cache_correctness(
 @pytest.mark.parametrize("num_batches", [32])
 @pytest.mark.parametrize("simplify_rate", [1.0])
 # yapf: enable
-def test_processing_cache_correctness_phi3v(
+def test_processing_correctness_phi3v(
     model_id: str,
     modalities: dict[str, bool],
     hit_rate: float,
@@ -810,7 +828,7 @@ def test_processing_cache_correctness_phi3v(
 
     AutoImageProcessor.from_pretrained(model_id, trust_remote_code=True)
 
-    _test_processing_cache_correctness(
+    _test_processing_correctness(
         model_id,
         modalities,
         hit_rate=hit_rate,
