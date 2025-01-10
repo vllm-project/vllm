@@ -14,4 +14,4 @@
 
 ### Build image from source
 
-## Supported features
+## Extra information

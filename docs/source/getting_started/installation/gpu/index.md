@@ -205,7 +205,7 @@ vLLM is a Python libary that supports the following GPU variants. Select your GP
 :sync: cuda
 ```{include} cuda.md
 :start-after: "### Build image from source"
-:end-before: "## Supported features"
+:end-before: "## Extra information"
 ```
 :::
 
@@ -213,7 +213,7 @@ vLLM is a Python libary that supports the following GPU variants. Select your GP
 :sync: rocm
 ```{include} rocm.md
 :start-after: "### Build image from source"
-:end-before: "## Supported features"
+:end-before: "## Extra information"
 ```
 :::
 
@@ -221,7 +221,7 @@ vLLM is a Python libary that supports the following GPU variants. Select your GP
 :sync: xpu
 ```{include} xpu.md
 :start-after: "### Build image from source"
-:end-before: "## Supported features"
+:end-before: "## Extra information"
 ```
 :::
 

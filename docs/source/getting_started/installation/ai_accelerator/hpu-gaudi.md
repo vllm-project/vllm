@@ -1,10 +1,13 @@
-(installation-gaudi)=
+# Installation
 
-# Installation for Intel® Gaudi®
+This tab provides instructions on running vLLM with Intel Gaudi devices.
 
-This README provides instructions on running vLLM with Intel Gaudi devices.
+## Requirements
 
-## Requirements and Installation
+- OS: Ubuntu 22.04 LTS
+- Python: 3.10
+- Intel Gaudi accelerator
+- Intel Gaudi software version 1.18.0
 
 Please follow the instructions provided in the [Gaudi Installation
 Guide](https://docs.habana.ai/en/latest/Installation_Guide/index.html)
@@ -12,27 +15,9 @@ to set up the execution environment. To achieve the best performance,
 please follow the methods outlined in the [Optimizing Training Platform
 Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
 
-### Requirements
+## Configure a new environment
 
-- OS: Ubuntu 22.04 LTS
-- Python: 3.10
-- Intel Gaudi accelerator
-- Intel Gaudi software version 1.18.0
-
-### Quick start using Dockerfile
-
-```console
-$ docker build -f Dockerfile.hpu -t vllm-hpu-env  .
-$ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --rm vllm-hpu-env
-```
-
-```{tip}
-If you're observing the following error: `docker: Error response from daemon: Unknown runtime specified habana.`, please refer to "Install Using Containers" section of [Intel Gaudi Software Stack and Driver Installation](https://docs.habana.ai/en/v1.18.0/Installation_Guide/Bare_Metal_Fresh_OS.html). Make sure you have `habana-container-runtime` package installed and that `habana` container runtime is registered.
-```
-
-### Build from source
-
-#### Environment verification
+### Environment verification
 
 To verify that the Intel Gaudi software was correctly installed, run:
 
@@ -47,7 +32,7 @@ Refer to [Intel Gaudi Software Stack
 Verification](https://docs.habana.ai/en/latest/Installation_Guide/SW_Verification.html#platform-upgrade)
 for more details.
 
-#### Run Docker Image
+### Run Docker Image
 
 It is highly recommended to use the latest Docker image from Intel Gaudi
 vault. Refer to the [Intel Gaudi
@@ -61,7 +46,13 @@ $ docker pull vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch
 $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
 ```
 
-#### Build and Install vLLM
+## Python
+
+### Pre-built wheels
+
+Currently, there are no pre-built Intel Gaudi wheels.
+
+### Build wheel from source
 
 To build and install vLLM from source, run:
 
@@ -80,7 +71,26 @@ $ git checkout habana_main
 $ python setup.py develop
 ```
 
-## Supported Features
+## Docker
+
+### Pre-built images
+
+Currently, there are no pre-built Intel Gaudi images.
+
+### Build image from source
+
+```console
+$ docker build -f Dockerfile.hpu -t vllm-hpu-env  .
+$ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --rm vllm-hpu-env
+```
+
+```{tip}
+If you're observing the following error: `docker: Error response from daemon: Unknown runtime specified habana.`, please refer to "Install Using Containers" section of [Intel Gaudi Software Stack and Driver Installation](https://docs.habana.ai/en/v1.18.0/Installation_Guide/Bare_Metal_Fresh_OS.html). Make sure you have `habana-container-runtime` package installed and that `habana` container runtime is registered.
+```
+
+## Extra information
+
+## Supported features
 
 - [Offline inference](#offline-inference)
 - Online serving via [OpenAI-Compatible Server](#openai-compatible-server)
@@ -94,14 +104,14 @@ $ python setup.py develop
   for accelerating low-batch latency and throughput
 - Attention with Linear Biases (ALiBi)
 
-## Unsupported Features
+## Unsupported features
 
 - Beam search
 - LoRA adapters
 - Quantization
 - Prefill chunking (mixed-batch inferencing)
 
-## Supported Configurations
+## Supported configurations
 
 The following configurations have been validated to be function with
 Gaudi2 devices. Configurations that are not listed may or may not work.
@@ -137,7 +147,7 @@ Gaudi2 devices. Configurations that are not listed may or may not work.
 - [meta-llama/Meta-Llama-3.1-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct)
   with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
 
-## Performance Tuning
+## Performance tuning
 
 ### Execution modes
 
@@ -368,7 +378,7 @@ Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM 
 - `PT_HPU_LAZY_MODE`: if `0`, PyTorch Eager backend for Gaudi will be used, if `1` PyTorch Lazy backend for Gaudi will be used, `1` is default
 - `PT_HPU_ENABLE_LAZY_COLLECTIVES`: required to be `true` for tensor parallel inference with HPU Graphs
 
-## Troubleshooting: Tweaking HPU Graphs
+## Troubleshooting: tweaking HPU graphs
 
 If you experience device out-of-memory issues or want to attempt
 inference at higher batch sizes, try tweaking HPU Graphs by following

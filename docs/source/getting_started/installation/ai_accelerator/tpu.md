@@ -1,6 +1,4 @@
-(installation-tpu)=
-
-# Installation for TPUs
+# Installation
 
 Tensor Processing Units (TPUs) are Google's custom-developed application-specific
 integrated circuits (ASICs) used to accelerate machine learning workloads. TPUs
@@ -54,7 +52,16 @@ In all of the following commands, replace the ALL CAPS parameter names with
 appropriate values. See the parameter descriptions table for more information.
 ```
 
-## Provision a Cloud TPU with the queued resource API
+### Provision Cloud TPUs with GKE
+
+For more information about using TPUs with GKE, see:
+- <https://cloud.google.com/kubernetes-engine/docs/how-to/tpus>
+- <https://cloud.google.com/kubernetes-engine/docs/concepts/tpus>
+- <https://cloud.google.com/kubernetes-engine/docs/concepts/plan-tpus>
+
+## Configure a new environment
+
+### Provision a Cloud TPU with the queued resource API
 
 Create a TPU v5e with 4 TPU chips:
 
@@ -102,6 +109,14 @@ Connect to your TPU using SSH:
 gcloud compute tpus tpu-vm ssh TPU_NAME --zone ZONE
 ```
 
+## Python
+
+### Pre-built wheels
+
+Currently, there are no pre-built TPU wheels.
+
+### Build wheel from source
+
 Install Miniconda:
 
 ```bash
@@ -142,16 +157,13 @@ Run the setup script:
 VLLM_TARGET_DEVICE="tpu" python setup.py develop
 ```
 
-## Provision Cloud TPUs with GKE
+## Docker
 
-For more information about using TPUs with GKE, see
-<https://cloud.google.com/kubernetes-engine/docs/how-to/tpus>
-<https://cloud.google.com/kubernetes-engine/docs/concepts/tpus>
-<https://cloud.google.com/kubernetes-engine/docs/concepts/plan-tpus>
+### Pre-built images
 
-(build-docker-tpu)=
+See <project:#deployment-docker-pre-built-image> for instructions on using the official Docker image, making sure to substitute the image name `vllm/vllm-openai` with `vllm/vllm-tpu`.
 
-## Build a docker image with {code}`Dockerfile.tpu`
+### Build image from source
 
 You can use <gh-file:Dockerfile.tpu> to build a Docker image with TPU support.
 
@@ -189,3 +201,5 @@ Install OpenBLAS with the following command:
 $ sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev
 ```
 ````
+
+## Extra information

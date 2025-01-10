@@ -79,8 +79,6 @@ The `uv` approach works for vLLM `v0.6.6` and later and offers an easy-to-rememb
 
 ### Build wheel from source
 
-(python-only-build)=
-
 #### Python-only build (without compilation)
 
 If you only need to change Python code, you can build and install vLLM without compilation. Using `pip`'s [`--editable` flag](https://pip.pypa.io/en/stable/topics/local-project-installs/#editable-installs), changes you make to the code will be reflected when you run vLLM:
@@ -100,11 +98,11 @@ $ export VLLM_PRECOMPILED_WHEEL_LOCATION=https://files.pythonhosted.org/packages
 $ pip install --editable .
 ```
 
-You can find more information about vLLM's wheels [above](#install-the-latest-code).
+You can find more information about vLLM's wheels in <project:#install-the-latest-code>.
 
 ```{note}
 There is a possibility that your source code may have a different commit ID compared to the latest vLLM wheel, which could potentially lead to unknown errors.
-It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to [the section above](#install-the-latest-code) for instructions on how to install a specified wheel.
+It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to <project:#install-the-latest-code> for instructions on how to install a specified wheel.
 ```
 
 #### Full build (with compilation)
@@ -222,4 +220,4 @@ The latest code can contain bugs and may not be stable. Please use it with cauti
 
 See <project:#deployment-docker-build-image-from-source> for instructions on building the Docker image.
 
-## Supported features
+## Extra information

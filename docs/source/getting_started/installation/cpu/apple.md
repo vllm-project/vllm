@@ -53,4 +53,4 @@ If the build has error like the following snippet where standard C++ headers can
 
 ### Build image from source
 
-## Supported features
+## Extra information

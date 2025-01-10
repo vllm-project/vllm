@@ -53,6 +53,8 @@ $ docker run -it \
              vllm-xpu-env
 ```
 
+## Extra information
+
 ## Supported features
 
 XPU platform supports tensor-parallel inference/serving and also supports pipeline parallel as a beta feature for online serving. We requires Ray as the distributed runtime backend. For example, a reference execution likes following:

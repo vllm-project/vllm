@@ -39,9 +39,6 @@ vLLM is a Python libary that supports the following AI accelerators. Select your
 
 ## Requirements
 
-- OS: Linux
-- Python: 3.9 -- 3.12
-
 ::::{tab-set}
 :sync-group: device
 
@@ -50,7 +47,7 @@ vLLM is a Python libary that supports the following AI accelerators. Select your
 
 ```{include} tpu.md
 :start-after: "## Requirements"
-:end-before: "## Install released versions"
+:end-before: "## Configure a new environment"
 ```
 
 :::
@@ -60,7 +57,7 @@ vLLM is a Python libary that supports the following AI accelerators. Select your
 
 ```{include} hpu-gaudi.md
 :start-after: "## Requirements"
-:end-before: "## Option 1: Build from source with docker (recommended)"
+:end-before: "## Configure a new environment"
 ```
 
 :::
@@ -70,9 +67,182 @@ vLLM is a Python libary that supports the following AI accelerators. Select your
 
 ```{include} neuron.md
 :start-after: "## Requirements"
-:end-before: "## Quick start using Dockerfile"
+:end-before: "## Configure a new environment"
 ```
 
+:::
+
+::::
+
+## Configure a new environment
+
+::::{tab-set}
+:sync-group: device
+
+:::{tab-item} TPU
+:sync: tpu
+```{include} tpu.md
+:start-after: "## Configure a new environment"
+:end-before: "## Python"
+```
+:::
+
+:::{tab-item} Intel Gaudi
+:sync: hpu-gaudi
+```{include} hpu-gaudi.md
+:start-after: "## Configure a new environment"
+:end-before: "## Python"
+```
+:::
+
+:::{tab-item} Neuron
+:sync: neuron
+```{include} neuron.md
+:start-after: "## Configure a new environment"
+:end-before: "## Python"
+```
+:::
+
+::::
+
+## Python
+
+### Pre-built wheels
+
+::::{tab-set}
+:sync-group: device
+
+:::{tab-item} TPU
+:sync: tpu
+```{include} tpu.md
+:start-after: "### Pre-built wheels"
+:end-before: "### Build wheel from source"
+```
+:::
+
+:::{tab-item} Intel Gaudi
+:sync: hpu-gaudi
+```{include} hpu-gaudi.md
+:start-after: "### Pre-built wheels"
+:end-before: "### Build wheel from source"
+```
+:::
+
+:::{tab-item} Neuron
+:sync: neuron
+```{include} neuron.md
+:start-after: "### Pre-built wheels"
+:end-before: "### Build wheel from source"
+```
+:::
+
+::::
+
+### Build wheel from source
+
+::::{tab-set}
+:sync-group: device
+
+:::{tab-item} TPU
+:sync: tpu
+```{include} tpu.md
+:start-after: "### Build wheel from source"
+:end-before: "## Docker"
+```
+:::
+
+:::{tab-item} Intel Gaudi
+:sync: hpu-gaudi
+```{include} hpu-gaudi.md
+:start-after: "### Build wheel from source"
+:end-before: "## Docker"
+```
+:::
+
+:::{tab-item} Neuron
+:sync: neuron
+```{include} neuron.md
+:start-after: "### Build wheel from source"
+:end-before: "## Docker"
+```
+:::
+
+::::
+
+## Docker
+
+### Pre-built images
+
+::::{tab-set}
+:sync-group: device
+
+:::{tab-item} TPU
+:sync: tpu
+```{include} tpu.md
+:start-after: "### Pre-built images"
+:end-before: "### Build image from source"
+```
+:::
+
+:::{tab-item} Intel Gaudi
+:sync: hpu-gaudi
+```{include} hpu-gaudi.md
+:start-after: "### Pre-built images"
+:end-before: "### Build image from source"
+```
+:::
+
+:::{tab-item} Neuron
+:sync: neuron
+```{include} neuron.md
+:start-after: "### Pre-built images"
+:end-before: "### Build image from source"
+```
+:::
+
+::::
+
+### Build image from source
+
+::::{tab-set}
+:sync-group: device
+
+:::{tab-item} TPU
+:sync: tpu
+```{include} tpu.md
+:start-after: "### Build image from source"
+:end-before: "## Extra information"
+```
+:::
+
+:::{tab-item} Intel Gaudi
+:sync: hpu-gaudi
+```{include} hpu-gaudi.md
+:start-after: "### Build image from source"
+:end-before: "## Extra information"
+```
+:::
+
+:::{tab-item} Neuron
+:sync: neuron
+```{include} neuron.md
+:start-after: "### Build image from source"
+:end-before: "## Extra information"
+```
+:::
+
+::::
+
+## Extra information
+
+::::{tab-set}
+:sync-group: device
+
+:::{tab-item} Intel Gaudi
+:sync: hpu-gaudi
+```{include} hpu-gaudi.md
+:start-after: "## Extra information"
+```
 :::
 
 ::::

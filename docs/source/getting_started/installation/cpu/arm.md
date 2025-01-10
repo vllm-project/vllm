@@ -28,4 +28,4 @@ Testing has been conducted on AWS Graviton3 instances for compatibility.
 
 ### Build image from source
 
-## Supported features
+## Extra information
