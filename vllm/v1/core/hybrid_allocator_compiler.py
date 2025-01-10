@@ -32,6 +32,8 @@ def _get_kv_cache_config_same_type(
     num_gpu_blocks = int(available_memory // page_size // len(kv_cache_spec))
     num_gpu_blocks = max(num_gpu_blocks, 0)
 
+    logger.info("num_gpu_blocks=%d", num_gpu_blocks)
+
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
         num_gpu_blocks_override = \
             vllm_config.cache_config.num_gpu_blocks_override
@@ -86,6 +88,8 @@ def _get_kv_cache_config_same_size(
             "num_gpu_blocks_override=%d", num_pages, num_gpu_blocks_override)
         # TODO(Chen): num_page and num_block has different meaning
         num_pages = num_gpu_blocks_override
+
+    logger.info("num_gpu_blocks=%d", num_pages)
 
     groups = []
     tensors: Dict[int, KVCacheTensor] = {}
