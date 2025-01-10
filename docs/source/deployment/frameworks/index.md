@@ -8,6 +8,7 @@ cerebrium
 dstack
 helm
 lws
+modal
 skypilot
 triton
 ```
