@@ -15,15 +15,13 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CompilationLevel, VllmConfig
-from vllm.distributed.parallel_state import graph_capture
-from vllm.forward_context import set_forward_context
+from vllm.config import VllmConfig
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE,
                         LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.pallas import PallasMetadata, PallasAttentionBackend
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
@@ -831,8 +829,7 @@ class TPUModelRunner:
             selected_token_ids = self.model(decode_data.token_ids,
                                             decode_data.position_ids,
                                             decode_data.attn_metadata,
-                                            self.kv_caches,
-                                            is_prompt=False)
+                                            self.kv_caches)
 
             # NOTE: TPU<>CPU sync happens here.
             # We need to call .cpu() first to avoid recompilation.
@@ -862,11 +859,10 @@ class TPUModelRunner:
         for idx, (req_id, prompt_len, token_ids, position_ids,
                   attn_metadata) in enumerate(prefill_data.zipped()):
             # FORWARD.
-            selected_token_ids = self.model(token_ids,
-                                            position_ids,
-                                            attn_metadata,
-                                            self.kv_caches,
-                                            is_prompt=True)
+            selected_token_ids = self.model(decode_data.token_ids,
+                                            decode_data.position_ids,
+                                            decode_data.attn_metadata,
+                                            self.kv_caches)
 
             # NOTE: TPU<>CPU sync happens here.
             # We need to call .cpu() first to avoid recompilation.
@@ -957,12 +953,15 @@ class TPUModelRunner:
         # determine the order of concatenating the output tensors.
         # As a workaround, we use the xm's rank assignment only when loading
         # the embedding weights.
-        xm_tp_rank = xr.global_ordinal()
-        with patch(
-                "vllm.model_executor.layers.vocab_parallel_embedding."
-                "get_tensor_model_parallel_rank",
-                return_value=xm_tp_rank):
-            model = get_model(vllm_config=self.vllm_config)
+        
+        # TODO: Why this is commented out?
+        # xm_tp_rank = xr.global_ordinal()
+        # with patch(
+        #         "vllm.model_executor.layers.vocab_parallel_embedding."
+        #         "get_tensor_model_parallel_rank",
+        #         return_value=xm_tp_rank):
+
+        model = get_model(vllm_config=self.vllm_config)
         model = model.eval()
         xm.wait_device_ops()
         model = ModelWrapper(model)
@@ -991,9 +990,9 @@ class TPUModelRunner:
             slot_mapping = torch.zeros((batch_size, seq_len),
                                        dtype=torch.int64,
                                        device=self.device)
-            input_lens = torch.ones((batch_size, ),
-                                    dtype=torch.int32,
-                                    device=self.device)
+            # input_lens = torch.ones((batch_size, ),
+            #                         dtype=torch.int32,
+            #                         device=self.device)
             if exec_mode == ExecutionMode.PREFILL:
                 attn_metadata = PallasMetadata(
                     num_prefills=batch_size,
@@ -1046,9 +1045,9 @@ class TPUModelRunner:
             context_lens = torch.ones((batch_size, ),
                                       dtype=torch.int32,
                                       device=self.device)
-            input_lens = torch.ones((batch_size, ),
-                                    dtype=torch.int32,
-                                    device=self.device)
+            # input_lens = torch.ones((batch_size, ),
+            #                         dtype=torch.int32,
+            #                         device=self.device)
             attn_metadata = PallasMetadata(
                 num_prefills=0,
                 num_prefill_tokens=0,
@@ -1059,9 +1058,9 @@ class TPUModelRunner:
                 context_lens=context_lens,
             )
 
-        t = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
-        p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
-        num_samples = _MAX_NUM_SAMPLES if exec_mode.is_prefill() else 1
+        # t = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
+        # p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
+        # num_samples = _MAX_NUM_SAMPLES if exec_mode.is_prefill() else 1
 
         # NOTE(woosuk): There are two stages of compilation: torch.compile and
         # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
@@ -1079,38 +1078,40 @@ class TPUModelRunner:
             # Decode
             torch._dynamo.mark_dynamic(token_ids, 0)
             torch._dynamo.mark_dynamic(position_ids, 0)
-            torch._dynamo.mark_dynamic(input_lens, 0)
+            # torch._dynamo.mark_dynamic(input_lens, 0)
             torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
             torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
             torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
-            torch._dynamo.mark_dynamic(t, 0)
-            torch._dynamo.mark_dynamic(p, 0)
+            # torch._dynamo.mark_dynamic(t, 0)
+            # torch._dynamo.mark_dynamic(p, 0)
 
         # Dummy run.
-        self.model(token_ids, position_ids, attn_metadata, input_lens, t, p,
-                   num_samples, kv_caches)
+        # TODO: Fix this!
+        # self.model(token_ids, position_ids, attn_metadata, input_lens, t, p,
+        #            num_samples, kv_caches)
+        self.model(token_ids, position_ids, attn_metadata, kv_caches)
 
-    def profile_run(self) -> None:
-        """Profile to measure peak memory during forward pass."""
+    # def profile_run(self) -> None:
+    #     """Profile to measure peak memory during forward pass."""
 
-        # use an empty tensor instead of `None`` to force Dynamo to pass
-        # it by reference, rather by specializing on the value `None`.
-        # the `dtype` argument does not matter, and we use `float32` as
-        # a placeholder (it has wide hardware support).
-        # it is important to create tensors inside the loop, rather than
-        # multiplying the list, to avoid Dynamo from treating them as
-        # tensor aliasing.
-        dummy_kv_caches = [(
-            torch.tensor([], dtype=torch.float32, device=self.device),
-            torch.tensor([], dtype=torch.float32, device=self.device),
-        ) for _ in range(self.num_attn_layers)]
+    #     # use an empty tensor instead of `None`` to force Dynamo to pass
+    #     # it by reference, rather by specializing on the value `None`.
+    #     # the `dtype` argument does not matter, and we use `float32` as
+    #     # a placeholder (it has wide hardware support).
+    #     # it is important to create tensors inside the loop, rather than
+    #     # multiplying the list, to avoid Dynamo from treating them as
+    #     # tensor aliasing.
+    #     dummy_kv_caches = [(
+    #         torch.tensor([], dtype=torch.float32, device=self.device),
+    #         torch.tensor([], dtype=torch.float32, device=self.device),
+    #     ) for _ in range(self.num_attn_layers)]
 
-        # Run empty forward.
-        self._dummy_run(
-            batch_size=1,
-            seq_len=self.max_num_tokens,  # Will be rounded to 16 multiple
-            kv_caches=dummy_kv_caches,
-            exec_mode=ExecutionMode.PREFILL)
+    #     # Run empty forward.
+    #     self._dummy_run(
+    #         batch_size=1,
+    #         seq_len=self.max_num_tokens,  # Will be rounded to 16 multiple
+    #         kv_caches=dummy_kv_caches,
+    #         exec_mode=ExecutionMode.PREFILL)
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -1193,10 +1194,6 @@ class ModelWrapper(nn.Module):
         token_ids: torch.Tensor,
         position_ids: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        input_lens: torch.Tensor,
-        t: torch.Tensor,
-        p: torch.Tensor,
-        num_samples: int,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
@@ -1212,20 +1209,21 @@ class ModelWrapper(nn.Module):
             kv_caches: The key and value caches. They can be None during the
                 memory profiling at initialization.
         """
-        batch_size, seq_len = token_ids.shape
+        # batch_size, seq_len = token_ids.shape
         # Calculate the positions to sample from.
-        start_indicies = torch.arange(
-            batch_size, dtype=torch.int32, device=input_lens.device) * seq_len
-        logits_indices = start_indicies + input_lens - 1
+        # start_indicies = torch.arange(
+        #     batch_size, dtype=torch.int32, device=input_lens.device) * seq_len
+        # logits_indices = start_indicies + input_lens - 1
 
+        # TODO: Ressurect
         # FIXME(woosuk): This is a temporary hack to avoid using the existing
         # sampler and sampling metadata.
-        sampling_metadata = SamplingMetadata(
-            seq_groups=[],
-            selected_token_indices=logits_indices,
-            categorized_sample_indices={},
-            num_prompts=attn_metadata.num_prefills,
-        )
+        # sampling_metadata = SamplingMetadata(
+        #     seq_groups=[],
+        #     selected_token_indices=logits_indices,
+        #     categorized_sample_indices={},
+        #     num_prompts=attn_metadata.num_prefills,
+        # )
 
         # Skip this in memory profiling at initialization.
         if kv_caches[0][0].numel() > 0:
@@ -1254,30 +1252,40 @@ class ModelWrapper(nn.Module):
             kv_caches,
             attn_metadata,
         )
+
         hidden_states = hidden_states.flatten(0, 1)
-        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+        logits = self.model.compute_logits(hidden_states, None)
 
-        # Argmax sampling.
+        # Greedy sampling.
         argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
-        argmax_token_ids = argmax_token_ids.repeat(1, num_samples)
+        # argmax_token_ids = argmax_token_ids.repeat(1, num_samples)
+        return argmax_token_ids.squeeze(dim=1)
 
-        # Zero temperature means greedy decoding. Avoid division by zero.
-        nonzero_t = torch.where(t != 0, t, 1.0)
-        logits = logits / nonzero_t.unsqueeze(dim=1)
-        if _ENABLE_TOP_P:
-            logits = _apply_top_p(logits, p.unsqueeze(dim=1))
+        # TODO: Ressurect this code
+        # hidden_states = hidden_states.flatten(0, 1)
+        # logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
-        # Random sampling.
-        probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
-        sampled_token_ids = torch.multinomial(probs,
-                                              num_samples,
-                                              replacement=True)
-        if num_samples == 1:
-            argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
-            sampled_token_ids = sampled_token_ids.squeeze(dim=-1)
-        next_token_ids = torch.where(t != 0, sampled_token_ids,
-                                     argmax_token_ids)
-        return next_token_ids
+        # # Argmax sampling.
+        # argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
+        # argmax_token_ids = argmax_token_ids.repeat(1, num_samples)
+
+        # # Zero temperature means greedy decoding. Avoid division by zero.
+        # nonzero_t = torch.where(t != 0, t, 1.0)
+        # logits = logits / nonzero_t.unsqueeze(dim=1)
+        # if _ENABLE_TOP_P:
+        #     logits = _apply_top_p(logits, p.unsqueeze(dim=1))
+
+        # # Random sampling.
+        # probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
+        # sampled_token_ids = torch.multinomial(probs,
+        #                                       num_samples,
+        #                                       replacement=True)
+        # if num_samples == 1:
+        #     argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
+        #     sampled_token_ids = sampled_token_ids.squeeze(dim=-1)
+        # next_token_ids = torch.where(t != 0, sampled_token_ids,
+        #                              argmax_token_ids)
+        # return next_token_ids
 
 
 # TODO: Duplicate with V0, refactor

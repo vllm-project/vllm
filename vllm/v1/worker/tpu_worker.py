@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Tuple
 
 import torch
 import torch.distributed
@@ -11,15 +11,13 @@ import torch_xla.runtime as xr
 import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment,
-                              set_custom_all_reduce)
+                              init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, get_dtype_size
 from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.worker.tpu_model_runner import TPUModelRunner
+from vllm.v1.worker.tpu_model_runner import TPUModelRunner, ExecutionMode
 
 logger = init_logger(__name__)
 
@@ -128,41 +126,49 @@ class TPUWorker:
 
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
-        """Profiles the peak memory usage of the model to determine how many
-        KV blocks may be allocated without OOMs.
+        num_layers = self.model_config.get_num_layers(self.parallel_config)
+        head_size = self.model_config.get_head_size()
+        num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
 
-        The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the maximum possible number of GPU and CPU blocks
-        that can be allocated with the remaining free memory.
-
-        .. tip::
-            You may limit the usage of GPU memory
-            by adjusting the `gpu_memory_utilization` parameter.
-        """
-
-        self.model_runner.profile_run()
-
+        # use an empty tensor instead of `None`` to force Dynamo to pass
+        # it by reference, rather by specializing on the value ``None``.
+        # the `dtype` argument does not matter, and we use `float32` as
+        # a placeholder (it has wide hardware support).
+        kv_caches = [(torch.tensor([], dtype=torch.float32,
+                                   device=self.device),
+                      torch.tensor([], dtype=torch.float32,
+                                   device=self.device))
+                     for _ in range(num_layers)]
+        self.model_runner._dummy_run(
+            batch_size=1,
+            seq_len=self.scheduler_config.max_num_batched_tokens,
+            kv_caches=kv_caches,
+            exec_mode=ExecutionMode.PREFILL,
+        )
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
         m = xm.get_memory_info(self.device)
-        total_tpu_memory = m["bytes_limit"]
-        peak_memory = m[
-            "peak_bytes_used"]  # Weights + intermediate activations.
-        logger.debug("Peak Used: %sGB", peak_memory // 1024 // 1024 // 1024)
-        logger.debug("Total Memory: %sGB",
-                     total_tpu_memory // 1024 // 1024 // 1024)
+        total_memory_size = m["bytes_limit"]
+        profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
 
-        cache_block_size = _get_cache_block_size(self.cache_config,
-                                                 self.model_config,
-                                                 self.parallel_config)
-        num_tpu_blocks = int(
-            (total_tpu_memory * self.cache_config.gpu_memory_utilization -
-             peak_memory) // cache_block_size)
-        num_tpu_blocks = (max(num_tpu_blocks, 0) // 8) * 8
-        return num_tpu_blocks, 0
+        # Calculate the TPU KV cache size based on profiling.
+        usable_memory_size = int(total_memory_size *
+                                 self.cache_config.gpu_memory_utilization)
+        tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
+        dtype_btyes = get_dtype_size(self.cache_dtype)
+        block_size_bytes = (dtype_btyes * self.cache_config.block_size *
+                            num_layers * 2 * head_size * num_kv_heads)
+        num_tpu_blocks = tpu_kv_cache_bytes // block_size_bytes
+        num_tpu_blocks = (num_tpu_blocks // 8) * 8  # Round down to 8.
+
+        # Calculate the CPU KV cache size based on the config.
+        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
+                             block_size_bytes)
+        num_cpu_blocks = (num_cpu_blocks // 8) * 8  # Round down to 8.
+        return num_tpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_tpu_blocks: int) -> None:
         """Allocate TPU and CPU KV cache with the specified number of blocks."""

@@ -55,8 +55,9 @@ class TpuPlatform(Platform):
         if compilation_config.level == CompilationLevel.NO_COMPILATION:
             # TPU does not support NO_COMPILATION
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
-        assert compilation_config.level < CompilationLevel.PIECEWISE,\
-            "TPU does not support Inductor."
+        compilation_config.level = 2
+        # assert compilation_config.level < CompilationLevel.PIECEWISE,\
+        #     "TPU does not support Inductor. compilation_config.level = {}".format(compilation_config.level)
 
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
