@@ -127,7 +127,7 @@ print(f"Score: {score}")
 
 A code example can be found here: <gh-file:examples/offline_inference/offline_inference_scoring.py>
 
-## Online Inference
+## Online Serving
 
 Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints that correspond to the offline APIs:
 

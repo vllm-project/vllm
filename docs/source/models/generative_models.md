@@ -118,7 +118,7 @@ print("Loaded chat template:", custom_template)
 outputs = llm.chat(conversation, chat_template=custom_template)
 ```
 
-## Online Inference
+## Online Serving
 
 Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints that correspond to the offline APIs:
 

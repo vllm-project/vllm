@@ -199,7 +199,7 @@ for o in outputs:
     print(generated_text)
 ```
 
-## Online Inference
+## Online Serving
 
 Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
 

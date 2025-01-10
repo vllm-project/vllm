@@ -61,7 +61,7 @@ function cpu_tests() {
     pytest -s -v -k cpu_model \
     tests/basic_correctness/test_chunked_prefill.py"  
 
-  # online inference
+  # online serving
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" bash -c "
     set -e
     export VLLM_CPU_KVCACHE_SPACE=10 

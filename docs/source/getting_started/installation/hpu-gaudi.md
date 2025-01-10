@@ -83,7 +83,7 @@ $ python setup.py develop
 ## Supported Features
 
 - [Offline inference](#offline-inference)
-- Online inference via [OpenAI-Compatible Server](#openai-compatible-server)
+- Online serving via [OpenAI-Compatible Server](#openai-compatible-server)
 - HPU autodetection - no need to manually select device within vLLM
 - Paged KV cache with algorithms enabled for Intel Gaudi accelerators
 - Custom Intel Gaudi implementations of Paged Attention, KV cache ops,
@@ -385,5 +385,5 @@ the below:
   completely. With HPU Graphs disabled, you are trading latency and
   throughput at lower batches for potentially higher throughput on
   higher batches. You can do that by adding `--enforce-eager` flag to
-  server (for online inference), or by passing `enforce_eager=True`
+  server (for online serving), or by passing `enforce_eager=True`
   argument to LLM constructor (for offline inference).
