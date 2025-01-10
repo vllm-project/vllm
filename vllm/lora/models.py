@@ -388,7 +388,6 @@ class LoRAModelManager(AdapterModelManager):
         logger.debug("Activating LoRA. int id: %d, slot index: %d",
                      lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
-        missing_modules = []
         for module_name, module in self.modules.items():
             module_lora = lora_model.get_lora(module_name)
             if module_lora:
@@ -407,14 +406,8 @@ class LoRAModelManager(AdapterModelManager):
                                 module_lora.embeddings_tensor,
                                 module_lora.bias)
             else:
-                missing_modules.append(module_name)
                 module.reset_lora(index)
 
-        if len(missing_modules) > 0:
-            logger.warning(
-                "Lora adapter int id %d is activated but is missing \
-                    base model modules %s which could impact output",
-                lora_model.id, missing_modules)
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -470,7 +463,6 @@ class LoRAModelManager(AdapterModelManager):
     def _create_lora_modules(self):
         for module_name, module in self.model.named_modules(
                 remove_duplicate=False):
-
             if isinstance(module, PPMissingLayer):
                 continue
             if not self._match_target_modules(module_name):
@@ -516,13 +508,7 @@ class LoRAModelManager(AdapterModelManager):
             # aims to prevent this error
             if self.supports_mm and not isinstance(new_module,
                                                    BaseLayerWithLoRA):
-                logger.warning(
-                    "%s module will be ignored because it isn't of type \
-                        BaseLayerWithLoRA",
-                    module_name,
-                )
                 continue
-
             self.register_module(module_name, new_module)
             self._register_packed_modules(module_name)
             # All lora layers share the same punica_wrapper based on reference.
