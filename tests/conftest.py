@@ -34,7 +34,7 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
-                        identity)
+                        identity, is_list_of)
 
 logger = init_logger(__name__)
 
@@ -887,7 +887,7 @@ class VllmRunner:
         beam_width: int,
         max_tokens: int,
     ) -> List[Tuple[List[List[int]], List[str]]]:
-        if isinstance(prompts[0], str):
+        if is_list_of(prompts, str, check="all"):
             prompts = [TextPrompt(prompt=prompt) for prompt in prompts]
         else:
             prompts = [
