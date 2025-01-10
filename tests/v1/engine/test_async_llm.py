@@ -7,6 +7,7 @@ from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.platforms import current_platform
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.utils import STR_ASYNC_LLM_PROMPT_LP_APC_UNSUPPORTED
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -28,6 +29,18 @@ async def generate(engine: AsyncLLM, request_id: str,
         await asyncio.sleep(0.)
 
     return count, request_id
+
+
+def test_async_llm_refuses_prompt_logprobs_with_apc():
+    """Test passes if AsyncLLM raises an exception when it is configured
+    for automatic prefix caching and it receives a request with
+    prompt_logprobs enabled, which is incompatible."""
+    with pytest.raises(ValueError) as excinfo:
+        (LLM(model="facebook/opt-125m", enable_prefix_caching=True).generate(
+            "Hello, my name is",
+            SamplingParams(temperature=0.8, top_p=0.95, prompt_logprobs=5)))
+    # Validate exception string is correct
+    assert str(excinfo.value) == STR_ASYNC_LLM_PROMPT_LP_APC_UNSUPPORTED
 
 
 @pytest.mark.asyncio

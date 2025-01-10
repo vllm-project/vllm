@@ -2,7 +2,7 @@ from typing import Dict, List, Mapping, Optional, Type, Union
 
 from typing_extensions import TypeVar
 
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
@@ -20,6 +20,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
+from vllm.v1.engine.utils import STR_LLM_ENGINE_PROMPT_LP_APC_UNSUPPORTED
 from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
@@ -43,6 +44,7 @@ class LLMEngine:
         multiprocess_mode: bool = False,
     ) -> None:
         self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -119,6 +121,22 @@ class LLMEngine:
         self.engine_core.abort_requests(request_ids)
         self.detokenizer.abort_requests(request_ids)
 
+    def _assert_valid_request(
+        self,
+        params: Union[SamplingParams, PoolingParams],
+    ) -> None:
+        """Validate LLMEngine request attributes. Fail if invalid.
+        
+        Args:
+          params: request parameters
+        """
+        # Prompt logprobs and APC are incompatible
+        if isinstance(params, SamplingParams):
+            plp = params.prompt_logprobs
+            if self.get_cache_config(
+            ).enable_prefix_caching and plp is not None and plp > 0:
+                raise ValueError(STR_LLM_ENGINE_PROMPT_LP_APC_UNSUPPORTED)
+
     def add_request(
         self,
         request_id: str,
@@ -130,6 +148,7 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
+        self._assert_valid_request(params)
 
         # 1) Process raw inputs into the request.
         request = self.processor.process_inputs(request_id, prompt, params,
@@ -159,8 +178,11 @@ class LLMEngine:
 
         return request_outputs
 
-    def get_model_config(self):
+    def get_model_config(self) -> ModelConfig:
         return self.model_config
+
+    def get_cache_config(self) -> CacheConfig:
+        return self.cache_config
 
     def start_profile(self):
         self.engine_core.profile(True)
