@@ -48,6 +48,10 @@ from ...utils import check_logprobs_close
         ),
         pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
+        pytest.param(
+            "ehristoforu/Falcon3-MoE-2x7B-Insruct",  # mixtral
+            marks=[pytest.mark.cpu_model],
+        )
     ])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
