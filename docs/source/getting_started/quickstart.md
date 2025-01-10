@@ -5,7 +5,7 @@
 This guide will help you quickly get started with vLLM to perform:
 
 - [Offline batched inference](#quickstart-offline)
-- [Online inference using OpenAI-compatible server](#quickstart-online)
+- [Online serving using OpenAI-compatible server](#quickstart-online)
 
 ## Prerequisites
 
