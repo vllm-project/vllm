@@ -1,3 +1,4 @@
+import itertools
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -18,9 +19,12 @@ from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
 from .interfaces import SupportsCrossEncoding
-import itertools
 
-def roberta_task_weights_filter(all_weights: Iterable[Tuple[str, torch.Tensor]])->Tuple[Iterable[Tuple[str, torch.Tensor]], Iterable[Tuple[str, torch.Tensor]]]:
+
+def roberta_task_weights_filter(
+    all_weights: Iterable[Tuple[str, torch.Tensor]]
+) -> Tuple[Iterable[Tuple[str, torch.Tensor]], Iterable[Tuple[str,
+                                                              torch.Tensor]]]:
     """
     Separate task-specific weights that are applied on top
     of the encoder-decoder bert base.
@@ -29,14 +33,17 @@ def roberta_task_weights_filter(all_weights: Iterable[Tuple[str, torch.Tensor]])
     from vanilla BertModel.
     """
     # Copy of a lazy iterator without in-memory overhead so both
-    # iterators can be iterated upon independently.  
+    # iterators can be iterated upon independently.
     all_weights1, all_weights2 = itertools.tee(all_weights)
+
     def encoder_decoder_weights():
         for name, weight in all_weights1:
             if name.startswith("roberta."):
                 yield (name[len("roberta."):], weight)
 
-    return encoder_decoder_weights(), ((n, w) for n, w in all_weights2 if not n.startswith("roberta."))
+    return encoder_decoder_weights(), ((n, w) for n, w in all_weights2
+                                       if not n.startswith("roberta."))
+
 
 class RobertaEmbedding(nn.Module):
 
@@ -172,7 +179,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         weights = self.hf_to_vllm_mapper.apply(weights)
-        # Separate weights in "roberta"-prefixed and all else (not in memory). 
+        # Separate weights in "roberta"-prefixed and all else (not in memory).
         # For use with models like FacebookAI/roberta-base.
         bert_weights, task_weights = roberta_task_weights_filter(weights)
         loaded = self.model.load_weights(bert_weights)
@@ -181,6 +188,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
             # which use the same architecture, but have no "roberta" prefix.
             loaded = self.model.load_weights(task_weights)
         assert len(loaded), "Unable to load RobertaEmbeddingModel"
+
 
 class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
     """A model that uses Roberta to provide embedding functionalities.

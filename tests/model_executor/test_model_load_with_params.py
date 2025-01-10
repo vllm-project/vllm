@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from vllm.model_executor.layers.pooler import PoolingType, CLSPool
+from vllm.model_executor.layers.pooler import CLSPool, PoolingType
 from vllm.model_executor.models.bert import BertEmbeddingModel
 from vllm.model_executor.models.roberta import RobertaEmbeddingModel
 from vllm.platforms import current_platform
@@ -92,6 +92,7 @@ def test_roberta_model_loading_with_params(vllm_runner):
 
         # assert output
         assert output
+
 
 @pytest.mark.skipif(current_platform.is_rocm(),
                     reason="Xformers backend is not supported on ROCm.")
