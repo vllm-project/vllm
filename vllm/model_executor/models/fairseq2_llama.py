@@ -14,20 +14,18 @@
 # limitations under the License.
 """Llama model for fairseq2 weights."""
 
-import types
 from typing import Iterable, Set, Tuple
 
 import torch
+from torch.nn import Parameter
 
 from vllm.config import VllmConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
-from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import set_weight_attrs
 from vllm.model_executor.models.llama import LlamaForCausalLM
 
 from .utils import AutoWeightsLoader, WeightsMapper
-
-logger = init_logger(__name__)
 
 
 class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
@@ -53,7 +51,8 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
         weights = weights_wrapped[
             weights_wrapped["model_key"]].items()  # type: ignore
 
-        hf_to_vllm_mapper = WeightsMapper(
+        # remap keys
+        fs2_to_vllm_mapper = WeightsMapper(
             orig_to_new_prefix={
                 "decoder_frontend.embed.": "model.embed_tokens.",
                 "decoder.": "model.",
@@ -69,21 +68,38 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
                 ".layer_norm.": ".norm.",
             },
         )
+        weights = fs2_to_vllm_mapper.apply(weights)
+
+        params = dict(self.named_parameters())
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(
-            (self.reshape_fairseq2_weights(name, loaded_weight)
-             for name, loaded_weight in weights),
-            mapper=hf_to_vllm_mapper,
-        )
+            (self.reshape_fairseq2_weights(name, loaded_weight, params)
+             for name, loaded_weight in weights))
+
+    def flag_sharded_weights(self, params: dict[str, Parameter]):
+        """Sets the `is_sharded_weight` flag to True for all sharded weights"""
+        for name, param in params.items():
+            modules = name.split(".")
+            if "norm" in name and len(param.size()) < 2:
+                # layer norms are not sharded
+                continue
+            elif any(emb in modules for emb in ["embed_tokens", "lm_head"]):
+                # for now we repeat embedding layers for compatibility
+                continue
+            else:
+                # all other layers are sharded
+                set_weight_attrs(param, {"is_sharded_weight": True})
 
     def reshape_fairseq2_weights(
         self,
         name: str,
         loaded_weight: torch.Tensor,
+        params: dict[str, Parameter],
     ) -> Tuple[str, torch.Tensor]:
         """Reshape fairseq2's weights."""
 
@@ -112,8 +128,8 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
         # We make the loaded weights compatible with both
         # full checkpoints and tp sharded checkpoints.
         # Embeddings are repeated to fit the vocab size.
-        # Other weights have their 'narrow' method monkey-patched.
-        if any(emb in modules for emb in ["embed", "final_proj"]):
+        # Other weights are flagged for the weight_loader calls.
+        if any(emb in modules for emb in ["embed_tokens", "lm_head"]):
             # Embeddings are sharded on dim 0
             dim = 0
             # In fairseq2, vocab size has to be divisible by tp_size
@@ -124,19 +140,9 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
                 repeats[dim] = self.tp_size
                 # repeat to match vocab size and to be easily 'narrow'able
                 loaded_weight = loaded_weight.repeat(repeats)
-        else:
-            # Monkey-patch the 'narrow' method to be conditional on tp_size:
-            # if the checkpoint is already tp-sharded, we don't need to
-            # narrow weights in weight_loader calls
-            def maybe_narrow(self, dim: int, start: int, length: int):
-                tp_size = get_tensor_model_parallel_world_size()
-                if tp_size > 1 and self.shape[dim] // tp_size == length:
-                    # weight is full and has to be narrowed
-                    return torch.narrow(self, dim, start, length)
-                else:
-                    return self
-
-            loaded_weight.narrow = types.MethodType(maybe_narrow,
-                                                    loaded_weight)
+                set_weight_attrs(params[name], {"is_sharded_weight": False})
+                # if embeddings are sharded, the rest is too
+                if "embed_tokens" in modules:
+                    self.flag_sharded_weights(params)
 
         return name, loaded_weight
