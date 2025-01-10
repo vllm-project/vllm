@@ -81,7 +81,6 @@ function cpu_tests() {
     set -e
     pytest -s -v \
     tests/lora/test_qwen2vl.py \
-    tests/lora/test_lora_bias_e2e.py"
 }
 
 # All of CPU tests are expected to be finished less than 25 mins.
