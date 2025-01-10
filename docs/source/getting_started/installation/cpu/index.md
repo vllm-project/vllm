@@ -1,6 +1,6 @@
 # CPU
 
-vLLM is a Python libary that supports the following CPU variants. Select your CPU type to see vendor specific instructions:
+vLLM is a Python library that supports the following CPU variants. Select your CPU type to see vendor specific instructions:
 
 ::::{tab-set}
 :sync-group: device
