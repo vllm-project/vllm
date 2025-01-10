@@ -423,10 +423,8 @@ def _get_default_neuron_config(model_config: ModelConfig,
                                parallel_config: ParallelConfig,
                                scheduler_config: SchedulerConfig):
     """Generate a neuron config based on vllm config args."""
-    logger.info(f"Initializing OnDeviceSampling config with global_topk=64")
-    on_device_sampling_config = OnDeviceSamplingConfig(global_topk=64,
-                                                    dynamic=True,
-                                                    deterministic=False)
+    on_device_sampling_config = OnDeviceSamplingConfig(dynamic=True,
+                                                       deterministic=False)
     batch_size = scheduler_config.max_num_seqs
 
     neuron_config = dict(
