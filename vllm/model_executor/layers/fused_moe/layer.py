@@ -313,15 +313,26 @@ class FusedMoE(torch.nn.Module):
         elif shard_id == "w2":
             param_data[expert_id] = loaded_weight
 
-    def _load_model_weight_or_group_weight_scale(
-            self, shard_dim: int, expert_data: torch.Tensor, shard_id: str,
-            loaded_weight: torch.Tensor, tp_rank: int, load_full_w2: bool):
-        # Load grouped weight scales for group quantization
-        # or model weights
-        # In act_order scenario, we need to load full w2 scales
+    def _load_model_weight_or_group_weight_scale(self,
+                                                 shard_dim: int,
+                                                 expert_data: torch.Tensor,
+                                                 shard_id: str,
+                                                 loaded_weight: torch.Tensor,
+                                                 tp_rank: int,
+                                                 load_full_w2: bool = False):
+        """
+        Load grouped weight scales for group quantization or model weights
+            :param shard_dim: dimension to shard
+            :param expert_data: parameter for a particular expert
+            :param shard_id: either w1, w2, or w3
+            :param loaded_weight: checkpoint weight to load into the param
+            :param tp_rank: tensor parallel rank
+            :param load_full_w2: whether or not the w2 loaded should be sharded.
+        """
         if shard_id == "w2":
-            self._load_w2(shard_id=shard_id,
-                          shard_dim=shard_dim,
+            # In the case where we have actorder/g_idx, we do not partition the
+            # w2 scales, as indicated by `load_full` argument, for all tp cases
+            self._load_w2(shard_dim=shard_dim,
                           loaded_weight=loaded_weight,
                           expert_data=expert_data,
                           tp_rank=tp_rank,
@@ -365,9 +376,12 @@ class FusedMoE(torch.nn.Module):
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
         expert_data.copy_(loaded_weight)
 
-    def _load_w2(self, expert_data: torch.Tensor, shard_dim: int,
-                 shard_id: str, loaded_weight: torch.Tensor, tp_rank: int,
-                 load_full: bool):
+    def _load_w2(self,
+                 expert_data: torch.Tensor,
+                 shard_dim: int,
+                 loaded_weight: torch.Tensor,
+                 tp_rank: int,
+                 load_full: bool = False):
 
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim
@@ -391,12 +405,10 @@ class FusedMoE(torch.nn.Module):
                     shard_dim: int, loaded_weight: torch.Tensor, tp_rank: int):
 
         if shard_id == "w2":
-            self._load_w2(shard_id=shard_id,
-                          shard_dim=shard_dim,
+            self._load_w2(shard_dim=shard_dim,
                           loaded_weight=loaded_weight,
                           expert_data=expert_data,
-                          tp_rank=tp_rank,
-                          load_full=False)
+                          tp_rank=tp_rank)
         else:
             assert shard_id in ("w1", "w3")
             expert_data.copy_(loaded_weight)
@@ -486,7 +498,7 @@ class FusedMoE(torch.nn.Module):
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
                     tp_rank=tp_rank,
-                    load_full_w2=True)
+                    load_full_w2=getattr(param, "load_full_w2", False))
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 self._load_per_tensor_weight_scale(shard_id=shard_id,
                                                    param=param,
@@ -512,8 +524,7 @@ class FusedMoE(torch.nn.Module):
                 shard_dim=shard_dim,
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
-                tp_rank=tp_rank,
-                load_full_w2=False)
+                tp_rank=tp_rank)
             return
 
     @staticmethod
