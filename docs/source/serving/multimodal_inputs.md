@@ -14,7 +14,7 @@ and [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/ch
 To input multi-modal data, follow this schema in {class}`vllm.inputs.PromptType`:
 
 - `prompt`: The prompt should follow the format that is documented on HuggingFace.
-- `multi_modal_data`: This is a dictionary that follows the schema defined in {class}`vllm.multimodal.MultiModalDataDict`.
+- `multi_modal_data`: This is a dictionary that follows the schema defined in {class}`vllm.multimodal.inputs.MultiModalDataDict`.
 
 ### Image
 

@@ -48,7 +48,7 @@ ModelRegistry.register_model("YourModelForCausalLM", "your_code:YourModelForCaus
 
 ```{important}
 If your model is a multimodal model, ensure the model class implements the {class}`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
-Read more about that [here](#enabling-multimodal-inputs).
+Read more about that [here](#supports-multimodal).
 ```
 
 ```{note}
