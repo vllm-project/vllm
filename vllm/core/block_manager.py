@@ -209,6 +209,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         "Lookahead slots" are slots that are allocated in addition to the slots
         for known tokens. The contents of the lookahead slots are not defined.
         This is used by speculative decoding when speculating future tokens.
+
+        TODO(Shawnd200): different cache policies have different space needs.
         """
 
         num_touched_blocks = 0

@@ -8,12 +8,7 @@ from vllm.utils import Device, cdiv, chunk_list
 
 
 class CachePolicyBase(CachePolicy):
-    """A class to manage blocks for a specific sequence.
-
-    The PhysicalBlockTable maps a sequence of tokens to a list of blocks, where each
-    block represents a contiguous memory allocation for a portion of the 
-    sequence. The blocks are managed by a DeviceAwareBlockAllocator, which is
-    responsible for allocating and freeing memory for the blocks.
+    """This cache policy always allocates new blocks to append new tokens.
 
     Args:
         block_size (int): The maximum number of tokens that can be stored in a
@@ -52,7 +47,8 @@ class CachePolicyBase(CachePolicy):
     def add_tokens_prefill(self,
                            token_ids: List[int],
                            device: Device = Device.GPU) -> None:
-        """Allocates memory blocks for storing the given sequence of token IDs.
+        """Allocates memory blocks for storing the given sequence of token IDs
+        in prefill stage only.
 
         This method allocates the required number of blocks to store the given
         sequence of token IDs.
@@ -80,7 +76,7 @@ class CachePolicyBase(CachePolicy):
                           token_ids: List[int],
                           num_lookahead_slots: int = 0) -> None:
         """Add a sequence of token IDs to the existing blocks in the
-        PhysicalBlockTable by two slot adding options:
+        PhysicalBlockTable.
 
         This method appends the given sequence of token IDs to the existing
         blocks in the PhysicalBlockTable. If there is not enough space in the
@@ -335,33 +331,13 @@ class CachePolicyBase(CachePolicy):
 
 
 class CachePolicySlidingWindow(CachePolicyBase):
-    """A class to manage blocks for a specific sequence.
-
-    The PhysicalBlockTable maps a sequence of tokens to a list of blocks, where each
-    block represents a contiguous memory allocation for a portion of the
-    sequence. The blocks are managed by a DeviceAwareBlockAllocator, which is
-    responsible for allocating and freeing memory for the blocks.
+    """This cache policy has a sliding-window context and a fixed cache space
+    as a result.
 
     Args:
-        block_size (int): The maximum number of tokens that can be stored in a
-            single block.
-        block_allocator (DeviceAwareBlockAllocator): The block allocator used to
-            manage memory for the blocks.
-        physical_block_table (Optional[List[Block]], optional): An optional list
-            of existing blocks to initialize the PhysicalBlockTable with. If not
-            provided, an empty PhysicalBlockTable is created.
-        num_sliding_window_blocks (Optional[int], optional): The number of
-            blocks to keep around for each sequence. If None, all blocks
-            are kept (e.g., when sliding window is not used).
-            It should at least fit the sliding window size of the model.
-
-    Attributes:
-        _block_size (int): The maximum number of tokens that can be stored in a
-            single block.
-        _allocator (DeviceAwareBlockAllocator): The block allocator used to
-            manage memory for the blocks.
-        _physical_block_table (PhysicalBlockTable): The list of blocks managed
-            by this PhysicalBlockTable.
+        num_sliding_window_blocks (int): The number of blocks to keep around
+            for a sequence. It should at least fit the sliding window size of
+            the context.
     """
 
     def __init__(
@@ -380,15 +356,12 @@ class CachePolicySlidingWindow(CachePolicyBase):
     def add_tokens_prefill(self,
                            token_ids: List[int],
                            device: Device = Device.GPU) -> None:
-        """Allocates memory blocks for storing the given sequence of token IDs.
+        """Allocate memory blocks for storing the given sequence of token IDs
+        in prefill stage only.
 
         This method allocates the required number of blocks to store the given
-        sequence of token IDs.
-
-        Args:
-            token_ids (List[int]): The sequence of token IDs to be stored.
-            device (Device, optional): The device on which the blocks should be
-                allocated. Defaults to Device.GPU.
+        sequence of token IDs only inside the sliding window, or
+        _num_sliding_window_blocks to be exact.
         """
         assert not self._is_allocated
         assert token_ids
@@ -406,6 +379,8 @@ class CachePolicySlidingWindow(CachePolicyBase):
                 last_window_start:last_window_end]
             remainder_chunks = token_chunks[last_window_end:]
 
+            # The remainder chunks cannot fill up a window, we need to rotate
+            # these chunks back to the front of the last full sliding window.
             if len(remainder_chunks) > 0:
                 chunk_idx = len(remainder_chunks[:-1])
                 last_window_chunks[:chunk_idx] = remainder_chunks[:chunk_idx]
@@ -421,11 +396,14 @@ class CachePolicySlidingWindow(CachePolicyBase):
                                                      token_chunks=token_chunks,
                                                      device=device)
         self.update_blocks(blocks)
-        if num_evicted_chunks > 0:
-            blocks = blocks[block_start_idx:] + blocks[:block_start_idx]
 
         num_evicted_tokens = 0
         if num_evicted_chunks > 0:
+            # Chronologically, we maintain the chunk order in the sequence to
+            # be added into the block tables.
+            blocks = blocks[block_start_idx:] + blocks[:block_start_idx]
+
+            # Allocate null blocks to represent the evicted tokens.
             null_block = self._allocator.allocate_or_get_null_block()
             evicted_blocks = [null_block] * num_evicted_chunks
             num_evicted_tokens = (
@@ -434,6 +412,7 @@ class CachePolicySlidingWindow(CachePolicyBase):
             self._virtual_block_table.append_tokens(evicted_blocks,
                                                     num_evicted_tokens,
                                                     evicted=True)
+            # Partially filled block actually appears twice due to rotation.
             if num_evicted_tokens % self._block_size != 0:
                 blocks.append(blocks[0])
 
@@ -443,27 +422,17 @@ class CachePolicySlidingWindow(CachePolicyBase):
     def add_tokens_decode(self,
                           token_ids: List[int],
                           num_lookahead_slots: int = 0) -> None:
-        """Add a sequence of token IDs to the existing blocks in the
-        PhysicalBlockTable by two slot adding options:
+        """Add a sequence of token IDs to the blocks in the PhysicalBlockTable
+        by rotating the blocks when appending new tokens when the sliding window
+        is full. This means the currently oldest tokens are evicted and replaced
+        with new tokens.
 
-        This method appends the given sequence of token IDs to the existing
-        blocks in the PhysicalBlockTable. If there is not enough space in the
-        existing blocks, new blocks are allocated using the
-        `_ensure_num_empty_slots` method to accommodate the additional tokens.
-
-        The token IDs are divided into chunks of size `block_size` (except for
-        the first chunk, which may be smaller), and each chunk is appended to a
-        separate block.
-
-        Args:
-            token_ids (List[int]): The sequence of token IDs to be appended.
-            num_lookahead_slots (int): The number of lookahead slots to allocate
-                in speculative decoding or chunked prefill.
         """
         assert self._is_allocated, "no blocks have been allocated"
         assert self.num_physical_blocks > 0
 
-        # Reuse blocks beyond sliding window so that no new blocks are needed
+        # Rotate and reuse blocks beyond sliding window so that no new blocks
+        # are needed
         assert self.num_physical_blocks <= self._num_sliding_window_blocks
         if self.num_physical_blocks < self._num_sliding_window_blocks:
             # Ensure there are enough empty slots for the new tokens plus
@@ -481,6 +450,7 @@ class CachePolicySlidingWindow(CachePolicyBase):
         for i, (slot_offset,
                 token_block) in enumerate(zip(slot_offsets, token_blocks),
                                           start=first_block_idx):
+            i %= self.num_physical_blocks
             block = self._physical_block_table.insert_tokens(
                 i, slot_offset, token_block)
             self._virtual_block_table.insert_tokens(block, slot_offset,

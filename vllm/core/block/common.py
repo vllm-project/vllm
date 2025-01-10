@@ -230,7 +230,12 @@ class BlockPool:
 
 
 class VirtualBlockTable:
-    """
+    """VirtualBlockTable maintains the mappings between tokens and physical
+    memory blocks. Both the token mappings and slot mappings are tracked
+    respectively, one maps physical blocks to tokens, and the other maps
+    tokens to their memory slots. The slot mappings are updated with the tokens
+    added and this avoids the need to reconstruct the mappings on every
+    iteration for kv copy to the cache.
     """
 
     def __init__(
@@ -288,8 +293,8 @@ class VirtualBlockTable:
         slot_offset: int,
         num_new_tokens: int
     ) -> None:
-        # If evict previous tokens from physical blocks and replace with new tokens,
-        # update the slot_mappings
+        # If evicting previous tokens from physical blocks, replace them with
+        # new tokens, and update the slot_mappings
         block_slot_start = slot_offset
         block_slot_end = slot_offset + num_new_tokens
         block_token_mappings = self._token_mappings[block.block_id]
@@ -297,7 +302,7 @@ class VirtualBlockTable:
             if token_idx != EVICTED_SLOT_ID:
                 self._slot_mappings[token_idx] = EVICTED_SLOT_ID
 
-        # Replace with new tokens in the physical blocks, update both
+        # Populate new tokens in the physical blocks, and update both
         # token_mappings and slot_mappings
         slot_start = (block.block_id * self._block_size) + slot_offset
         slot_end = slot_start + num_new_tokens
@@ -331,10 +336,11 @@ class VirtualBlockTable:
 
 
 class PhysicalBlockTable:
-    """This class is an optimization to allow fast-access to physical 
-    block ids. It maintains a block id list that is updated with the 
-    block list and this avoids the need to reconstruct the block id 
-    list on every iteration of the block manager
+    """PhysicalBlockTable (formerly BlockList) keeps track of the allocated
+    cache blocks. It is also an optimization to allow fast-access to physical
+    block ids. It maintains a block id list that is updated with the block
+    list and this avoids the need to reconstruct the block id list on every
+    iteration of the block manager.
     """
 
     def __init__(self, blocks: Optional[List[Block]] = None):

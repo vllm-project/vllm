@@ -311,12 +311,24 @@ class DeviceAwareBlockAllocator(ABC):
 
 
 class CachePolicy(ABC):
+    """A class to manage use of blocks for a sequence
+
+    The PhysicalBlockTable maps a sequence of tokens to a list of blocks, where
+    each block represents a contiguous memory allocation for a portion of the
+    sequence. The VirtualBlockTable maps each memory slot in each block to the
+    tokens and vice versa. Note that it is possible for a token to be evicted
+    from blocks to save cache space. The implementations bear the responsibility
+    of managing the blocks and tokens in terms of cache use while maintaining
+    the PhysicalBlockTable and the VirtualTable. The blocks are managed by a
+    DeviceAwareBlockAllocator, which is responsible for allocating and freeing
+    memory for the blocks.
+
+    """
+
     @abstractmethod
-    def add_tokens_prefill(
-        self,
-        token_ids: List[int],
-        device: Device = Device.GPU
-    ) -> None:
+    def add_tokens_prefill(self,
+                           token_ids: List[int],
+                           device: Device = Device.GPU) -> None:
         pass
 
     @abstractmethod
@@ -324,11 +336,9 @@ class CachePolicy(ABC):
         pass
 
     @abstractmethod
-    def add_tokens_decode(
-        self,
-        token_ids: List[int],
-        num_lookahead_slots: int = 0
-    ) -> None:
+    def add_tokens_decode(self,
+                          token_ids: List[int],
+                          num_lookahead_slots: int = 0) -> None:
         pass
 
     @abstractmethod
@@ -379,7 +389,7 @@ class CachePolicy(ABC):
                                 num_lookahead_slots: int = 0) -> int:
         """Calculates the minimum number of blocks required to store a given
         sequence of token IDs along with any look-ahead slots that may be
-        required (like in multi-step + chunked-prefill).
+        required (like in multistep + chunked-prefill).
 
         This assumes worst-case scenario, where every block requires a new
         allocation (e.g. ignoring prefix caching).
