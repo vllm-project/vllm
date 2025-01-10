@@ -30,6 +30,8 @@ from vllm.utils import PlaceholderModule
 try:
     from runai_model_streamer import SafetensorsStreamer
 except (ImportError, OSError):
+    # see https://github.com/run-ai/runai-model-streamer/issues/26
+    # OSError will be raised on arm64 platform
     runai_model_streamer = PlaceholderModule(
         "runai_model_streamer")  # type: ignore[assignment]
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
