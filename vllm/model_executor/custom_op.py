@@ -57,6 +57,11 @@ class CustomOp(nn.Module):
         # PyTorch-native implementation.
         return self.forward_native(*args, **kwargs)
 
+    def forward_oot(self, *args, **kwargs):
+        # By default, we assume that OOT ops are compatible with the
+        # PyTorch-native implementation.
+        return self.forward_native(*args, **kwargs)
+
     def dispatch_forward(self):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
@@ -81,6 +86,8 @@ class CustomOp(nn.Module):
             return self.forward_tpu
         elif current_platform.is_xpu():
             return self.forward_xpu
+        elif current_platform.is_out_of_tree():
+            return self.forward_oot
         else:
             return self.forward_cuda
 
