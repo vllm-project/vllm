@@ -1,82 +1,19 @@
-(installation-rocm)=
-
-# Installation for ROCm
+# Installation
 
 vLLM supports AMD GPUs with ROCm 6.2.
 
 ## Requirements
 
-- OS: Linux
-- Python: 3.9 -- 3.12
 - GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100)
 - ROCm 6.2
 
-Installation options:
+## Python
 
-1. [Build from source with docker](#build-from-source-docker-rocm)
-2. [Build from source](#build-from-source-rocm)
+### Pre-built wheels
 
-(build-from-source-docker-rocm)=
+Currently, there are no pre-built ROCm wheels.
 
-## Option 1: Build from source with docker (recommended)
-
-You can build and install vLLM from source.
-
-First, build a docker image from <gh-file:Dockerfile.rocm> and launch a docker container from the image.
-It is important that the user kicks off the docker build using buildkit. Either the user put DOCKER_BUILDKIT=1 as environment variable when calling docker build command, or the user needs to setup buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
-
-```console
-{
-    "features": {
-        "buildkit": true
-    }
-}
-```
-
-<gh-file:Dockerfile.rocm> uses ROCm 6.2 by default, but also supports ROCm 5.7, 6.0 and 6.1 in older vLLM branches.
-It provides flexibility to customize the build of docker image using the following arguments:
-
-- `BASE_IMAGE`: specifies the base image used when running `docker build`, specifically the PyTorch on ROCm base image.
-- `BUILD_FA`: specifies whether to build CK flash-attention. The default is 1. For [Radeon RX 7900 series (gfx1100)](https://rocm.docs.amd.com/projects/radeon/en/latest/index.html), this should be set to 0 before flash-attention supports this target.
-- `FX_GFX_ARCHS`: specifies the GFX architecture that is used to build CK flash-attention, for example, `gfx90a;gfx942` for MI200 and MI300. The default is `gfx90a;gfx942`
-- `FA_BRANCH`: specifies the branch used to build the CK flash-attention in [ROCm's flash-attention repo](https://github.com/ROCmSoftwarePlatform/flash-attention). The default is `ae7928c`
-- `BUILD_TRITON`: specifies whether to build triton flash-attention. The default value is 1.
-
-Their values can be passed in when running `docker build` with `--build-arg` options.
-
-To build vllm on ROCm 6.2 for MI200 and MI300 series, you can use the default:
-
-```console
-$ DOCKER_BUILDKIT=1 docker build -f Dockerfile.rocm -t vllm-rocm .
-```
-
-To build vllm on ROCm 6.2 for Radeon RX7900 series (gfx1100), you should specify `BUILD_FA` as below:
-
-```console
-$ DOCKER_BUILDKIT=1 docker build --build-arg BUILD_FA="0" -f Dockerfile.rocm -t vllm-rocm .
-```
-
-To run the above docker image `vllm-rocm`, use the below command:
-
-```console
-$ docker run -it \
-   --network=host \
-   --group-add=video \
-   --ipc=host \
-   --cap-add=SYS_PTRACE \
-   --security-opt seccomp=unconfined \
-   --device /dev/kfd \
-   --device /dev/dri \
-   -v <path/to/model>:/app/model \
-   vllm-rocm \
-   bash
-```
-
-Where the `<path/to/model>` is the location where the model is stored, for example, the weights for llama2 or llama3 models.
-
-(build-from-source-rocm)=
-
-## Option 2: Build from source
+### Build wheel from source
 
 0. Install prerequisites (skip if you are already in an environment/docker with the following installed):
 
@@ -161,3 +98,67 @@ This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm in
 - For MI300x (gfx942) users, to achieve optimal performance, please refer to [MI300x tuning guide](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html) for performance optimization and tuning tips on system and workflow level.
   For vLLM, please refer to [vLLM performance optimization](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/workload.html#vllm-performance-optimization).
 ```
+
+## Docker
+
+### Pre-built images
+
+Currently, there are no pre-built ROCm images.
+
+### Build image from source
+
+Building the Docker image from source is the recommended way to use vLLM with ROCm.
+
+First, build a docker image from <gh-file:Dockerfile.rocm> and launch a docker container from the image.
+It is important that the user kicks off the docker build using buildkit. Either the user put DOCKER_BUILDKIT=1 as environment variable when calling docker build command, or the user needs to setup buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
+
+```console
+{
+    "features": {
+        "buildkit": true
+    }
+}
+```
+
+<gh-file:Dockerfile.rocm> uses ROCm 6.2 by default, but also supports ROCm 5.7, 6.0 and 6.1 in older vLLM branches.
+It provides flexibility to customize the build of docker image using the following arguments:
+
+- `BASE_IMAGE`: specifies the base image used when running `docker build`, specifically the PyTorch on ROCm base image.
+- `BUILD_FA`: specifies whether to build CK flash-attention. The default is 1. For [Radeon RX 7900 series (gfx1100)](https://rocm.docs.amd.com/projects/radeon/en/latest/index.html), this should be set to 0 before flash-attention supports this target.
+- `FX_GFX_ARCHS`: specifies the GFX architecture that is used to build CK flash-attention, for example, `gfx90a;gfx942` for MI200 and MI300. The default is `gfx90a;gfx942`
+- `FA_BRANCH`: specifies the branch used to build the CK flash-attention in [ROCm's flash-attention repo](https://github.com/ROCmSoftwarePlatform/flash-attention). The default is `ae7928c`
+- `BUILD_TRITON`: specifies whether to build triton flash-attention. The default value is 1.
+
+Their values can be passed in when running `docker build` with `--build-arg` options.
+
+To build vllm on ROCm 6.2 for MI200 and MI300 series, you can use the default:
+
+```console
+$ DOCKER_BUILDKIT=1 docker build -f Dockerfile.rocm -t vllm-rocm .
+```
+
+To build vllm on ROCm 6.2 for Radeon RX7900 series (gfx1100), you should specify `BUILD_FA` as below:
+
+```console
+$ DOCKER_BUILDKIT=1 docker build --build-arg BUILD_FA="0" -f Dockerfile.rocm -t vllm-rocm .
+```
+
+To run the above docker image `vllm-rocm`, use the below command:
+
+```console
+$ docker run -it \
+   --network=host \
+   --group-add=video \
+   --ipc=host \
+   --cap-add=SYS_PTRACE \
+   --security-opt seccomp=unconfined \
+   --device /dev/kfd \
+   --device /dev/dri \
+   -v <path/to/model>:/app/model \
+   vllm-rocm \
+   bash
+```
+
+Where the `<path/to/model>` is the location where the model is stored, for example, the weights for llama2 or llama3 models.
+
+## Supported features
