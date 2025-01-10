@@ -1527,7 +1527,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self._update_inputs_to_capture_for_enc_dec_model(
                             capture_inputs)
 
-                    with set_forward_context(attn_metadata, self.vllm_config):
+                    with set_forward_context(attn_metadata, self.vllm_config,
+                                             virtual_engine):
                         graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
@@ -1695,7 +1696,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         if not bypass_model_exec:
             with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config):
+                                     self.vllm_config, virtual_engine):
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,

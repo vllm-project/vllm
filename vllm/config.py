@@ -2780,7 +2780,6 @@ class CompilationConfig(BaseModel):
     compilation_time: float = PrivateAttr
 
     # Per-model forward context
-    # Mainly used to store attention cls
     # Map from layer name to the attention cls
     static_forward_context: Dict[str, Any] = PrivateAttr
 
