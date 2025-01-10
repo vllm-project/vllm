@@ -373,6 +373,7 @@ class TPUModelRunner:
                     num_prefill_tokens=padded_prompt_len,
                     num_decode_tokens=0,
                     slot_mapping=slot_mapping.to(self.device),
+                    multi_modal_placeholder_index_maps=None,
                     block_tables=None,
                     context_lens=None,
                     effective_query_lens=None,
@@ -449,6 +450,7 @@ class TPUModelRunner:
                                    num_prefill_tokens=0,
                                    num_decode_tokens=padded_batch_size,
                                    slot_mapping=slot_mapping.to(self.device),
+                                   multi_modal_placeholder_index_maps=None,
                                    block_tables=block_table.to(self.device),
                                    context_lens=context_lens.to(self.device),
                                    effective_query_lens=None,
@@ -485,7 +487,7 @@ class TPUModelRunner:
 
         return (
             self._prepare_prefill_inputs(num_scheduled_tokens),
-            self._prepare_decode_inputs(num_decodes),
+            self._prepare_decode_inputs(),
         )
 
         # # OPTIMIZATION: Start copying the block table first.
@@ -824,6 +826,7 @@ class TPUModelRunner:
 
         ######################### DECODES #########################
         # Decodes run as one single batch with [padded_batch, 1]
+        sampled_token_ids_list = []
         if decode_data.num_decodes > 0:
             # FORWARD.
             selected_token_ids = self.model(decode_data.token_ids,
@@ -834,7 +837,7 @@ class TPUModelRunner:
             # NOTE: TPU<>CPU sync happens here.
             # We need to call .cpu() first to avoid recompilation.
             token_ids = selected_token_ids.cpu()[:decode_data.num_decodes]
-            sampled_token_ids_list = token_ids.tolist()
+            sampled_token_ids_list.extend(token_ids.tolist())
             sampled_token_ids[:decode_data.num_decodes] = token_ids
 
             # UPDATE REQUEST STATE.
@@ -859,14 +862,15 @@ class TPUModelRunner:
         for idx, (req_id, prompt_len, token_ids, position_ids,
                   attn_metadata) in enumerate(prefill_data.zipped()):
             # FORWARD.
-            selected_token_ids = self.model(decode_data.token_ids,
-                                            decode_data.position_ids,
-                                            decode_data.attn_metadata,
+            selected_token_ids = self.model(token_ids,
+                                            position_ids,
+                                            attn_metadata,
                                             self.kv_caches)
 
             # NOTE: TPU<>CPU sync happens here.
             # We need to call .cpu() first to avoid recompilation.
             token_id = selected_token_ids.cpu()[prompt_len - 1].item()
+            sampled_token_ids_list.append(token_id)
             sampled_token_ids[decode_data.num_decodes + idx] = token_id
             req_state = self.requests[req_id]
 
@@ -934,7 +938,7 @@ class TPUModelRunner:
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids_cpu=sampled_token_ids,
+            sampled_token_ids=sampled_token_ids_list,
             logprob_token_ids_cpu=None,
             logprobs_cpu=None,
         )
