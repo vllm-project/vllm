@@ -20,7 +20,7 @@ TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 RTOL = 0.03
 EXPECTED_VALUE = 0.58
-DEFAULT_ARGS = ["--max-model-len", "2048", "--disable-log-requests"]
+DEFAULT_ARGS = ["--max-model-len", "2048", "--disable-log-requests", "--enforce-eager"]
 MORE_ARGS_LIST = [
     [],  # Default
     ["--enable-chunked-prefill"],  # Chunked
@@ -61,12 +61,15 @@ def run_test(more_args):
         )
 
         measured_value = results["results"][TASK][FILTER]
+        print("measured_value = {}".format(measured_value))
+
         assert (measured_value - RTOL < EXPECTED_VALUE
                 and measured_value + RTOL > EXPECTED_VALUE
                 ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(),
+@pytest.mark.skipif(not current_platform.is_cuda()
+                    and not current_platform.is_tpu(),
                     reason="V1 currently only supported on CUDA")
 def test_lm_eval_accuracy_v1_engine(monkeypatch):
     """Run with the V1 Engine."""
