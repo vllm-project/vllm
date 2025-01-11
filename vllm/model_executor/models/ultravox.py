@@ -346,7 +346,6 @@ class ModifiedWhisperEncoder(WhisperEncoder):
         return hidden_states
 
 
-
 @MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor,
                                         info=UltravoxProcessingInfo,
                                         dummy_inputs=UltravoxDummyInputsBuilder
