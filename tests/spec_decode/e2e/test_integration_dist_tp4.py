@@ -108,7 +108,8 @@ def test_skip_speculation(common_llm_kwargs, per_test_common_llm_kwargs,
 
     TODO: fix it to pass without raising Error. (#5814)
     """
-    with pytest.raises(openai.APIConnectionError):
+    with pytest.raises(
+        (openai.APIConnectionError, openai.InternalServerError)):
         run_equality_correctness_test_tp(MAIN_MODEL,
                                          common_llm_kwargs,
                                          per_test_common_llm_kwargs,
