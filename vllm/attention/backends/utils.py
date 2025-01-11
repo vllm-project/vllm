@@ -4,7 +4,6 @@ from contextlib import contextmanager
 from itertools import accumulate
 from typing import TYPE_CHECKING, Any, Dict, List, Tuple, Type, TypeVar, Union
 
-import numpy as np
 import torch
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,

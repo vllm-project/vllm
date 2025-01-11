@@ -1,7 +1,8 @@
 from collections import deque, defaultdict
 import copy
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, List, Optional, Protocol, Tuple, DefaultDict
+from typing import (Deque, Dict, Iterable, List, Optional, Protocol, Tuple,
+                    DefaultDict)
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 
@@ -38,9 +39,10 @@ class RefCounter(RefCounterProtocol):
 
     def __init__(self, all_block_indices: Iterable[BlockId]):
         deduped = set(all_block_indices)
-        self._refcounts: Dict[BlockId,
-                              RefCount] = {index: 0
-                                           for index in deduped}
+        self._refcounts: Dict[BlockId, RefCount] = {
+            index: 0
+            for index in deduped
+        }
 
     def incr(self, block_id: BlockId) -> RefCount:
         assert block_id in self._refcounts
@@ -238,12 +240,10 @@ class VirtualBlockTable:
     iteration for kv copy to the cache.
     """
 
-    def __init__(
-        self,
-        block_size: int,
-        slot_mappings: Optional[SlotMappings] = None,
-        token_mappings: Optional[TokenMappings] = None
-    ):
+    def __init__(self,
+                 block_size: int,
+                 slot_mappings: Optional[SlotMappings] = None,
+                 token_mappings: Optional[TokenMappings] = None):
         self._block_size = block_size
         if slot_mappings is None:
             slot_mappings = []
@@ -253,32 +253,35 @@ class VirtualBlockTable:
                 defaultdict(lambda: [EVICTED_SLOT_ID] * self._block_size))
         self._token_mappings: TokenMappings = token_mappings
 
-    def append_tokens(
-        self,
-        blocks: List[Block],
-        num_new_tokens: int,
-        evicted: bool = False
-    ) -> None:
+    def append_tokens(self,
+                      blocks: List[Block],
+                      num_new_tokens: int,
+                      evicted: bool = False) -> None:
         first_chunk_size = self._block_size - (self.num_tokens %
                                                self._block_size)
         if first_chunk_size < num_new_tokens:
-            last_chunk_size = (self.num_tokens + num_new_tokens) % self._block_size
+            last_chunk_size = (self.num_tokens +
+                               num_new_tokens) % self._block_size
             num_middle_chunks = ((num_new_tokens - first_chunk_size) //
                                  self._block_size)
             middle_chunk_sizes = [(0, self._block_size)] * num_middle_chunks
-            chunk_list = [(self._block_size - first_chunk_size, first_chunk_size)]
+            chunk_list = [(self._block_size - first_chunk_size,
+                           first_chunk_size)]
             chunk_list.extend(middle_chunk_sizes)
             if last_chunk_size > 0:
                 chunk_list.append((0, last_chunk_size))
         else:
-            chunk_list = [(self._block_size - first_chunk_size, num_new_tokens)]
+            chunk_list = [(self._block_size - first_chunk_size, num_new_tokens)
+                          ]
         assert len(chunk_list) == len(blocks)
 
         for (slot_offset, chunk_size), block in zip(chunk_list, blocks):
             if not evicted:
                 block_token_mappings = self._token_mappings[block.block_id]
-                block_token_mappings[slot_offset:slot_offset+chunk_size] = (
-                    range(self.num_tokens, self.num_tokens+chunk_size))
+                block_token_mappings[slot_offset:slot_offset +
+                                     chunk_size] = (range(
+                                         self.num_tokens,
+                                         self.num_tokens + chunk_size))
 
                 slot_start = block.block_id * self._block_size + slot_offset
                 slot_end = slot_start + chunk_size
@@ -287,12 +290,8 @@ class VirtualBlockTable:
                 slots = [EVICTED_SLOT_ID] * chunk_size
             self._slot_mappings.extend(slots)
 
-    def insert_tokens(
-        self,
-        block: Block,
-        slot_offset: int,
-        num_new_tokens: int
-    ) -> None:
+    def insert_tokens(self, block: Block, slot_offset: int,
+                      num_new_tokens: int) -> None:
         # If evicting previous tokens from physical blocks, replace them with
         # new tokens, and update the slot_mappings
         block_slot_start = slot_offset
@@ -330,8 +329,7 @@ class VirtualBlockTable:
         return self._token_mappings
 
     def fork(self) -> "VirtualBlockTable":
-        return VirtualBlockTable(self._block_size,
-                                 self._slot_mappings.copy(),
+        return VirtualBlockTable(self._block_size, self._slot_mappings.copy(),
                                  copy.deepcopy(self._token_mappings))
 
 
@@ -371,12 +369,8 @@ class PhysicalBlockTable:
 
         return block
 
-    def insert_tokens(
-        self,
-        block_index: int,
-        slot_offset: int,
-        token_ids: List[int]
-    ) -> Block:
+    def insert_tokens(self, block_index: int, slot_offset: int,
+                      token_ids: List[int]) -> Block:
         block = self._blocks[block_index]
         prev_block_id = block.block_id
 

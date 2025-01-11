@@ -131,8 +131,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             device=Device.GPU)
 
         # Use watermark to avoid frequent cache eviction.
-        if (self.num_total_gpu_blocks - num_required_blocks <
-                self.watermark_blocks):
+        if (self.num_total_gpu_blocks - num_required_blocks
+                < self.watermark_blocks):
             return AllocStatus.NEVER
         if num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks:
             return AllocStatus.OK
@@ -143,8 +143,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         cache_policy = CachePolicyFactory.create(
             block_size=self.block_size,
             block_allocator=self.block_allocator,
-            num_sliding_window_blocks=self.num_sliding_window_blocks
-        )
+            num_sliding_window_blocks=self.num_sliding_window_blocks)
         if seq.get_token_ids():
             # NOTE: If there are any factors affecting the block besides
             # token_ids, they should be added as input to extra_hash.
@@ -237,10 +236,9 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         cache_policy = self.cache_policies[seq.seq_id]
 
         cache_policy.add_tokens_decode(
-            token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
+            token_ids=cache_policy.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
-            extra_hash=seq.extra_hash()
-        )
+            extra_hash=seq.extra_hash())
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
         return new_cows

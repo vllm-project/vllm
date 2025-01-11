@@ -334,14 +334,14 @@ class CachePolicy(ABC):
 
     @abstractmethod
     def update_blocks(self,
-                      blocks: List[Block],
-                      extra_hash: Optional[int] = None) -> None:
+                      blocks: List[Block]) -> None:
         pass
 
     @abstractmethod
     def add_tokens_decode(self,
                           token_ids: List[int],
-                          num_lookahead_slots: int = 0) -> None:
+                          num_lookahead_slots: int = 0,
+                          extra_hash: Optional[int] = None) -> None:
         pass
 
     @abstractmethod

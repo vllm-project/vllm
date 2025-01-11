@@ -308,7 +308,8 @@ class CachePolicyBase(CachePolicy):
         PhysicalBlockTable.
 
         Returns:
-            int: The total number of tokens currently stored in the PhysicalBlockTable.
+            int: The total number of tokens currently stored in the
+                PhysicalBlockTable.
         """
         return self.num_tokens
 
@@ -397,7 +398,8 @@ class CachePolicySlidingWindow(CachePolicyBase):
         if num_evicted_chunks > 0:
             num_windows = len(token_chunks) // self._num_sliding_window_blocks
             last_window_end = num_windows * self._num_sliding_window_blocks
-            last_window_start = last_window_end - self._num_sliding_window_blocks
+            last_window_start = (last_window_end -
+                                 self._num_sliding_window_blocks)
             last_window_chunks = token_chunks[
                 last_window_start:last_window_end]
             remainder_chunks = token_chunks[last_window_end:]
