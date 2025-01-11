@@ -28,8 +28,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-POLLING_TIMEOUT_MS = 2500
-POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
+POLLING_TIMEOUT_S = 2.5
 
 
 class EngineCore:
