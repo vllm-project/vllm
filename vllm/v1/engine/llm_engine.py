@@ -18,7 +18,7 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.detokenizer import Detokenizer
+from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 
@@ -42,7 +42,6 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
-        assert log_stats is False
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -62,7 +61,7 @@ class LLMEngine:
                                    mm_registry=mm_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
-        self.detokenizer = Detokenizer(
+        self.output_processor = OutputProcessor(
             tokenizer_name=vllm_config.model_config.tokenizer,
             tokenizer_mode=vllm_config.model_config.tokenizer_mode,
             trust_remote_code=vllm_config.model_config.trust_remote_code,
@@ -104,10 +103,10 @@ class LLMEngine:
                    multiprocess_mode=enable_multiprocessing)
 
     def get_num_unfinished_requests(self) -> int:
-        return self.detokenizer.get_num_unfinished_requests()
+        return self.output_processor.get_num_unfinished_requests()
 
     def has_unfinished_requests(self) -> bool:
-        return self.detokenizer.has_unfinished_requests()
+        return self.output_processor.has_unfinished_requests()
 
     @classmethod
     def validate_outputs(cls, outputs, output_type):
@@ -117,7 +116,7 @@ class LLMEngine:
         """Remove request_ids from EngineCore and Detokenizer."""
 
         self.engine_core.abort_requests(request_ids)
-        self.detokenizer.abort_requests(request_ids)
+        self.output_processor.abort_requests(request_ids)
 
     def add_request(
         self,
@@ -139,7 +138,7 @@ class LLMEngine:
                                                 priority)
 
         # 2) Add the request to Detokenizer.
-        self.detokenizer.add_request(request)
+        self.output_processor.add_request(request)
 
         # 3) Add the request to EngineCore.
         self.engine_core.add_request(request)

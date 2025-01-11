@@ -22,7 +22,6 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_log_time = time.monotonic()
 
     def log(self, scheduler_stats: SchedulerStats):
-        """Log Stats to standard output."""
 
         # Log every _LOCAL_LOGGING_INTERVAL_SEC.
         now = time.monotonic()

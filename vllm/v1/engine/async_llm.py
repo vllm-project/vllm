@@ -18,7 +18,7 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.detokenizer import Detokenizer
+from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerBase
@@ -72,7 +72,7 @@ class AsyncLLM(EngineClient):
         )
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
-        self.detokenizer = Detokenizer(
+        self.output_processor = OutputProcessor(
             tokenizer_name=vllm_config.model_config.tokenizer,
             tokenizer_mode=vllm_config.model_config.tokenizer_mode,
             trust_remote_code=vllm_config.model_config.trust_remote_code,
@@ -152,7 +152,7 @@ class AsyncLLM(EngineClient):
                                                 priority)
 
         # 3) Add the request to Detokenizer (this process).
-        self.detokenizer.add_request(request)
+        self.output_processor.add_request(request)
 
         # 4) Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
@@ -251,20 +251,22 @@ class AsyncLLM(EngineClient):
         try:
             while True:
                 # 1) Pull EngineCoreOutput from the EngineCore.
-                outputs = await self.engine_core.get_output_async()
+                engine_core_outputs = await self.engine_core.get_output_async()
 
                 # 2) Detokenize based on the output.
-                request_outputs, reqs_to_abort = self.detokenizer.step(
-                    outputs.outputs)
+                processed_outputs = self.output_processor.step(engine_core_outputs.outputs)
 
                 # 3) Put the RequestOutputs into the per-request queues.
-                self._process_request_outputs(request_outputs)
+                self._process_request_outputs(processed_outputs.request_outputs)
 
                 # 4) Abort any requests that finished due to stop strings.
-                await self.engine_core.abort_requests_async(reqs_to_abort)
+                await self.engine_core.abort_requests_async(processed_outputs.reqs_to_abort)
 
                 # 5) Log any stats.
-                await self._log_stats(scheduler_stats=outputs.scheduler_stats)
+                await self._log_stats(
+                    scheduler_stats=engine_core_outputs.scheduler_stats,
+                    iteration_stats=processed_outputs.iteration_stats,
+                )
 
         except Exception as e:
             logger.exception("EngineCore output handler hit an error: %s", e)
@@ -275,7 +277,7 @@ class AsyncLLM(EngineClient):
 
         request_ids = [request_id]
         await self.engine_core.abort_requests_async(request_ids)
-        self.detokenizer.abort_requests(request_ids)
+        self.output_processor.abort_requests(request_ids)
 
         # If a request finishes while we await then the request_id
         # will be removed from the tracked queues before we get here.
@@ -315,7 +317,7 @@ class AsyncLLM(EngineClient):
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
         assert lora_request is None
-        return self.detokenizer.tokenizer
+        return self.output_processor.tokenizer
 
     async def is_tracing_enabled(self) -> bool:
         return False
