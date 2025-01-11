@@ -60,4 +60,4 @@ Adding your model to <gh-file:tests/models/multimodal/processing/test_common.py>
 
 You can add a new file under <gh-dir:tests/models/multimodal/processing> to run tests that only apply to your model.
 
-For exapmle, if the HF processor for your model accepts user-specified keyword arguments, you can verify that the keyword arguments are being applied correctly, such as in <gh-file:tests/models/multimodal/processing/test_phi3v.py>.
+For example, if the HF processor for your model accepts user-specified keyword arguments, you can verify that the keyword arguments are being applied correctly, such as in <gh-file:tests/models/multimodal/processing/test_phi3v.py>.
