@@ -6,20 +6,23 @@ import uuid
 # from fastapi.lifespan import Lifespan
 from asyncio import Queue
 from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 
 import uvicorn
 import zmq
 import zmq.asyncio
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.logger import init_logger
 
-# default prefill and decode url
-url_prefill = "tcp://localhost:8110"
+# default prefill and decode addr
+fastapi_port = 8001
+prefill_addr = "ipc://localhost:7010"
 socket_prefill_num = 5
-url_decode = "tcp://localhost:8220"
+decode_addr = "ipc://localhost:7020"
 socket_decode_num = 5
+context_type_json = "application/json"
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger('vllm.entrypoints.connect')
@@ -77,14 +80,42 @@ async def execute_task_async(route: str, headers: dict, request: dict,
         while True:
             logger.info("Waiting for reply")
             [contentType, reply] = await sock.recv_multipart()
-            logger.info("Received result: %s, %s", contentType, reply)
-            reply = reply.decode()
-            yield f"{reply}"
-            if "[DONE]" in reply:
+            contentType_str = contentType.decode()
+            reply_str = reply.decode()
+            logger.info("Received result: %s, %s", contentType_str, reply_str)
+            yield (contentType_str, reply_str)
+            if context_type_json == contentType_str:
+                logger.info("Received %s message, return socket",
+                            contentType_str)
+                break
+            if "[DONE]" in reply_str:
                 logger.info("Received stop signal, return socket")
                 break
     finally:
         await sockets.put(sock)
+
+
+async def generate_stream_response(fisrt_reply: str,
+                                   generator: AsyncGenerator):
+    yield fisrt_reply
+    async for _, reply in generator:
+        yield reply
+
+
+async def decode(route: str, header: dict, original_request_data: dict):
+    logger.info("start decode")
+    generator = execute_task_async(route, header, original_request_data,
+                                   app.state.sockets_decode)
+    logger.info("finish decode")
+
+    async for contentType, reply in generator:
+        logger.info("contentType: %s, reply: %s", contentType, reply)
+        if context_type_json == contentType:
+            return JSONResponse(reply)
+        else:
+            return StreamingResponse(generate_stream_response(
+                reply, generator),
+                                     media_type="text/event-stream")
 
 
 @app.post('/v1/connect/completions')
@@ -108,11 +139,9 @@ async def chat_completions(request: Request):
                                           app.state.sockets_prefill):
             continue
 
-        # return decode
-        return StreamingResponse(execute_task_async(route, header,
-                                                    original_request_data,
-                                                    app.state.sockets_decode),
-                                 media_type="text/event-stream")
+        logger.info("finish prefill start decode")
+        response = await decode(route, header, original_request_data)
+        return response
 
     except Exception as e:
         import sys
@@ -127,13 +156,14 @@ async def run_disagg_connector(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM Disaggregate Connector start %s %s", args,
                 uvicorn_kwargs)
     logger.info(args.prefill_addr)
-
-    app.state.prefill_addr = (f"tcp://{args.prefill_addr}" if args.prefill_addr
-                              is not None else url_prefill)
-    app.state.decode_addr = (f"tcp://{args.decode_addr}"
-                             if args.decode_addr is not None else url_decode)
-    logger.info("start connect url_prefill: %s url_decode: %s",
-                app.state.prefill_addr, app.state.decode_addr)
+    app.state.port = args.port if args.port is not None else fastapi_port
+    app.state.prefill_addr = (f"ipc://{args.prefill_addr}" if args.prefill_addr
+                              is not None else decode_addr)
+    app.state.decode_addr = (f"ipc://{args.decode_addr}"
+                             if args.decode_addr is not None else decode_addr)
+    logger.info(
+        "start connect prefill_addr: %s decode_addr: %s zmq server port: %s",
+        app.state.prefill_addr, app.state.decode_addr, app.state.port)
 
     def signal_handler(*_) -> None:
         # Interrupt server on sigterm while initializing
@@ -141,11 +171,11 @@ async def run_disagg_connector(args, **uvicorn_kwargs) -> None:
 
     signal.signal(signal.SIGTERM, signal_handler)
     # init uvicorn server
-    config = uvicorn.Config(app, host="0.0.0.0", port=8001)
+    config = uvicorn.Config(app, host="0.0.0.0", port=app.state.port)
     server = uvicorn.Server(config)
     await server.serve()
 
 
 if __name__ == "__main__":
     # url = 'tcp://127.0.0.1:5555'
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=fastapi_port)

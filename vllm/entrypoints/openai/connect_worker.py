@@ -53,7 +53,7 @@ def bytes_to_headers(bytes_data: bytes) -> httpx.Headers:
     headers_dict = json.loads(bytes_data.decode())
     return httpx.Headers(headers_dict)
 
-async def worker_routine(worker_url: str, app: FastAPI,
+async def worker_routine(worker_addr: str, app: FastAPI,
                    context: zmq.asyncio.Context, i: int = 0):
     """Worker routine"""
     try:
@@ -61,8 +61,8 @@ async def worker_routine(worker_url: str, app: FastAPI,
         socket = context.socket(zmq.DEALER)
         worker_identity = f"worker-{i}-{uuid.uuid4()}"
         socket.setsockopt(zmq.IDENTITY, worker_identity.encode())
-        socket.connect(worker_url)
-        logger.info("%s started at %s", worker_identity, worker_url)
+        socket.connect(worker_addr)
+        logger.info("%s started at %s", worker_identity, worker_addr)
         while True:
             identity, url, header, body  = await socket.recv_multipart()
             logger.info("worker-%d Received request identity: [ %s ]",
@@ -81,15 +81,16 @@ async def worker_routine(worker_url: str, app: FastAPI,
             createRequest = create_request(url_str, "POST", body_json, headers)
             generator = await create_completion(app, completionRequest,
                                                 createRequest)
-            logger.info("worker-%d Received response: [ %s ]", i, generator)
+            context_type_json = b"application/json"
             if isinstance(generator, ErrorResponse):
                 content = generator.model_dump_json()
                 context_json = json.loads(content)
                 context_json.append("status_code", generator.code)
-                await socket.send_multipart([identity,  b"application/json",
+                await socket.send_multipart([identity,  context_type_json,
                                              json.dumps(context_json).encode('utf-8')])
             elif isinstance(generator, CompletionResponse):
-                await socket.send_multipart([identity,  b"application/json",
+                await socket.send_multipart([identity,
+                                             context_type_json,
                                              json.dumps(generator.model_dump()).encode('utf-8')])
             else:
                 async for chunk in generator:

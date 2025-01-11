@@ -21,6 +21,7 @@ async def test_connect_completions(session):
             "repetition_penalty": 1.2,
             "model": "facebook/opt-125m",
             "prompt": "Can you introduce vllm?",
+            # "stream": False,
             "stream": True,
             "stream_options": {
                 "include_usage": True
@@ -34,13 +35,19 @@ async def test_connect_completions(session):
             responseText = ""
             if response.status == 200:
                 transfer_encoding = response.headers.get('Transfer-Encoding')
+                content_type = response.headers.get('Content-Type')
+                print(f"Transfer-Encoding: {transfer_encoding}")
                 if transfer_encoding == 'chunked':
                     async for chunk in response.content.iter_chunked(1024):
                         try:
                             decoded_chunk = chunk.decode('utf-8')
+                            print(f"Decoded chunk: {decoded_chunk!r}")
                             responseText += decoded_chunk
                         except UnicodeDecodeError:
                             print(f"Error decoding chunk: {chunk!r}")
+                elif 'application/json' in content_type:
+                    responseText = await response.json()
+                    print(f"response {responseText!r}")
                 else:
                     # Print the headers and JSON response
                     print("Unexpected Transfer-Encoding: {} {} {}".format(
@@ -48,18 +55,30 @@ async def test_connect_completions(session):
                         response.json()))
             else:
                 print(f"Request failed with status code {response.status}")
-            print(
-                f"baseurl {base_url} response data {extract_data(responseText)}"
-            )
+            print(f"baseurl {base_url}")
+            print(f"response data {extract_data(responseText)}")
     except aiohttp.ClientError as e:
         print(f"Error: {e}")
 
+def is_json(data):
+    try:
+        json.loads(data)
+        return True
+    except ValueError:
+        return False
 
 def extract_data(responseText):
+    if responseText == "":
+        return ""
+    if is_json(responseText):
+        return responseText
     reply = ""
     for data in responseText.split("\n\n"):
         if data.startswith('data: '):
             content = data[6:]
+            if content == "[DONE]":
+                print("DONE")
+                break
             try:
                 json_data = json.loads(content)
                 choices = json_data["choices"]
