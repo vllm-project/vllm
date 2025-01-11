@@ -130,6 +130,8 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(DeepseekVLV2Config)
 
     def get_hf_processor(self) -> ProcessorMixin:
+        # TODO(Isotr0py): we should get rid of dependency on deepseek_vl2
+        # in the future, because it's flasky and lack of maintenance.
         try:
             from deepseek_vl2.models.processing_deepseek_vl_v2 import (
                 DeepseekVLV2Processor, select_best_resolution)
@@ -372,7 +374,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         quant_config: Optional[QuantizationConfig],
         prefix: str = "",
     ) -> nn.Module:
-        # TODO: refactor this vision model
+        # TODO: refactor vision model through timm wrapper from transformers
         try:
             import timm
         except ImportError:
