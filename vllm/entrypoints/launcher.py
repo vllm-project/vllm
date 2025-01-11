@@ -82,22 +82,22 @@ async def serve_zmq(arg, zmq_server_port: int, app: FastAPI) -> None:
     """Server routine"""
     logger.info("zmq Server start arg: %s, zmq_server_port: %d", arg,
                 zmq_server_port)
-    url_worker = "inproc://workers"
-    url_client = f"tcp://0.0.0.0:{zmq_server_port}"
+    workers_addr = "inproc://workers"
+    clients_addr = f"ipc://127.0.0.1:{zmq_server_port}"
     # Prepare our context and sockets
     context = zmq.asyncio.Context()
 
     # Socket to talk to clients
     clients = context.socket(zmq.ROUTER)
-    clients.bind(url_client)
-    logger.info("ZMQ Server ROUTER started at %s", url_client)
+    clients.bind(clients_addr)
+    logger.info("ZMQ Server ROUTER started at %s", clients_addr)
     # Socket to talk to workers
     workers = context.socket(zmq.DEALER)
-    workers.bind(url_worker)
-    logger.info("ZMQ Worker DEALER started at %s", url_worker)
+    workers.bind(workers_addr)
+    logger.info("ZMQ Worker DEALER started at %s", workers_addr)
 
     tasks = [
-        asyncio.create_task(worker_routine(url_worker, app, context, i))
+        asyncio.create_task(worker_routine(workers_addr, app, context, i))
         for i in range(5)
     ]
     proxy_task = asyncio.to_thread(zmq.proxy, clients, workers)
