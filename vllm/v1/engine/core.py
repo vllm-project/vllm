@@ -17,10 +17,9 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
 from vllm.v1.core.scheduler import Scheduler
-from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType, EngineCoreRequestUnion,
-                            SchedulerStats)
+from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
+                            EngineCoreRequest, EngineCoreRequestType,
+                            EngineCoreRequestUnion)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
@@ -114,7 +113,8 @@ class EngineCore:
         """Schedule, execute, and make output."""
 
         if not self.scheduler.has_unfinished_requests():
-            return []
+            return EngineCoreOutputs(
+                outputs=[], scheduler_stats=self.scheduler.make_stats())
 
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
@@ -139,8 +139,11 @@ class EngineCoreProc(EngineCore):
         ready_pipe: Connection,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
+        log_stats: bool = False,
     ):
         super().__init__(vllm_config, executor_class)
+
+        self.log_stats = log_stats
 
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -212,10 +215,9 @@ class EngineCoreProc(EngineCore):
                         self._handle_client_request(req)
                         break
                     except queue.Empty:
-                        # Push out most recent scheduler stats to client.
-                        stats = self.scheduler.make_stats()
-                        self.output_queue.put_nowait(EngineCoreOutputs(
-                            outputs=[], scheduler_stats=stats))
+                        # Break out the loops so we can log_stats via step().
+                        if self.log_stats:
+                            break
                         logger.debug("EngineCore busy loop waiting.")
                     except BaseException:
                         raise
@@ -230,7 +232,6 @@ class EngineCoreProc(EngineCore):
 
             # 5) Put EngineCoreOutputs into the output queue.
             self.output_queue.put_nowait(outputs)
-        
 
     def _handle_client_request(self, request: EngineCoreRequestUnion) -> None:
         """Handle EngineCoreRequest or EngineCoreABORT from Client."""

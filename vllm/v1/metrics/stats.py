@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+
 @dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""

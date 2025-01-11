@@ -1,5 +1,5 @@
-from abc import ABC, abstractmethod
 import time
+from abc import ABC, abstractmethod
 
 from vllm.logger import init_logger
 from vllm.v1.metrics.stats import SchedulerStats
@@ -10,7 +10,7 @@ _LOCAL_LOGGING_INTERVAL_SEC = 5.0
 
 
 class StatLoggerBase(ABC):
-    
+
     @abstractmethod
     def log(self, scheduler_stats: SchedulerStats):
         ...
@@ -36,4 +36,3 @@ class LoggingStatLogger(StatLoggerBase):
             scheduler_stats.num_running_reqs,
             scheduler_stats.num_waiting_reqs,
         )
-        

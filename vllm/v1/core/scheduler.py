@@ -518,12 +518,13 @@ class Scheduler:
 
     def has_unfinished_requests(self) -> bool:
         return self.get_num_unfinished_requests() > 0
-    
+
     def make_stats(self) -> SchedulerStats:
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
         )
+
 
 @dataclass
 class NewRequestData:

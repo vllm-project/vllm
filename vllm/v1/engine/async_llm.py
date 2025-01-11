@@ -20,10 +20,9 @@ from vllm.utils import kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
-from vllm.v1.metrics.loggers import StatLoggerBase
-from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.metrics.loggers import LoggingStatLogger
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerBase
+from vllm.v1.metrics.stats import SchedulerStats
 
 logger = init_logger(__name__)
 
@@ -247,7 +246,8 @@ class AsyncLLM(EngineClient):
                 outputs = await self.engine_core.get_output_async()
 
                 # 2) Detokenize based on the output.
-                request_outputs, reqs_to_abort = self.detokenizer.step(outputs.outputs)
+                request_outputs, reqs_to_abort = self.detokenizer.step(
+                    outputs.outputs)
 
                 # 3) Put the RequestOutputs into the per-request queues.
                 self._process_request_outputs(request_outputs)
@@ -256,9 +256,7 @@ class AsyncLLM(EngineClient):
                 await self.engine_core.abort_requests_async(reqs_to_abort)
 
                 # 5) Log any stats.
-                await self._log_stats(
-                    scheduler_stats=outputs.scheduler_stats
-                )
+                await self._log_stats(scheduler_stats=outputs.scheduler_stats)
 
         except Exception as e:
             logger.exception("EngineCore output handler hit an error: %s", e)
@@ -276,12 +274,11 @@ class AsyncLLM(EngineClient):
         if request_id in self.rid_to_queue:
             del self.rid_to_queue[request_id]
 
-
     async def _log_stats(self, scheduler_stats: SchedulerStats):
         """Log stats to the stat loggers."""
         if not self.log_stats:
             return
-        
+
         for logger in self.stat_loggers:
             logger.log(scheduler_stats=scheduler_stats)
 

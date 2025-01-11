@@ -12,9 +12,9 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         make_zmq_socket)
-from vllm.v1.engine import (EngineCoreOutputs,
-                            EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType, EngineCoreRequestUnion)
+from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
+                            EngineCoreRequest, EngineCoreRequestType,
+                            EngineCoreRequestUnion)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import PickleEncoder
@@ -132,6 +132,7 @@ class MPClient(EngineCoreClient):
         asyncio_mode: bool,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
+        log_stats: bool,
     ):
         # The child processes will send SIGUSR1 when unrecoverable
         # errors happen. We kill the process tree here so that the
@@ -178,6 +179,7 @@ class MPClient(EngineCoreClient):
             process_kwargs={
                 "vllm_config": vllm_config,
                 "executor_class": executor_class,
+                "log_stats": log_stats,
             })
 
     def shutdown(self):
@@ -191,11 +193,13 @@ class MPClient(EngineCoreClient):
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig, executor_class: Type[Executor]):
+    def __init__(self, vllm_config: VllmConfig,
+                 executor_class: Type[Executor]):
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
+            log_stats=False,
         )
 
     def get_output(self) -> EngineCoreOutputs:
@@ -224,11 +228,13 @@ class SyncMPClient(MPClient):
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig, executor_class: Type[Executor]):
+    def __init__(self, vllm_config: VllmConfig,
+                 executor_class: Type[Executor]):
         super().__init__(
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
+            log_stats=True,
         )
 
     async def get_output_async(self) -> EngineCoreOutputs:
