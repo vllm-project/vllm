@@ -7,7 +7,7 @@ import aiohttp
 # test connect completions we assume prefill and decode are on the same node
 # 1. node:vllm serve facebook/opt-125m --port 7001 --zmq-server-port 7010 \
 #   --chat-template ~/vllm/examples/template_chatglm2.jinja
-# 2. vllm connect --prefill-addr nodeIp:7010 --decode-addr nodeIp:7010
+# 2. vllm connect --prefill-addr 127.0.0.1:7010 --decode-addr 127.0.0.1:7010
 # 3. python test_request.py
 async def test_connect_completions(session):
     try:
@@ -68,11 +68,12 @@ def is_json(data):
         return False
 
 def extract_data(responseText):
+    reply = ""
     if responseText == "":
-        return ""
+        return reply
     if is_json(responseText):
         return responseText
-    reply = ""
+
     for data in responseText.split("\n\n"):
         if data.startswith('data: '):
             content = data[6:]
