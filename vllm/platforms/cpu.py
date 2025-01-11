@@ -28,10 +28,13 @@ class CpuPlatform(Platform):
         return "cpu"
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool) -> str:
         if selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
-        return _Backend.TORCH_SDPA
+        logger.info("Using Torch SDPA backend.")
+        return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -50,7 +53,7 @@ class CpuPlatform(Platform):
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
-        # Reminder: Please update docs/source/usage/compatibility_matrix.md
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if not model_config.enforce_eager:
             logger.warning(

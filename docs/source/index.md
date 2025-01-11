@@ -26,7 +26,7 @@ vLLM is a fast and easy-to-use library for LLM inference and serving.
 vLLM is fast with:
 
 - State-of-the-art serving throughput
-- Efficient management of attention key and value memory with **PagedAttention**
+- Efficient management of attention key and value memory with [**PagedAttention**](https://blog.vllm.ai/2023/06/20/vllm.html)
 - Continuous batching of incoming requests
 - Fast model execution with CUDA/HIP graph
 - Quantization: [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), INT4, INT8, and FP8
@@ -54,6 +54,8 @@ For more information, check out the following:
 
 ## Documentation
 
+% How to start using vLLM?
+
 ```{toctree}
 :caption: Getting Started
 :maxdepth: 1
@@ -65,80 +67,116 @@ getting_started/troubleshooting
 getting_started/faq
 ```
 
-```{toctree}
-:caption: Serving
-:maxdepth: 1
-
-serving/openai_compatible_server
-serving/deploying_with_docker
-serving/deploying_with_k8s
-serving/deploying_with_helm
-serving/deploying_with_nginx
-serving/distributed_serving
-serving/metrics
-serving/integrations
-serving/tensorizer
-serving/runai_model_streamer
-```
+% What does vLLM support?
 
 ```{toctree}
 :caption: Models
 :maxdepth: 1
 
-models/supported_models
 models/generative_models
 models/pooling_models
-models/adding_model
-models/enabling_multimodal_inputs
+models/supported_models
+models/extensions/index
 ```
+
+% Additional capabilities
 
 ```{toctree}
-:caption: Usage
+:caption: Features
 :maxdepth: 1
 
-usage/lora
-usage/multimodal_inputs
-usage/tool_calling
-usage/structured_outputs
-usage/spec_decode
-usage/compatibility_matrix
-usage/performance
-usage/engine_args
-usage/env_vars
-usage/usage_stats
-usage/disagg_prefill
+features/quantization/index
+features/lora
+features/tool_calling
+features/structured_outputs
+features/automatic_prefix_caching
+features/disagg_prefill
+features/spec_decode
+features/compatibility_matrix
 ```
+
+% Details about running vLLM
 
 ```{toctree}
-:caption: Quantization
+:caption: Inference and Serving
 :maxdepth: 1
 
-quantization/supported_hardware
-quantization/auto_awq
-quantization/bnb
-quantization/gguf
-quantization/int8
-quantization/fp8
-quantization/fp8_e5m2_kvcache
-quantization/fp8_e4m3_kvcache
+serving/offline_inference
+serving/openai_compatible_server
+serving/multimodal_inputs
+serving/distributed_serving
+serving/metrics
+serving/engine_args
+serving/env_vars
+serving/usage_stats
+serving/integrations/index
 ```
+
+% Scaling up vLLM for production
 
 ```{toctree}
-:caption: Automatic Prefix Caching
+:caption: Deployment
 :maxdepth: 1
 
-automatic_prefix_caching/apc
-automatic_prefix_caching/details
+deployment/docker
+deployment/k8s
+deployment/nginx
+deployment/frameworks/index
+deployment/integrations/index
 ```
+
+% Making the most out of vLLM
 
 ```{toctree}
 :caption: Performance
 :maxdepth: 1
 
+performance/optimization
 performance/benchmarks
 ```
 
-% Community: User community resources
+% Explanation of vLLM internals
+
+```{toctree}
+:caption: Design Documents
+:maxdepth: 2
+
+design/arch_overview
+design/huggingface_integration
+design/plugin_system
+design/kernel/paged_attention
+design/mm_processing
+design/automatic_prefix_caching
+design/multiprocessing
+```
+
+% How to contribute to the vLLM project
+
+```{toctree}
+:caption: Developer Guide
+:maxdepth: 2
+
+contributing/overview
+contributing/profiling/profiling_index
+contributing/dockerfile/dockerfile
+contributing/model/index
+contributing/vulnerability_management
+```
+
+% Technical API specifications
+
+```{toctree}
+:caption: API Reference
+:maxdepth: 2
+
+api/offline_inference/index
+api/engine/index
+api/inference_params
+api/multimodal/index
+api/model/index
+```
+
+% Latest news and acknowledgements
 
 ```{toctree}
 :caption: Community
@@ -146,44 +184,6 @@ performance/benchmarks
 
 community/meetups
 community/sponsors
-```
-
-% API Documentation: API reference aimed at vllm library usage
-
-```{toctree}
-:caption: API Documentation
-:maxdepth: 2
-
-dev/sampling_params
-dev/pooling_params
-dev/offline_inference/offline_index
-dev/engine/engine_index
-```
-
-% Design: docs about vLLM internals
-
-```{toctree}
-:caption: Design
-:maxdepth: 2
-
-design/arch_overview
-design/huggingface_integration
-design/plugin_system
-design/input_processing/model_inputs_index
-design/kernel/paged_attention
-design/multimodal/multimodal_index
-design/multiprocessing
-```
-
-% For Developers: contributing to the vLLM project
-
-```{toctree}
-:caption: For Developers
-:maxdepth: 2
-
-contributing/overview
-contributing/profiling/profiling_index
-contributing/dockerfile/dockerfile
 ```
 
 # Indices and tables
