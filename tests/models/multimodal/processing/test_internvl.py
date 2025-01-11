@@ -7,8 +7,8 @@ from transformers import AutoTokenizer
 from vllm.inputs import InputContext, token_inputs
 from vllm.multimodal import MultiModalRegistry
 
-from .....conftest import _ImageAssets
-from ....utils import build_model_context
+from ....conftest import _ImageAssets
+from ...utils import build_model_context
 
 models = ["OpenGVLab/InternVL2-2B"]
 
