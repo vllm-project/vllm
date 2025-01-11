@@ -2,8 +2,8 @@ import math
 from typing import List, Optional
 
 from vllm.core.block.common import PhysicalBlockTable, VirtualBlockTable
-from vllm.core.block.interfaces import (Block, DeviceAwareBlockAllocator,
-                                        CachePolicy)
+from vllm.core.block.interfaces import (Block, CachePolicy,
+                                        DeviceAwareBlockAllocator)
 from vllm.utils import Device, cdiv, chunk_list
 
 

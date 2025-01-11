@@ -1,8 +1,8 @@
-from collections import deque, defaultdict
 import copy
+from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import (Deque, Dict, Iterable, List, Optional, Protocol, Tuple,
-                    DefaultDict)
+from typing import (DefaultDict, Deque, Dict, Iterable, List, Optional,
+                    Protocol, Tuple)
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 
