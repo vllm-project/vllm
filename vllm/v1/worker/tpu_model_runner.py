@@ -334,26 +334,32 @@ class TPUModelRunner:
         num_reqs = self.input_batch.num_reqs
         num_decodes = num_reqs - self.num_new_reqs
         for idx in range(num_decodes, num_reqs):
+            print("prepare prefill idx = {}".format(idx))
             req_id = self.input_batch.req_ids[idx]
             prefill_request_ids.append(req_id)
+            print("  req_id = {}".format(req_id))
 
             prompt_len = num_scheduled_tokens[idx]
             prefill_prompt_lens.append(prompt_len)
+            print("  prompt_len = {}".format(prompt_len))
 
             # STATIC SHAPE: prefills are padded to the next power of 2.
             padded_prompt_len = _get_padded_prefill_len(prompt_len)
             assert padded_prompt_len <= self.max_model_len
+            print("  padded_prompt_len = {}".format(padded_prompt_len))
 
             # TOKEN_IDS.
             token_ids = torch.from_numpy(self.input_batch.token_ids_cpu[
                 idx, :padded_prompt_len].reshape(1, -1))
             token_ids[:, prompt_len:] = 0
             prefill_token_ids.append(token_ids.to(self.device))
+            print("  token_ids.shape = {} token_ids.vals = {}".format(token_ids.shape, token_ids))
 
             # POSITIONS.
-            positions = self.prefill_positions[:, :padded_prompt_len]
+            positions = self.prefill_positions[:, :padded_prompt_len].clone()
             positions[:, prompt_len:] = 0
             prefill_position_ids.append(positions.to(self.device))
+            print("  positions.shape = {} positions.vals = {}".format(positions.shape, positions))
 
             # SLOT_MAPPING.
             # The "slot" is the "physical index" of a token in the KV cache.
@@ -364,22 +370,25 @@ class TPUModelRunner:
             block_numbers = block_table_cpu_tensor[idx, positions //
                                                    self.block_size].reshape(
                                                        1, -1)
+            print("  block_numbers.shape = {} block_numbers.vals = {}".format(block_numbers.shape, block_numbers))
+
             block_offsets = positions % self.block_size
             slot_mapping = block_numbers * self.block_size + block_offsets
             # Set an out of range value for the padding tokens so that they
             # are ignored when inserting into the KV cache.
             slot_mapping[:, prompt_len:] = _PAD_SLOT_ID
             slot_mapping = slot_mapping.long()
+            print("  slot_mapping.shape = {} slot_mapping.vals = {}".format(slot_mapping.shape, slot_mapping))
 
             # BLOCK_TABLE [batch, max_num_blocks_per_req]
-            block_table = block_table_cpu_tensor[idx:idx + 1, :]
+            # block_table = block_table_cpu_tensor[idx:idx + 1, :]
 
-            context_lens_tensor = torch.tensor([prompt_len],
-                                               dtype=torch.int32,
-                                               device=self.device)
-            prompt_lens_tensor = torch.tensor([prompt_len],
-                                              dtype=torch.int32,
-                                              device=self.device)
+            # context_lens_tensor = torch.tensor([prompt_len],
+            #                                    dtype=torch.int32,
+            #                                    device=self.device)
+            # prompt_lens_tensor = torch.tensor([prompt_len],
+            #                                   dtype=torch.int32,
+            #                                   device=self.device)
 
             prefill_attn_metadata.append(
                 PallasMetadata(
@@ -417,6 +426,7 @@ class TPUModelRunner:
         if num_decodes == 0:
             return DecodeInputData(num_decodes=0)
 
+        print("prepare num_decodes = {}".format(num_decodes))
         # PAD FOR STATIC SHAPES.
         padded_batch_size = _get_padded_batch_size(num_decodes)
 
@@ -425,7 +435,10 @@ class TPUModelRunner:
         positions = torch.from_numpy(
             self.input_batch.num_computed_tokens_cpu.reshape(-1, 1))
         index = positions.to(torch.int64)
+        index[num_decodes:] = 0
         positions = positions[:padded_batch_size]
+        positions[num_decodes:] = 0
+        print("  positions.shape = {} positions.vals = {}".format(positions.shape, positions))
 
         # TOKEN_IDS. [batch, 1]
         token_ids = torch.gather(
@@ -433,6 +446,8 @@ class TPUModelRunner:
             dim=1,
             index=index,
         )[:padded_batch_size].to(torch.int32)
+        token_ids[num_decodes:] = 0
+        print("  token_ids.shape = {} token_ids.vals = {}".format(token_ids.shape, token_ids))
 
         # SLOT_MAPPING [batch, 1]
         # The "slot" is the "physical index" of a token in the KV cache.
@@ -442,6 +457,7 @@ class TPUModelRunner:
         block_number = torch.gather(input=block_table_cpu_tensor,
                                     dim=1,
                                     index=(index // self.block_size))
+        print("  block_number.shape = {} block_number.vals = {}".format(block_number.shape, block_number))
         block_offsets = index % self.block_size
         slot_mapping = block_number * self.block_size + block_offsets
         # Set an out of range value for the padding tokens so that they
@@ -450,11 +466,14 @@ class TPUModelRunner:
         slot_mapping = slot_mapping[:padded_batch_size]
         slot_mapping = slot_mapping.long()
 
+        print("  slot_mapping.shape = {} slot_mapping.vals = {}".format(slot_mapping.shape, slot_mapping))
         # BLOCK_TABLE [batch, max_num_blocks_per_req]
         block_table = block_table_cpu_tensor[:padded_batch_size]
 
         # CONTEXT_LENS [batch_size]
         context_lens = (positions.reshape(-1) + 1)
+        context_lens[num_decodes:] = 0
+        print("  context_lens.shape = {} context_lens.vals = {}".format(context_lens.shape, context_lens))
 
         # CPU<>TPU sync happens here.
         return DecodeInputData(num_decodes=num_decodes,
@@ -811,7 +830,7 @@ class TPUModelRunner:
         prefill_data, decode_data = self._prepare_inputs(scheduler_output)
 
         num_reqs = self.input_batch.num_reqs
-        sampled_token_ids = torch.empty(num_reqs, dtype=torch.int32)
+        # sampled_token_ids = torch.empty(num_reqs, dtype=torch.int32)
 
         # attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -851,11 +870,12 @@ class TPUModelRunner:
                                             decode_data.attn_metadata,
                                             self.kv_caches)
 
+            print("DECODE selected_token_ids.shape = {}".format(selected_token_ids.shape))
             # NOTE: TPU<>CPU sync happens here.
             # We need to call .cpu() first to avoid recompilation.
             token_ids = selected_token_ids.cpu()[:decode_data.num_decodes]
             sampled_token_ids_list.extend(token_ids.tolist())
-            sampled_token_ids[:decode_data.num_decodes] = token_ids
+            # sampled_token_ids[:decode_data.num_decodes] = token_ids
 
             # UPDATE REQUEST STATE.
             for i, req_id in enumerate(
@@ -870,9 +890,8 @@ class TPUModelRunner:
 
                 # TODO: Verify if req_id_to_index mapping is needed here!
                 token_id = sampled_token_ids_list[i]
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                self.input_batch.token_ids_cpu[req_idx, seq_len] = token_id
-                self.input_batch.num_tokens[req_idx] += 1
+                self.input_batch.token_ids_cpu[i, seq_len] = token_id
+                self.input_batch.num_tokens[i] += 1
                 req_state.output_token_ids.append(token_id)
 
         ######################### PREFILLS #########################
@@ -884,11 +903,12 @@ class TPUModelRunner:
             selected_token_ids = self.model(token_ids, position_ids,
                                             attn_metadata, self.kv_caches)
 
+            print("PREFILL selected_token_ids.shape = {}".format(selected_token_ids.shape))
             # NOTE: TPU<>CPU sync happens here.
             # We need to call .cpu() first to avoid recompilation.
-            token_id = selected_token_ids.cpu()[prompt_len - 1].item()
+            token_id = selected_token_ids.cpu()[prompt_len-1].item()
             sampled_token_ids_list.append(token_id)
-            sampled_token_ids[decode_data.num_decodes + idx] = token_id
+            # sampled_token_ids[decode_data.num_decodes + idx] = token_id
             req_state = self.requests[req_id]
 
             # TODO: ASSERT NO PREFIX CACHING.
@@ -975,15 +995,12 @@ class TPUModelRunner:
         # determine the order of concatenating the output tensors.
         # As a workaround, we use the xm's rank assignment only when loading
         # the embedding weights.
-
-        # TODO: Why this is commented out?
-        # xm_tp_rank = xr.global_ordinal()
-        # with patch(
-        #         "vllm.model_executor.layers.vocab_parallel_embedding."
-        #         "get_tensor_model_parallel_rank",
-        #         return_value=xm_tp_rank):
-
-        model = get_model(vllm_config=self.vllm_config)
+        xm_tp_rank = xr.global_ordinal()
+        with patch(
+                "vllm.model_executor.layers.vocab_parallel_embedding."
+                "get_tensor_model_parallel_rank",
+                return_value=xm_tp_rank):
+            model = get_model(vllm_config=self.vllm_config)
         model = model.eval()
         xm.wait_device_ops()
         model = ModelWrapper(model)
@@ -1190,19 +1207,18 @@ class TPUModelRunner:
         logger.info("Compilation for decode shapes is done in %.2f [secs].",
                     end - start)
 
-    def initialize_kv_cache(self, num_blocks: int) -> None:
+    def initialize_kv_cache(self, num_tpu_blocks: int) -> None:
         assert len(self.kv_caches) == 0
-        kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size)
+
+        tpu_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
+            num_tpu_blocks, self.block_size, self.num_kv_heads, self.head_size)
+
         for _ in range(self.num_attn_layers):
-            self.kv_caches.append((
-                torch.zeros(kv_cache_shape,
-                            dtype=self.kv_cache_dtype,
-                            device=self.device),
-                torch.zeros(kv_cache_shape,
-                            dtype=self.kv_cache_dtype,
-                            device=self.device),
-            ))
+            tpu_k_cache = torch.zeros(tpu_cache_shape,
+                                      dtype=self.kv_cache_dtype,
+                                      device=self.device)
+            tpu_v_cache = torch.zeros_like(tpu_k_cache)
+            self.kv_caches.append((tpu_k_cache, tpu_v_cache))
 
 
 # TODO: This is duplicate from V0, refactor
@@ -1287,7 +1303,7 @@ class ModelWrapper(nn.Module):
         ######
         # Greedy sampling.
         argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
-        argmax_token_ids = argmax_token_ids.repeat(1, 1)
+        # argmax_token_ids = argmax_token_ids.repeat(1, 1)
 
         # Zero temperature means greedy decoding. Avoid division by zero.
         # nonzero_t = torch.where(t != 0, t, 1.0)
@@ -1302,11 +1318,11 @@ class ModelWrapper(nn.Module):
         #                                       replacement=True)
         # if num_samples == 1:
         argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
-            # sampled_token_ids = sampled_token_ids.squeeze(dim=-1)
+        # sampled_token_ids = sampled_token_ids.squeeze(dim=-1)
         # next_token_ids = torch.where(t != 0, sampled_token_ids,
         #                              argmax_token_ids)
         return argmax_token_ids
-        ####    
+        ####
 
         # TODO: Ressurect this code
         # hidden_states = hidden_states.flatten(0, 1)
