@@ -8,8 +8,8 @@ from transformers import AutoImageProcessor, AutoTokenizer
 from vllm.inputs import InputContext, token_inputs
 from vllm.multimodal import MultiModalRegistry
 
-from .....conftest import _ImageAssets
-from ....utils import build_model_context
+from ....conftest import _ImageAssets
+from ...utils import build_model_context
 
 models = ["HuggingFaceM4/Idefics3-8B-Llama3"]
 
