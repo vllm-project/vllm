@@ -21,8 +21,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE,
-                        LayerBlockType, cdiv, is_pin_memory_available)
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
+                        is_pin_memory_available)
 from vllm.v1.attention.backends.pallas import PallasMetadata, PallasAttentionBackend
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 from vllm.v1.outputs import ModelRunnerOutput
@@ -313,6 +313,7 @@ class TPUModelRunner:
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
             self.input_batch.add_request(req_state, None)  # Append last
+
         self.num_new_reqs = len(req_ids_to_add)
 
     def _prepare_prefill_inputs(
@@ -333,7 +334,8 @@ class TPUModelRunner:
         num_reqs = self.input_batch.num_reqs
         num_decodes = num_reqs - self.num_new_reqs
         for idx in range(num_decodes, num_reqs):
-            prefill_request_ids.append(self.input_batch.req_ids[idx])
+            req_id = self.input_batch.req_ids[idx]
+            prefill_request_ids.append(req_id)
 
             prompt_len = num_scheduled_tokens[idx]
             prefill_prompt_lens.append(prompt_len)
@@ -345,10 +347,12 @@ class TPUModelRunner:
             # TOKEN_IDS.
             token_ids = torch.from_numpy(self.input_batch.token_ids_cpu[
                 idx, :padded_prompt_len].reshape(1, -1))
+            token_ids[:, prompt_len:] = 0
             prefill_token_ids.append(token_ids.to(self.device))
 
             # POSITIONS.
             positions = self.prefill_positions[:, :padded_prompt_len]
+            positions[:, prompt_len:] = 0
             prefill_position_ids.append(positions.to(self.device))
 
             # SLOT_MAPPING.
@@ -367,16 +371,26 @@ class TPUModelRunner:
             slot_mapping[:, prompt_len:] = _PAD_SLOT_ID
             slot_mapping = slot_mapping.long()
 
+            # BLOCK_TABLE [batch, max_num_blocks_per_req]
+            block_table = block_table_cpu_tensor[idx:idx + 1, :]
+
+            context_lens_tensor = torch.tensor([prompt_len],
+                                               dtype=torch.int32,
+                                               device=self.device)
+            prompt_lens_tensor = torch.tensor([prompt_len],
+                                              dtype=torch.int32,
+                                              device=self.device)
+
             prefill_attn_metadata.append(
                 PallasMetadata(
                     num_prefills=1,
-                    num_prefill_tokens=padded_prompt_len,
+                    num_prefill_tokens=prompt_len,  # NOTE: This is not used.
                     num_decode_tokens=0,
                     slot_mapping=slot_mapping.to(self.device),
                     multi_modal_placeholder_index_maps=None,
-                    block_tables=None,
-                    context_lens=None,
-                    effective_query_lens=None,
+                    block_tables=None,  #block_table.to(self.device),
+                    context_lens=None,  #context_lens_tensor,
+                    effective_query_lens=None,  #prompt_lens_tensor,
                 ))
 
         return PrefillInputData(
@@ -418,7 +432,7 @@ class TPUModelRunner:
             input=torch.from_numpy(self.input_batch.token_ids_cpu),
             dim=1,
             index=index,
-        )[:padded_batch_size]
+        )[:padded_batch_size].to(torch.int32)
 
         # SLOT_MAPPING [batch, 1]
         # The "slot" is the "physical index" of a token in the KV cache.
@@ -434,6 +448,7 @@ class TPUModelRunner:
         # are ignored when inserting into the KV cache.
         slot_mapping[num_decodes:] = _PAD_SLOT_ID
         slot_mapping = slot_mapping[:padded_batch_size]
+        slot_mapping = slot_mapping.long()
 
         # BLOCK_TABLE [batch, max_num_blocks_per_req]
         block_table = block_table_cpu_tensor[:padded_batch_size]
@@ -464,10 +479,11 @@ class TPUModelRunner:
 
         num_decodes = num_reqs - self.num_new_reqs
 
+        # TODO: Ressurect
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         # TODO: Verify this works with TPUs
-        self.input_batch.block_table.commit(num_reqs)
+        # self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
@@ -483,6 +499,7 @@ class TPUModelRunner:
             # NOTE: Assert that all the decodes are "decodes".
             if idx < num_decodes:
                 assert num_tokens == 1
+
         assert max_num_scheduled_tokens > 0
 
         return (
@@ -775,7 +792,7 @@ class TPUModelRunner:
                 encoder_outputs.append(encoder_output[start_idx:end_idx])
         return encoder_outputs
 
-    # @torch.inference_mode()
+    @torch.no_grad()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -853,7 +870,9 @@ class TPUModelRunner:
 
                 # TODO: Verify if req_id_to_index mapping is needed here!
                 token_id = sampled_token_ids_list[i]
-                self.input_batch.token_ids_cpu[i, seq_len] = token_id
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                self.input_batch.token_ids_cpu[req_idx, seq_len] = token_id
+                self.input_batch.num_tokens[req_idx] += 1
                 req_state.output_token_ids.append(token_id)
 
         ######################### PREFILLS #########################
@@ -862,10 +881,8 @@ class TPUModelRunner:
         for idx, (req_id, prompt_len, token_ids, position_ids,
                   attn_metadata) in enumerate(prefill_data.zipped()):
             # FORWARD.
-            selected_token_ids = self.model(token_ids,
-                                            position_ids,
-                                            attn_metadata,
-                                            self.kv_caches)
+            selected_token_ids = self.model(token_ids, position_ids,
+                                            attn_metadata, self.kv_caches)
 
             # NOTE: TPU<>CPU sync happens here.
             # We need to call .cpu() first to avoid recompilation.
@@ -886,6 +903,7 @@ class TPUModelRunner:
             # UPDATE REQUEST STATE.
             req_idx = self.input_batch.req_id_to_index[req_id]
             self.input_batch.token_ids_cpu[req_idx, seq_len] = token_id
+            self.input_batch.num_tokens[req_idx] += 1
             req_state.output_token_ids.append(token_id)
 
         # TODO: Remove
@@ -957,7 +975,7 @@ class TPUModelRunner:
         # determine the order of concatenating the output tensors.
         # As a workaround, we use the xm's rank assignment only when loading
         # the embedding weights.
-        
+
         # TODO: Why this is commented out?
         # xm_tp_rank = xr.global_ordinal()
         # with patch(
@@ -1159,9 +1177,10 @@ class TPUModelRunner:
                             self.kv_caches,
                             exec_mode=ExecutionMode.DECODE)
             xm.wait_device_ops()
-            logger.info("  -- batch_size: %d, seq_len: %d, max_num_seqs = %d", batch_size,
-                        seq_len, self.scheduler_config.max_num_seqs)
-            
+            logger.info("  -- batch_size: %d, seq_len: %d, max_num_seqs = %d",
+                        batch_size, seq_len,
+                        self.scheduler_config.max_num_seqs)
+
             if batch_size >= self.scheduler_config.max_num_seqs:
                 break
 
@@ -1261,9 +1280,33 @@ class ModelWrapper(nn.Module):
         logits = self.model.compute_logits(hidden_states, None)
 
         # Greedy sampling.
+        # argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
+        # # argmax_token_ids = argmax_token_ids.repeat(1, num_samples)
+        # return argmax_token_ids.squeeze(dim=-1)
+
+        ######
+        # Greedy sampling.
         argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
-        # argmax_token_ids = argmax_token_ids.repeat(1, num_samples)
-        return argmax_token_ids.squeeze(dim=1)
+        argmax_token_ids = argmax_token_ids.repeat(1, 1)
+
+        # Zero temperature means greedy decoding. Avoid division by zero.
+        # nonzero_t = torch.where(t != 0, t, 1.0)
+        # logits = logits / nonzero_t.unsqueeze(dim=1)
+        # if _ENABLE_TOP_P:
+        #     logits = _apply_top_p(logits, p.unsqueeze(dim=1))
+
+        # # Random sampling.
+        # probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
+        # sampled_token_ids = torch.multinomial(probs,
+        #                                       num_samples,
+        #                                       replacement=True)
+        # if num_samples == 1:
+        argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
+            # sampled_token_ids = sampled_token_ids.squeeze(dim=-1)
+        # next_token_ids = torch.where(t != 0, sampled_token_ids,
+        #                              argmax_token_ids)
+        return argmax_token_ids
+        ####    
 
         # TODO: Ressurect this code
         # hidden_states = hidden_states.flatten(0, 1)
