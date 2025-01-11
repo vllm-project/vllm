@@ -4,9 +4,8 @@ from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.metrics_types import StatLoggerBase
 from vllm.engine.protocol import EngineClient
-from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
+from vllm.inputs import INPUT_REGISTRY, PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -21,6 +20,9 @@ from vllm.utils import kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
+from vllm.v1.metrics.loggers import StatLoggerBase
+from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.metrics.loggers import LoggingStatLogger
 from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
@@ -33,19 +35,16 @@ class AsyncLLM(EngineClient):
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
         log_stats: bool,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
-        input_registry: InputRegistry = INPUT_REGISTRY,
-        use_cached_outputs: bool = False,
-        log_requests: bool = True,
-        start_engine_loop: bool = True,
+        log_requests: bool,
     ) -> None:
 
-        assert start_engine_loop
-
+        # Logging.
         self.log_requests = log_requests
         self.log_stats = log_stats
-        self.stat_loggers = stat_loggers
+        self.stat_loggers: List[StatLoggerBase] = [
+            LoggingStatLogger(),
+            # PrometheusStatLogger(),
+        ]
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -65,7 +64,7 @@ class AsyncLLM(EngineClient):
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
             tokenizer=self.tokenizer,
-            input_registry=input_registry,
+            input_registry=INPUT_REGISTRY,
         )
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
@@ -82,7 +81,6 @@ class AsyncLLM(EngineClient):
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=self.log_stats,
         )
 
         self.output_handler: Optional[asyncio.Task] = None
@@ -92,9 +90,7 @@ class AsyncLLM(EngineClient):
         cls,
         engine_args: AsyncEngineArgs,
         engine_config: Optional[VllmConfig] = None,
-        start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
@@ -112,9 +108,6 @@ class AsyncLLM(EngineClient):
             executor_class=executor_class,
             log_requests=not engine_args.disable_log_requests,
             log_stats=not engine_args.disable_log_stats,
-            start_engine_loop=start_engine_loop,
-            usage_context=usage_context,
-            stat_loggers=stat_loggers,
         )
 
     def shutdown(self):
@@ -254,13 +247,18 @@ class AsyncLLM(EngineClient):
                 outputs = await self.engine_core.get_output_async()
 
                 # 2) Detokenize based on the output.
-                request_outputs, reqs_to_abort = self.detokenizer.step(outputs)
+                request_outputs, reqs_to_abort = self.detokenizer.step(outputs.outputs)
 
                 # 3) Put the RequestOutputs into the per-request queues.
                 self._process_request_outputs(request_outputs)
 
                 # 4) Abort any requests that finished due to stop strings.
                 await self.engine_core.abort_requests_async(reqs_to_abort)
+
+                # 5) Log any stats.
+                await self._log_stats(
+                    scheduler_stats=outputs.scheduler_stats
+                )
 
         except Exception as e:
             logger.exception("EngineCore output handler hit an error: %s", e)
@@ -277,6 +275,15 @@ class AsyncLLM(EngineClient):
         # will be removed from the tracked queues before we get here.
         if request_id in self.rid_to_queue:
             del self.rid_to_queue[request_id]
+
+
+    async def _log_stats(self, scheduler_stats: SchedulerStats):
+        """Log stats to the stat loggers."""
+        if not self.log_stats:
+            return
+        
+        for logger in self.stat_loggers:
+            logger.log(scheduler_stats=scheduler_stats)
 
     def encode(
         self,

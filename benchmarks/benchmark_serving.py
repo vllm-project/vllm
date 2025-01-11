@@ -791,7 +791,7 @@ def main(args: argparse.Namespace):
         base_url = f"http://{args.host}:{args.port}"
 
     tokenizer = get_tokenizer(tokenizer_id,
-                              tokenizer_mode=tokenizer_mode,
+                            #   tokenizer_mode=tokenizer_mode,
                               trust_remote_code=args.trust_remote_code)
 
     if args.dataset is not None:

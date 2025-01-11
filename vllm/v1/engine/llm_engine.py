@@ -42,6 +42,7 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
+        assert log_stats is False
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -74,7 +75,6 @@ class LLMEngine:
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=False,
         )
 
     @classmethod
@@ -147,11 +147,11 @@ class LLMEngine:
     def step(self) -> List[RequestOutput]:
 
         # 1) Get EngineCoreOutput from the EngineCore.
-        engine_core_outputs = self.engine_core.get_output()
+        outputs = self.engine_core.get_output()
 
         # 2) Detokenizer the EngineCoreOutput.
         request_outputs, requests_to_abort = self.detokenizer.step(
-            engine_core_outputs)
+            outputs.outputs)
 
         # 3) Abort requests that finished due to stopping criteria.
         if requests_to_abort:
