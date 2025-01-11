@@ -1,9 +1,8 @@
 from dataclasses import dataclass
 import math
-from typing import Dict, List, Protocol, Tuple, runtime_checkable
+from typing import Dict, List, runtime_checkable
 import torch
 
-from vllm.config import ModelConfig, VllmConfig
 from vllm.utils import get_dtype_size
 from vllm.logger import init_logger
 
