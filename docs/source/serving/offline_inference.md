@@ -23,7 +23,7 @@ The available APIs depend on the type of model that is being run:
 Please refer to the above pages for more details about each API.
 
 ```{seealso}
-[API Reference](/dev/offline_inference/offline_index)
+[API Reference](/api/offline_inference/index)
 ```
 
 ## Configuration Options

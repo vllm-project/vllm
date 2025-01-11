@@ -100,11 +100,7 @@ MultiModalDataDict: TypeAlias = Mapping[str, ModalityData[Any]]
 """
 A dictionary containing an entry for each modality type to input.
 
-Note:
-    This dictionary also accepts modality keys defined outside
-    :class:`MultiModalDataBuiltins` as long as a customized plugin
-    is registered through the :class:`~vllm.multimodal.MULTIMODAL_REGISTRY`.
-    Read more on that :ref:`here <adding-multimodal-plugin>`.
+The built-in modalities are defined by :class:`MultiModalDataBuiltins`.
 """
 
 
@@ -491,13 +487,14 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
 MultiModalPlaceholderDict = Mapping[str, Sequence[PlaceholderRange]]
 """
-A dictionary containing placeholder ranges.
+A dictionary containing placeholder ranges for each modality.
 """
 
 
 class MultiModalInputsV2(TypedDict):
     """
-    Represents the outputs of :class:`vllm.multimodal.MultiModalProcessor`,
+    Represents the outputs of
+    :class:`vllm.multimodal.processing.BaseMultiModalProcessor`,
     ready to be passed to vLLM internals.
     """
 

@@ -298,7 +298,7 @@ class Qwen2Model(nn.Module):
             lambda prefix: Qwen2DecoderLayer(config=config,
                                              cache_config=cache_config,
                                              quant_config=quant_config,
-                                             prefix=f"{prefix}.layers"),
+                                             prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 

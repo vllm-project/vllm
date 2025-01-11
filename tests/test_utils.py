@@ -5,8 +5,11 @@ from typing import AsyncIterator, Tuple
 
 import pytest
 import torch
+from vllm_test_utils import monitor
 
-from vllm.utils import (FlexibleArgumentParser, StoreBoolean, deprecate_kwargs,
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.utils import (FlexibleArgumentParser, PlaceholderModule,
+                        StoreBoolean, bind_kv_cache, deprecate_kwargs,
                         get_open_port, memory_profiling, merge_async_iterators,
                         supports_kw)
 
@@ -289,8 +292,16 @@ def test_memory_profiling():
 
     weights_memory_in_bytes = 128 * 1024 * 1024 * 4 # 512 MiB
 
+    def measure_current_non_torch():
+        free, total = torch.cuda.mem_get_info()
+        current_used = total - free
+        current_torch = torch.cuda.memory_reserved()
+        current_non_torch = current_used - current_torch
+        return current_non_torch
+
     with memory_profiling(baseline_memory_in_bytes=baseline_memory_in_bytes,
-    weights_memory_in_bytes=weights_memory_in_bytes) as result:
+    weights_memory_in_bytes=weights_memory_in_bytes) as result, \
+        monitor(measure_current_non_torch) as monitored_values:
         # make a memory spike, 1 GiB
         spike = torch.randn(256, 1024, 1024, device='cuda', dtype=torch.float32)
         del spike
@@ -298,7 +309,15 @@ def test_memory_profiling():
         # Add some extra non-torch memory 256 MiB (simulate NCCL)
         handle2 = lib.cudaMalloc(256 * 1024 * 1024)
 
+    # this is an analytic value, it is exact,
+    # we only have 256 MiB non-torch memory increase
+    measured_diff = monitored_values.values[-1] - monitored_values.values[0]
+    assert measured_diff == 256 * 1024 * 1024
+
     # Check that the memory usage is within 5% of the expected values
+    # 5% tolerance is caused by PyTorch caching allocator,
+    # we cannot control PyTorch's behavior of its internal buffers,
+    # which causes a small error (<10 MiB in practice)
     non_torch_ratio = result.non_torch_increase_in_bytes / (256 * 1024 * 1024) # noqa
     torch_peak_ratio = result.torch_peak_increase_in_bytes / (1024 * 1024 * 1024) # noqa
     assert abs(non_torch_ratio - 1) <= 0.05
@@ -306,3 +325,123 @@ def test_memory_profiling():
     del weights
     lib.cudaFree(handle1)
     lib.cudaFree(handle2)
+
+
+def test_bind_kv_cache():
+    from vllm.attention import Attention
+
+    ctx = {
+        'layers.0.self_attn': Attention(32, 128, 0.1),
+        'layers.1.self_attn': Attention(32, 128, 0.1),
+        'layers.2.self_attn': Attention(32, 128, 0.1),
+        'layers.3.self_attn': Attention(32, 128, 0.1),
+    }
+    kv_cache = [
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+    ]
+    bind_kv_cache(ctx, [kv_cache])
+    assert ctx['layers.0.self_attn'].kv_cache[0] is kv_cache[0]
+    assert ctx['layers.1.self_attn'].kv_cache[0] is kv_cache[1]
+    assert ctx['layers.2.self_attn'].kv_cache[0] is kv_cache[2]
+    assert ctx['layers.3.self_attn'].kv_cache[0] is kv_cache[3]
+
+def test_bind_kv_cache_non_attention():
+    from vllm.attention import Attention
+
+    # example from Jamba PP=2
+    ctx = {
+        'model.layers.20.attn': Attention(32, 128, 0.1),
+        'model.layers.28.attn': Attention(32, 128, 0.1),
+    }
+    kv_cache = [
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+    ]
+    bind_kv_cache(ctx, [kv_cache])
+    assert ctx['model.layers.20.attn'].kv_cache[0] is kv_cache[0]
+    assert ctx['model.layers.28.attn'].kv_cache[0] is kv_cache[1]
+
+
+def test_bind_kv_cache_encoder_decoder():
+    from vllm.attention import Attention, AttentionType
+
+    # example from bart
+    ctx = {
+        'encoder.layers.0.self_attn.attn':
+            Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER),
+        'decoder.layers.0.encoder_attn.attn':
+            Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER_DECODER),
+        'decoder.layers.0.self_attn.attn':
+            Attention(32, 128, 0.1, attn_type=AttentionType.DECODER),
+    }
+
+    kv_cache = [
+        torch.zeros((1, )),
+    ]
+    encoder_kv_cache = ctx['encoder.layers.0.self_attn.attn'].kv_cache
+
+    bind_kv_cache(ctx, [kv_cache])
+    assert ctx['encoder.layers.0.self_attn.attn'].kv_cache is encoder_kv_cache
+    assert ctx['decoder.layers.0.encoder_attn.attn'].kv_cache[0] is kv_cache[0]
+    assert ctx['decoder.layers.0.self_attn.attn'].kv_cache[0] is kv_cache[0]
+
+
+def test_bind_kv_cache_pp():
+    cfg = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=2))
+    with set_current_vllm_config(cfg):
+        from vllm.attention import Attention
+
+        ctx = {
+            'layers.0.self_attn': Attention(32, 128, 0.1),
+        }
+        kv_cache = [
+            [torch.zeros((1, ))],
+            [torch.zeros((1, ))]
+        ]
+        bind_kv_cache(ctx, kv_cache)
+        assert ctx['layers.0.self_attn'].kv_cache[0] is kv_cache[0][0]
+        assert ctx['layers.0.self_attn'].kv_cache[1] is kv_cache[1][0]
+
+
+def test_placeholder_module_error_handling():
+    placeholder = PlaceholderModule("placeholder_1234")
+
+    def build_ctx():
+        return pytest.raises(ModuleNotFoundError,
+                             match="No module named")
+
+    with build_ctx():
+        int(placeholder)
+
+    with build_ctx():
+        placeholder()
+
+    with build_ctx():
+        _ = placeholder.some_attr
+
+    with build_ctx():
+        # Test conflict with internal __name attribute
+        _ = placeholder.name
+
+    # OK to print the placeholder or use it in a f-string
+    _ = repr(placeholder)
+    _ = str(placeholder)
+
+    # No error yet; only error when it is used downstream
+    placeholder_attr = placeholder.placeholder_attr("attr")
+
+    with build_ctx():
+        int(placeholder_attr)
+
+    with build_ctx():
+        placeholder_attr()
+
+    with build_ctx():
+        _ = placeholder_attr.some_attr
+
+    with build_ctx():
+        # Test conflict with internal __module attribute
+        _ = placeholder_attr.module

@@ -1068,7 +1068,7 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
         trust_remote_code=model_config.trust_remote_code)
 
     # NOTE: message formatting for raw text prompt is only applied for
-    # offline inference; for online inference, the prompt is always in
+    # offline inference; for online serving, the prompt is always in
     # instruction format and tokenized.
     if prompt is not None and re.match(r"^User:[\s\S]*?(Assistant:)*$",
                                        prompt):
