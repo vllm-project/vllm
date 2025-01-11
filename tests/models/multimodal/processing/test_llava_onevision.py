@@ -10,7 +10,7 @@ from vllm.multimodal.parse import ImageSize
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.utils import cached_get_tokenizer
 
-from ....utils import build_model_context
+from ...utils import build_model_context
 
 
 def _validate_image_prompt_replacements_one(

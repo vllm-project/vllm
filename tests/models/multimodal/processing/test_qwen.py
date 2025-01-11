@@ -9,8 +9,8 @@ from vllm.inputs import InputContext, token_inputs
 from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.utils import cached_get_tokenizer
 
-from .....conftest import IMAGE_ASSETS
-from ....utils import build_model_context
+from ....conftest import IMAGE_ASSETS
+from ...utils import build_model_context
 
 ### Multimodal preprocessing tests
 SAMPLE_IMAGE = IMAGE_ASSETS[0].pil_image
