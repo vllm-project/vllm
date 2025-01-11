@@ -19,6 +19,8 @@ class XPUPlatform(Platform):
     device_name: str = "xpu"
     device_type: str = "xpu"
     dispatch_key: str = "XPU"
+    # does XPU have a ray device key?
+    ray_device_key: str = "GPU"
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
