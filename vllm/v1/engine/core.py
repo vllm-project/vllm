@@ -71,14 +71,22 @@ class EngineCore:
     def _initialize_kv_caches(self,
                               vllm_config: VllmConfig) -> Tuple[int, int]:
         start = time.time()
+
+        # Get all kv cache tensor needed by the model
         kv_cache_spec = self.model_executor.get_kv_cache_spec()
+
+        # Profiles the peak memory usage of the model to determine how much
+        # memory can be allocated for kv cache.
         availble_gpu_memory = self.model_executor.get_available_memory()
 
+        # Get the kv cache tensor size
         kv_cache_config, num_gpu_blocks = get_kv_cache_config(
             vllm_config, kv_cache_spec, availble_gpu_memory)
-
         num_cpu_blocks = 0
+
+        # Initialize kv cache and warmup the execution
         self.model_executor.initialize(kv_cache_config)
+
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)

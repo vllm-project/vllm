@@ -113,20 +113,16 @@ class Worker:
 
     @torch.inference_mode()
     def get_available_memory(self) -> int:
-        """Profiles the peak memory usage of the model to determine how many
-        KV blocks may be allocated without OOMs.
+        """Profiles the peak memory usage of the model to determine how much 
+        memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the maximum possible number of GPU and CPU blocks
-        that can be allocated with the remaining free memory.
+        Then, it calculate the free memory that can be used for KV cache
 
         .. tip::
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
-        TODO (Chen): update comments
         """
-        # Profile the memory usage of the model and get the maximum number of
-        # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 

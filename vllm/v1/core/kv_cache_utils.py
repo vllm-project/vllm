@@ -312,9 +312,11 @@ def hash_request_tokens(block_size: int,
 
 def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
                         available_memory: int) -> Tuple[KVCacheConfig, int]:
+    """ returns the KV cache configuration and the number of GPU blocks
+    """
     check_enough_memory(vllm_config, kv_cache_spec, available_memory)
     if is_same_key(kv_cache_spec):
-        # kv_cache of all layers are the same
+        # kv_cache of all layers are the same, which is true for most models
         return _get_kv_cache_config_same_key(vllm_config, kv_cache_spec,
                                              available_memory)
     else:
@@ -331,8 +333,6 @@ def _get_kv_cache_config_same_key(
     num_gpu_blocks = int(available_memory // page_size // len(kv_cache_spec))
     num_gpu_blocks = max(num_gpu_blocks, 0)
 
-    logger.info("# GPU blocks: %d", num_gpu_blocks)
-
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
         num_gpu_blocks_override = \
             vllm_config.cache_config.num_gpu_blocks_override
@@ -341,6 +341,8 @@ def _get_kv_cache_config_same_key(
             "num_gpu_blocks_override=%d", num_gpu_blocks,
             num_gpu_blocks_override)
         num_gpu_blocks = num_gpu_blocks_override
+
+    logger.info("# GPU blocks: %d", num_gpu_blocks)
 
     per_layer_size = page_size * num_gpu_blocks
 
