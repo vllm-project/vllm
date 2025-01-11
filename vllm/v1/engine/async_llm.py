@@ -41,7 +41,8 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
     ) -> None:
 
-        # Logging.
+        assert start_engine_loop
+
         self.log_requests = log_requests
         self.log_stats = log_stats
         self.stat_loggers: List[StatLoggerBase] = [
