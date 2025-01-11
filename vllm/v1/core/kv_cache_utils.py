@@ -316,7 +316,8 @@ def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
     """
     check_enough_memory(vllm_config, kv_cache_spec, available_memory)
     if is_same_key(kv_cache_spec):
-        # kv_cache of all layers are the same, which is true for most models
+        # kv cache of all layers are the same, which is true for most models.
+        # Allocate the same amount of memory for each layer.
         return _get_kv_cache_config_same_key(vllm_config, kv_cache_spec,
                                              available_memory)
     else:
@@ -374,7 +375,6 @@ def check_enough_memory(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
         needed_memory += layer_spec.bytes_for_tokens(max_model_len)
 
     if needed_memory > available_memory:
-        # TODO(Chen): need unit test
         raise ValueError(
             f"To serve at least one request with the models's max seq len "
             f"({max_model_len}), ({needed_memory/1024/1024/1024} GB KV cache is"
