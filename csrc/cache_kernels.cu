@@ -379,19 +379,21 @@ void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
   dim3 block(std::min(block_stride, int64_t(512)));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if (kv_cache_dtype == "auto") {
+  if (kv_cache_dtype == "fp8_e5m2") {
     if (src_cache.dtype() == at::ScalarType::Float) {
-      CALL_CONVERT_FP8(uint8_t, float, vllm::Fp8KVCacheDataType::kAuto);
+      CALL_CONVERT_FP8(uint8_t, float, vllm::Fp8KVCacheDataType::kFp8E5M2);
     } else if (src_cache.dtype() == at::ScalarType::Half) {
-      CALL_CONVERT_FP8(uint8_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto);
+      CALL_CONVERT_FP8(uint8_t, uint16_t, vllm::Fp8KVCacheDataType::kFp8E5M2);
     } else if (src_cache.dtype() == at::ScalarType::BFloat16) {
-      CALL_CONVERT_FP8(uint8_t, __nv_bfloat16, vllm::Fp8KVCacheDataType::kAuto);
+      CALL_CONVERT_FP8(uint8_t, __nv_bfloat16,
+                       vllm::Fp8KVCacheDataType::kFp8E5M2);
     } else if (dst_cache.dtype() == at::ScalarType::Float) {
-      CALL_CONVERT_FP8(float, uint8_t, vllm::Fp8KVCacheDataType::kAuto);
+      CALL_CONVERT_FP8(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);
     } else if (dst_cache.dtype() == at::ScalarType::Half) {
-      CALL_CONVERT_FP8(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kAuto);
+      CALL_CONVERT_FP8(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E5M2);
     } else if (dst_cache.dtype() == at::ScalarType::BFloat16) {
-      CALL_CONVERT_FP8(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kAuto);
+      CALL_CONVERT_FP8(__nv_bfloat16, uint8_t,
+                       vllm::Fp8KVCacheDataType::kFp8E5M2);
     }
   } else if (kv_cache_dtype == "fp8" || kv_cache_dtype == "fp8_e4m3") {
     if (src_cache.dtype() == at::ScalarType::Float) {
