@@ -89,7 +89,7 @@ class IpexAttnMetadata(FlashAttentionMetadata):
 class IpexAttnMetadataBuilder(
     AttentionMetadataBuilder[IpexAttnMetadata]):
 
-    def __init__(self, input_builder: "ModelInputForXPUBuilder"):
+    def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.slot_mapping: List[int] = []
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
@@ -109,7 +109,7 @@ class IpexAttnMetadataBuilder(
         self.block_size = input_builder.block_size
 
     def _add_seq_group(
-            self, inter_data: "ModelInputForXPUBuilder.InterDataForSeqGroup",
+            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
             chunked_prefill_enabled: bool, prefix_cache_hit: bool):
         """Add a sequence group to the metadata. Specifically update/append
         1. context length.
