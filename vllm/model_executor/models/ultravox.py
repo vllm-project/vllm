@@ -346,7 +346,6 @@ class ModifiedWhisperEncoder(WhisperEncoder):
         return hidden_states
 
 
-
 @MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor,
                                         info=UltravoxProcessingInfo,
                                         dummy_inputs=UltravoxDummyInputsBuilder
@@ -359,7 +358,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     }
 
     # LoRA specific attributes
-    #lm_head is not added for now since it requires logits_processor
     # which is missing from ultravox
     # TODO : Add LoRA to the audio tower and projector.
     supported_lora_modules = [

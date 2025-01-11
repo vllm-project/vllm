@@ -16,7 +16,7 @@ LLMA_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 
 VLLM_PLACEHOLDER = "<|reserved_special_token_0|>"
 
-PROMPT = "Tell me about a silly chess move in 20 words"
+PROMPT = "Tell me about a Fool's mate move in 20 words. Provide the moves!"
 
 
 def llama3_1_8b_chess_lora_path():
@@ -60,7 +60,7 @@ def _get_prompt(audio_count, question, placeholder, model_name) -> str:
                                          add_generation_prompt=True)
 
 
-def test_ultravox_lora(vllm_runner, ):
+def test_ultravox_lora(vllm_runner):
     llama3_1_8b_chess_lora = llama3_1_8b_chess_lora_path()
     with TemporaryDirectory() as temp_ultravox_lora_dir:
         llama3_1_8b_ultravox_chess_lora = mk_llama3_1_8b_ultravox_chess_lora(

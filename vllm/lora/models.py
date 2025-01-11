@@ -407,7 +407,6 @@ class LoRAModelManager(AdapterModelManager):
                                 module_lora.bias)
             else:
                 module.reset_lora(index)
-
         return True
 
     def _deactivate_adapter(self, lora_id: int):
