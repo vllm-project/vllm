@@ -5,7 +5,7 @@ from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.inputs import INPUT_REGISTRY, PromptType
+from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -34,7 +34,11 @@ class AsyncLLM(EngineClient):
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
         log_stats: bool,
-        log_requests: bool,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        input_registry: InputRegistry = INPUT_REGISTRY,
+        use_cached_outputs: bool = False,
+        log_requests: bool = True,
+        start_engine_loop: bool = True,
     ) -> None:
 
         # Logging.
@@ -63,7 +67,7 @@ class AsyncLLM(EngineClient):
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
             tokenizer=self.tokenizer,
-            input_registry=INPUT_REGISTRY,
+            input_registry=input_registry,
         )
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
@@ -89,6 +93,7 @@ class AsyncLLM(EngineClient):
         cls,
         engine_args: AsyncEngineArgs,
         engine_config: Optional[VllmConfig] = None,
+        start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
@@ -107,6 +112,8 @@ class AsyncLLM(EngineClient):
             executor_class=executor_class,
             log_requests=not engine_args.disable_log_requests,
             log_stats=not engine_args.disable_log_stats,
+            start_engine_loop=start_engine_loop,
+            usage_context=usage_context,
         )
 
     def shutdown(self):
