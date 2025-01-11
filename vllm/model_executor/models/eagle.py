@@ -26,9 +26,10 @@ class DummyInputLayerNorm(nn.Module):
 class DummyOutputNorm(nn.Module):
 
     def forward(self, x, residual):
-        if residual is not None:
-            x = x + residual
-        return x, residual
+        if residual is None:
+            return x
+        else:
+            return x, residual
 
 
 class EAGLE(nn.Module):
