@@ -9,12 +9,3 @@ class SchedulerStats:
 
     # gpu_cache_usage: float = 0.0
     # gpu_prefix_cache_hit_rate: float = 0.0
-
-@dataclass
-class RequestStats:
-    """Stats associated with a request."""
-    pass
-
-@dataclass
-class Stats:
-    scheduler: SchedulerStats
