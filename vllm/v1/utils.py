@@ -5,6 +5,8 @@ from collections.abc import Sequence
 from typing import (Any, Callable, Dict, Generic, List, Optional, TypeVar,
                     Union, overload)
 
+import torch
+
 from vllm.logger import init_logger
 from vllm.utils import get_mp_context, kill_process_tree
 
@@ -134,3 +136,13 @@ def shutdown(proc: multiprocessing.Process, input_path: str, output_path: str):
         socket_file = ipc_socket.replace("ipc://", "")
         if os and os.path.exists(socket_file):
             os.remove(socket_file)
+
+
+def bind_kv_cache(
+    ctx: Dict[str, Any],
+    kv_caches: Dict[str, torch.Tensor],
+) -> None:
+    for layer_name, kv_cache in kv_caches.items():
+        # TODO: change [kv_cache] to kv_cache when dropping v0 which uses
+        # virtual engine to support PP.
+        ctx[layer_name].kv_cache = [kv_cache]

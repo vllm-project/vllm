@@ -3,7 +3,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, List, NamedTuple, Optional, Tuple
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheSpec,
+                                        KVCacheTensor)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -305,3 +308,75 @@ def hash_request_tokens(block_size: int,
         ret.append(block_hash)
         parent_block_hash_value = block_hash.hash_value
     return ret
+
+
+def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
+                        available_memory: int) -> Tuple[KVCacheConfig, int]:
+    check_enough_memory(vllm_config, kv_cache_spec, available_memory)
+    if is_same_key(kv_cache_spec):
+        # kv_cache of all layers are the same
+        return _get_kv_cache_config_same_key(vllm_config, kv_cache_spec,
+                                             available_memory)
+    else:
+        raise NotImplementedError
+
+
+def _get_kv_cache_config_same_key(
+        vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
+        available_memory: int) -> Tuple[KVCacheConfig, int]:
+    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
+    assert len(page_sizes) == 1
+    page_size = page_sizes.pop()
+
+    num_gpu_blocks = int(available_memory // page_size // len(kv_cache_spec))
+    num_gpu_blocks = max(num_gpu_blocks, 0)
+
+    logger.info("# GPU blocks: %d", num_gpu_blocks)
+
+    if vllm_config.cache_config.num_gpu_blocks_override is not None:
+        num_gpu_blocks_override = \
+            vllm_config.cache_config.num_gpu_blocks_override
+        logger.info(
+            "Overriding num_gpu_blocks=%d with "
+            "num_gpu_blocks_override=%d", num_gpu_blocks,
+            num_gpu_blocks_override)
+        num_gpu_blocks = num_gpu_blocks_override
+
+    per_layer_size = page_size * num_gpu_blocks
+
+    kv_cache_config = KVCacheConfig(
+        tensors={
+            layer_name: KVCacheTensor(size=per_layer_size)
+            for layer_name in kv_cache_spec
+        },
+        groups=[[layer_name for layer_name in kv_cache_spec]],
+        kv_cache_spec=kv_cache_spec)
+    return kv_cache_config, num_gpu_blocks
+
+
+def is_same_key(kv_cache_spec: KVCacheSpec) -> bool:
+    layer_keys = set(layer.key for layer in kv_cache_spec.values())
+    return len(layer_keys) == 1
+
+
+def check_enough_memory(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
+                        available_memory: int):
+    if available_memory <= 0:
+        raise ValueError("No available memory for the cache blocks. "
+                         "Try increasing `gpu_memory_utilization` when "
+                         "initializing the engine.")
+
+    max_model_len = vllm_config.model_config.max_model_len
+    needed_memory = 0
+    for layer_spec in kv_cache_spec.values():
+        needed_memory += layer_spec.bytes_for_tokens(max_model_len)
+
+    if needed_memory > available_memory:
+        # TODO(Chen): need unit test
+        raise ValueError(
+            f"To serve at least one request with the models's max seq len "
+            f"({max_model_len}), ({needed_memory/1024/1024/1024} GB KV cache is"
+            f"needed, which is larger than the available KV Cache memory "
+            f"({available_memory/1024/1024/1024} GB). Try increasing "
+            f"`gpu_memory_utilization` or decreasing `max_model_len` when "
+            f"initializing the engine.")

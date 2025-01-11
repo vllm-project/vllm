@@ -10,6 +10,7 @@ from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.ray_utils import (RayWorkerWrapper,
                                         initialize_ray_cluster, ray)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 
 if ray is not None:
@@ -211,38 +212,39 @@ class RayExecutor(Executor):
             distributed_init_method=distributed_init_method,
         )
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def get_available_memory(self) -> int:
         """
-        Determine the number of available KV blocks.
+        Determine the available GPU memory in bytes.
         
-        This invokes `determine_num_available_blocks` on each worker and takes
+        This invokes `get_available_memory` on each worker and takes
         the min of the results, guaranteeing that the selected cache sizes are
         compatible with all workers.
-        
-        Returns:
-            - tuple[num_gpu_blocks, num_cpu_blocks]
         """
-        # Get the maximum number of blocks that can be allocated on GPU and CPU.
-        num_blocks = self._run_workers("determine_num_available_blocks")
+
+        memory_sizes = self._run_workers("get_available_memory")
 
         # Since we use a shared centralized controller, we take the minimum
-        # number of blocks across all workers to make sure all the memory
+        # memory size across all workers to make sure all the memory
         # operators can be applied to all workers.
-        num_gpu_blocks = min(b[0] for b in num_blocks)
-        num_cpu_blocks = min(b[1] for b in num_blocks)
+        return min(memory_sizes)
 
-        return num_gpu_blocks, num_cpu_blocks
-
-    def initialize(self, num_gpu_blocks: int) -> None:
+    def initialize(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize the KV cache in all workers.
         """
-        # NOTE: This is logged in the executor because there can be >1 worker
-        # with other executors. We could log in the engine level, but work
-        # remains to abstract away the device for non-GPU configurations.
-        logger.info("# GPU blocks: %d", num_gpu_blocks)
-        self._run_workers("initialize_cache", num_gpu_blocks)
+        self._run_workers("initialize_cache", kv_cache_config)
         self._run_workers("compile_or_warm_up_model")
+
+    def get_kv_cache_spec(self) -> KVCacheSpec:
+        """
+        Get the KVCacheSpec of the model
+        
+        This invokes `get_kv_cache_spec` on each worker and asserts that
+        they are identical. The KVCacheSpec is then returned.
+        """
+        kv_cache_specs = self._run_workers("get_kv_cache_spec")
+        assert all(lc == kv_cache_specs[0] for lc in kv_cache_specs)
+        return kv_cache_specs[0]
 
     def _run_workers(
         self,
