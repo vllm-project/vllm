@@ -1,7 +1,9 @@
 from unittest.mock import patch
 
 import pytest
+from packaging.version import Version
 from transformers import PretrainedConfig
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm import LLM
 
@@ -13,6 +15,14 @@ def test_can_initialize(model_arch):
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     if not model_info.is_available_online:
         pytest.skip("Model is not available online")
+    if model_info.min_transformers_version is not None:
+        current_version = TRANSFORMERS_VERSION
+        required_version = model_info.min_transformers_version
+        if Version(current_version) < Version(required_version):
+            pytest.skip(
+                f"You have `transformers=={current_version}` installed, but "
+                f"`transformers>={required_version}` is required to run this "
+                "model")
 
     # Avoid OOM
     def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:

@@ -22,6 +22,11 @@ class _HfExamplesInfo:
     for speculative decoding.
     """
 
+    min_transformers_version: Optional[str] = None
+    """
+    The minimum version of HF Transformers that is required to run this model.
+    """
+
     is_available_online: bool = True
     """
     Set this to ``False`` if the name of this architecture no longer exists on

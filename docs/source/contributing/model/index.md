@@ -10,6 +10,7 @@ This section provides more information on how to integrate a [PyTorch](https://p
 
 basic
 registration
+tests
 multimodal
 ```
 

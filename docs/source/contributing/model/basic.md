@@ -1,6 +1,6 @@
 (new-model-basic)=
 
-# Basic Implementation
+# Implementing a Basic Model
 
 This guide walks you through the steps to implement a basic vLLM model.
 
