@@ -100,6 +100,10 @@ class MultiprocExecutor(Executor):
         self.collective_rpc("compile_or_warm_up_model")
 
     def get_available_memory(self) -> int:
+        """
+        Determine the available memory for KV cache by invoking the
+        underlying worker.
+        """
         memory_sizes = self.collective_rpc("get_available_memory")
 
         # Since we use a shared centralized controller, we take the minimum
@@ -108,6 +112,10 @@ class MultiprocExecutor(Executor):
         return min(memory_sizes)
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
+        """
+        Get all kv cache tensor needed by the model by invoking the
+        underlying worker.
+        """
         kv_cache_specs = self.collective_rpc("get_kv_cache_spec")
         assert all(lc == kv_cache_specs[0] for lc in kv_cache_specs)
         return kv_cache_specs[0]

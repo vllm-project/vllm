@@ -237,7 +237,7 @@ class RayExecutor(Executor):
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
-        Get the KVCacheSpec of the model
+        Get all kv cache tensor needed by the model
         
         This invokes `get_kv_cache_spec` on each worker and asserts that
         they are identical. The KVCacheSpec is then returned.
