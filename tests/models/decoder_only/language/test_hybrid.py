@@ -120,8 +120,8 @@ def test_mamba_prefill_chunking(hf_runner, vllm_runner, example_prompts,
         example_prompts.pop(1)
     elif 'Bamba' in model:
         example_prompts.pop(6)
-        example_prompts.pop(4)
         example_prompts.pop(3)
+        example_prompts.pop(2)
 
     with hf_runner(
             model,
