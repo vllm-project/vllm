@@ -1,10 +1,11 @@
-from dataclasses import dataclass
 import math
-from typing import Dict, List, runtime_checkable
+from dataclasses import dataclass
+from typing import Dict, List
+
 import torch
 
-from vllm.utils import get_dtype_size
 from vllm.logger import init_logger
+from vllm.utils import get_dtype_size
 
 logger = init_logger(__name__)
 
