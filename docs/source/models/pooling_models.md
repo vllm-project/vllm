@@ -88,7 +88,7 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/offline_inference_embedding.py>
+A code example can be found here: <gh-file:examples/offline_inference/embedding.py>
 
 ### `LLM.classify`
 
@@ -103,7 +103,7 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/offline_inference_classification.py>
+A code example can be found here: <gh-file:examples/offline_inference/classification.py>
 
 ### `LLM.score`
 
@@ -125,9 +125,9 @@ score = output.outputs.score
 print(f"Score: {score}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference/offline_inference_scoring.py>
+A code example can be found here: <gh-file:examples/offline_inference/scoring.py>
 
-## Online Inference
+## Online Serving
 
 Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints that correspond to the offline APIs:
 

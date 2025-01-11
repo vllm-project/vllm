@@ -1,40 +1,34 @@
-"""Tests for phi3v's multimodal preprocessing kwargs."""
 import pytest
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import cached_get_tokenizer
 
-from .....conftest import _ImageAssets
-from ....utils import build_model_context
+from ....conftest import _ImageAssets
+from ...utils import build_model_context
 
 
-@pytest.mark.parametrize("model_id", ["microsoft/Phi-3.5-vision-instruct"])
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
 # yapf: disable
 @pytest.mark.parametrize(
-    ("mm_processor_kwargs", "expected_toks_per_img"),
-    [
-        ({"num_crops": 4}, 757),
-        ({"num_crops": 16}, 1921),
-        # the default num_crops of phi-3.5-vision is 4
-        ({}, 757),
+    ("mm_processor_kwargs", "expected_toks_per_img", "expected_pixels_shape"), [
+        ({}, 1426, (5704, 1176)),
+        ({"min_pixels": 64**2, "max_pixels": 512**2}, 330, (1320, 1176)),
     ])
 # yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_override(
     image_assets: _ImageAssets,
     model_id: str,
-    mm_processor_kwargs: dict[str, int],
+    mm_processor_kwargs: dict[str, object],
     expected_toks_per_img: int,
+    expected_pixels_shape: tuple[int, int],
     num_imgs: int,
 ):
-    """Ensure input_processor_for_phi3v handles num_crops properly."""
-    # Avoid initializing CUDA early
-    from vllm.model_executor.models.phi3v import _IMAGE_TOKEN_ID
-
+    """Ensure Qwen2VLMultiModalProcessor handles min/max pixels properly."""
     ctx = build_model_context(
         model_name=model_id,
         tokenizer_name=model_id,
-        trust_remote_code=True,
+        mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": num_imgs},
     )
     tokenizer = cached_get_tokenizer(ctx.model_config.tokenizer)
@@ -44,12 +38,17 @@ def test_processor_override(
     )
 
     # Build the image str / prompt based on the number of images we pass
-    img_str = "".join([f"<|image_{idx}|>\n" for idx in range(1, num_imgs + 1)])
-    prompt = f"<|user|>\n{img_str}<|end|>\n<|assistant|>\n"
+    prompt = "<|vision_start|><|image_pad|><|vision_end|>" * num_imgs
     mm_data = {"image": [image_assets[0].pil_image] * num_imgs}
 
     processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
 
     # Ensure we have the right number of placeholders per num_crops size
-    img_tok_count = processed_inputs["prompt_token_ids"].count(_IMAGE_TOKEN_ID)
+    hf_processor = processor.info.get_hf_processor(**mm_processor_kwargs)
+    image_token_id = tokenizer.convert_tokens_to_ids(hf_processor.image_token)
+    img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
+    pixel_shape = processed_inputs["mm_kwargs"]["pixel_values"].shape
+
     assert img_tok_count == expected_toks_per_img * num_imgs
+    assert pixel_shape[0] == expected_pixels_shape[0] * num_imgs
+    assert pixel_shape[1] == expected_pixels_shape[1]
