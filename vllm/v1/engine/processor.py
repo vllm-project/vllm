@@ -1,12 +1,15 @@
 import time
 from typing import Mapping, Optional, Union
 
-from vllm.config import CacheConfig, LoRAConfig, ModelConfig
+from vllm.config import CacheConfig, DecodingConfig, LoRAConfig, ModelConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.inputs.preprocess import InputPreprocessor
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.guided_decoding import (
+    get_local_guided_decoding_logits_processor)
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalHasher,
                              MultiModalKwargs, MultiModalRegistry)
 from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
@@ -17,6 +20,8 @@ from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 
+logger = init_logger(__name__)
+
 
 class Processor:
 
@@ -25,6 +30,7 @@ class Processor:
         model_config: ModelConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
+        decoding_config: Optional[DecodingConfig],
         tokenizer: BaseTokenizerGroup,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
@@ -32,6 +38,7 @@ class Processor:
 
         self.model_config = model_config
         self.lora_config = lora_config
+        self.decoding_config = decoding_config or DecodingConfig()
         self.tokenizer = tokenizer
 
         self.generation_config_fields = model_config.try_get_generation_config(
@@ -102,6 +109,9 @@ class Processor:
         sampling_params = params.clone()
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
+
+        # Add logits processors to sampling params
+        self._build_logits_processors(sampling_params, lora_request)
 
         # Multimodal related.
         # Compute MM hashes (if enabled)
@@ -221,3 +231,50 @@ class Processor:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
+
+    def _build_logits_processors(
+            self, sampling_params: SamplingParams,
+            lora_request: Optional[LoRARequest]) -> SamplingParams:
+        """Constructs logits processors based on the guided_decoding,
+        logits_bias, and allowed_token_ids fields in sampling_params. Deletes
+        those fields and adds the constructed logits processors to the
+        logits_processors field. Returns the modified sampling params."""
+
+        logits_processors = []
+
+        if sampling_params.guided_decoding is not None:
+            # TODO(WangErXiao) Whether to copy sampling_params or not in v1
+            # Defensively copy sampling params since guided decoding logits
+            # processors can have different state for each request
+            # sampling_params = copy.copy(sampling_params)
+            guided_decoding = sampling_params.guided_decoding
+
+            logger.debug(
+                "Building guided decoding logits processor in "
+                "Processor. Params: %s", guided_decoding)
+
+            # tokenizer = self.get_tokenizer(lora_request=lora_request)
+            guided_decoding.backend = guided_decoding.backend or \
+                self.decoding_config.guided_decoding_backend
+
+            processor = get_local_guided_decoding_logits_processor(
+                guided_params=guided_decoding,
+                tokenizer=self._get_lora_tokenizer(lora_request),
+                model_config=self.model_config)
+            if processor:
+                logits_processors.append(processor)
+
+            # Unset so this doesn't get passed down to the model
+            sampling_params.guided_decoding = None
+
+        if logits_processors:
+            if sampling_params.logits_processors is None:
+                sampling_params.logits_processors = logits_processors
+            else:
+                sampling_params.logits_processors.extend(logits_processors)
+
+    def _get_lora_tokenizer(self, lora_request: Optional[LoRARequest] = None):
+        # TODO(WangErXiao) add lora tokenizer
+        # self.tokenizer is BaseTokenizerGroup type, so we need to return
+        # original tokenizer for logits processor
+        return self.tokenizer.get_lora_tokenizer(lora_request)

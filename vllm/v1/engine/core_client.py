@@ -2,7 +2,7 @@ import os
 import signal
 import weakref
 from abc import ABC, abstractmethod
-from typing import List, Type
+from typing import Any, List, Tuple, Type, Union
 
 import msgspec
 import zmq
@@ -17,7 +17,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreRequestType, EngineCoreRequestUnion)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.serial_utils import CloudPickleEncoder, PickleEncoder
 from vllm.v1.utils import BackgroundProcHandle
 
 logger = init_logger(__name__)
@@ -151,6 +151,7 @@ class MPClient(EngineCoreClient):
 
         # Serialization setup.
         self.encoder = PickleEncoder()
+        self.cloudpickle_encoder = CloudPickleEncoder()
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
         # ZMQ setup.
@@ -183,6 +184,29 @@ class MPClient(EngineCoreClient):
                 "log_stats": log_stats,
             })
 
+    def _prepare_request(
+            self, request_type: EngineCoreRequestType,
+            request: EngineCoreRequestUnion) -> Tuple[Union[bytes, Any], ...]:
+        #TODO(WangErXiao)
+        # Detach logits processors so that they can be pickled
+        # separately (may require cloudpickle which is slower)
+        if request_type == EngineCoreRequestType.ADD:
+            assert isinstance(request, EngineCoreRequest)
+            if request.sampling_params and \
+                request.sampling_params.logits_processors:
+                logits_processors = request.sampling_params.logits_processors
+                request.sampling_params.logits_processors = None
+                lp_bytes = self.cloudpickle_encoder.encode(logits_processors)
+        else:
+            lp_bytes = None
+
+        # (RequestType, SerializedRequest) or
+        # (RequestType, SerializedRequest, LogitsProcessors)
+        msg = (request_type.value, self.encoder.encode(request), lp_bytes) \
+              if lp_bytes else \
+                (request_type.value, self.encoder.encode(request))
+        return msg
+
     def shutdown(self):
         """Clean up background resources."""
         if hasattr(self, "proc_handle"):
@@ -214,8 +238,7 @@ class SyncMPClient(MPClient):
     def _send_input(self, request_type: EngineCoreRequestType,
                     request: EngineCoreRequestUnion) -> None:
 
-        # (RequestType, SerializedRequest)
-        msg = (request_type.value, self.encoder.encode(request))
+        msg = self._prepare_request(request_type, request)
         self.input_socket.send_multipart(msg, copy=False)
 
     def add_request(self, request: EngineCoreRequest) -> None:
@@ -256,7 +279,7 @@ class AsyncMPClient(MPClient):
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: EngineCoreRequestUnion) -> None:
 
-        msg = (request_type.value, self.encoder.encode(request))
+        msg = self._prepare_request(request_type, request)
         await self.input_socket.send_multipart(msg, copy=False)
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
