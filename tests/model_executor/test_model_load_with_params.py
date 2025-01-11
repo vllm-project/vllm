@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from vllm.model_executor.layers.pooler import PoolingType
+from vllm.model_executor.layers.pooler import CLSPool, PoolingType
 from vllm.model_executor.models.bert import BertEmbeddingModel
 from vllm.model_executor.models.roberta import RobertaEmbeddingModel
 from vllm.platforms import current_platform
@@ -91,4 +91,29 @@ def test_roberta_model_loading_with_params(vllm_runner):
         assert model._pooler.normalize
 
         # assert output
+        assert output
+
+
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="Xformers backend is not supported on ROCm.")
+def test_facebook_roberta_model_loading_with_params(vllm_runner):
+    """
+    Test loading roberta-base model with no lm_head.
+    """
+    model_name = "FacebookAI/roberta-base"
+    with vllm_runner(model_name=model_name,
+                     dtype="float16",
+                     max_model_len=MAX_MODEL_LEN) as model:
+        output = model.encode("Write a short story about a robot that"
+                              " dreams for the first time.\n")
+
+        model_tokenizer = model.model.llm_engine.tokenizer
+        assert model_tokenizer.tokenizer_id == model_name
+
+        model = model.model.llm_engine.model_executor\
+                     .driver_worker.model_runner.model
+        assert not hasattr(model, "lm_head")
+        assert isinstance(model, RobertaEmbeddingModel)
+        assert isinstance(model._pooler, CLSPool)
+
         assert output
