@@ -1107,7 +1107,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                         device='cpu')
         else:
             real_batch_size = len(seq_group_metadata_list)
-            input_tokens = output[:real_batch_size]
+            input_tokens = output[:real_batch_size].clone()
 
         input_positions = torch.tensor(input_positions,
                                        dtype=torch.long,
@@ -2250,18 +2250,31 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
 
                     result = self._prepare_decode(seq_group_metadata_list,
                                                   output=output)
+                    if self.lora_config:
+                        lora_mapping = LoRAMapping(
+                            **dict(index_mapping=result.lora_index_mapping,
+                                   prompt_mapping=result.lora_prompt_mapping,
+                                   is_prefill=False))
+                        self.set_active_loras(result.lora_requests,
+                                              lora_mapping)
+                        lora_mask, lora_logits_mask = self.create_lora_mask(
+                            result.input_tokens, result.lora_ids, False)
+
                     execute_model_kwargs.update({
                         "input_ids":
                         result.input_tokens,
                         "positions":
                         result.input_positions,
                         "attn_metadata":
-                        self.trim_attn_metadata(result.attn_metadata)
+                        self.trim_attn_metadata(result.attn_metadata),
+                        "lora_mask":
+                        lora_mask,
                     })
                     model_kwargs_broadcast_data = {
                         "input_ids": result.input_tokens,
                         "positions": result.input_positions,
-                        "attn_metadata": vars(result.attn_metadata)
+                        "attn_metadata": vars(result.attn_metadata),
+                        "lora_mask": lora_mask,
                     }
                     broadcast_tensor_dict(model_kwargs_broadcast_data, src=0)
                 else:
