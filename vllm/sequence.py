@@ -817,17 +817,6 @@ class SequenceGroup:
         lifetime of the request."""
         if self.is_single_seq:
             return 0 if self.first_seq.is_finished() else 1
-        if self.sampling_params:
-            n = self.sampling_params.n
-            assert isinstance(n, int)
-            if n > self.num_seqs():
-                # At prompt stage, the sequence group is not yet filled up
-                # and only have one sequence running. However, in the
-                # generation stage, we will have `n` sequences
-                # running.
-                return n
-        # At sampling stages, return the number of actual sequences
-        # that are not finished yet.
         return self.num_seqs() - self.num_finished_seqs()
 
     def get_seqs(
@@ -1466,25 +1455,27 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             return None
 
         # in the non-streaming mode, we will return the assembled sequence
-        # once after all sequences finish, and then return None for the
+        # when the last sequences finishes, and then return None for the
         # rest of the time
-
-        if len(self.to_be_finished) > 0:
-            return None
-
-        assert self.assembled_seq_group is not None
-        params = self.assembled_seq_group.sampling_params
-        assert isinstance(params, SamplingParams)
-        if not self.output_produced:
-            self.output_produced = True
-            if params._real_n is not None:
-                # Get the top-n sequences.
-                n = params._real_n or params.n
-                seqs = self.assembled_seq_group.seqs
-                sorting_key = lambda seq: seq.get_cumulative_logprob()
-                sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
-                top_n_seqs = sorted_seqs[:n]
-                self.assembled_seq_group.seqs = top_n_seqs
-            return self.assembled_seq_group
-        if self.output_produced:
-            return None
+        if (
+            len(self.to_be_finished) == 1
+            and seq_group.request_id in self.to_be_finished
+            and seq_group.is_finished()
+        ):
+            assert self.assembled_seq_group is not None
+            params = self.assembled_seq_group.sampling_params
+            assert isinstance(params, SamplingParams)
+            if not self.output_produced:
+                self.output_produced = True
+                if params._real_n is not None:
+                    # Get the top-n sequences.
+                    n = params._real_n or params.n
+                    seqs = self.assembled_seq_group.seqs
+                    sorting_key = lambda seq: seq.get_cumulative_logprob()
+                    sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
+                    top_n_seqs = sorted_seqs[:n]
+                    self.assembled_seq_group.seqs = top_n_seqs
+                return self.assembled_seq_group
+            if self.output_produced:
+                return None
+        return None
