@@ -14,6 +14,7 @@ from vllm.outputs import (ClassificationOutput, ClassificationRequestOutput,
                           ScoringRequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.spec_decode.spec_decode_params import SpecDecodeParams
 
 from .version import __version__, __version_tuple__
 
@@ -26,6 +27,7 @@ __all__ = [
     "TextPrompt",
     "TokensPrompt",
     "SamplingParams",
+    "SpecDecodeParams",
     "RequestOutput",
     "CompletionOutput",
     "PoolingOutput",

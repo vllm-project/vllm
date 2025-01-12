@@ -263,6 +263,7 @@ class MQLLMEngine:
                 prompt=request.prompt,
                 params=request.params,
                 lora_request=request.lora_request,
+                spec_decode_params=request.spec_decode_params,
                 trace_headers=request.trace_headers,
                 prompt_adapter_request=request.prompt_adapter_request,
                 priority=request.priority)
