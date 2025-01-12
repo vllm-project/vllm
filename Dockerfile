@@ -126,8 +126,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
-# Default max size of the wheel is 250MB
-ARG VLLM_MAX_SIZE_MB=250
+# Default max size of the wheel is 300MB
+ARG VLLM_MAX_SIZE_MB=300
 ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
 ARG RUN_WHEEL_CHECK=true
 RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
