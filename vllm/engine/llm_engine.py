@@ -774,6 +774,10 @@ class LLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
+        if isinstance(prompt, dict) and prompt.get("prompt_embeds", None) is not None:
+            if not prompt.get("prompt_token_ids", None):
+                prompt["prompt_token_ids"] = [0] * prompt["prompt_embeds"].shape[0]
+
         if self.tokenizer is not None:
             self._validate_token_prompt(
                 prompt,

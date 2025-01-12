@@ -721,7 +721,6 @@ class FlashAttentionImpl(AttentionImpl):
         prefill_output = output[:num_prefill_query_tokens]
         assert query.shape[0] == num_prefill_query_tokens
         assert decode_query.shape[0] == num_decode_query_tokens
-
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
             if (kv_cache.numel() == 0 or prefill_meta.block_tables is None
