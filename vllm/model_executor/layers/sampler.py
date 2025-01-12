@@ -1280,7 +1280,7 @@ def _get_next_prompt_tokens(seq_group: SequenceGroupToSample) -> List[int]:
     assert len(seq_ids) == 1
     seq_data = seq_group.seq_data[seq_ids[0]]
     computed_len = seq_data.get_num_computed_tokens()
-    prompt_tokens = seq_data.prompt_token_ids
+    prompt_tokens = seq_data.prompt_token_ids + seq_data.output_token_ids
     # +1 because we are looking for a next prompt token.
     next_token_index_start = computed_len + 1
     next_token_index_end = min(computed_len + query_len + 1,

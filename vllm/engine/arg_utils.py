@@ -14,7 +14,7 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PoolerConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TaskOption, TokenizerPoolConfig,
-                         VllmConfig)
+                         VllmConfig, LoraPolicy)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -145,6 +145,8 @@ class EngineArgs:
     enable_lora_bias: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
+    num_iters_before_lora_reschedule: int = 32
+    lora_policy: LoraPolicy = LoraPolicy.NAIVE
     enable_prompt_adapter: bool = False
     max_prompt_adapters: int = 1
     max_prompt_adapter_token: int = 0
@@ -1205,6 +1207,8 @@ class EngineArgs:
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             long_lora_scaling_factors=self.long_lora_scaling_factors,
             lora_dtype=self.lora_dtype,
+            num_iters_before_reschedule=self.num_iters_before_lora_reschedule,
+            lora_policy=self.lora_policy,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 
