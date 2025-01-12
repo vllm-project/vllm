@@ -234,8 +234,6 @@ steps:
   source_file_dependencies:
   - vllm/spec_decode
   - tests/spec_decode
-  - vllm/model_executor/models/eagle.py
-  - vllm/model_executor/models/eagle.py
   commands:
     - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
     - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py
