@@ -58,6 +58,8 @@ from vllm.worker.model_runner_base import (
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict, dump_input_when_exception)
 
+from vllm.global_cache import global_cache_instance
+
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -214,6 +216,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             seq_ids: List[int],
             is_prompt: bool,
             block_tables: Optional[Dict[int, List[int]]],
+            block_global_computed_tables: Optional[Dict[int, List[int]]],
+            block_hash_map: Optional[Dict[int, Dict[int, int]]],
             computed_block_nums: List[int],
             n_seqs: int = 0,
 
@@ -266,6 +270,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.request_id = request_id
             self.is_prompt = is_prompt
             self.block_tables = block_tables
+            self.block_global_computed_tables = block_global_computed_tables
+            self.block_hash_map = block_hash_map
             self.computed_block_nums = computed_block_nums
             self.n_seqs = n_seqs
             self.encoder_seq_len = encoder_seq_len
@@ -405,6 +411,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             seq_ids=[0] * num_seqs,
             is_prompt=True,
             block_tables=None,
+            block_hash_map=None,
+            block_global_computed_tables=None,
             computed_block_nums=[])
 
     def init_cached_inter_data(self, *args, **kwargs):
@@ -429,7 +437,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
     def __init__(self,
                  runner: "GPUModelRunnerBase",
-                 finished_requests_ids: Optional[List[str]] = None):
+                 finished_requests_ids: Optional[List[str]] = None,
+                 kv_caches: Optional[List[torch.Tensor]] = None):
         super().__init__()
         # Compute functions for each sequence in a sequence group.
         # WARNING: The order of the functions matters!
@@ -446,6 +455,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self._compute_multi_modal_input,
         ]
 
+        self.kv_caches = kv_caches
         self.runner = runner
         self.model_input_cls = self.runner._model_input_cls
         self.attn_backend = self.runner.attn_backend
@@ -531,22 +541,54 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         remaining blocks.
         """
         computed_block_nums = inter_data.computed_block_nums
+        block_global_computed_tables = (
+            inter_data.block_global_computed_tables[
+                inter_data.seq_ids[seq_idx]]
+            if inter_data.block_global_computed_tables is not None and 
+            len(inter_data.block_global_computed_tables) > 0 else []
+        )
 
         # Note that prefix caching does not support sliding window.
         prefix_cache_hit = (computed_block_nums is not None
                             and len(computed_block_nums) > 0
                             and self.sliding_window is None
                             and inter_data.is_prompt)
-        inter_data.prefix_cache_hit = prefix_cache_hit
 
-        if not prefix_cache_hit:
+        global_prefix_cache_hit = (block_global_computed_tables is not None
+                            and len(block_global_computed_tables) > 0
+                            and self.sliding_window is None
+                            and inter_data.is_prompt)
+
+        inter_data.prefix_cache_hit = (prefix_cache_hit or 
+            global_prefix_cache_hit)
+
+        if not inter_data.prefix_cache_hit:
             return
 
-        assert computed_block_nums is not None
+        assert (computed_block_nums is not None or 
+            block_global_computed_tables is not None)
+
+        computed_max_len = max(len(computed_block_nums), 
+            len(block_global_computed_tables))
+        if len(block_global_computed_tables) > len(computed_block_nums):
+            block_global_computed = [
+                block for block in block_global_computed_tables 
+                if block not in computed_block_nums]
+            for block_id in block_global_computed:
+                content_hash = inter_data.block_hash_map[
+                    inter_data.seq_ids[seq_idx]][block_id]
+                for layer_idx in range(
+                    self.runner.model_config.hf_config.num_hidden_layers):
+                    (self.kv_caches[layer_idx][0][block_id], 
+                    self.kv_caches[layer_idx][1][block_id]) = \
+                        global_cache_instance.readCache(
+                            content_hash, layer_idx, self.runner.device)
+            torch.cuda.synchronize()
+
         # The cache hit prompt tokens in this sequence. Note that
         # this may be larger than the sequence length if chunked
         # prefill is enabled.
-        prefix_cache_len = len(computed_block_nums) * self.block_size
+        prefix_cache_len = computed_max_len * self.block_size
         seq_group_metadata.seq_data[inter_data.seq_ids[
             seq_idx]].update_num_cached_tokens(prefix_cache_len)
 
@@ -738,6 +780,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             seq_ids=seq_ids,
             is_prompt=is_prompt,
             block_tables=seq_group_metadata.block_tables,
+            block_hash_map=seq_group_metadata.block_hash_map,
+            block_global_computed_tables=seq_group_metadata.block_global_computed_tables,
             computed_block_nums=seq_group_metadata.computed_block_nums,
             reinit=True,
             reinit_use_defaults=True,
@@ -1204,7 +1248,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[List[str]] = None,
+        kv_caches: Optional[List[torch.Tensor]] = None,
     ) -> TModelInputForGPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
@@ -1220,7 +1265,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
-        builder = self._builder_cls(weakref.proxy(self), finished_requests_ids)
+        builder = self._builder_cls(weakref.proxy(self), 
+            finished_requests_ids, kv_caches)
         for seq_group_metadata in seq_group_metadata_list:
             builder.add_seq_group(seq_group_metadata)
 
@@ -1299,6 +1345,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 seq_data={group_id: dummy_data.seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
+                block_global_computed_tables=None,
                 lora_request=dummy_lora_requests_per_seq[group_id]
                 if dummy_lora_requests_per_seq else None,
                 multi_modal_data=dummy_data.multi_modal_data,
@@ -1591,6 +1638,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None,
+        kv_caches: Optional[List[torch.Tensor]] = None,
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -1606,7 +1654,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         If cuda graph is required, this API automatically pads inputs.
         """
         model_input = self._prepare_model_input_tensors(
-            seq_group_metadata_list, finished_requests_ids)
+            seq_group_metadata_list, finished_requests_ids, kv_caches)
         if get_pp_group().is_last_rank:
             # Sampling metadata is only required for the final pp group
             generators = self.get_generators(finished_requests_ids)
@@ -1707,6 +1755,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                                  device=self.device),
                     **seqlen_agnostic_kwargs)
 
+            if (model_input.is_prompt and 
+                self.cache_config.num_global_cache_blocks > 0):
+                self.write_global_cache(model_input, kv_caches)
+
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_end.record()
@@ -1790,6 +1842,36 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             output.hidden_states = hidden_states
 
         return [output]
+
+    def write_global_cache(
+        self, model_input: ModelInputForGPUWithSamplingMetadata, 
+        kv_caches: List[torch.Tensor]):
+        """
+        for each layer and seq, get the block id and block hash, 
+        then write to global kv cache
+        """
+        metadata = model_input.attn_metadata
+        for i in range(self.model_config.hf_config.num_hidden_layers):
+            seq_start_idx = 0
+            if (len(metadata.block_hash_map) > 0 and 
+                metadata.block_tables.numel() == 0):
+                for seq_idx, seq_length in enumerate(metadata.seq_lens):
+                    num_blocks = seq_length // self.cache_config.block_size
+                    for idx in range(num_blocks):
+                        block_id = metadata.slot_mapping[
+                            seq_start_idx + idx * self.cache_config.block_size
+                        ].item() // self.cache_config.block_size
+                        if (block_id in metadata.block_hash_map[seq_idx] and 
+                            metadata.block_hash_map[
+                                seq_idx][block_id] is not None):
+                            block_hash = metadata.block_hash_map[
+                                seq_idx][block_id]
+                            global_cache_instance.writeCache(
+                                block_hash, i, 
+                                kv_caches[i][0][block_id], 
+                                kv_caches[i][1][block_id])
+
+                    seq_start_idx += seq_length
 
     def need_recv_kv(self, model_input, kv_caches) -> bool:
         """Check if we need to receive kv-cache from the other worker.

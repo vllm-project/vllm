@@ -417,6 +417,14 @@ class NullBlock(Block):
         self._proxy.computed = value
 
     @property
+    def global_computed(self):
+        return self._proxy.global_computed
+
+    @global_computed.setter
+    def global_computed(self, value):
+        self._proxy.global_computed = value        
+
+    @property
     def last_accessed(self) -> float:
         return self._proxy.last_accessed
 

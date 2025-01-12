@@ -260,7 +260,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         return model_input, worker_input, kwargs
 
     def _get_driver_input_and_broadcast(
-        self, execute_model_req: ExecuteModelRequest
+        self, execute_model_req: ExecuteModelRequest, 
+        kv_caches: Optional[List[torch.Tensor]] = None,
     ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
         """ Get the driver input and broadcast it to other workers.  """
         assert self.is_driver_worker
@@ -271,7 +272,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             self.model_runner.prepare_model_input(
                 execute_model_req.seq_group_metadata_list,
                 execute_model_req.virtual_engine,
-                execute_model_req.finished_requests_ids))
+                execute_model_req.finished_requests_ids,
+                kv_caches))
 
         kwargs = extract_previous_hidden_states(execute_model_req)
 
@@ -290,7 +292,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def prepare_input(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest] = None,
+        kv_caches: Optional[List[torch.Tensor]] = None,
     ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
             str, torch.Tensor]]]:
         """
@@ -306,7 +309,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     # notify all other workers to stop their execution loop.
                     broadcast_tensor_dict({}, src=0)
                 return None
-            return self._get_driver_input_and_broadcast(execute_model_req)
+            return self._get_driver_input_and_broadcast(execute_model_req, 
+                kv_caches)
         else:
             return self._get_worker_input_from_broadcast()
 
@@ -318,7 +322,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         sequences are provided."""
         start_time = time.perf_counter()
 
-        inputs = self.prepare_input(execute_model_req)
+        inputs = self.prepare_input(execute_model_req, 
+            kv_caches=self.kv_cache[execute_model_req.virtual_engine])
         if inputs is None:
             return None
 

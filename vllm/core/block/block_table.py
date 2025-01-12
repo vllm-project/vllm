@@ -1,5 +1,5 @@
 import math
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from vllm.core.block.common import BlockList
 from vllm.core.block.interfaces import Block, DeviceAwareBlockAllocator
@@ -256,6 +256,14 @@ class BlockTable:
                 BlockTable.
         """
         return self._blocks.ids()
+
+    @property
+    def block_hashes(self) -> Dict[int, int]:
+        return self._blocks.hashes()
+
+    @property
+    def global_computed_list(self) -> List[int]:
+        return self._blocks.global_computed_list()
 
     def get_unseen_token_ids(self, sequence_token_ids: List[int]) -> List[int]:
         """Get the number of "unseen" tokens in the sequence.

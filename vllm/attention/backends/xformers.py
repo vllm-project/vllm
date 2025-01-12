@@ -225,6 +225,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             query_start_loc=query_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
+            block_hash_map=self.block_hash_map,
             use_cuda_graph=False,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
@@ -265,6 +266,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
             block_tables=block_tables,
+            block_hash_map=self.block_hash_map,
             use_cuda_graph=self.use_cuda_graph,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
