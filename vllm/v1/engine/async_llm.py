@@ -151,7 +151,7 @@ class AsyncLLM(EngineClient):
         # 2) Add the request to AsyncLLM.
         queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
         self.request_states[request_id] = RequestState.from_new_request(
-            tokenizer=(await self.get_tokenizer(lora_request)),
+            tokenizer=self.tokenizer.get_lora_tokenizer(lora_request),
             request=request,
             queue=queue,
         )
