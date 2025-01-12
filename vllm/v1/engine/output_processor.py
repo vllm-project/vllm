@@ -61,7 +61,7 @@ class OutputProcessor:
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.request_states: Dict[str, RequestState] = {}
-    
+
     def add_request(
         self,
         request: EngineCoreRequest,
@@ -74,8 +74,7 @@ class OutputProcessor:
         self.request_states[request_id] = RequestState.from_new_request(
             tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
             request=request,
-            queue=queue
-        )
+            queue=queue)
 
     def abort_requests(
         self,
@@ -83,7 +82,6 @@ class OutputProcessor:
     ) -> None:
         for request_id in request_ids:
             self.request_states.pop(request_id, None)
-        
 
     def make_request_output(
         self,

@@ -20,7 +20,6 @@ from vllm.utils import kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.processor import Processor
-from vllm.v1.engine.request_state import RequestState
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
@@ -70,10 +69,8 @@ class AsyncLLM(EngineClient):
         )
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
-        self.output_processor = OutputProcessor(
-            tokenizer=self.tokenizer,
-            log_stats=self.log_stats,
-        )
+        self.output_processor = OutputProcessor(self.tokenizer,
+                                                log_stats=self.log_stats)
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_client(
@@ -239,7 +236,8 @@ class AsyncLLM(EngineClient):
                     outputs.outputs)
 
                 # 3) Abort any reqs that finished due to stop strings.
-                await self.engine_core.abort_requests_async(processed_outputs.reqs_to_abort)
+                await self.engine_core.abort_requests_async(
+                    processed_outputs.reqs_to_abort)
 
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in

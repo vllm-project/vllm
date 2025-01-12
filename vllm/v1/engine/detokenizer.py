@@ -10,6 +10,7 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 
 logger = init_logger(__name__)
 
+
 @dataclass
 class DetokenizerOutput:
     output_text: str
@@ -159,9 +160,8 @@ class Detokenizer:
         output_text = self._get_next_output_text(finished, delta)
         token_ids = new_token_ids if delta else self.output_token_ids
 
-        return DetokenizerOutput(
-            output_text, token_ids, finished, finish_reason, stop_reason)
-
+        return DetokenizerOutput(output_text, token_ids, finished,
+                                 finish_reason, stop_reason)
 
     def _get_next_output_text(self, finished: bool, delta: bool) -> str:
         """If delta is True, only new text since the last call to

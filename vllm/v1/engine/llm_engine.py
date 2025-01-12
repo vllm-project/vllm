@@ -53,9 +53,6 @@ class LLMEngine:
             lora_config=vllm_config.lora_config)
         self.tokenizer.ping()
 
-        # Request States (map of request_id -> RequestState).
-        self.request_states: Dict[str, RequestState] = {}
-
         # Processor (convert Inputs --> EngineCoreRequests)
         self.processor = Processor(model_config=vllm_config.model_config,
                                    cache_config=vllm_config.cache_config,
@@ -65,10 +62,8 @@ class LLMEngine:
                                    mm_registry=mm_registry)
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
-        self.output_processor = OutputProcessor(
-            request_states=self.request_states,
-            log_stats=False,
-        )
+        self.output_processor = OutputProcessor(self.tokenizer,
+                                                log_stats=False)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
@@ -126,9 +121,6 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
 
-        if request_id in self.request_states:
-            raise ValueError(f"Request id {request_id} already running.")
-
         # 1) Convert Input --> Request.
         request = self.processor.process_inputs(request_id, prompt, params,
                                                 arrival_time, lora_request,
@@ -138,7 +130,8 @@ class LLMEngine:
 
         # 2) Make a new RequestState and queue.
         self.request_states[request_id] = RequestState.from_new_request(
-            tokenizer=self.get_tokenizer_group().get_lora_tokenizer(lora_request),
+            tokenizer=self.get_tokenizer_group().get_lora_tokenizer(
+                lora_request),
             request=request,
         )
 

@@ -17,17 +17,15 @@ ENGINE_ARGS = AsyncEngineArgs(model="meta-llama/Llama-3.2-1B",
                               disable_log_requests=True)
 
 
-async def run_example(
-    engine: AsyncLLM,
-    request_id: str,
-    num_tokens: int,
-    abort_after: int = 0
-) -> Tuple[int, int, str]:
-    
-    generator = engine.generate(
-        request_id=request_id,
-        prompt="Hello my name is Robert and",
-        sampling_params=SamplingParams(max_tokens=num_tokens, temperature=0))
+async def run_example(engine: AsyncLLM,
+                      request_id: str,
+                      num_tokens: int,
+                      abort_after: int = 0) -> Tuple[int, int, str]:
+
+    generator = engine.generate(request_id=request_id,
+                                prompt="Hello my name is Robert and",
+                                sampling_params=SamplingParams(
+                                    max_tokens=num_tokens, temperature=0))
 
     count = 0
     try:
@@ -42,7 +40,7 @@ async def run_example(
         print(f"{request_id=}")
         assert request_id not in engine.request_states
     finally:
-        
+
         expected_count = num_tokens if abort_after == 0 else abort_after
         return count, expected_count, request_id
 
@@ -67,12 +65,13 @@ async def test_load(monkeypatch):
 
         # Create concurrent requests.
         tasks = [
-            asyncio.create_task(run_example(
-                engine=engine,
-                request_id=request_id,
-                num_tokens=NUM_EXPECTED_TOKENS,
-                abort_after=(ABORT_AFTER if idx % ABORT_RATE == 0 else 0)
-            )) for idx, request_id in enumerate(request_ids)
+            asyncio.create_task(
+                run_example(engine=engine,
+                            request_id=request_id,
+                            num_tokens=NUM_EXPECTED_TOKENS,
+                            abort_after=(ABORT_AFTER if idx %
+                                         ABORT_RATE == 0 else 0)))
+            for idx, request_id in enumerate(request_ids)
         ]
 
         # Confirm that we got all the EXPECTED tokens from the requests.
