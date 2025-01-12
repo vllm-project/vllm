@@ -46,12 +46,12 @@ class LLMEngine:
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
-        self.tokenizer_group = init_tokenizer_from_configs(
+        self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)
-        self.tokenizer_group.ping()
+        self.tokenizer.ping()
 
         # Request States (map of request_id -> RequestState).
         self.request_states: Dict[str, RequestState] = {}
@@ -60,7 +60,7 @@ class LLMEngine:
         self.processor = Processor(model_config=vllm_config.model_config,
                                    cache_config=vllm_config.cache_config,
                                    lora_config=vllm_config.lora_config,
-                                   tokenizer=self.tokenizer_group,
+                                   tokenizer=self.tokenizer,
                                    input_registry=input_registry,
                                    mm_registry=mm_registry)
 
@@ -138,7 +138,7 @@ class LLMEngine:
 
         # 2) Make a new RequestState and queue.
         self.request_states[request_id] = RequestState.from_new_request(
-            tokenizer=self.get_tokenizer(),
+            tokenizer=self.get_tokenizer_group().get_lora_tokenizer(lora_request),
             request=request,
         )
 
@@ -173,7 +173,7 @@ class LLMEngine:
         self,
         group_type: Type[_G] = BaseTokenizerGroup,
     ) -> _G:
-        tokenizer_group = self.tokenizer_group
+        tokenizer_group = self.tokenizer
 
         if tokenizer_group is None:
             raise ValueError("Unable to get tokenizer because "
@@ -184,9 +184,3 @@ class LLMEngine:
                             f"found type: {type(tokenizer_group)}")
 
         return tokenizer_group
-
-    async def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
