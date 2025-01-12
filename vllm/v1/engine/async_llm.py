@@ -2,7 +2,7 @@ import asyncio
 import os
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import DecodingConfig, ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.engine.protocol import EngineClient
@@ -64,6 +64,7 @@ class AsyncLLM(EngineClient):
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
+            decoding_config=vllm_config.decoding_config or DecodingConfig(),
             tokenizer=self.tokenizer,
             input_registry=input_registry,
         )

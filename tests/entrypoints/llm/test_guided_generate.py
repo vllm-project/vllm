@@ -14,6 +14,14 @@ MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 @pytest.fixture(scope="module")
 def llm():
     # pytest caches the fixture so we use weakref.proxy to
@@ -236,6 +244,7 @@ def test_validation_against_both_guided_decoding_options(sample_regex, llm):
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
+@pytest.mark.skip_v1
 def test_guided_json_object(llm, guided_decoding_backend: str):
     sampling_params = SamplingParams(temperature=1.0,
                                      max_tokens=100,

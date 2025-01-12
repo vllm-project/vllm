@@ -1,5 +1,7 @@
 import pickle
 
+import cloudpickle
+
 
 class PickleEncoder:
 
@@ -8,3 +10,12 @@ class PickleEncoder:
 
     def decode(self, data):
         return pickle.loads(data)
+
+
+class CloudPickleEncoder:
+
+    def encode(self, obj):
+        return cloudpickle.dumps(obj)
+
+    def decode(self, data):
+        return cloudpickle.loads(data)

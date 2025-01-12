@@ -13,6 +13,7 @@ from msgspec import msgpack
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
@@ -23,7 +24,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.serial_utils import CloudPickleEncoder, PickleEncoder
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -270,17 +271,26 @@ class EngineCoreProc(EngineCore):
         # Msgpack serialization decoding.
         decoder_add_req = PickleEncoder()
         decoder_abort_req = PickleEncoder()
+        cloud_decoder_add_req = CloudPickleEncoder()
 
         with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
             while True:
                 # (RequestType, RequestData)
-                type_frame, data_frame = socket.recv_multipart(copy=False)
+                frames = socket.recv_multipart(copy=False)
+                type_frame, data_frame = frames[0], frames[1]
                 request_type = type_frame.buffer
                 request_data = data_frame.buffer
 
                 # Deserialize the request data.
                 if request_type == EngineCoreRequestType.ADD.value:
                     request = decoder_add_req.decode(request_data)
+                    if len(frames) >= 3:
+                        # Use cloudpickle for logits processors
+                        assert isinstance(request.sampling_params,
+                                          SamplingParams)
+                        lprocs = cloud_decoder_add_req.decode(frames[2].buffer)
+                        request.sampling_params.logits_processors = lprocs
+
                 elif request_type == EngineCoreRequestType.ABORT.value:
                     request = decoder_abort_req.decode(request_data)
                 elif request_type == EngineCoreRequestType.PROFILE.value:

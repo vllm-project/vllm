@@ -2,7 +2,7 @@ from typing import Dict, List, Mapping, Optional, Type, Union
 
 from typing_extensions import TypeVar
 
-from vllm.config import VllmConfig
+from vllm.config import DecodingConfig, VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
@@ -56,6 +56,8 @@ class LLMEngine:
         self.processor = Processor(model_config=vllm_config.model_config,
                                    cache_config=vllm_config.cache_config,
                                    lora_config=vllm_config.lora_config,
+                                   decoding_config=vllm_config.decoding_config
+                                   or DecodingConfig(),
                                    tokenizer=self.tokenizer,
                                    input_registry=input_registry,
                                    mm_registry=mm_registry)

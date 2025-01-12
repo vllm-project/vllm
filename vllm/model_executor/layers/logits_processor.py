@@ -1,6 +1,6 @@
 """A layer that compute logits from hidden_stats."""
 import inspect
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -12,6 +12,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
+from vllm.v1.sample.metadata import SamplingMetadata as SamplingMetadataV1
 
 
 class LogitsProcessor(nn.Module):
@@ -51,13 +52,14 @@ class LogitsProcessor(nn.Module):
         self,
         lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
-        sampling_metadata: Optional[SamplingMetadata] = None,
+        sampling_metadata: Optional[Union[SamplingMetadata,
+                                          SamplingMetadataV1]] = None,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         if self.logits_as_input:
             logits = hidden_states
         else:
-            if sampling_metadata is not None:
+            if not envs.VLLM_USE_V1 and sampling_metadata is not None:
                 hidden_states = _prune_hidden_states(hidden_states,
                                                      sampling_metadata)
 
@@ -74,7 +76,12 @@ class LogitsProcessor(nn.Module):
 
             # Apply logits processors (if any).
             if sampling_metadata is not None:
-                logits = _apply_logits_processors(logits, sampling_metadata)
+                if envs.VLLM_USE_V1:
+                    logits = _apply_logits_processors_v1(
+                        logits, sampling_metadata)
+                else:
+                    logits = _apply_logits_processors(logits,
+                                                      sampling_metadata)
 
         return logits
 
@@ -161,4 +168,28 @@ def _apply_logits_processors(
     if found_logits_processors:
         # verifies that no rows in logits were missed unexpectedly
         assert logits_processed == logits.shape[0]
+    return logits
+
+
+def _apply_logits_processors_v1(
+    logits: torch.Tensor,
+    sampling_metadata: SamplingMetadataV1,
+) -> torch.Tensor:
+    for idx, req_logits_processors in enumerate(
+            sampling_metadata.logits_processors):
+        if not req_logits_processors:
+            continue
+
+        past_tokens_ids = sampling_metadata.output_token_ids[idx]
+        for logits_processor in req_logits_processors:
+            parameters = inspect.signature(logits_processor).parameters
+            if len(parameters) == 3:
+                # TODO(WangErXiao): Whether to add prompt_tokens_ids info
+                # in the CPU
+                prompt_tokens_ids = sampling_metadata.prompt_token_ids[idx]
+                logits[idx] = logits_processor(prompt_tokens_ids,
+                                               past_tokens_ids, logits[idx])
+            else:
+                logits[idx] = logits_processor(past_tokens_ids, logits[idx])
+
     return logits

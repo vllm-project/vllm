@@ -12,6 +12,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
+    from vllm.logits_process import LogitsProcessor
     from vllm.multimodal.inputs import PlaceholderRange
 
 
@@ -164,6 +165,10 @@ class InputBatch:
         self.num_logprobs: Dict[str, int] = {}
         self.prompt_logprob_reqs: Set[str] = set()
 
+        # logits processors for guided decoding
+        self.logits_processors: List[Optional[List[LogitsProcessor]]] = \
+            [None] * max_num_reqs
+
     def add_request(
         self,
         request: "CachedRequestState",
@@ -229,6 +234,9 @@ class InputBatch:
             self.num_logprobs[req_id] = num_logprobs
         if sampling_params.prompt_logprobs:
             self.prompt_logprob_reqs.add(req_id)
+        if sampling_params.logits_processors is not None:
+            self.logits_processors[
+                req_index] = sampling_params.logits_processors
 
     def remove_request(self, req_id: str) -> Optional[int]:
         req_index = self.req_id_to_index.pop(req_id, None)
@@ -246,6 +254,7 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.prompt_logprob_reqs.discard(req_id)
+        self.logits_processors[req_index] = None
         return req_index
 
     def clear(self) -> None:
@@ -261,6 +270,7 @@ class InputBatch:
         self.generators.clear()
         self.num_logprobs.clear()
         self.prompt_logprob_reqs.clear()
+        self.logits_processors = [None] * self.max_num_reqs
 
     def condense(self, empty_req_indices: List[int]) -> None:
         if self.num_reqs == 0:
@@ -312,7 +322,9 @@ class InputBatch:
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
-
+            self.logits_processors[empty_index] = self.logits_processors[
+                last_req_index]
+            self.logits_processors[last_req_index] = None
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
@@ -377,6 +389,7 @@ class InputBatch:
             min_tokens=self.min_tokens[:self.num_reqs],
             stop_token_ids=self.stop_token_ids[:self.num_reqs],
             no_penalties=self.no_penalties,
+            logits_processors=self.logits_processors[:self.num_reqs],
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
