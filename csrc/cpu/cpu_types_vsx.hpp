@@ -1,4 +1,3 @@
-
 #ifndef CPU_TYPES_VSX_HPP
 #define CPU_TYPES_VSX_HPP
 
@@ -376,14 +375,6 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   }
 };
 
-template <typename T> struct VecType { using vec_type = void; };
-
-template <typename T> using vec_t = typename VecType<T>::vec_type;
-
-template <> struct VecType<float> { using vec_type = FP32Vec8; };
-
-template <> struct VecType<c10::BFloat16> { using vec_type = BF16Vec8; };
-
 template <typename T> void storeFP32(float v, T *ptr) { *ptr = v; }
 
 inline void fma(FP32Vec16 &acc, FP32Vec16 &a, FP32Vec16 &b) {
@@ -485,6 +476,55 @@ inline BF16Vec16::BF16Vec16(const FP32Vec16 &v) {
 inline void prefetch(const void *addr) {
   __asm__ __volatile__("dcbt 0, %0" : : "r"(addr) : "memory");
 }
+
+/***********************************/
+/*           OpsVecType            */
+/***********************************/
+template <typename T> struct OpsVecType { using vec_type = void; };
+
+template <typename T> using vec_t = typename OpsVecType<T>::vec_type;
+
+template <> struct OpsVecType<float> { using vec_type = vec_op::FP32Vec8; };
+
+template <> struct OpsVecType<c10::Half> { using vec_type = vec_op::FP16Vec8; };
+
+template <> struct OpsVecType<c10::BFloat16> { using vec_type = vec_op::BF16Vec8; };
+
+/***********************************/
+/*           AttnVecType           */
+/***********************************/
+template <typename scalar_t>
+struct AttnVecTypeISA;
+
+template <>
+struct AttnVecTypeISA<float> {
+  using q_load_vec_type = vec_op::FP32Vec4;
+  using q_vec_type = vec_op::FP32Vec16;
+  using k_load_vec_type = vec_op::FP32Vec16;
+  using k_vec_type = vec_op::FP32Vec16;
+  using qk_acc_vec_type = vec_op::FP32Vec16;
+  using v_load_vec_type = vec_op::FP32Vec16;
+};
+
+template <>
+struct AttnVecTypeISA<c10::Half> {
+  using q_load_vec_type = vec_op::FP32Vec8;
+  using q_vec_type = vec_op::FP32Vec16;
+  using k_load_vec_type = vec_op::FP32Vec16;
+  using k_vec_type = vec_op::FP32Vec16;
+  using qk_acc_vec_type = vec_op::FP32Vec16;
+  using v_load_vec_type = vec_op::FP32Vec16;
+};
+
+template <>
+struct AttnVecTypeISA<c10::BFloat16> {
+  using q_load_vec_type = vec_op::BF16Vec8;
+  using q_vec_type = vec_op::FP32Vec16;
+  using k_load_vec_type = vec_op::BF16Vec16;
+  using k_vec_type = vec_op::FP32Vec16;
+  using qk_acc_vec_type = vec_op::FP32Vec16;
+  using v_load_vec_type = vec_op::BF16Vec16;
+};
 
 }; // namespace vec_op
 

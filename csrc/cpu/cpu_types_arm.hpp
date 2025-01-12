@@ -1,3 +1,6 @@
+#ifndef CPU_TYPES_ARM_HPP
+#define CPU_TYPES_ARM_HPP
+
 #include <arm_neon.h>
 #include <torch/all.h> 
 #include <cmath>
@@ -5,14 +8,14 @@
 namespace vec_op {
 
 #ifdef ARM_BF16_SUPPORT
-  #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)                                 \
-    AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)                         \
-    AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)                         \
-    AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)  
+#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)                                 \
+  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)                         \
+  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)                          \
+  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)
 #else
-  #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)                                 \
-    AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)                         \
-    AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)
+#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)                                 \
+  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)                         \
+  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)
 #endif
 
 #define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...)                          \
@@ -487,18 +490,6 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   };
 };
 
-template <typename T> struct VecType { using vec_type = void; };
-
-template <typename T> using vec_t = typename VecType<T>::vec_type;
-
-template <> struct VecType<float> { using vec_type = FP32Vec8; };
-
-template <> struct VecType<c10::Half> { using vec_type = FP16Vec8; };
-
-#ifdef ARM_BF16_SUPPORT
-template <> struct VecType<c10::BFloat16> { using vec_type = BF16Vec8; };
-#endif
-
 template <typename T> void storeFP32(float v, T *ptr) { *ptr = v; }
 
 template <> inline void storeFP32<c10::Half>(float v, c10::Half *ptr) {
@@ -569,4 +560,67 @@ inline void storeFP32<c10::BFloat16>(float v, c10::BFloat16 *ptr) {
   *reinterpret_cast<__bf16 *>(ptr) = vcvth_bf16_f32(v);
 };
 #endif
+
+/***********************************/
+/*           OpsVecType            */
+/***********************************/
+template <typename T> struct OpsVecType { using vec_type = void; };
+
+template <typename T> using vec_t = typename OpsVecType<T>::vec_type;
+
+template <> struct OpsVecType<float> { using vec_type = vec_op::FP32Vec8; };
+
+template <> struct OpsVecType<c10::Half> { using vec_type = vec_op::FP16Vec8; };
+
+#ifdef ARM_BF16_SUPPORT
+template <> struct OpsVecType<c10::BFloat16> { using vec_type = vec_op::BF16Vec8; };
+#endif
+
+/***********************************/
+/*           AttnVecType           */
+/***********************************/
+template <typename scalar_t>
+struct AttnVecTypeISA {
+  using q_load_vec_type = void;
+  using q_vec_type = void;
+  using k_load_vec_type = void;
+  using k_vec_type = void;
+  using qk_acc_vec_type = void;
+  using v_load_vec_type = void;
 };
+
+template <>
+struct AttnVecTypeISA<float> {
+  using q_load_vec_type = vec_op::FP32Vec4;
+  using q_vec_type = vec_op::FP32Vec16;
+  using k_load_vec_type = vec_op::FP32Vec16;
+  using k_vec_type = vec_op::FP32Vec16;
+  using qk_acc_vec_type = vec_op::FP32Vec16;
+  using v_load_vec_type = vec_op::FP32Vec16;
+};
+
+template <>
+struct AttnVecTypeISA<c10::Half> {
+  using q_load_vec_type = vec_op::FP16Vec8;
+  using q_vec_type = vec_op::FP32Vec16;
+  using k_load_vec_type = vec_op::FP16Vec16;
+  using k_vec_type = vec_op::FP32Vec16;
+  using qk_acc_vec_type = vec_op::FP32Vec16;
+  using v_load_vec_type = vec_op::FP16Vec16;
+};
+
+#ifdef ARM_BF16_SUPPORT
+template <>
+struct AttnVecTypeISA<c10::BFloat16> {
+  using q_load_vec_type = vec_op::BF16Vec8;
+  using q_vec_type = vec_op::FP32Vec16;
+  using k_load_vec_type = vec_op::BF16Vec16;
+  using k_vec_type = vec_op::FP32Vec16;
+  using qk_acc_vec_type = vec_op::FP32Vec16;
+  using v_load_vec_type = vec_op::BF16Vec16;
+};
+#endif  // ARM_BF16_SUPPORT
+
+};  // namespace vec_op
+
+#endif
