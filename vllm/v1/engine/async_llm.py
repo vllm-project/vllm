@@ -226,8 +226,9 @@ class AsyncLLM(EngineClient):
 
                 yield out
 
-        # If the request is disconnected by the client, the generate()
-        # task will be canceled. So, we abort the request if we end up here.
+        # If the request is disconnected by the client, the
+        # generate() task will be canceled. So, we abort the
+        # request if we end up here.
         except asyncio.CancelledError:
             await self.abort(request_id)
             raise
