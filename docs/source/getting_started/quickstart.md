@@ -19,17 +19,17 @@ If you are using NVIDIA GPUs, you can install vLLM using [pip](https://pypi.org/
 It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
 
 ```console
-$ uv venv myenv --python 3.12 --seed
-$ source myenv/bin/activate
-$ uv pip install vllm
+uv venv myenv --python 3.12 --seed
+source myenv/bin/activate
+uv pip install vllm
 ```
 
 You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments.
 
 ```console
-$ conda create -n myenv python=3.12 -y
-$ conda activate myenv
-$ pip install vllm
+conda create -n myenv python=3.12 -y
+conda activate myenv
+pip install vllm
 ```
 
 ```{note}
@@ -94,7 +94,7 @@ By default, it starts the server at `http://localhost:8000`. You can specify the
 Run the following command to start the vLLM server with the [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) model:
 
 ```console
-$ vllm serve Qwen/Qwen2.5-1.5B-Instruct
+vllm serve Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 ```{note}
@@ -105,7 +105,7 @@ You can learn about overriding it [here](#chat-template).
 This server can be queried in the same format as OpenAI API. For example, to list the models:
 
 ```console
-$ curl http://localhost:8000/v1/models
+curl http://localhost:8000/v1/models
 ```
 
 You can pass in the argument `--api-key` or environment variable `VLLM_API_KEY` to enable the server to check for API key in the header.
@@ -115,14 +115,14 @@ You can pass in the argument `--api-key` or environment variable `VLLM_API_KEY` 
 Once your server is started, you can query the model with input prompts:
 
 ```console
-$ curl http://localhost:8000/v1/completions \
-$     -H "Content-Type: application/json" \
-$     -d '{
-$         "model": "Qwen/Qwen2.5-1.5B-Instruct",
-$         "prompt": "San Francisco is a",
-$         "max_tokens": 7,
-$         "temperature": 0
-$     }'
+curl http://localhost:8000/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "prompt": "San Francisco is a",
+        "max_tokens": 7,
+        "temperature": 0
+    }'
 ```
 
 Since this server is compatible with OpenAI API, you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the `openai` Python package:
@@ -151,15 +151,15 @@ vLLM is designed to also support the OpenAI Chat Completions API. The chat inter
 You can use the [create chat completion](https://platform.openai.com/docs/api-reference/chat/completions/create) endpoint to interact with the model:
 
 ```console
-$ curl http://localhost:8000/v1/chat/completions \
-$     -H "Content-Type: application/json" \
-$     -d '{
-$         "model": "Qwen/Qwen2.5-1.5B-Instruct",
-$         "messages": [
-$             {"role": "system", "content": "You are a helpful assistant."},
-$             {"role": "user", "content": "Who won the world series in 2020?"}
-$         ]
-$     }'
+curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Who won the world series in 2020?"}
+        ]
+    }'
 ```
 
 Alternatively, you can use the `openai` Python package:

@@ -216,6 +216,9 @@ class SyncMPClient(MPClient):
         self.input_socket.send_multipart(msg, copy=False)
 
     def add_request(self, request: EngineCoreRequest) -> None:
+        # NOTE: text prompt is not needed in the core engine as it has been
+        # tokenized.
+        request.prompt = None
         self._send_input(EngineCoreRequestType.ADD, request)
 
     def abort_requests(self, request_ids: List[str]) -> None:
@@ -251,6 +254,9 @@ class AsyncMPClient(MPClient):
         await self.input_socket.send_multipart(msg, copy=False)
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        # NOTE: text prompt is not needed in the core engine as it has been
+        # tokenized.
+        request.prompt = None
         await self._send_input(EngineCoreRequestType.ADD, request)
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:

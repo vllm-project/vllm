@@ -16,7 +16,7 @@ INT8 computation is supported on NVIDIA GPUs with compute capability > 7.5 (Turi
 To use INT8 quantization with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:
 
 ```console
-$ pip install llmcompressor
+pip install llmcompressor
 ```
 
 ## Quantization Process

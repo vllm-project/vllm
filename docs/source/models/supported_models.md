@@ -45,7 +45,7 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 To use models from [ModelScope](https://www.modelscope.cn) instead of HuggingFace Hub, set an environment variable:
 
 ```shell
-$ export VLLM_USE_MODELSCOPE=True
+export VLLM_USE_MODELSCOPE=True
 ```
 
 And use with `trust_remote_code=True`.
@@ -610,6 +610,13 @@ See [this page](#generative-models) for more information on how to use generativ
   -
   - ✅︎
   - ✅︎
+* - `DeepseekVLV2ForCausalLM`
+  - DeepSeek-VL2
+  - T + I<sup>+</sup>
+  - `deepseek-ai/deepseek-vl2-tiny`(WIP), `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2` etc. (see note)
+  -
+  - ✅︎
+  - ✅︎
 * - `FuyuForCausalLM`
   - Fuyu
   - T + I
@@ -755,8 +762,19 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
+````{note}
+The `deepseek-ai/deepseek-vl2-tiny` is not supported yet.
+
+To use `DeepSeek-VL2` series models, you need to install a fork version `deepseek_vl2` package:
+```shell
+pip install git+https://github.com/Isotr0py/DeepSeek-VL2.git
+```
+
+Besides, to run `DeepSeek-VL2` series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
+````
+
 ```{note}
-To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
+To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
 ```
 
 ```{note}
@@ -820,19 +838,22 @@ The following table lists those that are tested in vLLM.
 
 _________________
 
-# Model Support Policy
+## Model Support Policy
 
 At vLLM, we are committed to facilitating the integration and support of third-party models within our ecosystem. Our approach is designed to balance the need for robustness and the practical limitations of supporting a wide range of models. Here’s how we manage third-party model support:
 
 1. **Community-Driven Support**: We encourage community contributions for adding new models. When a user requests support for a new model, we welcome pull requests (PRs) from the community. These contributions are evaluated primarily on the sensibility of the output they generate, rather than strict consistency with existing implementations such as those in transformers. **Call for contribution:** PRs coming directly from model vendors are greatly appreciated!
+
 2. **Best-Effort Consistency**: While we aim to maintain a level of consistency between the models implemented in vLLM and other frameworks like transformers, complete alignment is not always feasible. Factors like acceleration techniques and the use of low-precision computations can introduce discrepancies. Our commitment is to ensure that the implemented models are functional and produce sensible results.
 
-```{tip}
-When comparing the output of `model.generate` from HuggingFace Transformers with the output of `llm.generate` from vLLM, note that the former reads the model's generation config file (i.e., [generation_config.json](https://github.com/huggingface/transformers/blob/19dabe96362803fb0a9ae7073d03533966598b17/src/transformers/generation/utils.py#L1945)) and applies the default parameters for generation, while the latter only uses the parameters passed to the function. Ensure all sampling parameters are identical when comparing outputs.
-```
+    ```{tip}
+    When comparing the output of `model.generate` from HuggingFace Transformers with the output of `llm.generate` from vLLM, note that the former reads the model's generation config file (i.e., [generation_config.json](https://github.com/huggingface/transformers/blob/19dabe96362803fb0a9ae7073d03533966598b17/src/transformers/generation/utils.py#L1945)) and applies the default parameters for generation, while the latter only uses the parameters passed to the function. Ensure all sampling parameters are identical when comparing outputs.
+    ```
 
 3. **Issue Resolution and Model Updates**: Users are encouraged to report any bugs or issues they encounter with third-party models. Proposed fixes should be submitted via PRs, with a clear explanation of the problem and the rationale behind the proposed solution. If a fix for one model impacts another, we rely on the community to highlight and address these cross-model dependencies. Note: for bugfix PRs, it is good etiquette to inform the original author to seek their feedback.
+
 4. **Monitoring and Updates**: Users interested in specific models should monitor the commit history for those models (e.g., by tracking changes in the main/vllm/model_executor/models directory). This proactive approach helps users stay informed about updates and changes that may affect the models they use.
+
 5. **Selective Focus**: Our resources are primarily directed towards models with significant user interest and impact. Models that are less frequently used may receive less attention, and we rely on the community to play a more active role in their upkeep and improvement.
 
 Through this approach, vLLM fosters a collaborative environment where both the core development team and the broader community contribute to the robustness and diversity of the third-party models supported in our ecosystem.
