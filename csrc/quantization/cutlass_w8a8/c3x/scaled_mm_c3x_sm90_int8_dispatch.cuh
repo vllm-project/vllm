@@ -1,6 +1,7 @@
 #pragma once
 
 #include "scaled_mm_c3x.cuh"
+#include "cutlass_gemm_caller.cuh"
 
 /**
  * This file defines Gemm kernel configurations for SM90 (int8) based on the
@@ -8,6 +9,8 @@
  */
 
 namespace vllm {
+
+using c3x::cutlass_gemm_caller;
 
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
@@ -134,6 +137,26 @@ inline void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out,
     // m in (128, inf)
     return cutlass_gemm_caller<Cutlass3xGemmDefault>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
+  }
+}
+
+template <template <typename, typename, typename> typename Epilogue,
+          typename... EpilogueArgs>
+void cutlass_scaled_mm_sm90_int8_epilogue(torch::Tensor& out,
+                                          torch::Tensor const& a,
+                                          torch::Tensor const& b,
+                                          EpilogueArgs&&... epilogue_args) {
+  TORCH_CHECK(a.dtype() == torch::kInt8);
+  TORCH_CHECK(b.dtype() == torch::kInt8);
+
+  if (out.dtype() == torch::kBFloat16) {
+    return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::bfloat16_t,
+                                           Epilogue>(
+        out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
+  } else {
+    TORCH_CHECK(out.dtype() == torch::kFloat16);
+    return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::half_t, Epilogue>(
+        out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
   }
 }
 
