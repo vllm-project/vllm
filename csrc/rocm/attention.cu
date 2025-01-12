@@ -163,7 +163,14 @@ __device__ __forceinline__ _B16x4 addx4(const _B16x4& inp1,
     for (int i = 0; i < 4; i++) {
       t1.u = inp1[i];
       t2.u = inp2[i];
-      res.b = t1.b + t2.b;
+      // See https://github.com/ROCm/ROCm/issues/2534
+      hip_bfloat16 t1b, t2b;
+      __hip_bfloat16 resb;
+      t1b.data = t1.b.data;
+      t2b.data = t2.b.data;
+      resb.data = (t1b + t2b).data;
+      res.b = resb;
+      // res.b = t1.b + t2.b;
       ret[i] = res.u;
     }
     return ret;
