@@ -214,10 +214,10 @@ class EngineCoreProc(EngineCore):
                         self._handle_client_request(req)
                         break
                     except queue.Empty:
-                        # Break out the loops so we can log_stats via step().
+                        logger.debug("EngineCore busy loop waiting.")
+                        # Break out the loop so we can log_stats in step().
                         if self.log_stats:
                             break
-                        logger.debug("EngineCore busy loop waiting.")
                     except BaseException:
                         raise
 
