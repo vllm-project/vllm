@@ -703,9 +703,22 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             execute_model_req.previous_hidden_states = \
                 prepare_prefill_hidden_states(
                     sampler_output.prefill_hidden_states)
+
+            # The current LoRA adapter is configured for the target model. 
+            # Applying it to the draft model might cause errors, so it is temporarily disabled.
+            original_lora_requests = [
+                metadata.lora_request for metadata in execute_model_req.seq_group_metadata_list
+            ]
+            for metadata in execute_model_req.seq_group_metadata_list:
+                metadata.lora_request = None
+
             for i in range(self._num_spec_prefill_steps):
                 execute_model_req.spec_step_idx = i
                 self.proposer_worker.execute_model(execute_model_req)
+
+            # Restore the original LoRA information in execute_model_req after proposals are generated.
+            for metadata, original_lora_request in zip(execute_model_req.seq_group_metadata_list, original_lora_requests):
+                metadata.lora_request = original_lora_request
 
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
             execute_model_req=execute_model_req, sampler_output=sampler_output)
@@ -779,9 +792,21 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         self.previous_hidden_states = None
 
         with Timer() as proposal_timer:
+            # The current LoRA adapter is configured for the target model. 
+            # Applying it to the draft model might cause errors, so it is temporarily disabled.
+            original_lora_requests = [
+                metadata.lora_request for metadata in execute_model_req.seq_group_metadata_list
+            ]
+            for metadata in execute_model_req.seq_group_metadata_list:
+                metadata.lora_request = None
+
             # Generate proposals using draft worker.
             proposals = self.proposer_worker.get_spec_proposals(
                 execute_model_req, self._seq_with_bonus_token_in_last_step)
+
+            # Restore the original LoRA information in execute_model_req after proposals are generated.
+            for metadata, original_lora_request in zip(execute_model_req.seq_group_metadata_list, original_lora_requests):
+                metadata.lora_request = original_lora_request
 
         if not self._allow_zero_draft_token_step and proposals.no_proposals:
             #TODO: Fix it #5814
@@ -1251,12 +1276,22 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         """Get the vocab size of the model and make sure it's consistent between
         draft and target workers.
         """
-        vocab_sizes = [
+        orig_vocab_sizes = [
             worker.vocab_size
             for worker in [self.proposer_worker, self.scorer_worker]
         ]
-        assert all(vocab_sizes[0] == vocab_size for vocab_size in vocab_sizes)
-        return vocab_sizes[0]
+        assert all(orig_vocab_sizes[0] == vocab_size for vocab_size in orig_vocab_sizes)
+
+        # If LoRA is enabled, additional padding is applied to the vocabulary size 
+        # for kernel compatibility.
+        lora_vocab_padding_sizes = [
+            worker.lora_config.lora_vocab_padding_size
+            for worker in [self.proposer_worker, self.scorer_worker]
+            if worker.lora_config is not None and worker.lora_config.lora_vocab_padding_size is not None
+        ]
+        assert all(lora_vocab_padding_sizes[0] == vocab_size for vocab_size in lora_vocab_padding_sizes)
+
+        return orig_vocab_sizes[0] + lora_vocab_padding_sizes[0]
 
     @property
     def rank(self):
