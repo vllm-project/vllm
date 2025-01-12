@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, List, Optional, Union
 
 import msgspec
 
+from vllm.v1.metrics.stats import SchedulerStats
+
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
@@ -56,6 +58,7 @@ class EngineCoreOutputs(
 
     # [num_reqs]
     outputs: List[EngineCoreOutput]
+    scheduler_stats: SchedulerStats
 
 
 @dataclass
