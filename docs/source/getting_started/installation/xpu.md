@@ -40,15 +40,15 @@ $ docker run -it \
 - Second, install Python packages for vLLM XPU backend building:
 
 ```console
-$ source /opt/intel/oneapi/setvars.sh
-$ pip install --upgrade pip
-$ pip install -v -r requirements-xpu.txt
+source /opt/intel/oneapi/setvars.sh
+pip install --upgrade pip
+pip install -v -r requirements-xpu.txt
 ```
 
 - Finally, build and install vLLM XPU backend:
 
 ```console
-$ VLLM_TARGET_DEVICE=xpu python setup.py install
+VLLM_TARGET_DEVICE=xpu python setup.py install
 ```
 
 ```{note}
@@ -61,14 +61,14 @@ $ VLLM_TARGET_DEVICE=xpu python setup.py install
 XPU platform supports tensor-parallel inference/serving and also supports pipeline parallel as a beta feature for online serving. We requires Ray as the distributed runtime backend. For example, a reference execution likes following:
 
 ```console
-$ python -m vllm.entrypoints.openai.api_server \
-$      --model=facebook/opt-13b \
-$      --dtype=bfloat16 \
-$      --device=xpu \
-$      --max_model_len=1024 \
-$      --distributed-executor-backend=ray \
-$      --pipeline-parallel-size=2 \
-$      -tp=8
+python -m vllm.entrypoints.openai.api_server \
+     --model=facebook/opt-13b \
+     --dtype=bfloat16 \
+     --device=xpu \
+     --max_model_len=1024 \
+     --distributed-executor-backend=ray \
+     --pipeline-parallel-size=2 \
+     -tp=8
 ```
 
 By default, a ray instance will be launched automatically if no existing one is detected in system, with `num-gpus` equals to `parallel_config.world_size`. We recommend properly starting a ray cluster before execution, referring to the <gh-file:examples/online_serving/run_cluster.sh> helper script.

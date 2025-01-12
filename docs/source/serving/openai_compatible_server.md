@@ -5,11 +5,13 @@
 vLLM provides an HTTP server that implements OpenAI's [Completions API](https://platform.openai.com/docs/api-reference/completions), [Chat API](https://platform.openai.com/docs/api-reference/chat), and more!
 
 You can start the server via the [`vllm serve`](#vllm-serve) command, or through [Docker](#deployment-docker):
+
 ```bash
 vllm serve NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
 ```
 
 To call the server, you can use the [official OpenAI Python client](https://github.com/openai/openai-python), or any other HTTP client.
+
 ```python
 from openai import OpenAI
 client = OpenAI(
@@ -50,6 +52,7 @@ In addition, we have the following custom APIs:
   - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
 
 (chat-template)=
+
 ## Chat Template
 
 In order for the language model to support chat protocol, vLLM requires the model to include
@@ -71,6 +74,7 @@ vLLM community provides a set of chat templates for popular models. You can find
 
 With the inclusion of multi-modal chat APIs, the OpenAI spec now accepts chat messages in a new format which specifies
 both a `type` and a `text` field. An example is provided below:
+
 ```python
 completion = client.chat.completions.create(
   model="NousResearch/Meta-Llama-3-8B-Instruct",
@@ -80,7 +84,7 @@ completion = client.chat.completions.create(
 )
 ```
 
-Most chat templates for LLMs expect the `content` field to be a string, but there are some newer models like 
+Most chat templates for LLMs expect the `content` field to be a string, but there are some newer models like
 `meta-llama/Llama-Guard-3-1B` that expect the content to be formatted according to the OpenAI schema in the
 request. vLLM provides best-effort support to detect this automatically, which is logged as a string like
 *"Detected the chat template content format to be..."*, and internally converts incoming requests to match
@@ -115,12 +119,12 @@ completion = client.chat.completions.create(
 ## Extra HTTP Headers
 
 Only `X-Request-Id` HTTP request header is supported for now. It can be enabled
-with `--enable-request-id-headers`. 
+with `--enable-request-id-headers`.
 
 > Note that enablement of the headers can impact performance significantly at high QPS
 > rates. We recommend implementing HTTP headers at the router level (e.g. via Istio),
 > rather than within the vLLM layer for this reason.
-> See https://github.com/vllm-project/vllm/pull/11529 for more details.
+> See [this PR](https://github.com/vllm-project/vllm/pull/11529) for more details.
 
 ```python
 completion = client.chat.completions.create(
@@ -147,6 +151,7 @@ print(completion._request_id)
 ## CLI Reference
 
 (vllm-serve)=
+
 ### `vllm serve`
 
 The `vllm serve` command is used to launch the OpenAI-compatible server.
@@ -175,7 +180,7 @@ uvicorn-log-level: "info"
 To use the above config file:
 
 ```bash
-$ vllm serve SOME_MODEL --config config.yaml
+vllm serve SOME_MODEL --config config.yaml
 ```
 
 ```{note}
@@ -186,6 +191,7 @@ The order of priorities is `command line > config file values > defaults`.
 ## API Reference
 
 (completions-api)=
+
 ### Completions API
 
 Our Completions API is compatible with [OpenAI's Completions API](https://platform.openai.com/docs/api-reference/completions);
@@ -212,6 +218,7 @@ The following extra parameters are supported:
 ```
 
 (chat-api)=
+
 ### Chat API
 
 Our Chat API is compatible with [OpenAI's Chat Completions API](https://platform.openai.com/docs/api-reference/chat);
@@ -243,6 +250,7 @@ The following extra parameters are supported:
 ```
 
 (embeddings-api)=
+
 ### Embeddings API
 
 Our Embeddings API is compatible with [OpenAI's Embeddings API](https://platform.openai.com/docs/api-reference/embeddings);
@@ -284,6 +292,7 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
 ```
 
 (tokenizer-api)=
+
 ### Tokenizer API
 
 Our Tokenizer API is a simple wrapper over [HuggingFace-style tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer).
@@ -293,6 +302,7 @@ It consists of two endpoints:
 - `/detokenize` corresponds to calling `tokenizer.decode()`.
 
 (pooling-api)=
+
 ### Pooling API
 
 Our Pooling API encodes input prompts using a [pooling model](../models/pooling_models.md) and returns the corresponding hidden states.
@@ -302,6 +312,7 @@ The input format is the same as [Embeddings API](#embeddings-api), but the outpu
 Code example: <gh-file:examples/online_serving/openai_pooling_client.py>
 
 (score-api)=
+
 ### Score API
 
 Our Score API applies a cross-encoder model to predict scores for sentence pairs.

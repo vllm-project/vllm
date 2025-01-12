@@ -22,8 +22,8 @@ Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optim
 ### Quick start using Dockerfile
 
 ```console
-$ docker build -f Dockerfile.hpu -t vllm-hpu-env  .
-$ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --rm vllm-hpu-env
+docker build -f Dockerfile.hpu -t vllm-hpu-env  .
+docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --rm vllm-hpu-env
 ```
 
 ```{tip}
@@ -37,10 +37,10 @@ If you're observing the following error: `docker: Error response from daemon: Un
 To verify that the Intel Gaudi software was correctly installed, run:
 
 ```console
-$ hl-smi # verify that hl-smi is in your PATH and each Gaudi accelerator is visible
-$ apt list --installed | grep habana # verify that habanalabs-firmware-tools, habanalabs-graph, habanalabs-rdma-core, habanalabs-thunk and habanalabs-container-runtime are installed
-$ pip list | grep habana # verify that habana-torch-plugin, habana-torch-dataloader, habana-pyhlml and habana-media-loader are installed
-$ pip list | grep neural # verify that neural_compressor is installed
+hl-smi # verify that hl-smi is in your PATH and each Gaudi accelerator is visible
+apt list --installed | grep habana # verify that habanalabs-firmware-tools, habanalabs-graph, habanalabs-rdma-core, habanalabs-thunk and habanalabs-container-runtime are installed
+pip list | grep habana # verify that habana-torch-plugin, habana-torch-dataloader, habana-pyhlml and habana-media-loader are installed
+pip list | grep neural # verify that neural_compressor is installed
 ```
 
 Refer to [Intel Gaudi Software Stack
@@ -57,8 +57,8 @@ for more details.
 Use the following commands to run a Docker image:
 
 ```console
-$ docker pull vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
-$ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
+docker pull vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
+docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
 ```
 
 #### Build and Install vLLM
@@ -66,18 +66,18 @@ $ docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_
 To build and install vLLM from source, run:
 
 ```console
-$ git clone https://github.com/vllm-project/vllm.git
-$ cd vllm
-$ python setup.py develop
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+python setup.py develop
 ```
 
 Currently, the latest features and performance optimizations are developed in Gaudi's [vLLM-fork](https://github.com/HabanaAI/vllm-fork) and we periodically upstream them to vLLM main repo. To install latest [HabanaAI/vLLM-fork](https://github.com/HabanaAI/vllm-fork), run the following:
 
 ```console
-$ git clone https://github.com/HabanaAI/vllm-fork.git
-$ cd vllm-fork
-$ git checkout habana_main
-$ python setup.py develop
+git clone https://github.com/HabanaAI/vllm-fork.git
+cd vllm-fork
+git checkout habana_main
+python setup.py develop
 ```
 
 ## Supported Features
@@ -181,7 +181,7 @@ Bucketing allows us to reduce the number of required graphs significantly, but i
 
 Bucketing ranges are determined with 3 parameters - `min`, `step` and `max`. They can be set separately for prompt and decode phase, and for batch size and sequence length dimension. These parameters can be observed in logs during vLLM startup:
 
-```
+```text
 INFO 08-01 21:37:59 hpu_model_runner.py:493] Prompt bucket config (min, step, max_warmup) bs:[1, 32, 4], seq:[128, 128, 1024]
 INFO 08-01 21:37:59 hpu_model_runner.py:499] Generated 24 prompt buckets: [(1, 128), (1, 256), (1, 384), (1, 512), (1, 640), (1, 768), (1, 896), (1, 1024), (2, 128), (2, 256), (2, 384), (2, 512), (2, 640), (2, 768), (2, 896), (2, 1024), (4, 128), (4, 256), (4, 384), (4, 512), (4, 640), (4, 768), (4, 896), (4, 1024)]
 INFO 08-01 21:37:59 hpu_model_runner.py:504] Decode bucket config (min, step, max_warmup) bs:[1, 128, 4], seq:[128, 128, 2048]
@@ -192,7 +192,7 @@ INFO 08-01 21:37:59 hpu_model_runner.py:509] Generated 48 decode buckets: [(1, 1
 
 Example (with ramp-up)
 
-```
+```text
 min = 2, step = 32, max = 64
 => ramp_up = (2, 4, 8, 16)
 => stable = (32, 64)
@@ -201,7 +201,7 @@ min = 2, step = 32, max = 64
 
 Example (without ramp-up)
 
-```
+```text
 min = 128, step = 128, max = 512
 => ramp_up = ()
 => stable = (128, 256, 384, 512)
@@ -224,7 +224,7 @@ Bucketing is transparent to a client -- padding in sequence length dimension is 
 
 Warmup is an optional, but highly recommended step occurring before vLLM server starts listening. It executes a forward pass for each bucket with dummy data. The goal is to pre-compile all graphs and not incur any graph compilation overheads within bucket boundaries during server runtime. Each warmup step is logged during vLLM startup:
 
-```
+```text
 INFO 08-01 22:26:47 hpu_model_runner.py:1066] [Warmup][Prompt][1/24] batch_size:4 seq_len:1024 free_mem:79.16 GiB
 INFO 08-01 22:26:47 hpu_model_runner.py:1066] [Warmup][Prompt][2/24] batch_size:4 seq_len:896 free_mem:55.43 GiB
 INFO 08-01 22:26:48 hpu_model_runner.py:1066] [Warmup][Prompt][3/24] batch_size:4 seq_len:768 free_mem:55.43 GiB
@@ -273,7 +273,7 @@ When there's large amount of requests pending, vLLM scheduler will attempt to fi
 
 Each described step is logged by vLLM server, as follows (negative values correspond to memory being released):
 
-```
+```text
 INFO 08-02 17:37:44 hpu_model_runner.py:493] Prompt bucket config (min, step, max_warmup) bs:[1, 32, 4], seq:[128, 128, 1024]
 INFO 08-02 17:37:44 hpu_model_runner.py:499] Generated 24 prompt buckets: [(1, 128), (1, 256), (1, 384), (1, 512), (1, 640), (1, 768), (1, 896), (1, 1024), (2, 128), (2, 256), (2, 384), (2, 512), (2, 640), (2, 768), (2, 896), (2, 1024), (4, 128), (4, 256), (4, 384), (4, 512), (4, 640), (4, 768), (4, 896), (4, 1024)]
 INFO 08-02 17:37:44 hpu_model_runner.py:504] Decode bucket config (min, step, max_warmup) bs:[1, 128, 4], seq:[128, 128, 2048]
@@ -349,19 +349,19 @@ INFO 08-02 17:38:43 hpu_executor.py:91] init_cache_engine took 37.92 GiB of devi
   - Default values:
 
     - Prompt:
-      : - batch size min (`VLLM_PROMPT_BS_BUCKET_MIN`): `1`
-        - batch size step (`VLLM_PROMPT_BS_BUCKET_STEP`): `min(max_num_seqs, 32)`
-        - batch size max (`VLLM_PROMPT_BS_BUCKET_MAX`): `min(max_num_seqs, 64)`
-        - sequence length min (`VLLM_PROMPT_SEQ_BUCKET_MIN`): `block_size`
-        - sequence length step (`VLLM_PROMPT_SEQ_BUCKET_STEP`): `block_size`
-        - sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `max_model_len`
+      - batch size min (`VLLM_PROMPT_BS_BUCKET_MIN`): `1`
+      - batch size step (`VLLM_PROMPT_BS_BUCKET_STEP`): `min(max_num_seqs, 32)`
+      - batch size max (`VLLM_PROMPT_BS_BUCKET_MAX`): `min(max_num_seqs, 64)`
+      - sequence length min (`VLLM_PROMPT_SEQ_BUCKET_MIN`): `block_size`
+      - sequence length step (`VLLM_PROMPT_SEQ_BUCKET_STEP`): `block_size`
+      - sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `max_model_len`
     - Decode:
-      : - batch size min (`VLLM_DECODE_BS_BUCKET_MIN`): `1`
-        - batch size step (`VLLM_DECODE_BS_BUCKET_STEP`): `min(max_num_seqs, 32)`
-        - batch size max (`VLLM_DECODE_BS_BUCKET_MAX`): `max_num_seqs`
-        - sequence length min (`VLLM_DECODE_BLOCK_BUCKET_MIN`): `block_size`
-        - sequence length step (`VLLM_DECODE_BLOCK_BUCKET_STEP`): `block_size`
-        - sequence length max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max(128, (max_num_seqs*max_model_len)/block_size)`
+      - batch size min (`VLLM_DECODE_BS_BUCKET_MIN`): `1`
+      - batch size step (`VLLM_DECODE_BS_BUCKET_STEP`): `min(max_num_seqs, 32)`
+      - batch size max (`VLLM_DECODE_BS_BUCKET_MAX`): `max_num_seqs`
+      - sequence length min (`VLLM_DECODE_BLOCK_BUCKET_MIN`): `block_size`
+      - sequence length step (`VLLM_DECODE_BLOCK_BUCKET_STEP`): `block_size`
+      - sequence length max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max(128, (max_num_seqs*max_model_len)/block_size)`
 
 Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM execution:
 

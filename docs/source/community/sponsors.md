@@ -6,6 +6,7 @@ vLLM is a community project. Our compute resources for development and testing a
 <!-- Note: Please keep these consistent with README.md. -->
 
 Cash Donations:
+
 - a16z
 - Dropbox
 - Sequoia Capital
@@ -13,6 +14,7 @@ Cash Donations:
 - ZhenFund
 
 Compute Resources:
+
 - AMD
 - Anyscale
 - AWS

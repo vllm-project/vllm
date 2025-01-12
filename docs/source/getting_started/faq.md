@@ -30,7 +30,7 @@ changes in batch size, or batch expansion in speculative decoding. These batchin
 can lead to slightly different logit/logprob values at each step. Such differences can accumulate, potentially resulting in
 different tokens being sampled. Once a different token is sampled, further divergence is likely.
 
-**Mitigation Strategies**
+## Mitigation Strategies
 
 - For improved stability and reduced variance, use `float32`. Note that this will require more memory.
 - If using `bfloat16`, switching to `float16` can also help.

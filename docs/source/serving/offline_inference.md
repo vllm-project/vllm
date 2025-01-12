@@ -64,7 +64,7 @@ Dynamic quantization is also supported via the `quantization` option -- see [her
 
 #### Context length and batch size
 
-You can further reduce memory usage by limit the context length of the model (`max_model_len` option)
+You can further reduce memory usage by limiting the context length of the model (`max_model_len` option)
 and the maximum batch size (`max_num_seqs` option).
 
 ```python

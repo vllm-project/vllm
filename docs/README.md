@@ -16,4 +16,5 @@ make html
 ```bash
 python -m http.server -d build/html/
 ```
+
 Launch your browser and open localhost:8000.

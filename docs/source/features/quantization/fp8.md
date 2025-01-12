@@ -41,7 +41,7 @@ Currently, we load the model at original precision before quantizing down to 8-b
 To produce performant FP8 quantized models with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:
 
 ```console
-$ pip install llmcompressor
+pip install llmcompressor
 ```
 
 ## Quantization Process
@@ -98,7 +98,7 @@ tokenizer.save_pretrained(SAVE_DIR)
 Install `vllm` and `lm-evaluation-harness`:
 
 ```console
-$ pip install vllm lm-eval==0.4.4
+pip install vllm lm-eval==0.4.4
 ```
 
 Load and run the model in `vllm`:

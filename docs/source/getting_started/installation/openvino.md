@@ -27,8 +27,8 @@ vLLM powered by OpenVINO supports all LLM models from [vLLM supported models lis
 ## Quick start using Dockerfile
 
 ```console
-$ docker build -f Dockerfile.openvino -t vllm-openvino-env .
-$ docker run -it --rm vllm-openvino-env
+docker build -f Dockerfile.openvino -t vllm-openvino-env .
+docker run -it --rm vllm-openvino-env
 ```
 
 (install-openvino-backend-from-source)=
@@ -38,21 +38,21 @@ $ docker run -it --rm vllm-openvino-env
 - First, install Python. For example, on Ubuntu 22.04, you can run:
 
   ```console
-  $ sudo apt-get update  -y
-  $ sudo apt-get install python3
+  sudo apt-get update  -y
+  sudo apt-get install python3
   ```
 
 - Second, install prerequisites vLLM OpenVINO backend installation:
 
   ```console
-  $ pip install --upgrade pip
-  $ pip install -r requirements-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
+  pip install --upgrade pip
+  pip install -r requirements-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
   ```
 
 - Finally, install vLLM with OpenVINO backend:
 
   ```console
-  $ PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" VLLM_TARGET_DEVICE=openvino python -m pip install -v .
+  PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" VLLM_TARGET_DEVICE=openvino python -m pip install -v .
   ```
 
 - [Optional] To use vLLM OpenVINO backend with a GPU device, ensure your system is properly set up. Follow the instructions provided here: [https://docs.openvino.ai/2024/get-started/configurations/configurations-intel-gpu.html](https://docs.openvino.ai/2024/get-started/configurations/configurations-intel-gpu.html).

@@ -200,6 +200,7 @@ def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
 ```{note}
 Our [actual code](gh-file:vllm/model_executor/models/llava.py) is more abstracted to support vision encoders other than CLIP.
 ```
+
 :::
 ::::
 
@@ -248,6 +249,7 @@ def get_dummy_processor_inputs(
         mm_data=mm_data,
     )
 ```
+
 :::
 ::::
 
@@ -312,6 +314,7 @@ def _get_mm_fields_config(
 Our [actual code](gh-file:vllm/model_executor/models/llava.py) additionally supports
 pre-computed image embeddings, which can be passed to be model via the `image_embeds` argument.
 ```
+
 :::
 ::::
 
@@ -369,6 +372,7 @@ def _get_prompt_replacements(
         ),
     ]
 ```
+
 :::
 ::::
 
