@@ -20,7 +20,7 @@ from .utils import (assert_close, generate_data,
                     generate_data_for_expand_nslices,
                     generate_data_for_nslices)
 
-HIDDEN_SIZES = [4097]
+HIDDEN_SIZES = [2049]
 
 BATCHES = [1, 4, 16, 32]
 NUM_LORA = [1, 8, 32, 128]
