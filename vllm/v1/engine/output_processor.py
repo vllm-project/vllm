@@ -10,7 +10,6 @@ from vllm.v1.metrics.stats import IterationStats
 
 @dataclass
 class OutputProcessorOutput:
-    """Output of the OutputProcessor.step() function."""
 
     request_outputs: List[RequestOutput]
     reqs_to_abort: List[str]
