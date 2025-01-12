@@ -3,14 +3,19 @@ from typing import List
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.config import VllmConfig
+from vllm.engine.arg_utils import EngineArgs
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
 
 TOKENIZER_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
+VLLM_CONFIG = EngineArgs(model=TOKENIZER_NAME).create_engine_config()
+TOKENIZER_GROUP = init_tokenizer_from_configs(
+    VLLM_CONFIG.model_config, VLLM_CONFIG.scheduler_config,
+    VLLM_CONFIG.parallel_config, VLLM_CONFIG.lora_config)
 tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
+
 
 FULL_STRINGS = [
     "My name is Robert from Neural Magic and I love working on vLLM so much!",
@@ -68,7 +73,7 @@ class MockEngineCore:
     "request_output_kind",
     [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
 def test_incremental_detokenization(request_output_kind: RequestOutputKind):
-    output_processor = OutputProcessor(TOKENIZER_NAME, log_stats=False)
+    output_processor = OutputProcessor(TOKENIZER_GROUP, log_stats=False)
     engine_core = MockEngineCore(GENERATION_TOKENS)
 
     # Make N requests.
@@ -138,7 +143,7 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind):
 
 @pytest.mark.parametrize("include_stop_str_in_output", [True, False])
 def test_stop_string(include_stop_str_in_output: bool):
-    detokenizer = OutputProcessor(TOKENIZER_NAME, log_stats=False)
+    output_processor = OutputProcessor(TOKENIZER_GROUP, log_stats=False)
     engine_core = MockEngineCore(GENERATION_TOKENS)
 
     # Make N requests.
@@ -166,7 +171,7 @@ def test_stop_string(include_stop_str_in_output: bool):
 
     # Add requests to the detokenizer.
     for request in requests:
-        detokenizer.add_request(request)
+        output_processor.add_request(request)
 
     gen_strings = {}
     aborted = []
@@ -177,7 +182,9 @@ def test_stop_string(include_stop_str_in_output: bool):
             break
 
         # Step the Detokenizer.
-        request_outputs, requests_to_abort = detokenizer.step(outputs)
+        processed_outputs = output_processor.process_outputs(outputs)
+        request_outputs = processed_outputs.request_outputs
+        requests_to_abort = processed_outputs.reqs_to_abort
         for request_output in request_outputs:
             # If aborted, we should not get a request output.
             assert request_output.request_id not in aborted
@@ -218,5 +225,5 @@ def test_stop_string(include_stop_str_in_output: bool):
             assert gen_str == ref_str_exc_stop, (
                 f"{gen_str=}, {ref_str_exc_stop=}")
 
-    assert detokenizer.get_num_unfinished_requests() == 0
-    assert not detokenizer.has_unfinished_requests()
+    assert output_processor.get_num_unfinished_requests() == 0
+    assert not output_processor.has_unfinished_requests()
