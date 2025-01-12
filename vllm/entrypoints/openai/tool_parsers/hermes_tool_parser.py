@@ -3,6 +3,7 @@ import re
 from typing import Dict, List, Sequence, Union
 
 import partial_json_parser
+from json_repair import json_repair
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -82,7 +83,7 @@ class Hermes2ProToolParser(ToolParser):
                 # load the JSON, and then use it to build the Function and
                 # Tool Call
                 raw_function_calls = [
-                    json.loads(match[0] if match[0] else match[1])
+                    json_repair.loads(match[0] if match[0] else match[1])
                     for match in function_call_tuples
                 ]
                 tool_calls = [
