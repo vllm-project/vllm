@@ -399,6 +399,10 @@ class LlamaModel(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
+            # Remapping the name of FP8 kv-scale.
+            name = maybe_remap_kv_scale_name(name, params_dict)
+            if name is None:
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -417,10 +421,6 @@ class LlamaModel(nn.Module):
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
                     continue
 
                 if is_pp_missing_parameter(name, self):

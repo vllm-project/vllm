@@ -657,6 +657,20 @@ def initialize_dummy_weights(
                 param.uniform_(low, high, generator=generator)
 
 
+def remap_modelopt_kv_scale_names(name: str):
+
+    modelopt_scale_name_dict = {
+        '.self_attn.k_proj.k_scale': '.self_attn.attn.k_scale',
+        '.self_attn.v_proj.v_scale': '.self_attn.attn.v_scale'
+    }
+
+    for scale_name in modelopt_scale_name_dict:
+        if name.endswith(scale_name):
+            remapped_name = name.replace(scale_name,
+                                         modelopt_scale_name_dict[scale_name])
+            return remapped_name
+
+
 def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
     """Remap the name of FP8 k/v_scale parameters.
 
@@ -691,11 +705,18 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
                 "not loaded.")
             return None
         return remapped_name
-
     possible_scale_names = [".k_scale", ".v_scale"]
+    modelopt_scale_names = [
+        '.self_attn.k_proj.k_scale', '.self_attn.v_proj.v_scale'
+    ]
+
     for scale_name in possible_scale_names:
         if name.endswith(scale_name):
-            remapped_name = name.replace(scale_name, f".attn{scale_name}")
+            if modelopt_scale_names[0] in name or modelopt_scale_names[
+                    1] in name:
+                remapped_name = remap_modelopt_kv_scale_names(name)
+            else:
+                remapped_name = name.replace(scale_name, f".attn{scale_name}")
             if remapped_name not in params_dict:
                 logger.warning_once(
                     f"Found {scale_name} in the checkpoint (e.g. {name}), "
