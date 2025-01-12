@@ -1648,7 +1648,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 model_input.prompt_adapter_requests,
                 model_input.prompt_adapter_mapping)
 
-        self.attn_state.begin_forward(model_input)
+        self.attn_state.begin_forward(model_input, weakref.proxy(self.model))
 
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
