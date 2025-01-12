@@ -1,6 +1,6 @@
 (installation-openvino)=
 
-# Installation for OpenVINO
+# OpenVINO
 
 vLLM powered by OpenVINO supports all LLM models from [vLLM supported models list](#supported-models) and can perform optimal model serving on all x86-64 CPUs with, at least, AVX2 support, as well as on both integrated and discrete Intel® GPUs ([the list of supported GPUs](https://docs.openvino.ai/2024/about-openvino/release-notes-openvino/system-requirements.html#gpu)). OpenVINO vLLM backend supports the following advanced vLLM features:
 

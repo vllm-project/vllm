@@ -1,40 +1,19 @@
-(installation-xpu)=
-
-# Installation for XPUs
+# Installation
 
 vLLM initially supports basic model inferencing and serving on Intel GPU platform.
 
-Table of contents:
-
-1. [Requirements](#xpu-backend-requirements)
-2. [Quick start using Dockerfile](#xpu-backend-quick-start-dockerfile)
-3. [Build from source](#build-xpu-backend-from-source)
-
-(xpu-backend-requirements)=
-
 ## Requirements
 
-- OS: Linux
 - Supported Hardware: Intel Data Center GPU, Intel ARC GPU
 - OneAPI requirements: oneAPI 2024.2
 
-(xpu-backend-quick-start-dockerfile)=
+## Python
 
-## Quick start using Dockerfile
+### Pre-built wheels
 
-```console
-$ docker build -f Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
-$ docker run -it \
-             --rm \
-             --network=host \
-             --device /dev/dri \
-             -v /dev/dri/by-path:/dev/dri/by-path \
-             vllm-xpu-env
-```
+Currently, there are no pre-built XPU wheels.
 
-(build-xpu-backend-from-source)=
-
-## Build from source
+### Build wheel from source
 
 - First, install required driver and intel OneAPI 2024.2 or later.
 - Second, install Python packages for vLLM XPU backend building:
@@ -56,7 +35,27 @@ $ VLLM_TARGET_DEVICE=xpu python setup.py install
   type will be supported in the future.
 ```
 
-## Distributed inference and serving
+## Docker
+
+### Pre-built images
+
+Currently, there are no pre-built XPU images.
+
+### Build image from source
+
+```console
+$ docker build -f Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
+$ docker run -it \
+             --rm \
+             --network=host \
+             --device /dev/dri \
+             -v /dev/dri/by-path:/dev/dri/by-path \
+             vllm-xpu-env
+```
+
+## Extra information
+
+## Supported features
 
 XPU platform supports tensor-parallel inference/serving and also supports pipeline parallel as a beta feature for online serving. We requires Ray as the distributed runtime backend. For example, a reference execution likes following:
 
