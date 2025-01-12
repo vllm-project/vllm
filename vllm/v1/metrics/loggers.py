@@ -17,6 +17,7 @@ class StatLoggerBase(ABC):
 
 
 class LoggingStatLogger(StatLoggerBase):
+    """Log Stats to standard output."""
 
     def __init__(self):
         self.last_log_time = time.monotonic()
