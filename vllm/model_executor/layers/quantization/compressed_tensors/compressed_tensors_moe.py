@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS)
+from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
@@ -78,6 +79,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                        hidden_size: int, intermediate_size: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
+        # not needed by fp8
+        extra_weight_attrs.pop("intermediate_full")
         params_dtype = torch.float8_e4m3fn
 
         # WEIGHTS
@@ -254,6 +257,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self.packed_factor = 32 // config.num_bits
         self.strategy = config.strategy
         self.group_size = config.group_size
+        self.actorder = config.actorder
         assert config.symmetric, (
             "Only symmetric quantization is supported for MoE")
 
@@ -272,6 +276,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
+        intermediate_full = extra_weight_attrs.pop("intermediate_full")
         extra_weight_attrs.update({
             "is_transposed": True,
             "quant_method": self.strategy
@@ -294,11 +299,20 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w2_weight_packed", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
+        # In the case where we have actorder/g_idx,
+        # we do not partition the w2 scales
+        load_full_w2 = self.actorder and self.group_size != -1
+        w2_scales_size = (intermediate_full
+                          if load_full_w2 else intermediate_size)
+        # @eliza TODO: is this condition actually needed/is it doing anything?
+        self.is_k_full = (not self.actorder) or (
+            self.actorder and intermediate_size == intermediate_full)
+
         if self.strategy == "channel":
             num_groups_w2 = num_groups_w13 = 1
             self.group_size = -1
         else:
-            num_groups_w2 = intermediate_size // self.group_size
+            num_groups_w2 = w2_scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 
         w13_scale = torch.nn.Parameter(torch.ones(num_experts,
@@ -316,6 +330,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                                       requires_grad=False)
         layer.register_parameter("w2_weight_scale", w2_scale)
         set_weight_attrs(w2_scale, extra_weight_attrs)
+        set_weight_attrs(w2_scale, {"load_full_w2": load_full_w2})
 
         w2_weight_shape = torch.nn.Parameter(torch.empty(num_experts, 2),
                                              requires_grad=False)
@@ -335,7 +350,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             ),
             requires_grad=False,
         )
-        layer.register_parameter("w13_g_idx", w13_g_idx)
+        layer.register_parameter("w13_weight_g_idx", w13_g_idx)
         set_weight_attrs(w13_g_idx, extra_weight_attrs)
 
         w2_g_idx = torch.nn.Parameter(
@@ -346,7 +361,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             ),
             requires_grad=False,
         )
-        layer.register_parameter("w2_g_idx", w2_g_idx)
+        layer.register_parameter("w2_weight_g_idx", w2_g_idx)
         set_weight_attrs(w2_g_idx, extra_weight_attrs)
 
         w13_g_idx_sort_indices = torch.nn.Parameter(
@@ -422,24 +437,55 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         size_k2 = layer.w2_weight_packed.shape[2]
         size_k13 = layer.w13_weight_packed.shape[2]
 
-        num_experts = layer.w13_g_idx.shape[0]
-        device = layer.w13_g_idx.device
-        layer.w13_g_idx = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-            requires_grad=False,
-        )
-        layer.w2_g_idx = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-            requires_grad=False,
-        )
-        layer.w13_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-            requires_grad=False,
-        )
-        layer.w2_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-            requires_grad=False,
-        )
+        num_experts = layer.w13_weight_g_idx.shape[0]
+        device = layer.w13_weight_g_idx.device
+
+        # when running models with grouped act order,
+        # resort g_idx values provided
+        if self.actorder == "group":
+            w13_g_idx_sort_indices = torch.empty_like(layer.w13_weight_g_idx)
+            w2_g_idx_sort_indices = torch.empty_like(layer.w2_weight_g_idx)
+            w13_sorted_g_idx = torch.empty_like(layer.w13_weight_g_idx)
+            w2_sorted_g_idx = torch.empty_like(layer.w2_weight_g_idx)
+
+            for e in range(num_experts):
+                w13_g_idx_sort_indices[e] = torch.argsort(
+                    layer.w13_weight_g_idx[e]).to(torch.int32)
+                w2_g_idx_sort_indices[e] = torch.argsort(
+                    layer.w2_weight_g_idx[e]).to(torch.int32)
+                w13_sorted_g_idx[e] = layer.w13_weight_g_idx[e][
+                    w13_g_idx_sort_indices[e]]
+                w2_sorted_g_idx[e] = layer.w2_weight_g_idx[e][
+                    w2_g_idx_sort_indices[e]]
+
+            replace_parameter(layer, "w13_weight_g_idx", w13_sorted_g_idx)
+            replace_parameter(layer, "w2_weight_g_idx", w2_sorted_g_idx)
+            replace_parameter(layer, "w13_g_idx_sort_indices",
+                              w13_g_idx_sort_indices)
+            replace_parameter(layer, "w2_g_idx_sort_indices",
+                              w2_g_idx_sort_indices)
+
+        else:
+            layer.w13_weight_g_idx = torch.nn.Parameter(
+                torch.empty((num_experts, 0), dtype=torch.int32,
+                            device=device),
+                requires_grad=False,
+            )
+            layer.w2_weight_g_idx = torch.nn.Parameter(
+                torch.empty((num_experts, 0), dtype=torch.int32,
+                            device=device),
+                requires_grad=False,
+            )
+            layer.w13_g_idx_sort_indices = torch.nn.Parameter(
+                torch.empty((num_experts, 0), dtype=torch.int32,
+                            device=device),
+                requires_grad=False,
+            )
+            layer.w2_g_idx_sort_indices = torch.nn.Parameter(
+                torch.empty((num_experts, 0), dtype=torch.int32,
+                            device=device),
+                requires_grad=False,
+            )
 
         marlin_w13_qweight = ops.gptq_marlin_moe_repack(
             layer.w13_weight_packed,
@@ -511,9 +557,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             router_logits,
             topk_weights,
             topk_ids,
-            g_idx1=layer.w13_g_idx,
-            g_idx2=layer.w2_g_idx,
+            g_idx1=layer.w13_weight_g_idx,
+            g_idx2=layer.w2_weight_g_idx,
             sort_indices1=layer.w13_g_idx_sort_indices,
             sort_indices2=layer.w2_g_idx_sort_indices,
             num_bits=self.num_bits,
-        )
+            is_k_full=self.is_k_full)
