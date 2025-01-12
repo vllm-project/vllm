@@ -170,13 +170,15 @@ class LlamaAttention(nn.Module):
         )
 
         if hasattr(config, "interleaved_sliding_window"):
-            if isinstance(config.interleaved_sliding_window, int):
-                sliding_window = config.interleaved_sliding_window
-            elif isinstance(config.interleaved_sliding_window, list):
-                sw_idx = layer_idx % len(config.interleaved_sliding_window)
-                sliding_window = config.interleaved_sliding_window[sw_idx]
+            interleaved_sliding_window = config.interleaved_sliding_window
+            if isinstance(interleaved_sliding_window, int):
+                sliding_window = interleaved_sliding_window
+            elif isinstance(interleaved_sliding_window, list):
+                sw_idx = layer_idx % len(interleaved_sliding_window)
+                sliding_window = interleaved_sliding_window[sw_idx]
             else:
-                raise ValueError(f"{type(sliding_window)} is not supported.")
+                raise ValueError(
+                    f"{type(interleaved_sliding_window)} is not supported.")
         else:
             sliding_window = None
 
@@ -451,8 +453,9 @@ class LlamaModel(nn.Module):
                 # which is consistent with the practice of setting
                 # scaling_factor = tensor_amax / FPtype_max
                 scaling_factor *= 2
-            if hasattr(layer_self_attn, "kv_scale"):
-                layer_self_attn.attn._kv_scale = scaling_factor
+            if hasattr(layer_self_attn.attn, "_k_scale"):
+                layer_self_attn.attn._k_scale = scaling_factor
+                layer_self_attn.attn._v_scale = scaling_factor
             else:
                 raise RuntimeError("Self attention has no KV cache scaling "
                                    "factor attribute!")
@@ -541,9 +544,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                     config.vocab_size,
                                                     logit_scale)
-            self.sampler = get_sampler()
         else:
             self.lm_head = PPMissingLayer()
+
+        self.sampler = get_sampler()
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)

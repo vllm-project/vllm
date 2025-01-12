@@ -1065,16 +1065,20 @@ class AsyncLLMEngine(EngineClient):
             >>> # Process and return the final output
             >>> ...
         """
-        async for output in await self.add_request(
-                request_id,
-                prompt,
-                sampling_params,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
-                priority=priority,
-        ):
-            yield LLMEngine.validate_output(output, RequestOutput)
+        try:
+            async for output in await self.add_request(
+                    request_id,
+                    prompt,
+                    sampling_params,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    prompt_adapter_request=prompt_adapter_request,
+                    priority=priority,
+            ):
+                yield LLMEngine.validate_output(output, RequestOutput)
+        except asyncio.CancelledError:
+            await self.abort(request_id)
+            raise
 
     async def encode(
         self,
@@ -1085,7 +1089,7 @@ class AsyncLLMEngine(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        """Generate outputs for a request from an embedding model.
+        """Generate outputs for a request from a pooling model.
 
         Generate outputs for a request. This method is a coroutine. It adds the
         request into the waiting queue of the LLMEngine and streams the outputs
@@ -1147,15 +1151,19 @@ class AsyncLLMEngine(EngineClient):
             >>> # Process and return the final output
             >>> ...
         """
-        async for output in await self.add_request(
-                request_id,
-                prompt,
-                pooling_params,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                priority=priority,
-        ):
-            yield LLMEngine.validate_output(output, PoolingRequestOutput)
+        try:
+            async for output in await self.add_request(
+                    request_id,
+                    prompt,
+                    pooling_params,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    priority=priority,
+            ):
+                yield LLMEngine.validate_output(output, PoolingRequestOutput)
+        except asyncio.CancelledError:
+            await self.abort(request_id)
+            raise
 
     async def abort(self, request_id: str) -> None:
         """Abort a request.
@@ -1248,3 +1256,14 @@ class AsyncLLMEngine(EngineClient):
             self.engine.model_executor.stop_profile()
         else:
             self.engine.model_executor._run_workers("stop_profile")
+
+    async def add_lora(self, lora_request: LoRARequest) -> None:
+        """Load a new LoRA adapter into the engine for future requests."""
+        self.engine.add_lora(lora_request)
+
+
+# TODO(v1): Remove this class proxy when V1 goes default.
+if envs.VLLM_USE_V1:
+    from vllm.v1.engine.async_llm import AsyncLLM
+
+    AsyncLLMEngine = AsyncLLM  # type: ignore

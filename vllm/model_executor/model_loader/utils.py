@@ -1,13 +1,15 @@
 """Utilities for selecting and loading models."""
 import contextlib
-from typing import Optional, Tuple, Type
+from typing import Tuple, Type
 
 import torch
 from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models import ModelRegistry
-from vllm.model_executor.models.adapters import as_embedding_model
+from vllm.model_executor.models.adapters import (as_classification_model,
+                                                 as_embedding_model,
+                                                 as_reward_model)
 
 
 @contextlib.contextmanager
@@ -20,12 +22,8 @@ def set_default_torch_dtype(dtype: torch.dtype):
 
 
 def get_model_architecture(
-    model_config: ModelConfig,
-    *,
-    architectures: Optional[list[str]] = None,
-) -> Tuple[Type[nn.Module], str]:
-    if architectures is None:
-        architectures = getattr(model_config.hf_config, "architectures", [])
+        model_config: ModelConfig) -> Tuple[Type[nn.Module], str]:
+    architectures = getattr(model_config.hf_config, "architectures", [])
 
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
@@ -39,8 +37,12 @@ def get_model_architecture(
         architectures = ["QuantMixtralForCausalLM"]
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
-    if model_config.task == "embedding":
+    if model_config.task == "embed":
         model_cls = as_embedding_model(model_cls)
+    elif model_config.task == "classify":
+        model_cls = as_classification_model(model_cls)
+    elif model_config.task == "reward":
+        model_cls = as_reward_model(model_cls)
 
     return model_cls, arch
 

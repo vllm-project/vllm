@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -28,29 +28,36 @@ class OpenVinoPlatform(Platform):
     dispatch_key: str = "CPU"
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool) -> str:
         if selected_backend != _Backend.OPENVINO:
             logger.info("Cannot use %s backend on OpenVINO.", selected_backend)
-        return _Backend.OPENVINO
+        logger.info("Using OpenVINO Attention backend.")
+        return "vllm.attention.backends.openvino.OpenVINOAttentionBackend"
 
     @classmethod
-    def get_device_name(self, device_id: int = 0) -> str:
+    def get_device_name(cls, device_id: int = 0) -> str:
         return "openvino"
 
     @classmethod
-    def inference_mode(self):
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        return False
+
+    @classmethod
+    def inference_mode(cls):
         return torch.inference_mode(mode=True)
 
     @classmethod
-    def is_openvino_cpu(self) -> bool:
+    def is_openvino_cpu(cls) -> bool:
         return "CPU" in envs.VLLM_OPENVINO_DEVICE
 
     @classmethod
-    def is_openvino_gpu(self) -> bool:
+    def is_openvino_gpu(cls) -> bool:
         return "GPU" in envs.VLLM_OPENVINO_DEVICE
 
     @classmethod
-    def is_pin_memory_available(self) -> bool:
+    def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on OpenViNO.")
         return False
 
@@ -83,6 +90,9 @@ class OpenVinoPlatform(Platform):
         # check and update cache config
         ov_core = ov.Core()
         cache_config = vllm_config.cache_config
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
+
         if envs.VLLM_OPENVINO_CPU_KV_CACHE_PRECISION == "u8":
             if not OpenVinoPlatform.is_openvino_cpu():
                 logger.info("VLLM_OPENVINO_CPU_KV_CACHE_PRECISION is"

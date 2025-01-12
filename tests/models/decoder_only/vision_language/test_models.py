@@ -1,21 +1,23 @@
 """Common tests for testing .generate() functionality for single / multiple
 image, embedding, and video support for different VLMs in vLLM.
 """
+import math
 import os
+from collections import defaultdict
 from pathlib import PosixPath
 from typing import Type
 
 import pytest
-import transformers
 from transformers import AutoModelForVision2Seq
 from transformers.utils import is_flash_attn_2_available
 
 from vllm.platforms import current_platform
-from vllm.utils import cuda_device_count_stateless, identity
+from vllm.utils import identity
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
                           _VideoAssets)
-from ....utils import fork_new_process_for_each_test, large_gpu_mark
+from ....utils import (fork_new_process_for_each_test, large_gpu_mark,
+                       multi_gpu_marks)
 from ...utils import check_outputs_equal
 from .vlm_utils import custom_inputs, model_utils, runners
 from .vlm_utils.case_filtering import get_parametrized_options
@@ -35,7 +37,7 @@ COMMON_BROADCAST_SETTINGS = {
     "dtype": "half",
     "max_tokens": 5,
     "tensor_parallel_size": 2,
-    "model_kwargs": {"device_map": "auto"},
+    "hf_model_kwargs": {"device_map": "auto"},
     "image_size_factors": [(.25, 0.5, 1.0)],
     "distributed_executor_backend": (
         "ray",
@@ -109,7 +111,7 @@ VLM_TEST_SETTINGS = {
             "cherry_blossom": "What is in the picture?",
         }),
         auto_cls=AutoModelForVision2Seq,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
         vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
@@ -138,10 +140,7 @@ VLM_TEST_SETTINGS = {
     "aria": VLMTestInfo(
         models=["rhymes-ai/Aria"],
         tokenizer_mode="slow",
-        test_type=(
-            VLMTestType.IMAGE,
-            VLMTestType.MULTI_IMAGE,
-        ),
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         dtype="bfloat16",
         prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
         img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
@@ -152,7 +151,7 @@ VLM_TEST_SETTINGS = {
             "cherry_blossom": "<vlm_image>Please infer the season with reason.",
         }),
         multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
-        postprocess_inputs=model_utils.get_key_type_post_processor("pixel_values"),
+        postprocess_inputs=model_utils.cast_dtype_post_processor("pixel_values"),
         stop_str=["<|im_end|>"],
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,
@@ -177,8 +176,9 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
+        max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
         # For chameleon, we only compare the sequences
@@ -187,12 +187,33 @@ VLM_TEST_SETTINGS = {
         comparator=check_outputs_equal,
         max_tokens=8,
         dtype="bfloat16",
+    ),
+    "deepseek_vl_v2": VLMTestInfo(
+        models=["deepseek-ai/deepseek-vl2-small"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        dtype="bfloat16",
+        prompt_formatter=lambda img_prompt: f"<|User|>: {img_prompt}\n\n<|Assistant|>: ", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<image>\nWhat's the color of the stop sign and car?",
+            "cherry_blossom": "<image>\nWhat's the color of the tower?",
+        }),
+        multi_image_prompt="image_1:<image>\nimage_2:<image>\nDescribe the two images shortly.",    # noqa: E501
+        vllm_runner_kwargs={"hf_overrides": {"architectures": ["DeepseekVLV2ForCausalLM"]}},  # noqa: E501
+        image_size_factors=[(0.10, 0.15)],
+        patch_hf_runner=model_utils.deepseekvl2_patch_hf_runner,
+        postprocess_inputs=model_utils.cast_dtype_post_processor("images"),
+        hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
+        stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],  # noqa: E501
+        num_logprobs=5,
         marks=[
             pytest.mark.skipif(
-                transformers.__version__ < "4.46.2",
-                reason="Model broken in HF, see huggingface/transformers#34379"
+                not is_flash_attn_2_available(),
+                reason="Model needs flash-attn for numeric convergence.",
             ),
-        ]
+            large_gpu_mark(min_gb=48),
+        ],
     ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
@@ -216,7 +237,7 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
         patch_hf_runner=model_utils.glm_patch_hf_runner,
-        marks=[large_gpu_mark(min_gb=48)],
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     "h2ovl": VLMTestInfo(
         models = [
@@ -243,13 +264,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
-        marks=[
-            pytest.mark.skipif(
-                transformers.__version__ < "4.46.0",
-                reason="Model introduced in HF >= 4.46.0"
-            ),
-            large_gpu_mark(min_gb=48),
-        ],
+        marks=[large_gpu_mark(min_gb=48)],
     ),
     "intern_vl": VLMTestInfo(
         models=[
@@ -271,6 +286,7 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     "llava_next": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
@@ -285,22 +301,18 @@ VLM_TEST_SETTINGS = {
             ),
             limit_mm_per_prompt={"image": 4},
         )],
-        # Llava-next tests fixed sizes & the default size factors
-        image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
     ),
-    "llava_one_vision": VLMTestInfo(
+    "llava_onevision": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
         test_type=VLMTestType.CUSTOM_INPUTS,
         prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
         num_video_frames=16,
         max_model_len=16384,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values_videos"
         ),
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
-        # Llava-one-vision tests fixed sizes & the default size factors
-        image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
         custom_test_opts=[CustomTestOptions(
             inputs=custom_inputs.multi_video_multi_aspect_ratio_inputs(
                 formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
@@ -317,13 +329,20 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
-        image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
-        marks=[
-            pytest.mark.skipif(
-                transformers.__version__ < "4.46.2",
-                reason="Model broken with changes in transformers 4.46"
-            )
-        ],
+    ),
+    "mantis": VLMTestInfo(
+        models=["TIGER-Lab/Mantis-8B-siglip-llama3"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
+        max_model_len=4096,
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
+            "pixel_values"
+        ),
+        vllm_runner_kwargs={"hf_overrides": {"architectures": ["MantisForConditionalGeneration"]}},  # noqa: E501
+        get_stop_token_ids=lambda tok: [128009],
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
+        patch_hf_runner=model_utils.mantis_patch_hf_runner,
     ),
     "minicpmv_25": VLMTestInfo(
         models=["openbmb/MiniCPM-Llama3-V-2_5"],
@@ -349,6 +368,16 @@ VLM_TEST_SETTINGS = {
         ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
     ),
+    "molmo": VLMTestInfo(
+        models=["allenai/Molmo-7B-D-0924"],
+        test_type=(VLMTestType.IMAGE),
+        prompt_formatter=lambda img_prompt:"User: " + img_prompt + " Assistant:", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        image_size_factors=[(),(1.0, 1.0, 1.0)],
+        patch_hf_runner=model_utils.mlomo_patch_hf_runner,
+        postprocess_inputs=model_utils.molmo_post_processor,
+    ),
     # Tests for phi3v currently live in another file because of a bug in
     # transformers. Once this issue is fixed, we can enable them here instead.
     # https://github.com/huggingface/transformers/issues/34307
@@ -361,7 +390,7 @@ VLM_TEST_SETTINGS = {
     #     max_num_seqs=2,
     #     task="generate",
     #     # use eager mode for hf runner since phi3v didn't work with flash_attn
-    #     model_kwargs={"_attn_implementation": "eager"},
+    #     hf_model_kwargs={"_attn_implementation": "eager"},
     #     use_tokenizer_eos=True,
     #     vllm_output_post_proc=model_utils.phi3v_vllm_to_hf_output,
     #     num_logprobs=10,
@@ -387,58 +416,36 @@ VLM_TEST_SETTINGS = {
         prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
     ),
     ### Tensor parallel / multi-gpu broadcast tests
-    "broadcast-chameleon": VLMTestInfo(
+    "chameleon-broadcast": VLMTestInfo(
         models=["facebook/chameleon-7b"],
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
         vllm_output_post_proc = lambda vllm_output, model: vllm_output[:2],
         hf_output_post_proc = lambda hf_output, model: hf_output[:2],
         comparator=check_outputs_equal,
-        marks=[
-            pytest.mark.distributed_2_gpus,
-            pytest.mark.skipif(
-                cuda_device_count_stateless() < 2,
-                reason="Need at least 2 GPUs to run the test.",
-            ),
-            pytest.mark.skipif(
-                transformers.__version__ < "4.46.2",
-                reason="Model broken in HF, see huggingface/transformers#34379"
-            )
-        ],
+        marks=multi_gpu_marks(num_gpus=2),
         **COMMON_BROADCAST_SETTINGS # type: ignore
     ),
-    "broadcast-llava": VLMTestInfo(
+    "llava-broadcast": VLMTestInfo(
         models=["llava-hf/llava-1.5-7b-hf"],
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
-        marks=[
-            pytest.mark.distributed_2_gpus,
-            pytest.mark.skipif(
-                cuda_device_count_stateless() < 2,
-                reason="Need at least 2 GPUs to run the test.",
-            )
-        ],
+        marks=multi_gpu_marks(num_gpus=2),
         **COMMON_BROADCAST_SETTINGS # type: ignore
     ),
-    "broadcast-llava_next": VLMTestInfo(
+    "llava_next-broadcast": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
         prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
         max_model_len=10240,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
-        marks=[
-            pytest.mark.distributed_2_gpus,
-            pytest.mark.skipif(
-                cuda_device_count_stateless() < 2,
-                reason="Need at least 2 GPUs to run the test.",
-            )
-        ],
+        marks=multi_gpu_marks(num_gpus=2),
         **COMMON_BROADCAST_SETTINGS # type: ignore
     ),
     ### Custom input edge-cases for specific models
@@ -456,12 +463,12 @@ VLM_TEST_SETTINGS = {
             ) for inp in custom_inputs.different_patch_input_cases_internvl()
         ],
     ),
-    "llava_one_vision-multiple-images": VLMTestInfo(
+    "llava_onevision-multiple-images": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=16384,
         max_num_seqs=2,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
         auto_cls=AutoModelForVision2Seq,
@@ -475,6 +482,41 @@ VLM_TEST_SETTINGS = {
     ),
 }
 # yapf: enable
+
+
+def _mark_splits(
+    test_settings: dict[str, VLMTestInfo],
+    *,
+    num_groups: int,
+) -> dict[str, VLMTestInfo]:
+    name_by_test_info_id = {id(v): k for k, v in test_settings.items()}
+    test_infos_by_model = defaultdict[str, list[VLMTestInfo]](list)
+
+    for info in test_settings.values():
+        for model in info.models:
+            test_infos_by_model[model].append(info)
+
+    models = sorted(test_infos_by_model.keys())
+    split_size = math.ceil(len(models) / num_groups)
+
+    new_test_settings = dict[str, VLMTestInfo]()
+
+    for i in range(num_groups):
+        models_in_group = models[i * split_size:(i + 1) * split_size]
+
+        for model in models_in_group:
+            for info in test_infos_by_model[model]:
+                new_marks = (info.marks or []) + [pytest.mark.split(group=i)]
+                new_info = info._replace(marks=new_marks)
+                new_test_settings[name_by_test_info_id[id(info)]] = new_info
+
+    missing_keys = test_settings.keys() - new_test_settings.keys()
+    assert not missing_keys, f"Missing keys: {missing_keys}"
+
+    return new_test_settings
+
+
+VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
 
 
 ### Test wrappers

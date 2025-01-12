@@ -54,6 +54,10 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     speculative_config: SpeculativeConfig = vllm_config.speculative_config
     assert speculative_config is not None
 
+    if vllm_config.parallel_config.pipeline_parallel_size > 1:
+        raise NotImplementedError("Speculative decoding is currently "
+                                  "incompatible with pipeline parallelism")
+
     draft_worker_kwargs = kwargs.copy()
 
     kwargs["model_runner_cls"] = TargetModelRunner
@@ -104,7 +108,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     return spec_decode_worker
 
 
-# Reminder: Please update docs/source/usage/compatibility_matrix.rst
+# Reminder: Please update docs/source/features/compatibility_matrix.md
 # If the feature combo become valid
 class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     """Worker which implements speculative decoding.

@@ -8,14 +8,10 @@ import torch.nn as nn
 from torch.func import functional_call
 from transformers import PretrainedConfig
 
-import vllm.envs as envs
-from vllm.attention.selector import (backend_name_to_enum,
-                                     get_global_forced_attn_backend)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
-from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
 
@@ -251,12 +247,15 @@ def init_vllm_registered_model(
     """
     from vllm.model_executor.model_loader.loader import _initialize_model
 
-    if hf_config is not None:
-        vllm_config = vllm_config.with_hf_config(hf_config)
+    if hf_config is None and architectures is not None:
+        # So that the architectures field is overridden
+        hf_config = vllm_config.model_config.hf_config
 
-    return _initialize_model(vllm_config=vllm_config,
-                             prefix=prefix,
-                             architectures=architectures)
+    if hf_config is not None:
+        vllm_config = vllm_config.with_hf_config(hf_config,
+                                                 architectures=architectures)
+
+    return _initialize_model(vllm_config=vllm_config, prefix=prefix)
 
 
 @overload
@@ -275,6 +274,15 @@ def flatten_bn(
     *,
     concat: Literal[True],
 ) -> torch.Tensor:
+    ...
+
+
+@overload
+def flatten_bn(
+    x: Union[List[torch.Tensor], torch.Tensor],
+    *,
+    concat: bool = False,
+) -> Union[List[torch.Tensor], torch.Tensor]:
     ...
 
 
@@ -370,7 +378,7 @@ def embed_multimodal(
     input_ids: torch.Tensor,
     multimodal_token_id: int,
     get_text_embeds: Callable[[torch.Tensor], torch.Tensor],
-    multimodal_embeds: Union[torch.Tensor, List[torch.Tensor]],
+    multimodal_embeds: NestedTensors,
 ) -> torch.Tensor:
     """
     Embed token IDs and multimodal inputs and combine their embeddings.
@@ -406,16 +414,42 @@ def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
-    placeholder_token_id: int,
+    placeholder_token_id: Union[int, List[int]],
 ) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
     positions in ``inputs_embeds`` corresponding to placeholder tokens in
     ``input_ids``.
+    
+    ``placeholder_token_id`` can be a list of token ids (e.g, token ids 
+    of img_start, img_break, and img_end tokens) when needed: This means 
+    the order of these tokens in the ``input_ids`` MUST MATCH the order of 
+    their embeddings in ``multimodal_embeddings`` since we need to 
+    slice-merge instead of individually scattering.
+
+    For example, if input_ids is "TTTTTSIIIBIIIBIIIETTT", where
+    - T is text token
+    - S is image start token
+    - I is image embedding token
+    - B is image break token
+    - E is image end token.
+    
+    Then the image embeddings (that correspond to I's) from vision encoder 
+    must be padded with embeddings of S, B, and E in the same order of 
+    input_ids for a correct embedding merge.
 
     Note:
         This updates ``inputs_embeds`` in place.
     """
+    if isinstance(placeholder_token_id, list):
+        placeholder_token_id = torch.tensor(placeholder_token_id,
+                                            device=input_ids.device)
+        return _merge_multimodal_embeddings(
+            inputs_embeds,
+            torch.isin(input_ids, placeholder_token_id),
+            multimodal_embeddings,
+        )
+
     return _merge_multimodal_embeddings(
         inputs_embeds,
         (input_ids == placeholder_token_id),
@@ -572,37 +606,6 @@ def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):
         })
 
     return make_empty_intermediate_tensors
-
-
-def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
-    """
-    Get the available attention backend for Vision Transformer.
-    """
-    # TODO(Isotr0py): Remove `support_fa` after support FA for all ViTs attn.
-    selected_backend: Optional[_Backend] = get_global_forced_attn_backend()
-    if selected_backend is None:
-        backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
-        if backend_by_env_var is not None:
-            selected_backend = backend_name_to_enum(backend_by_env_var)
-    if selected_backend is None:
-        # For Volta and Turing GPUs, use xformers instead.
-        device_available = current_platform.has_device_capability(80)
-        if device_available and support_fa:
-            from transformers.utils import is_flash_attn_2_available
-            if is_flash_attn_2_available():
-                selected_backend = _Backend.FLASH_ATTN
-            else:
-                logger.warning(
-                    "Current `vllm-flash-attn` has a bug inside vision module, "
-                    "so we use xformers backend instead. You can run "
-                    "`pip install flash-attn` to use flash-attention backend.")
-                selected_backend = _Backend.XFORMERS
-        elif current_platform.is_cpu() or current_platform.is_rocm():
-            # ROCM doesn't support xformers
-            selected_backend = _Backend.TORCH_SDPA
-        else:
-            selected_backend = _Backend.XFORMERS
-    return selected_backend
 
 
 def maybe_prefix(prefix: str, name: str) -> str:

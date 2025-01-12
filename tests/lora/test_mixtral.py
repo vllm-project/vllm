@@ -5,6 +5,7 @@ import torch
 
 import vllm
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
 MODEL_PATH = "mistralai/Mixtral-8x7B-Instruct-v0.1"
 
@@ -31,7 +32,8 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int,
 @pytest.mark.parametrize("tp_size", [4])
 def test_mixtral_lora(mixtral_lora_files, tp_size):
     """Original test, the LoRA model has the common target modules, not all"""
-    if torch.cuda.device_count() < tp_size:
+    if torch.cuda.device_count(
+    ) < tp_size and tp_size > 1 and current_platform.is_cuda_alike():
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
     prompts = [
@@ -47,6 +49,7 @@ def test_mixtral_lora(mixtral_lora_files, tp_size):
         max_loras=4,
         distributed_executor_backend="ray",
         tensor_parallel_size=tp_size,
+        enable_chunked_prefill=True,
     )
 
     expected_lora_output = [
@@ -61,8 +64,9 @@ def test_mixtral_lora(mixtral_lora_files, tp_size):
 
 
 @pytest.mark.parametrize("tp_size", [4])
+@pytest.mark.parametrize("fully_shard", [True, False])
 def test_mixtral_lora_all_target_modules(mixtral_lora_files_all_target_modules,
-                                         tp_size):
+                                         tp_size, fully_shard):
     """This LoRA model has all supported Mixtral target modules"""
 
     if torch.cuda.device_count() < tp_size:
@@ -81,6 +85,7 @@ def test_mixtral_lora_all_target_modules(mixtral_lora_files_all_target_modules,
         max_loras=4,
         distributed_executor_backend="ray",
         tensor_parallel_size=tp_size,
+        fully_sharded_loras=fully_shard,
         max_lora_rank=32,
     )
 
