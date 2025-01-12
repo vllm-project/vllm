@@ -322,7 +322,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - ✅︎
   - ✅︎
 * - `Qwen2ForCausalLM`
-  - Qwen2
+  - QwQ, Qwen2
   - `Qwen/QwQ-32B-Preview`, `Qwen/Qwen2-7B-Instruct`, `Qwen/Qwen2-7B`, etc.
   - ✅︎
   - ✅︎
@@ -436,7 +436,7 @@ loaded. See [relevant issue on HF Transformers](https://github.com/huggingface/t
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
-{func}`vllm.model_executor.models.adapters.as_embedding_model`. By default, the embeddings
+{func}`~vllm.model_executor.models.adapters.as_embedding_model`. By default, the embeddings
 of the whole prompt are extracted from the normalized hidden state corresponding to the last token.
 
 #### Reward Modeling (`--task reward`)
@@ -468,7 +468,7 @@ of the whole prompt are extracted from the normalized hidden state corresponding
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
-{func}`vllm.model_executor.models.adapters.as_reward_model`. By default, we return the hidden states of each token directly.
+{func}`~vllm.model_executor.models.adapters.as_reward_model`. By default, we return the hidden states of each token directly.
 
 ```{important}
 For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
@@ -499,7 +499,7 @@ e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "r
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
-{func}`vllm.model_executor.models.adapters.as_classification_model`. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
+{func}`~vllm.model_executor.models.adapters.as_classification_model`. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
 #### Sentence Pair Scoring (`--task score`)
 
@@ -549,6 +549,28 @@ On the other hand, modalities separated by `/` are mutually exclusive.
 - e.g.: `T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
 
 See [this page](#multimodal-inputs) on how to pass multi-modal inputs to the model.
+
+````{important}
+To enable multiple multi-modal items per text prompt, you have to set `limit_mm_per_prompt` (offline inference)
+or `--limit-mm-per-prompt` (online serving). For example, to enable passing up to 4 images per text prompt:
+
+Offline inference:
+```python
+llm = LLM(
+    model="Qwen/Qwen2-VL-7B-Instruct",
+    limit_mm_per_prompt={"image": 4},
+)
+```
+
+Online serving:
+```bash
+vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
+```
+````
+
+```{note}
+vLLM currently only supports adding LoRA to the language backbone of multimodal models.
+```
 
 ### Generative Models
 
@@ -689,14 +711,14 @@ See [this page](#generative-models) for more information on how to use generativ
 * - `Phi3VForCausalLM`
   - Phi-3-Vision, Phi-3.5-Vision
   - T + I<sup>E+</sup>
-  - `microsoft/Phi-3-vision-128k-instruct`, `microsoft/Phi-3.5-vision-instruct` etc.
+  - `microsoft/Phi-3-vision-128k-instruct`, `microsoft/Phi-3.5-vision-instruct`, etc.
   -
   - ✅︎
   - ✅︎
 * - `PixtralForConditionalGeneration`
   - Pixtral
   - T + I<sup>+</sup>
-  - `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b` etc.
+  - `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b` (see note), etc.
   -
   - ✅︎
   - ✅︎
@@ -715,7 +737,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - ✅︎
   - ✅︎
 * - `Qwen2VLForConditionalGeneration`
-  - Qwen2-VL
+  - QVQ, Qwen2-VL
   - T + I<sup>E+</sup> + V<sup>E+</sup>
   - `Qwen/QVQ-72B-Preview`, `Qwen/Qwen2-VL-7B-Instruct`, `Qwen/Qwen2-VL-72B-Instruct`, etc.
   - ✅︎
@@ -733,26 +755,6 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
-````{important}
-To enable multiple multi-modal items per text prompt, you have to set `limit_mm_per_prompt` (offline inference)
-or `--limit-mm-per-prompt` (online inference). For example, to enable passing up to 4 images per text prompt:
-
-```python
-llm = LLM(
-    model="Qwen/Qwen2-VL-7B-Instruct",
-    limit_mm_per_prompt={"image": 4},
-)
-```
-
-```bash
-vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
-```
-````
-
-```{note}
-vLLM currently only supports adding LoRA to the language backbone of multimodal models.
-```
-
 ```{note}
 To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
 ```
@@ -760,6 +762,11 @@ To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have pass `--hf_overrides '{"arc
 ```{note}
 The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
 For more details, please see: <gh-pr:4087#issuecomment-2250397630>
+```
+
+```{note}
+The chat template for Pixtral-HF is incorrect (see [discussion](https://huggingface.co/mistral-community/pixtral-12b/discussions/22)).
+A corrected version is available at <gh-file:examples/template_pixtral_hf.jinja>.
 ```
 
 ### Pooling Models

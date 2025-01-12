@@ -637,7 +637,8 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
             execute_model_kwargs.update(
                 {"previous_hidden_states": previous_hidden_states})
 
-        with set_forward_context(model_input.attn_metadata, self.vllm_config):
+        with set_forward_context(model_input.attn_metadata, self.vllm_config,
+                                 model_input.virtual_engine):
             hidden_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
