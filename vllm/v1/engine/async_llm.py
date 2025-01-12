@@ -199,7 +199,8 @@ class AsyncLLM(EngineClient):
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
             if self.output_handler is None:
-                self.output_handler = asyncio.create_task(self.step_async())
+                self.output_handler = asyncio.create_task(
+                    self._run_output_handler())
 
             q = await self.add_request(
                 request_id,
@@ -231,7 +232,7 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             raise
 
-    async def step_async(self):
+    async def _run_output_handler(self):
         """Busy loop: Pull From EngineCore -> Process -> Push to Queues"""
 
         try:
