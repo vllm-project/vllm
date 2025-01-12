@@ -235,19 +235,17 @@ class AsyncLLM(EngineClient):
                 engine_core_outputs = await self.engine_core.get_output_async()
 
                 # 2) Process EngineCoreOutputs.
-                processed_outputs = self.output_processor.process_outputs(
-                    engine_core_outputs, self.request_states)
+                outputs = self.output_processor.process_outputs(engine_core_outputs)
 
                 # 3) Abort any reqs that finished due to stop strings.
-                await self.engine_core.abort_requests_async(
-                    processed_outputs.reqs_to_abort)
+                await self.engine_core.abort_requests_async(outputs.reqs_to_abort)
 
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once we add Prometheus.
                 self._log_stats(
                     scheduler_stats=engine_core_outputs.scheduler_stats,
-                    iteration_stats=processed_outputs.iteration_stats,
+                    iteration_stats=outputs.iteration_stats,
                 )
 
         except Exception as e:
@@ -260,7 +258,6 @@ class AsyncLLM(EngineClient):
         request_ids = [request_id]
         await self.engine_core.abort_requests_async(request_ids)
         self.output_processor.abort_requests(request_ids)
-
 
     def _log_stats(
         self,

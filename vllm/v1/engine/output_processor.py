@@ -112,7 +112,6 @@ class OutputProcessor:
     def process_outputs(
         self,
         outputs: EngineCoreOutputs,
-        request_states: Dict[str, RequestState],
     ) -> OutputProcessorOutput:
         """
         Process the EngineCoreOutputs:
@@ -146,7 +145,7 @@ class OutputProcessor:
         iteration_stats = IterationStats(self.log_stats)
         for engine_core_output in outputs.outputs:
             req_id = engine_core_output.request_id
-            req_state = request_states.get(req_id)
+            req_state = self.request_states.get(req_id)
             if req_state is None:
                 # Ignore output for already-aborted request.
                 continue
@@ -173,7 +172,7 @@ class OutputProcessor:
 
                 # Free completed requests.
                 if request_output.finished:
-                    request_states.pop(req_id)
+                    self.request_states.pop(req_id)
                     if not engine_core_output.finished:
                         # If req not finished in EngineCore, but Detokenizer
                         # detected stop string, abort needed in EngineCore.
