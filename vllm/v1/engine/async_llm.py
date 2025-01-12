@@ -20,9 +20,10 @@ from vllm.utils import kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.processor import Processor
+from vllm.v1.engine.request_state import RequestState
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerBase
-from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
 
@@ -52,31 +53,29 @@ class AsyncLLM(EngineClient):
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
-        self.tokenizer = init_tokenizer_from_configs(
+        self.tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)
-        self.tokenizer.ping()
+        self.tokenizer_group.ping()
 
-        # Request streams (map of request_id -> queue).
-        self.rid_to_queue: Dict[str, asyncio.Queue] = {}
+        # Request States (map of request_id -> RequestState).
+        self.request_states: Dict[str, RequestState] = {}
 
-        # Processor (converts Inputs --> EngineCoreRequests).
+        # Processor (convert Inputs --> EngineCoreRequests).
         self.processor = Processor(
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
-            tokenizer=self.tokenizer,
+            tokenizer_group=self.tokenizer_group,
             input_registry=input_registry,
         )
 
-        # Detokenizer (converts EngineCoreOutputs --> RequestOutput).
+        # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(
-            tokenizer_name=vllm_config.model_config.tokenizer,
-            tokenizer_mode=vllm_config.model_config.tokenizer_mode,
-            trust_remote_code=vllm_config.model_config.trust_remote_code,
-            revision=vllm_config.model_config.tokenizer_revision,
+            request_states=self.request_states,
+            log_stats=self.log_stats,
         )
 
         # EngineCore (starts the engine in background process).
@@ -139,28 +138,31 @@ class AsyncLLM(EngineClient):
     ) -> asyncio.Queue[RequestOutput]:
         """Add new request to the AsyncLLM."""
 
-        # 1) Create a new output queue for the request.
-        if request_id in self.rid_to_queue:
+        if request_id in self.request_states:
             raise ValueError(f"Request id {request_id} already running.")
-        self.rid_to_queue[request_id] = asyncio.Queue()
 
-        # 2) Convert Input --> Request.
+        # 1) Convert Input --> Request.
         request = self.processor.process_inputs(request_id, prompt, params,
                                                 arrival_time, lora_request,
                                                 trace_headers,
                                                 prompt_adapter_request,
                                                 priority)
 
-        # 3) Add the request to Detokenizer (this process).
-        self.output_processor.add_request(request)
+        # 2) Make a nnew RequestState and queue.
+        queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
+        self.request_states[request_id] = RequestState.from_new_request(
+            tokenizer=self.get_tokenizer(),
+            request=request,
+            queue=queue,
+        )
 
-        # 4) Add the EngineCoreRequest to EngineCore (separate process).
+        # 3) Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
 
         if self.log_requests:
             logger.info("Added request %s.", request_id)
 
-        return self.rid_to_queue[request_id]
+        return queue
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -197,8 +199,7 @@ class AsyncLLM(EngineClient):
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
             if self.output_handler is None:
-                self.output_handler = asyncio.create_task(
-                    self._run_output_handler())
+                self.output_handler = asyncio.create_task(self.step_async())
 
             q = await self.add_request(
                 request_id,
@@ -217,53 +218,40 @@ class AsyncLLM(EngineClient):
                 # task switching under load which helps performance).
                 out = q.get_nowait() if q.qsize() > 0 else await q.get()
 
-                # Note: both Detokenizer and EngineCore handle their
-                # own request cleanup based on finished.
+                # Note: OutputProcessor removes from request_states.
                 if out.finished:
-                    del self.rid_to_queue[request_id]
                     yield out
                     break
 
                 yield out
 
-        # If the request is disconnected by the client, the
-        # generate() task will be canceled. So, we abort the
-        # request if we end up here.
+        # If the request is disconnected by the client, the generate()
+        # task will be canceled. So, we abort the request if we end up here.
         except asyncio.CancelledError:
             await self.abort(request_id)
             raise
 
-    def _process_request_outputs(self, request_outputs: List[RequestOutput]):
-        """Process outputs by putting them into per-request queues."""
-
-        for request_output in request_outputs:
-            request_id = request_output.request_id
-
-            # Note: it is possible a request was aborted and removed from
-            # the state due to client cancellations, so if we encounter a
-            # request id not in the state, we skip.
-            if request_id in self.rid_to_queue:
-                self.rid_to_queue[request_id].put_nowait(request_output)
-
-    async def _run_output_handler(self):
-        """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
+    async def step_async(self):
+        """Busy loop: Pull From EngineCore -> Process -> Push to Queues"""
 
         try:
             while True:
-                # 1) Pull EngineCoreOutput from the EngineCore.
+                # 1) Pull EngineCoreOutputs from the EngineCore.
                 engine_core_outputs = await self.engine_core.get_output_async()
 
-                # 2) Detokenize based on the output.
-                processed_outputs = self.output_processor.step(engine_core_outputs.outputs)
+                # 2) Process EngineCoreOutputs, pushing RequestOutputs into
+                # asyncio queues for handling by the per-req generate() task.
+                processed_outputs = self.output_processor.process_outputs(
+                    engine_core_outputs)
 
-                # 3) Put the RequestOutputs into the per-request queues.
-                self._process_request_outputs(processed_outputs.request_outputs)
+                # 3) Abort any reqs that finished due to stop strings.
+                await self.engine_core.abort_requests_async(
+                    processed_outputs.reqs_to_abort)
 
-                # 4) Abort any requests that finished due to stop strings.
-                await self.engine_core.abort_requests_async(processed_outputs.reqs_to_abort)
-
-                # 5) Log any stats.
-                await self._log_stats(
+                # 4) Logging.
+                # TODO(rob): make into a coroutine and launch it in
+                # background thread once we add Prometheus.
+                self._log_stats(
                     scheduler_stats=engine_core_outputs.scheduler_stats,
                     iteration_stats=processed_outputs.iteration_stats,
                 )
@@ -273,19 +261,21 @@ class AsyncLLM(EngineClient):
             kill_process_tree(os.getpid())
 
     async def abort(self, request_id: str) -> None:
-        """Abort RequestId in self, detokenizer, and engine core."""
+        """Abort a Request."""
 
-        request_ids = [request_id]
-        await self.engine_core.abort_requests_async(request_ids)
-        self.output_processor.abort_requests(request_ids)
+        # Remove from EngineCore.
+        await self.engine_core.abort_requests_async([request_id])
 
-        # If a request finishes while we await then the request_id
-        # will be removed from the tracked queues before we get here.
-        if request_id in self.rid_to_queue:
-            del self.rid_to_queue[request_id]
+        # Remove from AsyncLLM.
+        # Note: the request can finish during await, so check to make
+        # sure it is still active in the tracker before we pop.
+        _ = self.request_states.pop(request_id, None)
 
-    async def _log_stats(self, scheduler_stats: SchedulerStats):
-        """Log stats to the stat loggers."""
+    def _log_stats(
+        self,
+        scheduler_stats: SchedulerStats,
+        iteration_stats: IterationStats,
+    ):
         if not self.log_stats:
             return
 
@@ -316,8 +306,7 @@ class AsyncLLM(EngineClient):
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
-        assert lora_request is None
-        return self.output_processor.tokenizer
+        return self.tokenizer_group.get_lora_tokenizer(lora_request)
 
     async def is_tracing_enabled(self) -> bool:
         return False

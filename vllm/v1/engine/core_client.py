@@ -105,7 +105,8 @@ class InprocClient(EngineCoreClient):
         self.engine_core.add_request(request)
 
     def abort_requests(self, request_ids: List[str]) -> None:
-        self.engine_core.abort_requests(request_ids)
+        if len(request_ids) > 0:
+            self.engine_core.abort_requests(request_ids)
 
     def shutdown(self):
         self.engine_core.shutdown()
@@ -218,7 +219,8 @@ class SyncMPClient(MPClient):
         self._send_input(EngineCoreRequestType.ADD, request)
 
     def abort_requests(self, request_ids: List[str]) -> None:
-        self._send_input(EngineCoreRequestType.ABORT, request_ids)
+        if len(request_ids) > 0:
+            self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     def profile(self, is_start: bool = True) -> None:
         self._send_input(EngineCoreRequestType.PROFILE,

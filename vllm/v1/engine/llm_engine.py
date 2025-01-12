@@ -15,11 +15,12 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import (
-    BaseTokenizerGroup, init_tokenizer_from_configs)
+    AnyTokenizer, BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.processor import Processor
+from vllm.v1.engine.request_state import RequestState
 from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
@@ -45,27 +46,28 @@ class LLMEngine:
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
-        self.tokenizer = init_tokenizer_from_configs(
+        self.tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)
-        self.tokenizer.ping()
+        self.tokenizer_group.ping()
+
+        # Request States (map of request_id -> RequestState).
+        self.request_states: Dict[str, RequestState] = {}
 
         # Processor (convert Inputs --> EngineCoreRequests)
         self.processor = Processor(model_config=vllm_config.model_config,
                                    cache_config=vllm_config.cache_config,
                                    lora_config=vllm_config.lora_config,
-                                   tokenizer=self.tokenizer,
+                                   tokenizer_group=self.tokenizer_group,
                                    input_registry=input_registry,
                                    mm_registry=mm_registry)
 
-        # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
+        # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(
-            tokenizer_name=vllm_config.model_config.tokenizer,
-            tokenizer_mode=vllm_config.model_config.tokenizer_mode,
-            trust_remote_code=vllm_config.model_config.trust_remote_code,
-            revision=vllm_config.model_config.tokenizer_revision,
+            request_states=self.request_states,
+            log_stats=False,
         )
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
@@ -103,20 +105,14 @@ class LLMEngine:
                    multiprocess_mode=enable_multiprocessing)
 
     def get_num_unfinished_requests(self) -> int:
-        return self.output_processor.get_num_unfinished_requests()
+        return len(self.request_states)
 
     def has_unfinished_requests(self) -> bool:
-        return self.output_processor.has_unfinished_requests()
+        return self.get_num_unfinished_requests() > 0
 
     @classmethod
     def validate_outputs(cls, outputs, output_type):
         return outputs
-
-    def abort_request(self, request_ids: List[str]) -> None:
-        """Remove request_ids from EngineCore and Detokenizer."""
-
-        self.engine_core.abort_requests(request_ids)
-        self.output_processor.abort_requests(request_ids)
 
     def add_request(
         self,
@@ -130,33 +126,39 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
 
-        # 1) Process raw inputs into the request.
+        if request_id in self.request_states:
+            raise ValueError(f"Request id {request_id} already running.")
+
+        # 1) Convert Input --> Request.
         request = self.processor.process_inputs(request_id, prompt, params,
                                                 arrival_time, lora_request,
                                                 trace_headers,
                                                 prompt_adapter_request,
                                                 priority)
 
-        # 2) Add the request to Detokenizer.
-        self.output_processor.add_request(request)
+        # 2) Make a new RequestState and queue.
+        self.request_states[request_id] = RequestState.from_new_request(
+            tokenizer=self.get_tokenizer(),
+            request=request,
+        )
 
         # 3) Add the request to EngineCore.
         self.engine_core.add_request(request)
 
     def step(self) -> List[RequestOutput]:
+        """Pull From EngineCore -> Process -> Return RequestOutput."""
 
-        # 1) Get EngineCoreOutput from the EngineCore.
-        outputs = self.engine_core.get_output()
+        # 1) Pull EngineCoreOutput from the EngineCore.
+        engine_core_outputs = self.engine_core.get_output()
 
-        # 2) Detokenizer the EngineCoreOutput.
-        request_outputs, requests_to_abort = self.detokenizer.step(
-            outputs.outputs)
+        # 2) Process EngineCoreOutputs.
+        processed_outputs = self.output_processor.process_outputs(
+            engine_core_outputs)
 
-        # 3) Abort requests that finished due to stopping criteria.
-        if requests_to_abort:
-            self.abort_request(requests_to_abort)
+        # 3) Abort any reqs that finished due to stop strings.
+        self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
 
-        return request_outputs
+        return processed_outputs.request_outputs
 
     def get_model_config(self):
         return self.model_config
@@ -171,7 +173,7 @@ class LLMEngine:
         self,
         group_type: Type[_G] = BaseTokenizerGroup,
     ) -> _G:
-        tokenizer_group = self.tokenizer
+        tokenizer_group = self.tokenizer_group
 
         if tokenizer_group is None:
             raise ValueError("Unable to get tokenizer because "
@@ -182,3 +184,9 @@ class LLMEngine:
                             f"found type: {type(tokenizer_group)}")
 
         return tokenizer_group
+
+    async def get_tokenizer(
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AnyTokenizer:
+        return self.get_tokenizer_group().get_lora_tokenizer(lora_request)

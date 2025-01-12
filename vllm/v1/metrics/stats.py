@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from vllm.v1.engine import EngineCoreOutput
+
 
 @dataclass
 class SchedulerStats:
@@ -12,9 +14,23 @@ class SchedulerStats:
     # gpu_prefix_cache_hit_rate: float = 0.0
 
 
-@dataclass
 class IterationStats:
-    """Stats associated with a single iteration"""
+    """Stats associated with a single set of EngineCoreOutputs."""
 
-    num_generation_tokens: int = 0
-    num_prompt_tokens: int = 0
+    def __init__(self, log_stats: bool):
+        self.log_stats = log_stats
+        self.num_generation_tokens = 0
+        self.num_prompt_tokens = 0
+
+    def update_from_output(self,
+                           output: EngineCoreOutput,
+                           is_prefilling: bool,
+                           prompt_len: int = 0):
+        """Update the IterationStats with the EngineCoreOutput."""
+
+        if not self.log_stats:
+            return
+
+        self.num_generation_tokens += len(output.new_token_ids)
+        if is_prefilling:
+            self.num_prompt_tokens += prompt_len
