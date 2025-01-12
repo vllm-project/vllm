@@ -12,5 +12,9 @@ repos:
   hooks:
   - id: isort
 # codespell
-# isort
 # clang-format
+- repo: https://github.com/jackdewinter/pymarkdown
+  rev: v0.9.27
+  hooks:
+  - id: pymarkdown
+    files: docs/.*

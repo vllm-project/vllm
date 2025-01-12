@@ -4,7 +4,6 @@ toml==0.10.2
 tomli==2.0.2
 codespell==2.3.0
 clang-format==18.1.5
-pymarkdownlnt==0.9.26
 
 # type checking
 mypy==1.11.1

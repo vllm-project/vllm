@@ -35,7 +35,6 @@ check_command clang-format
 MYPY_VERSION=$(mypy --version | awk '{print $2}')
 CODESPELL_VERSION=$(codespell --version)
 CLANGFORMAT_VERSION=$(clang-format --version | awk '{print $3}')
-PYMARKDOWNLNT_VERSION=$(pymarkdownlnt version | awk '{print $1}')
 
 # # params: tool name, tool version, required version
 tool_version_check() {
@@ -49,7 +48,6 @@ tool_version_check() {
 tool_version_check "mypy" "$MYPY_VERSION"
 tool_version_check "codespell" "$CODESPELL_VERSION"
 tool_version_check "clang-format" "$CLANGFORMAT_VERSION"
-tool_version_check "pymarkdownlnt" "$PYMARKDOWNLNT_VERSION"
 
 # Run mypy
 echo 'vLLM mypy:'
@@ -176,7 +174,3 @@ if ! git diff --quiet &>/dev/null; then
 else
     echo "✨🎉 Format check passed! Congratulations! 🎉✨"
 fi
-
-echo 'vLLM doc-lint:'
-tools/doc-lint.sh
-echo 'vLLM doc-lint: Done'
