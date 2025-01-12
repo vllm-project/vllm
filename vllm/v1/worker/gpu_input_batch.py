@@ -162,7 +162,13 @@ class InputBatch:
         self.generators: Dict[int, torch.Generator] = {}
 
         self.num_logprobs: Dict[str, int] = {}
-        self.prompt_logprob_reqs: Set[str] = set()
+        # NOTE(rob): num_prompt_logprobs ONLY includes reqs
+        # that are currently in the prefill phase.
+        self.num_prompt_logprobs: Dict[str, int] = {}
+        # Dict mapping from partial request ID, to the ID of the token which
+        # immediately follows the last token processed in the current step.
+        # Only necessary for partial requests with prompt logprobs enabled.
+        self.cached_partial_req_peek_token_ids: Dict[str, torch.Tensor] = {}
 
     def add_request(
         self,
@@ -224,11 +230,13 @@ class InputBatch:
         if request.generator is not None:
             self.generators[req_index] = request.generator
 
-        num_logprobs = sampling_params.logprobs
-        if num_logprobs is not None and num_logprobs > 0:
-            self.num_logprobs[req_id] = num_logprobs
+        if sampling_params.logprobs:
+            self.num_logprobs[req_id] = sampling_params.logprobs
         if sampling_params.prompt_logprobs:
-            self.prompt_logprob_reqs.add(req_id)
+            # FIXME(andy): handle prefix caching and preemption.
+            # We currently get incorrect results if prompt logprobs
+            # are requested and we get a cache hit.
+            self.num_prompt_logprobs[req_id] = sampling_params.prompt_logprobs
 
     def remove_request(self, req_id: str) -> Optional[int]:
         req_index = self.req_id_to_index.pop(req_id, None)
@@ -245,7 +253,7 @@ class InputBatch:
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
-        self.prompt_logprob_reqs.discard(req_id)
+        self.num_prompt_logprobs.pop(req_id, None)
         return req_index
 
     def clear(self) -> None:
@@ -260,7 +268,7 @@ class InputBatch:
         self.repetition_penalties_reqs.clear()
         self.generators.clear()
         self.num_logprobs.clear()
-        self.prompt_logprob_reqs.clear()
+        self.num_prompt_logprobs.clear()
 
     def condense(self, empty_req_indices: List[int]) -> None:
         if self.num_reqs == 0:
@@ -427,9 +435,5 @@ class InputBatch:
         return max(self.num_logprobs.values()) if self.num_logprobs else 0
 
     @property
-    def no_logprob(self) -> bool:
-        return len(self.num_logprobs) == 0
-
-    @property
     def no_prompt_logprob(self) -> bool:
-        return len(self.prompt_logprob_reqs) == 0
+        return len(self.num_prompt_logprobs) == 0

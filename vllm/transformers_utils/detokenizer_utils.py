@@ -1,5 +1,7 @@
 from typing import List, Optional, Tuple
 
+import torch
+
 from .tokenizer import AnyTokenizer
 
 
@@ -70,6 +72,21 @@ def convert_prompt_ids_to_tokens(
     # This is required to guard against out-of-vocab prompt token ids
     _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
     return new_tokens, prefix_offset, read_offset
+
+
+def detokenize_non_incrementally(
+    tokenizer: AnyTokenizer,
+    token_ids: torch.Tensor,
+) -> List[str]:
+    """Detokenize the input ids individually."""
+
+    # Flatten input to shape [N, 1]. Tokenizers then
+    # treats it as decoding batch N seq_len 1, such
+    # that they all happen independently.
+    flat_token_ids = token_ids.reshape(-1, 1)
+    # FIXME(andy): deal with MistralTokenizer not having
+    # batch_decode. Follow up if hard?
+    return tokenizer.batch_decode(flat_token_ids)  # type: ignore
 
 
 # Based on

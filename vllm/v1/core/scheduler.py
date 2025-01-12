@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
                     Tuple, Union)
 
+import torch
+
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -107,11 +109,11 @@ class Scheduler:
         # but not all. The constraint is due to the persistent batch in the
         # V1 model runner.
         # TODO(woosuk): Remove this constraint after refactoring model runner.
-        has_partial_request = False
+        partial_req_ids: List[str] = []
         req_index = 0
         while req_index < len(self.running):
             # Only the last request in the RUNNING queue can be "partial".
-            assert not has_partial_request
+            assert len(partial_req_ids) == 0
             assert token_budget > 0
             request = self.running[req_index]
             num_new_tokens = request.num_tokens - request.num_computed_tokens
@@ -158,9 +160,11 @@ class Scheduler:
             ]
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
+            if (request.num_computed_tokens + num_new_tokens <
+                    request.num_tokens):
+                assert len(partial_req_ids) == 0
+                partial_req_ids.append(request.request_id)
             req_index += 1
-            has_partial_request = (request.num_computed_tokens + num_new_tokens
-                                   < request.num_tokens)
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -174,7 +178,7 @@ class Scheduler:
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             while self.waiting:
-                if has_partial_request:
+                if len(partial_req_ids) > 0:
                     break
                 if len(self.running) == self.max_num_running_reqs:
                     break
@@ -240,8 +244,9 @@ class Scheduler:
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                has_partial_request = (num_computed_tokens + num_new_tokens <
-                                       request.num_tokens)
+                if (num_computed_tokens + num_new_tokens < request.num_tokens):
+                    assert len(partial_req_ids) == 0
+                    partial_req_ids.append(request.request_id)
 
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
@@ -290,6 +295,7 @@ class Scheduler:
             scheduled_new_reqs=new_reqs_data,
             scheduled_resumed_reqs=resumed_reqs_data,
             scheduled_running_reqs=running_reqs_data,
+            partial_req_ids=partial_req_ids,
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
@@ -397,6 +403,9 @@ class Scheduler:
     ) -> List[EngineCoreOutput]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
+        logprobs_token_ids_cpu = model_runner_output.logprob_token_ids_cpu
+        logprobs_cpu = model_runner_output.logprobs_cpu
+        prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
         engine_core_outputs: List[EngineCoreOutput] = []
@@ -418,6 +427,10 @@ class Scheduler:
                     # in the decoder's KV cache.
                     self.encoder_cache_manager.free(request, input_id)
 
+            # Extract prompt logprobs for this req if needed.
+            prompt_logprobs, prompt_logprobs_token_ids = (
+                prompt_logprobs_dict.get(req_id, (None, None)))
+
             if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
                 # NOTE(woosuk): Currently, we assume that each request
@@ -431,18 +444,48 @@ class Scheduler:
                 # This must be called before me make the EngineCoreOutput.
                 stopped = self._check_stop(request)
 
+                # Extract sample logprobs if needed.
+                logprobs_token_ids: List[torch.Tensor] = []
+                logprobs: List[torch.Tensor] = []
+                if request.sampling_params.logprobs:
+                    assert logprobs_token_ids_cpu is not None
+                    assert logprobs_cpu is not None
+                    # Here we assume there is 1 generated token per step.
+                    logprobs_token_ids = [logprobs_token_ids_cpu[req_index]]
+                    logprobs = [logprobs_cpu[req_index]]
+
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
                     request_id=req_id,
                     new_token_ids=request.output_token_ids[-num_new_tokens:],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason)
+                    stop_reason=request.stop_reason,
+                    logprobs_token_ids=logprobs_token_ids,
+                    logprobs=logprobs,
+                    prompt_logprobs_token_ids=prompt_logprobs_token_ids,
+                    prompt_logprobs=prompt_logprobs)
                 engine_core_outputs.append(output)
 
                 # Breakout of the loop.
                 if stopped:
                     continue
+
+            elif prompt_logprobs is not None:
+                # Chunked prefill & prompt logprobs is enabled; transmit partial
+                # logprobs via EngineCoreOutput
+                # Add EngineCoreOutput for this Request.
+                output = EngineCoreOutput(
+                    request_id=req_id,
+                    new_token_ids=[],
+                    finished=request.is_finished(),
+                    finish_reason=request.get_finished_reason(),
+                    stop_reason=request.stop_reason,
+                    logprobs_token_ids=[],
+                    logprobs=[],
+                    prompt_logprobs_token_ids=prompt_logprobs_token_ids,
+                    prompt_logprobs=prompt_logprobs)
+                engine_core_outputs.append(output)
 
             new_running.append(request)
         self.running = new_running
@@ -597,6 +640,7 @@ class SchedulerOutput:
     scheduled_new_reqs: List[NewRequestData]
     scheduled_resumed_reqs: List[ResumedRequestData]
     scheduled_running_reqs: List[RunningRequestData]
+    partial_req_ids: List[str]
 
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int

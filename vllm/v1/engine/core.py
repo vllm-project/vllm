@@ -9,7 +9,6 @@ from typing import List, Tuple, Type
 import psutil
 import zmq
 import zmq.asyncio
-from msgspec import msgpack
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
@@ -23,7 +22,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.serial_utils import MsgpackEncoder, PickleEncoder
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -295,7 +294,7 @@ class EngineCoreProc(EngineCore):
         """Output socket IO thread."""
 
         # Msgpack serialization encoding.
-        encoder = msgpack.Encoder()
+        encoder = MsgpackEncoder()
         # Reuse send buffer.
         buffer = bytearray()
 
