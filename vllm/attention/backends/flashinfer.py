@@ -362,8 +362,14 @@ class FlashInferMetadata(AttentionMetadata):
                     self.paged_kv_indptr[:self.num_prefills + 1],
                     self.paged_kv_indices,
                     self.paged_kv_last_page_len[:self.num_prefills],
-                    self.num_qo_heads, self.num_kv_heads, self.head_dim,
-                    self.page_size)
+                    self.num_qo_heads,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    self.page_size,
+                    # kv-cache data type.
+                    kv_data_type=self.data_type,
+                    # query data type.
+                    q_data_type=self.q_data_type)
         if self.num_decode_tokens > 0:
             assert self.paged_kv_indices is not None
             assert self.paged_kv_indptr is not None
