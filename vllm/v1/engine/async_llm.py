@@ -60,9 +60,6 @@ class AsyncLLM(EngineClient):
             lora_config=vllm_config.lora_config)
         self.tokenizer.ping()
 
-        # Request States (map of request_id -> RequestState).
-        self.request_states: Dict[str, RequestState] = {}
-
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
             model_config=vllm_config.model_config,
@@ -74,7 +71,6 @@ class AsyncLLM(EngineClient):
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(
-            request_states=self.request_states,
             tokenizer=self.tokenizer,
             log_stats=self.log_stats,
         )
@@ -215,7 +211,8 @@ class AsyncLLM(EngineClient):
                 # task switching under load which helps performance).
                 out = q.get_nowait() if q.qsize() > 0 else await q.get()
 
-                # Note: OutputProcessor handles removal from request_states.
+                # Note: both OutputProcessor and EngineCore handle their
+                # own cleanup based on finished.
                 if out.finished:
                     yield out
                     break
