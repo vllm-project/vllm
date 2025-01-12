@@ -133,7 +133,7 @@ class AsyncLLM(EngineClient):
         """Add new request to the AsyncLLM."""
 
         # 1) Create a new output queue for the request.
-        if request_id in self.output_processor.request_states:
+        if self.output_processor.is_request_active(request_id):
             raise ValueError(f"Request id {request_id} already running.")
         queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
 
@@ -236,6 +236,8 @@ class AsyncLLM(EngineClient):
                 # 2) Process EngineCoreOutputs.
                 processed_outputs = self.output_processor.process_outputs(
                     outputs.outputs)
+                # NOTE: RequestOutputs are pushed to their queues.
+                assert len(processed_outputs.request_outputs) == 0
 
                 # 3) Abort any reqs that finished due to stop strings.
                 await self.engine_core.abort_requests_async(

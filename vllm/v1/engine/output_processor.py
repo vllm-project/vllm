@@ -2,11 +2,12 @@ import asyncio
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from vllm.outputs import RequestOutput
 from vllm.transformers_utils.detokenizer_utils import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.outputs import RequestOutput
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
-from vllm.v1.engine.detokenizer import IncrementalDetokenizer, DetokenizerOutput
+from vllm.v1.engine.detokenizer import (DetokenizerOutput,
+                                        IncrementalDetokenizer)
 from vllm.v1.metrics.stats import IterationStats
 
 
@@ -66,6 +67,9 @@ class OutputProcessor:
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.request_states: Dict[str, RequestState] = {}
+
+    def is_request_active(self, request_id: str) -> bool:
+        return request_id in self.request_states
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)

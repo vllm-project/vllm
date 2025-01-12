@@ -1,5 +1,5 @@
-from typing import TYPE_CHECKING
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreOutput
