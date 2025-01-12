@@ -28,6 +28,14 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 @pytest.mark.parametrize("lora_bias", [True])
 @pytest.mark.parametrize("fully_sharded", [True, False])
 def test_lora_bias(lora_bias_files: str, lora_bias: bool, fully_sharded: bool):

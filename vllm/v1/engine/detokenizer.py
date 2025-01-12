@@ -3,11 +3,12 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.transformers_utils.tokenizer import get_lora_tokenizer, get_tokenizer
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -198,15 +199,25 @@ class Detokenizer:
                  tokenizer_mode: str = "auto",
                  trust_remote_code: bool = False,
                  revision: Optional[str] = None):
-        # TODO: once we support LoRA, we should should pass the tokenizer
-        # here. We currently have two copies (this + in the LLMEngine).
-        self.tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
-                                       tokenizer_mode=tokenizer_mode,
-                                       trust_remote_code=trust_remote_code,
-                                       revision=revision)
+        # per-request tokenizers, like in LoRA, are created in
+        # add_request. All other requests use the base_tokenizer.
+        self._base_tokenizer = get_tokenizer(
+            tokenizer_name=tokenizer_name,
+            tokenizer_mode=tokenizer_mode,
+            trust_remote_code=trust_remote_code,
+            revision=revision)
 
         # Request id -> IncrementalDetokenizer
         self.request_states: Dict[str, IncrementalDetokenizer] = {}
+
+    def get_tokenizer(self,
+                      lora_request: Optional[LoRARequest] = None
+                      ) -> AnyTokenizer:
+        lora_tokenizer = get_lora_tokenizer(lora_request)
+        if lora_tokenizer:
+            return lora_tokenizer
+        # Fall back to base tokenizer
+        return self._base_tokenizer
 
     def is_request_active(self, request_id: str):
         return request_id in self.request_states
@@ -234,8 +245,12 @@ class Detokenizer:
 
         assert (request.request_id not in self.request_states)
 
+        req_tokenizer = self._base_tokenizer
+        if request.lora_request:
+            req_tokenizer = self.get_tokenizer(request.lora_request)
+
         request_state = IncrementalDetokenizer.from_new_request(
-            self.tokenizer, request)
+            req_tokenizer, request)
         self.request_states[request.request_id] = request_state
 
     def step(

@@ -166,14 +166,28 @@ class FreeKVCacheBlockQueue:
         return ret
 
 
-def generate_block_hash_extra_keys(
-        request: Request, start_token_idx: int, end_token_idx: int,
-        start_mm_idx: int) -> Tuple[Optional[Tuple[Any, ...]], int]:
-    """Generate extra keys for the block hash. The extra keys can come from
-    the multi-modal inputs and request specific metadata (e.g., LoRA ID).
-    For multi-modal inputs, the extra keys are (mm_hash, start_offset) that
-    indicate a mm input contained in the block and its starting offset in
-    the block tokens.
+def need_extra_keys(request: Request) -> bool:
+    """Check whether the blocks allocated to this request need extra hash keys.
+
+    Args:
+        request (Request): The request. 
+
+    Returns:
+        bool: Whether blocks allocated to this request need extra hash keys. 
+    """
+
+    # Multimodal requests need to include the MM hash.
+    # LoRA requests need to include the LoRA ID.
+    return bool(request.mm_positions) or (request.lora_request is not None)
+
+
+def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
+                            end_token_idx: int,
+                            start_mm_idx: int) -> Tuple[List[Any], int]:
+    """Generate extra keys related to MultiModal request for block hash
+    computation. For multi-modal inputs, the extra keys are
+    (mm_hash, start_offset) that indicate a mm input contained in the
+    block and its starting offset in the block tokens.
     
     Args:
         request: The request object.
@@ -184,10 +198,11 @@ def generate_block_hash_extra_keys(
     Returns:
         A tuple of extra keys and the next multi-modal index.
     """
+    extra_keys: List[Any] = []
 
     mm_positions, mm_hashes = request.mm_positions, request.mm_hashes
     if not mm_positions:
-        return None, start_mm_idx
+        return extra_keys, start_mm_idx
 
     if mm_positions and len(mm_positions) != len(mm_hashes):
         raise ValueError(
@@ -200,14 +215,13 @@ def generate_block_hash_extra_keys(
     # range. This usually happens in the late prefill phase and decoding phase.
     if mm_positions[-1]["offset"] + mm_positions[-1][
             "length"] < start_token_idx:
-        return None, start_mm_idx
+        return extra_keys, start_mm_idx
 
     # Support start_mm_idx == -1 to indicate the last mm input.
     if start_mm_idx < 0:
         assert -start_mm_idx <= len(mm_positions)
         start_mm_idx = len(mm_positions) + start_mm_idx
 
-    extra_keys = []
     curr_mm_idx = start_mm_idx
     while mm_positions and curr_mm_idx < len(mm_positions):
         assert mm_hashes[curr_mm_idx] is not None
@@ -233,7 +247,50 @@ def generate_block_hash_extra_keys(
         else:
             # This block has not reached the current mm input.
             break
-    return tuple(extra_keys), curr_mm_idx
+    return extra_keys, curr_mm_idx
+
+
+def _gen_lora_extra_hash_keys(request: Request) -> List[int]:
+    """Generate extra keys related to LoRA for block hash computation.
+    
+    Args:
+        request: The request object.
+    
+    Returns:
+        Return LoRA id of the request if it is a LoRA request. Return empty
+        list otherwise.
+    """
+    if not request.lora_request:
+        return []
+    return [request.lora_request.lora_int_id]
+
+
+def generate_block_hash_extra_keys(
+        request: Request, start_token_idx: int, end_token_idx: int,
+        start_mm_idx: int) -> Tuple[Optional[Tuple[Any, ...]], int]:
+    """Generate extra keys for the block hash. The extra keys can come from
+    the multi-modal inputs and request specific metadata (e.g., LoRA ID).
+    
+    Args:
+        request: The request object.
+        start_token_idx: The start token index of the block.
+        end_token_idx: The end token index of the block.
+        start_mm_idx: The start multi-modal index of the block.
+    
+    Returns:
+        A tuple of extra keys and the next multi-modal index.
+    """
+    mm_extra_keys: List[Any]
+    mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
+        request, start_token_idx, end_token_idx, start_mm_idx)
+    lora_extra_keys: List[int] = _gen_lora_extra_hash_keys(request)
+
+    extra_keys: List[Any] = lora_extra_keys + mm_extra_keys
+
+    if not extra_keys:
+        return None, new_start_mm_idx
+
+    return tuple(extra_keys), new_start_mm_idx
 
 
 def hash_block_tokens(
@@ -244,9 +301,6 @@ def hash_block_tokens(
     the contents of the preceding block(s). The hash value is used for
     prefix caching. We use LRU cache for this function to avoid recomputing
     hash values for the same block contents.
-
-    TODO: Support arbitrary metadata so that we could support more
-    features such as LoRA adapter.
 
     Args:
         parent_block_hash: The hash of the parent block. None
@@ -276,14 +330,9 @@ def hash_request_tokens(block_size: int,
         The list of computed hash values.
     """
     token_ids = request.all_token_ids
-    mm_positions, mm_hashes = request.mm_positions, request.mm_hashes
-    if mm_positions and len(mm_positions) != len(mm_hashes):
-        raise ValueError(
-            "The number of multi-modal positions and hashes must match.")
 
-    # TODO: Extend this to support other features such as LoRA.
-    need_extra_keys = bool(mm_positions)
-    extra_keys = None
+    req_need_extra_keys = need_extra_keys(request)
+    req_extra_keys = None
     curr_mm_idx = 0
 
     ret = []
@@ -295,13 +344,13 @@ def hash_request_tokens(block_size: int,
         if len(block_token_ids) < block_size:
             break
 
-        # Add extra keys if the block is a multi-modal block.
-        if need_extra_keys:
-            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+        if req_need_extra_keys:
+            # MM and LoRA requests need extra keys for block-hash computation.
+            req_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
                 request, start, end, curr_mm_idx)
 
         block_hash = hash_block_tokens(parent_block_hash_value,
-                                       block_token_ids, extra_keys)
+                                       block_token_ids, req_extra_keys)
         ret.append(block_hash)
         parent_block_hash_value = block_hash.hash_value
     return ret

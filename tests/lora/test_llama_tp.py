@@ -1,5 +1,6 @@
 from typing import List
 
+import pytest
 import ray
 
 import vllm
@@ -69,6 +70,14 @@ def generate_and_test(llm, sql_lora_files):
     assert do_sample(llm, sql_lora_files, lora_id=2) == EXPECTED_LORA_OUTPUT
 
     print("removing lora")
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
 
 
 @fork_new_process_for_each_test
