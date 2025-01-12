@@ -1,4 +1,5 @@
 # Copyright 2023 The vLLM team.
+# Copyright 2024, GigaIO Networks, Inc. All rights reserved.
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/parallel_state.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
@@ -21,6 +22,7 @@ If you only need to use the distributed environment without model/pipeline
 """
 import contextlib
 import gc
+import json
 import pickle
 import weakref
 from collections import namedtuple
@@ -145,6 +147,7 @@ class GroupCoordinator:
     #   2     |   1  |  2   |     0      |       2
     #   3     |   1  |  3   |     1      |       3
     local_rank: int  # local rank used to assign devices
+    device: torch.device  # Device associated with rank
     rank_in_group: int  # rank inside the group
     cpu_group: ProcessGroup  # group for CPU communication
     device_group: ProcessGroup  # group for device communication
@@ -159,6 +162,7 @@ class GroupCoordinator:
         self,
         group_ranks: List[List[int]],
         local_rank: int,
+        device: torch.device,
         torch_distributed_backend: Union[str, Backend],
         use_pynccl: bool,
         use_custom_allreduce: bool,
@@ -174,6 +178,7 @@ class GroupCoordinator:
 
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
+        self.device = device
         self.device_group = None
         self.cpu_group = None
 
@@ -195,7 +200,7 @@ class GroupCoordinator:
 
         from vllm.platforms import current_platform
         if current_platform.is_cuda_alike():
-            self.device = torch.device(f"cuda:{local_rank}")
+            self.device = torch.device(self.device)
         else:
             self.device = torch.device("cpu")
 
@@ -516,7 +521,8 @@ class GroupCoordinator:
             "as the current rank.")
 
         # Serialize object to tensor and get the size as well
-        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8)
+        object_tensor = torch.frombuffer(bytearray(pickle.dumps(obj)),
+                                         dtype=torch.uint8)
 
         size_tensor = torch.tensor([object_tensor.numel()],
                                    dtype=torch.long,
@@ -837,11 +843,12 @@ def get_world_group() -> GroupCoordinator:
     return _WORLD
 
 
-def init_world_group(ranks: List[int], local_rank: int,
+def init_world_group(ranks: List[int], local_rank: int, device: torch.device,
                      backend: str) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=[ranks],
         local_rank=local_rank,
+        device=device,
         torch_distributed_backend=backend,
         use_pynccl=False,
         use_custom_allreduce=False,
@@ -855,6 +862,7 @@ def init_world_group(ranks: List[int], local_rank: int,
 def init_model_parallel_group(
     group_ranks: List[List[int]],
     local_rank: int,
+    device: torch.device,
     backend: str,
     use_custom_allreduce: Optional[bool] = None,
     use_message_queue_broadcaster: bool = False,
@@ -865,6 +873,7 @@ def init_model_parallel_group(
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
+        device=device,
         torch_distributed_backend=backend,
         use_pynccl=True,
         use_custom_allreduce=use_custom_allreduce,
@@ -944,12 +953,14 @@ def init_distributed_environment(
     rank: int = -1,
     distributed_init_method: str = "env://",
     local_rank: int = -1,
+    device: Optional[torch.device] = None,
     backend: str = "nccl",
 ):
+
     logger.debug(
-        "world_size=%d rank=%d local_rank=%d "
+        "world_size=%d rank=%d local_rank=%d %r "
         "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
-        distributed_init_method, backend)
+        device, distributed_init_method, backend)
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
@@ -970,13 +981,106 @@ def init_distributed_environment(
             local_rank = envs.LOCAL_RANK
         else:
             local_rank = rank
+
+    if device is None:
+        dstr = f"cuda:{local_rank}"
+        logger.warning("device not found, setting to %s", dstr)
+        device = torch.device(dstr)
+
     global _WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
-        _WORLD = init_world_group(ranks, local_rank, backend)
+        _WORLD = init_world_group(ranks, local_rank, device, backend)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
+
+
+_RANK_DEV_MAP: Optional[Dict[str, List[int]]] = None
+
+
+def _get_rank_dev_map() -> Optional[Dict[str, List[int]]]:
+    """
+    If VLLM_LOCAL_RANK_DEV_MAP exists, parse JSON object
+    The resulting dict should be structure as:
+    '{ "tp-0" : "[d_tp0-0, d_tp0-1, ..., d_tp0-(npp-1)]",
+       "tp-1" : "[d_tp1-0, d_tp1-1, ..., d_tp1-(npp-1)]",
+          ...
+       "tp-(ntp-1)" : "[d_tpn-0, d_tpn-1, ..., d_tpn-(npp-1)]" }'
+    Where npp == pipeline-parallel world size
+          ntp == tensor-parallel world size
+          d_tpx-y is the device ordinal to map to tp-rank x / pp-rank y
+    """
+
+    global _RANK_DEV_MAP
+    if _RANK_DEV_MAP is not None:
+        return _RANK_DEV_MAP.copy() if len(_RANK_DEV_MAP) > 0 else None
+
+    rdm_str = envs.VLLM_LOCAL_RANK_DEV_MAP
+    if not rdm_str:
+        logger.info("No rank-dev-map found")
+        _RANK_DEV_MAP = {}
+        return None
+
+    try:
+        jrdmobj = json.loads(rdm_str)
+        if not jrdmobj:
+            _RANK_DEV_MAP = {}
+            return None
+    except json.JSONDecodeError as e:
+        logger.error("JSON decode error parsing VLLM_LOCAL_RANK_DEV_MAP")
+        logger.error(e)
+        raise
+
+    if len(jrdmobj) == 0:
+        _RANK_DEV_MAP = jrdmobj
+        return None
+
+    all_devs = []
+    tp_groups = []
+    for tpk in jrdmobj:
+        assert tpk.startswith("tp-"), f"malformed tp-group key {tpk}"
+        k_split = tpk.split("-")
+        assert len(k_split) == 2 and k_split[-1].isdigit(
+        ), f"malformed tp-group key {tpk}"
+        tp_group = int(k_split[-1], 10)
+        assert tp_group >= 0, f"tp-group key {tpk} out-of-bounds"
+        assert tp_group not in tp_groups, f"tp-group {tpk} double-mapped"
+        tp_groups.append(tp_group)
+
+        assert len(jrdmobj[tpk]) > 0 , \
+                f"VLLM_LOCAL_RANK_DEV_MAP: Len of group {tpk} <= 0"
+        for d in jrdmobj[tpk]:
+            assert d >= 0, f"VLLM_LOCAL_RANK_DEV_MAP invalid device ordinal {d}"
+            assert d not in all_devs, \
+                    f"VLLM_LOCAL_RANK_DEV_MAP device {d} double mapped"
+            all_devs.append(d)
+
+    tpg_len = len(jrdmobj["tp-0"])
+    for tpg in range(1, len(jrdmobj)):
+        k = f"tp-{tpg}"
+        assert len(jrdmobj[k]) == tpg_len, (
+            "VLLM_LOCAL_RANK_DEV_MAP error:" +
+            f"{k} is len {len(jrdmobj[k])}, expected {tpg_len}")
+
+    _RANK_DEV_MAP = jrdmobj
+    return _RANK_DEV_MAP.copy()
+
+
+def get_device_idx(local_rank: int) -> int:
+    rdm = _get_rank_dev_map()
+    if not rdm:
+        return local_rank
+
+    tp_size = len(rdm["tp-0"])
+
+    ppidx = local_rank // tp_size
+    tpidx = local_rank % tp_size
+
+    # logger.info("local_rank: %d, ppidx: %d tpidx: %d dev: %d",
+    #             local_rank, ppidx, tpidx, rdm[f"tp-{ppidx}"][tpidx])
+
+    return rdm[f"tp-{ppidx}"][tpidx]
 
 
 def initialize_model_parallel(
@@ -1034,6 +1138,7 @@ def initialize_model_parallel(
     # message queue broadcaster is only used in tensor model parallel group
     _TP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
+                                    get_world_group().device,
                                     backend,
                                     use_message_queue_broadcaster=True,
                                     group_name="tp")
@@ -1051,6 +1156,7 @@ def initialize_model_parallel(
     # pipeline parallel does not need custom allreduce
     _PP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
+                                    get_world_group().device,
                                     backend,
                                     use_custom_allreduce=False,
                                     group_name="pp")

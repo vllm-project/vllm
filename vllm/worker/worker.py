@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_kv_transfer_initialized,
                               ensure_model_parallel_initialized,
-                              init_distributed_environment,
+                              get_device_idx, init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -52,7 +52,11 @@ class Worker(LocalOrDistributedWorkerBase):
         WorkerBase.__init__(self, vllm_config)
         self.parallel_config.rank = rank
         self.local_rank = local_rank
+        self.device_idx = get_device_idx(self.local_rank)
         self.rank = rank
+        logger.info("rank %d local_rank %d got dev_idx %d (total %d)",
+                    self.rank, self.local_rank, self.device_idx,
+                    torch.cuda.device_count())
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
         if is_driver_worker:
@@ -134,7 +138,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-            self.device = torch.device(f"cuda:{self.local_rank}")
+            self.device = torch.device(f"cuda:{self.device_idx}")
             torch.cuda.set_device(self.device)
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)
@@ -145,9 +149,11 @@ class Worker(LocalOrDistributedWorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.vllm_config, self.rank,
+        init_worker_distributed_environment(self.vllm_config,
+                                            self.rank,
                                             self.distributed_init_method,
-                                            self.local_rank)
+                                            self.local_rank,
+                                            device=self.device)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -452,13 +458,15 @@ def init_worker_distributed_environment(
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
+    device: Optional[torch.device] = None,
 ) -> None:
     """Initialize the distributed environment."""
     parallel_config = vllm_config.parallel_config
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank)
+                                 distributed_init_method, local_rank, device)
+
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
