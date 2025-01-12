@@ -513,20 +513,28 @@ class MllamaVisionEncoder(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, BaseModelOutput]:
-        encoder_states = ()
+        encoder_states = torch.empty(
+            (len(self.output_hidden_states), hidden_states.size(0),
+             hidden_states.size(1), hidden_states.size(2)),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device)
+        hidden_states_idx = torch.tensor([0], device=hidden_states.device)
 
         for i, encoder_layer in enumerate(self.layers):
             if i in self.output_hidden_states:
-                encoder_states = encoder_states + (hidden_states, )
+                encoder_states.index_copy_(0, hidden_states_idx,
+                                           hidden_states.unsqueeze(0))
+                hidden_states_idx.add_(1)
             hidden_states = encoder_layer(
                 hidden_states,
                 attention_mask,
             )
 
         if len(self.layers) - 1 in self.output_hidden_states:
-            encoder_states = encoder_states + (hidden_states, )
+            encoder_states.index_copy_(0, hidden_states_idx,
+                                       hidden_states.unsqueeze(0))
 
-        return hidden_states, encoder_states
+        return hidden_states, encoder_states.permute(1, 2, 3, 0)
 
 
 class MllamaVisionModel(nn.Module):
@@ -662,8 +670,6 @@ class MllamaVisionModel(nn.Module):
             attention_mask=attention_mask,
         )
         hidden_state, intermediate_hidden_states = output[0], output[1]
-        intermediate_hidden_states = torch.stack(intermediate_hidden_states,
-                                                 dim=-1)
 
         # apply global encoder
         hidden_state = self.layernorm_post(hidden_state)
