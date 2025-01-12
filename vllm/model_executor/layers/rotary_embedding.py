@@ -83,6 +83,7 @@ class RotaryEmbedding(CustomOp):
         base: int,
         is_neox_style: bool,
         dtype: torch.dtype,
+        device: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.head_size = head_size
@@ -91,6 +92,7 @@ class RotaryEmbedding(CustomOp):
         self.base = base
         self.is_neox_style = is_neox_style
         self.dtype = dtype
+        self.device = device
 
         cache = self._compute_cos_sin_cache()
         cache = cache.to(dtype)
@@ -611,23 +613,22 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     Credits to Peng et al. github.com/jquesnelle/yarn
     """
 
-    def __init__(
-        self,
-        head_size: int,
-        rotary_dim: int,
-        max_position_embeddings: int,
-        base: int,
-        is_neox_style: bool,
-        scaling_factor: float,
-        dtype: torch.dtype,
-        *,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
-        beta_fast: int = 32,
-        beta_slow: int = 1,
-        mscale: float = 1,
-        mscale_all_dim: float = 0,
-    ) -> None:
+    def __init__(self,
+                 head_size: int,
+                 rotary_dim: int,
+                 max_position_embeddings: int,
+                 base: int,
+                 is_neox_style: bool,
+                 scaling_factor: float,
+                 dtype: torch.dtype,
+                 *,
+                 extrapolation_factor: float = 1,
+                 attn_factor: float = 1,
+                 beta_fast: int = 32,
+                 beta_slow: int = 1,
+                 mscale: float = 1,
+                 mscale_all_dim: float = 0,
+                 device: Optional[str] = None) -> None:
         self.scaling_factor = scaling_factor
         self.extrapolation_factor = extrapolation_factor
         self.attn_factor = attn_factor
@@ -639,11 +640,11 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) *
             attn_factor)
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
-                         is_neox_style, dtype)
+                         is_neox_style, dtype, device)
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
         pos_freqs = self.base**(torch.arange(
-            0, self.rotary_dim, 2, dtype=torch.float, device="cuda") /
+            0, self.rotary_dim, 2, dtype=torch.float, device=self.device) /
                                 self.rotary_dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
@@ -662,7 +663,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = torch.arange(self.max_position_embeddings * self.scaling_factor,
-                         device="cuda",
+                         device=self.device,
                          dtype=torch.float32)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = (freqs.cos() * self.mscale)
@@ -943,6 +944,7 @@ def get_rope(
     rope_scaling: Optional[Dict[str, Any]] = None,
     dtype: Optional[torch.dtype] = None,
     partial_rotary_factor: float = 1.0,
+    device: Optional[str] = None,
 ) -> RotaryEmbedding:
     if dtype is None:
         dtype = torch.get_default_dtype()
@@ -1037,6 +1039,7 @@ def get_rope(
                 if k in ("extrapolation_factor", "attn_factor", "beta_fast",
                          "beta_slow", "mscale", "mscale_all_dim")
             }
+            extra_kwargs["device"] = device
             rotary_emb = DeepseekScalingRotaryEmbedding(
                 head_size, rotary_dim, original_max_position, base,
                 is_neox_style, scaling_factor, dtype, **extra_kwargs)
