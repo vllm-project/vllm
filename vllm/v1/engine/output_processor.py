@@ -56,11 +56,29 @@ class RequestState:
 
 
 class OutputProcessor:
+    """Process EngineCoreOutputs into RequestOutputs."""
 
-    def __init__(self, log_stats: bool, tokenizer: BaseTokenizerGroup):
+    def __init__(
+        self,
+        tokenizer: BaseTokenizerGroup,
+        log_stats: bool,
+    ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.request_states: Dict[str, RequestState] = {}
+
+    def get_num_unfinished_requests(self):
+        return len(self.request_states)
+
+    def has_unfinished_requests(self) -> bool:
+        return len(self.request_states) > 0
+
+    def abort_requests(
+        self,
+        request_ids: List[str],
+    ) -> None:
+        for request_id in request_ids:
+            self.request_states.pop(request_id, None)
 
     def add_request(
         self,
@@ -75,37 +93,6 @@ class OutputProcessor:
             tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
             request=request,
             queue=queue)
-
-    def abort_requests(
-        self,
-        request_ids: List[str],
-    ) -> None:
-        for request_id in request_ids:
-            self.request_states.pop(request_id, None)
-
-    def make_request_output(
-        self,
-        request_state: RequestState,
-        detokenizer_output: Optional[DetokenizerOutput],
-    ) -> Optional[RequestOutput]:
-
-        if detokenizer_output is None:
-            return None
-
-        request_output = RequestOutput.new(
-            request_state.request_id,
-            request_state.prompt,
-            request_state.prompt_token_ids,
-            detokenizer_output.output_text,
-            detokenizer_output.token_ids,
-            detokenizer_output.finished,
-        )
-        if detokenizer_output.finished:
-            completion_output = request_output.outputs[0]
-            completion_output.finish_reason = detokenizer_output.finish_reason
-            completion_output.stop_reason = detokenizer_output.stop_reason
-
-        return request_output
 
     def process_outputs(
         self,
@@ -159,7 +146,7 @@ class OutputProcessor:
                 engine_core_output)
 
             # 3) Create and handle RequestOutput objects.
-            if request_output := self.make_request_output(
+            if request_output := self._make_request_output(
                     req_state, detokenizer_output):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
@@ -181,3 +168,27 @@ class OutputProcessor:
             reqs_to_abort=reqs_to_abort,
             iteration_stats=iteration_stats,
         )
+
+    def _make_request_output(
+        self,
+        request_state: RequestState,
+        detokenizer_output: Optional[DetokenizerOutput],
+    ) -> Optional[RequestOutput]:
+
+        if detokenizer_output is None:
+            return None
+
+        request_output = RequestOutput.new(
+            request_state.request_id,
+            request_state.prompt,
+            request_state.prompt_token_ids,
+            detokenizer_output.output_text,
+            detokenizer_output.token_ids,
+            detokenizer_output.finished,
+        )
+        if detokenizer_output.finished:
+            completion_output = request_output.outputs[0]
+            completion_output.finish_reason = detokenizer_output.finish_reason
+            completion_output.stop_reason = detokenizer_output.stop_reason
+
+        return request_output

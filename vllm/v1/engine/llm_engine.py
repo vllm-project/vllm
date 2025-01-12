@@ -100,10 +100,10 @@ class LLMEngine:
                    multiprocess_mode=enable_multiprocessing)
 
     def get_num_unfinished_requests(self) -> int:
-        return len(self.request_states)
+        return self.output_processor.get_num_unfinished_requests()
 
     def has_unfinished_requests(self) -> bool:
-        return self.get_num_unfinished_requests() > 0
+        return self.output_processor.has_unfinished_requests()
 
     @classmethod
     def validate_outputs(cls, outputs, output_type):
@@ -148,7 +148,7 @@ class LLMEngine:
 
         # 2) Process EngineCoreOutputs.
         processed_outputs = self.output_processor.process_outputs(
-            engine_core_outputs)
+            engine_core_outputs.output)
 
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
