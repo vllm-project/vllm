@@ -126,6 +126,8 @@ class OutputProcessor:
             * IterationStats.update_from_output()
             * Detokenizer.update_from_output()
         
+        TODO(rob): add Protocol makes update_from_output explicit.
+        
         **********************************************************
         """
 
