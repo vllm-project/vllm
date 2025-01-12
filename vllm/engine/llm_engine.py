@@ -1210,8 +1210,13 @@ class LLMEngine:
         # LLMEngine/AsyncLLMEngine directly
         if is_async:
             # Log stats.
-            self.do_log_stats(scheduler_outputs, outputs, finished_before,
-                              skip)
+            self.do_log_stats(
+                scheduler_outputs,
+                outputs,
+                finished_before,
+                skip,
+                custom_labels={"model_name": seq_group.lora_request.lora_name}
+                if seq_group.lora_request else {})
 
             # Tracing
             self.do_tracing(scheduler_outputs, finished_before)
@@ -1443,7 +1448,18 @@ class LLMEngine:
                 self._process_model_outputs(ctx=ctx)
 
                 # Log stats.
-                self.do_log_stats(scheduler_outputs, outputs)
+                custom_labels = {}
+                if len(scheduler_outputs.scheduled_seq_groups) != 0:
+                    seq_groups = scheduler_outputs.scheduled_seq_groups
+                    scheduled_seq_group = seq_groups[0]
+                    seq_group = scheduled_seq_group.seq_group
+                    if seq_group.lora_request is not None:
+                        custom_labels = {
+                            "model_name": seq_group.lora_request.lora_name
+                        }
+                self.do_log_stats(scheduler_outputs,
+                                  outputs,
+                                  custom_labels=custom_labels)
 
                 # Tracing
                 self.do_tracing(scheduler_outputs)
@@ -1545,13 +1561,14 @@ class LLMEngine:
                      scheduler_outputs: Optional[SchedulerOutputs] = None,
                      model_output: Optional[List[SamplerOutput]] = None,
                      finished_before: Optional[List[int]] = None,
-                     skip: Optional[List[int]] = None) -> None:
+                     skip: Optional[List[int]] = None,
+                     custom_labels: Optional[Dict[str, str]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
             stats = self._get_stats(scheduler_outputs, model_output,
                                     finished_before, skip)
             for logger in self.stat_loggers.values():
-                logger.log(stats)
+                logger.log(stats, custom_labels)
 
     def _get_stats(self,
                    scheduler_outputs: Optional[SchedulerOutputs],
