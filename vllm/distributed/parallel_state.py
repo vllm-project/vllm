@@ -1147,6 +1147,16 @@ def get_tensor_model_parallel_rank():
     return get_tp_group().rank_in_group
 
 
+def get_pipeline_model_parallel_world_size():
+    """Return world size for the pipeline model parallel group."""
+    return get_pp_group().world_size
+
+
+def get_pipeline_model_parallel_rank():
+    """Return my rank for the pipeline model parallel group."""
+    return get_pp_group().rank_in_group
+
+
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     global _TP
