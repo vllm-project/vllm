@@ -8,7 +8,15 @@ import triton.language as tl
 from vllm.platforms import current_platform
 
 # Static kernels parameters
-BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
+if current_platform.get_device_capability() == (6, 0):  # P100 has 24 KB SM
+    BASE_BLOCK = 16
+elif current_platform.get_device_capability() == (6, 1):  # P40 has 48 KB SM
+    BASE_BLOCK = 32
+elif current_platform.has_device_capability(80):
+    BASE_BLOCK = 128
+else:
+    BASE_BLOCK = 64
+
 NUM_WARPS = 8
 
 # To check compatibility
