@@ -28,6 +28,7 @@ from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.distributed.parallel_state import get_world_group
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -1943,7 +1944,11 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                 f"graphs{'T' if use_graphs else 'F'}")
         else:
             model_event_name = 'model_executable'
-        with self.profiler.record_event('internal', model_event_name):
+        with set_forward_context(
+                model_input.attn_metadata, self.vllm_config,
+                model_input.virtual_engine), \
+            self.profiler.record_event(
+                    'internal', model_event_name):
             hidden_states = self.model.forward(
                 **execute_model_kwargs,
                 selected_token_indices=sampling_metadata.selected_token_indices
