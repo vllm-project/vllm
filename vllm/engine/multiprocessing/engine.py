@@ -218,8 +218,13 @@ class MQLLMEngine:
     def handle_new_input(self):
         """Handle new input from the socket"""
         try:
-            while self.input_socket.poll(timeout=0) != 0:
-                frames = self.input_socket.recv_multipart(copy=False)
+            while True:
+                try:
+                    frames = self.input_socket.recv_multipart(
+                        flags=zmq.NOBLOCK, copy=False)
+                except zmq.error.Again:
+                    break
+
                 request = pickle.loads(frames[0].buffer)
 
                 if isinstance(request, RPCProcessRequest):
