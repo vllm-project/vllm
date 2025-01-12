@@ -1048,9 +1048,13 @@ class PixtralHFVisionModel(nn.Module):
             for img in pixel_values
         ]
 
+        patch_embeds = [
+            p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list
+        ]
+        embed_sizes = [p.shape[1] for p in patch_embeds]
+
         # flatten to a single sequence
-        patch_embeds = torch.cat(
-            [p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list], dim=1)
+        patch_embeds = torch.cat(patch_embeds, dim=1)
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
@@ -1081,6 +1085,8 @@ class PixtralHFVisionModel(nn.Module):
         out = resolve_visual_encoder_outputs(out, feature_sample_layers, None,
                                              self.config.num_hidden_layers)
 
+        # squeeze dim 0 and split into separate tensors for each image
+        out = torch.split(torch.squeeze(out), embed_sizes)
         return out
 
     # (TODO) Add prefix argument for filtering out weights to be loaded

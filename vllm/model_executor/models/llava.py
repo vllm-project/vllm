@@ -613,7 +613,17 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         assert self.vision_tower is not None
         image_features = self._process_image_pixels(image_input)
-        return self.multi_modal_projector(image_features)
+
+        if isinstance(image_features, torch.Tensor):
+            return self.multi_modal_projector(image_features)
+
+        feature_sizes = [
+            image_feature.shape[0] for image_feature in image_features
+        ]
+
+        image_embeds = self.multi_modal_projector(torch.cat(image_features))
+        image_embeds = torch.split(image_embeds, feature_sizes)
+        return image_embeds
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
