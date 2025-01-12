@@ -109,10 +109,10 @@ class LLMEngine:
     def validate_outputs(cls, outputs, output_type):
         return outputs
 
-    def abort_request(self, request_ids: List[str]) -> None:	
-        """Remove request_ids from EngineCore and Detokenizer."""	
+    def abort_request(self, request_ids: List[str]) -> None:
+        """Remove request_ids from EngineCore and Detokenizer."""
 
-        self.engine_core.abort_requests(request_ids)	
+        self.engine_core.abort_requests(request_ids)
         self.output_processor.abort_requests(request_ids)
 
     def add_request(
