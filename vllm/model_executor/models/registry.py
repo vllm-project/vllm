@@ -100,6 +100,9 @@ _TEXT_GENERATION_MODELS = {
     "BartModel": ("bart", "BartForConditionalGeneration"),
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
     "Florence2ForConditionalGeneration": ("florence2", "Florence2ForConditionalGeneration"),  # noqa: E501
+    "T5Model": ("t5", "T5ForConditionalGeneration"),
+    "T5ForConditionalGeneration": ("t5", "T5ForConditionalGeneration"),
+    "T5WithLMHeadModel": ("t5", "T5ForConditionalGeneration")
 }
 
 _EMBEDDING_MODELS = {

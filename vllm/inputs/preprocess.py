@@ -155,7 +155,7 @@ class InputPreprocessor:
         if decoder_input_ids is None:
             # no decoder prompt input ->
             # use decoder_start_token_id as decoder_input_ids
-            decoder_input_ids = self._get_default_enc_dec_decoder_prompt()
+            decoder_input_ids = [decoder_start_token_id]
 
         if (len(decoder_input_ids) == 0
                 or decoder_input_ids[0] != decoder_start_token_id):
