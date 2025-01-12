@@ -1,6 +1,6 @@
 import asyncio
 import os
-from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
+from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -133,6 +133,8 @@ class AsyncLLM(EngineClient):
         """Add new request to the AsyncLLM."""
 
         # 1) Create a new output queue for the request.
+        if request_id in self.output_processor.request_states:
+            raise ValueError(f"Request id {request_id} already running.")
         queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
 
         # 2) Convert Input --> Request.

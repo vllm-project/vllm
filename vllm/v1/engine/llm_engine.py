@@ -15,12 +15,11 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import (
-    AnyTokenizer, BaseTokenizerGroup, init_tokenizer_from_configs)
+    BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.processor import Processor
-from vllm.v1.engine.request_state import RequestState
 from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
@@ -147,7 +146,7 @@ class LLMEngine:
 
         # 2) Process EngineCoreOutputs.
         processed_outputs = self.output_processor.process_outputs(
-            outputs.output)
+            outputs.outputs)
 
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)

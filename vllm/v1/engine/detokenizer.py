@@ -21,7 +21,7 @@ class DetokenizerOutput:
 
 
 @dataclass
-class Detokenizer:
+class IncrementalDetokenizer:
 
     # Generation data
     output_text: str
@@ -58,7 +58,7 @@ class Detokenizer:
         cls,
         tokenizer: AnyTokenizer,
         request: EngineCoreRequest,
-    ) -> "Detokenizer":
+    ) -> "IncrementalDetokenizer":
 
         tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
             tokenizer=tokenizer,

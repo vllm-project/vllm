@@ -6,7 +6,7 @@ from vllm.transformers_utils.detokenizer_utils import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.outputs import RequestOutput
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
-from vllm.v1.engine.detokenizer import Detokenizer, DetokenizerOutput
+from vllm.v1.engine.detokenizer import IncrementalDetokenizer, DetokenizerOutput
 from vllm.v1.metrics.stats import IterationStats
 
 
@@ -25,7 +25,7 @@ class RequestState:
         request_id: str,
         prompt: Optional[str],
         prompt_token_ids: List[int],
-        detokenizer: Detokenizer,
+        detokenizer: IncrementalDetokenizer,
         queue: Optional[asyncio.Queue[RequestOutput]],
     ):
         self.request_id = request_id
@@ -47,7 +47,7 @@ class RequestState:
             request_id=request.request_id,
             prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
-            detokenizer=Detokenizer.from_new_request(
+            detokenizer=IncrementalDetokenizer.from_new_request(
                 tokenizer=tokenizer,
                 request=request,
             ),
