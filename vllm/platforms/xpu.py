@@ -48,6 +48,10 @@ class XPUPlatform(Platform):
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         return True
 
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa: E501
+
     @staticmethod
     def inference_mode():
         return torch.no_grad()

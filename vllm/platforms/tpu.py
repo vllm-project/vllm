@@ -45,6 +45,10 @@ class TpuPlatform(Platform):
         return True
 
     @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm.distributed.device_communicators.tpu_communicator.TpuCommunicator"  # noqa: E501
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 

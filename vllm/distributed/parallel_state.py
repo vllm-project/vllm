@@ -39,7 +39,8 @@ import vllm.distributed.kv_transfer.kv_transfer_agent as kv_transfer
 import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
-from vllm.utils import direct_register_custom_op, supports_custom_op
+from vllm.utils import (direct_register_custom_op, resolve_obj_by_qualname,
+                        supports_custom_op)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -162,9 +163,7 @@ class GroupCoordinator:
         torch_distributed_backend: Union[str, Backend],
         use_pynccl: bool,
         use_custom_allreduce: bool,
-        use_tpu_communicator: bool,
-        use_hpu_communicator: bool,
-        use_xpu_communicator: bool,
+        use_device_specific_communicator: bool,
         use_message_queue_broadcaster: bool = False,
         group_name: Optional[str] = None,
     ):
@@ -201,11 +200,11 @@ class GroupCoordinator:
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
-        self.use_tpu_communicator = use_tpu_communicator
-        self.use_hpu_communicator = use_hpu_communicator
-        self.use_xpu_communicator = use_xpu_communicator
+        self.use_device_specific_communicator = use_device_specific_communicator
 
         # lazy import to avoid documentation build error
+        from vllm.distributed.device_communicators.base_communicator import (
+            CommunicatorBase)
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce)
         from vllm.distributed.device_communicators.pynccl import (
@@ -226,23 +225,15 @@ class GroupCoordinator:
                 device=self.device,
             )
 
-        from vllm.distributed.device_communicators.tpu_communicator import (
-            TpuCommunicator)
-        self.tpu_communicator: Optional[TpuCommunicator] = None
-        if use_tpu_communicator and self.world_size > 1:
-            self.tpu_communicator = TpuCommunicator(group=self.cpu_group)
-
-        from vllm.distributed.device_communicators.hpu_communicator import (
-            HpuCommunicator)
-        self.hpu_communicator: Optional[HpuCommunicator]
-        if use_hpu_communicator and self.world_size > 1:
-            self.hpu_communicator = HpuCommunicator(group=self.device_group)
-
-        from vllm.distributed.device_communicators.xpu_communicator import (
-            XpuCommunicator)
-        self.xpu_communicator: Optional[XpuCommunicator]
-        if use_xpu_communicator and self.world_size > 1:
-            self.xpu_communicator = XpuCommunicator(group=self.device_group)
+        self.device_communicator: CommunicatorBase
+        if self.use_device_specific_communicator and self.world_size > 1:
+            device_comm_cls = resolve_obj_by_qualname(
+                current_platform.get_device_communicator_cls())
+            self.device_communicator = device_comm_cls(
+                group=self.device_group,
+                rank_in_group=self.rank_in_group,
+                ranks=self.ranks,
+                unique_name=self.unique_name)
 
         from vllm.distributed.device_communicators.shm_broadcast import (
             MessageQueue)
@@ -326,27 +317,12 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
-        if input_.is_cpu:
-            import intel_extension_for_pytorch as ipex
-            ipex.distributed.all_reduce(input_, group=self.device_group)
-            return input_
-
-        if self.tpu_communicator is not None and \
-            not self.tpu_communicator.disabled:
-            # TPU handles Dynamo with its own logic.
-            return self.tpu_communicator.all_reduce(input_)
-
-        if self.hpu_communicator is not None and \
-            not self.hpu_communicator.disabled:
-            return self.hpu_communicator.all_reduce(input_)
-
-        if self.xpu_communicator is not None and \
-                not self.xpu_communicator.disabled:
-            return self.xpu_communicator.all_reduce(input_)
-
-        return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
+        return self.device_communicator.all_reduce(input_)
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
+        """
+        Out place all-reduce operation, which is registered in `torch.ops.vllm`
+        """
         # always try custom allreduce first,
         # and then pynccl.
         ca_comm = self.ca_comm
@@ -374,41 +350,7 @@ class GroupCoordinator:
             return input_
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
-
-        # For TPUs, use TPU communicator.
-        tpu_comm = self.tpu_communicator
-        if tpu_comm is not None and not tpu_comm.disabled:
-            return tpu_comm.all_gather(input_, dim)
-
-        # For HPUs, use HPU communicator.
-        hpu_comm = self.hpu_communicator
-        if hpu_comm is not None and not hpu_comm.disabled:
-            return hpu_comm.all_gather(input_, dim)
-
-        if dim < 0:
-            # Convert negative dim to positive.
-            dim += input_.dim()
-        input_size = input_.size()
-        # NOTE: we have to use concat-style all-gather here,
-        # stack-style all-gather has compatibility issues with
-        # torch.compile . see https://github.com/pytorch/pytorch/issues/138795
-        output_size = (input_size[0] * world_size, ) + input_size[1:]
-        # Allocate output tensor.
-        output_tensor = torch.empty(output_size,
-                                    dtype=input_.dtype,
-                                    device=input_.device)
-        # All-gather.
-        torch.distributed.all_gather_into_tensor(output_tensor,
-                                                 input_,
-                                                 group=self.device_group)
-        # Reshape
-        output_tensor = output_tensor.reshape((world_size, ) + input_size)
-        output_tensor = output_tensor.movedim(0, dim)
-        output_tensor = output_tensor.reshape(input_size[:dim] +
-                                              (world_size *
-                                               input_size[dim], ) +
-                                              input_size[dim + 1:])
-        return output_tensor
+        return self.device_communicator.all_gather(input_, dim)
 
     def gather(self,
                input_: torch.Tensor,
@@ -428,25 +370,8 @@ class GroupCoordinator:
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
-        if self.xpu_communicator is not None and \
-                not self.xpu_communicator.disabled:
-            return self.xpu_communicator.gather(input_, self.rank_in_group,
-                                                dst, dim)
-        # Allocate output tensor.
-        if self.rank_in_group == dst:
-            gather_list = [torch.empty_like(input_) for _ in range(world_size)]
-        else:
-            gather_list = None
-        # Gather.
-        torch.distributed.gather(input_,
-                                 gather_list,
-                                 dst=self.ranks[dst],
-                                 group=self.device_group)
-        if self.rank_in_group == dst:
-            output_tensor = torch.cat(gather_list, dim=dim)
-        else:
-            output_tensor = None
-        return output_tensor
+
+        return self.device_communicator.gather(input_, dst, dim)
 
     def broadcast(self, input_: torch.Tensor, src: int = 0):
         """Broadcast the input tensor.
@@ -845,9 +770,7 @@ def init_world_group(ranks: List[int], local_rank: int,
         torch_distributed_backend=backend,
         use_pynccl=False,
         use_custom_allreduce=False,
-        use_tpu_communicator=False,
-        use_hpu_communicator=False,
-        use_xpu_communicator=False,
+        use_device_specific_communicator=False,
         group_name="world",
     )
 
@@ -868,9 +791,7 @@ def init_model_parallel_group(
         torch_distributed_backend=backend,
         use_pynccl=True,
         use_custom_allreduce=use_custom_allreduce,
-        use_tpu_communicator=True,
-        use_hpu_communicator=True,
-        use_xpu_communicator=True,
+        use_device_specific_communicator=True,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
     )
