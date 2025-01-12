@@ -164,4 +164,3 @@ Where the `<path/to/model>` is the location where the model is stored, for examp
 ## Supported features
 
 See <project:#feature-x-hardware> compatibility matrix for feature support information.
-
