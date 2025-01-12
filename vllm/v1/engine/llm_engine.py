@@ -109,6 +109,12 @@ class LLMEngine:
     def validate_outputs(cls, outputs, output_type):
         return outputs
 
+    def abort_request(self, request_ids: List[str]) -> None:	
+        """Remove request_ids from EngineCore and Detokenizer."""	
+
+        self.engine_core.abort_requests(request_ids)	
+        self.output_processor.abort_requests(request_ids)
+
     def add_request(
         self,
         request_id: str,
@@ -121,7 +127,7 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
 
-        # 1) Convert Input --> Request.
+        # 1) Process raw inputs into the request.
         request = self.processor.process_inputs(request_id, prompt, params,
                                                 arrival_time, lora_request,
                                                 trace_headers,
@@ -129,11 +135,7 @@ class LLMEngine:
                                                 priority)
 
         # 2) Make a new RequestState and queue.
-        self.request_states[request_id] = RequestState.from_new_request(
-            tokenizer=self.get_tokenizer_group().get_lora_tokenizer(
-                lora_request),
-            request=request,
-        )
+        self.output_processor.add_request(request)
 
         # 3) Add the request to EngineCore.
         self.engine_core.add_request(request)
