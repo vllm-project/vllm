@@ -5,6 +5,8 @@ from typing import Optional
 
 import pytest
 
+from tests.kernels.utils import override_backend_env_variable
+
 from ..models.utils import check_logprobs_close, check_outputs_equal
 
 MODELS = [
@@ -19,10 +21,11 @@ NUM_PROMPTS = [10]
 @pytest.mark.parametrize("tp_size", [1])
 @pytest.mark.parametrize("enable_chunked_prefill", [False, True])
 @pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
 @pytest.mark.parametrize("num_logprobs", [None, 5])
+@pytest.mark.parametrize("attention_backend", ["FLASH_ATTN", "FLASHINFER"])
 def test_multi_step_llm(
     hf_runner,
     vllm_runner,
@@ -36,6 +39,8 @@ def test_multi_step_llm(
     num_scheduler_steps: int,
     num_prompts: int,
     num_logprobs: Optional[int],
+    attention_backend: str,
+    monkeypatch,
 ) -> None:
     """Test vLLM engine with multi-step scheduling via sync LLM Engine.
 
@@ -63,6 +68,7 @@ def test_multi_step_llm(
       num_logprobs: corresponds to the `logprobs` argument to the OpenAI
                     completions endpoint; `None` -> 1 logprob returned.
     """
+    override_backend_env_variable(monkeypatch, attention_backend)
 
     prompts = example_prompts
     if len(prompts) < num_prompts:
@@ -114,6 +120,7 @@ def test_multi_step_llm(
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
 @pytest.mark.parametrize("num_logprobs,num_prompt_logprobs", [(5, 5)])
+@pytest.mark.parametrize("attention_backend", ["FLASH_ATTN"])
 def test_multi_step_llm_w_prompt_logprobs(
     vllm_runner,
     example_prompts,
@@ -126,6 +133,8 @@ def test_multi_step_llm_w_prompt_logprobs(
     num_prompts: int,
     num_logprobs: Optional[int],
     num_prompt_logprobs: Optional[int],
+    attention_backend: str,
+    monkeypatch,
 ) -> None:
     """Test prompt logprobs with multi-step scheduling via sync LLM Engine.
 
@@ -155,6 +164,7 @@ def test_multi_step_llm_w_prompt_logprobs(
                            note that this argument is not supported by the
                            OpenAI completions endpoint.
     """
+    override_backend_env_variable(monkeypatch, attention_backend)
 
     prompts = example_prompts
     if len(prompts) < num_prompts:
@@ -205,6 +215,7 @@ def test_multi_step_llm_w_prompt_logprobs(
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
 @pytest.mark.parametrize("num_logprobs", [None, 5])
+@pytest.mark.parametrize("attention_backend", ["FLASH_ATTN"])
 def test_multi_step_llm_chunked_prefill_prefix_cache(
     vllm_runner,
     example_prompts,
@@ -216,6 +227,8 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
     num_scheduler_steps: int,
     num_prompts: int,
     num_logprobs: Optional[int],
+    attention_backend: str,
+    monkeypatch,
 ) -> None:
     """Test vLLM engine with multi-step+"single-step chunked prefill"+APC.
 
@@ -278,6 +291,8 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
     #
     # The Incorrect scheduling behavior - if it occurs - will cause an exception
     # in the model runner resulting from `do_sample=False`.
+    override_backend_env_variable(monkeypatch, attention_backend)
+
     assert len(example_prompts) >= 2
     challenge_prompts = copy.deepcopy(example_prompts)
     challenge_prompts[0] = ('vLLM is a high-throughput and memory-efficient '
