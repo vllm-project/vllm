@@ -16,7 +16,6 @@ TOKENIZER_GROUP = init_tokenizer_from_configs(
     VLLM_CONFIG.parallel_config, VLLM_CONFIG.lora_config)
 tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
 
-
 FULL_STRINGS = [
     "My name is Robert from Neural Magic and I love working on vLLM so much!",
     "Red Hat is the best open source company by far across Linux, K8s, and AI.",
