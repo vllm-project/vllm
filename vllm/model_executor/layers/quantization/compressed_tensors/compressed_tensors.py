@@ -377,19 +377,19 @@ class CompressedTensorsConfig(QuantizationConfig):
             scheme_dict = self.target_scheme_map[matched_target]
             weight_quant = scheme_dict.get("weights")
             input_quant = scheme_dict.get("input_activations")
-        elif self.sparsity_scheme_map:
-            matched_target = find_matched_target(
-                layer_name=layer_name,
-                module=layer,
-                targets=self.sparsity_scheme_map.keys())
+        else:
             weight_quant = None
             input_quant = None
 
         # For models with sparsity, assumes that the sparse layers are also
         # quantized for cutlass 2:4 support
-        sparsity_scheme: Optional[
-            SparsityCompressionConfig] = self.sparsity_scheme_map.get(
-                matched_target)
+        sparsity_scheme: Optional[SparsityCompressionConfig] = None
+        if self.sparsity_scheme_map:
+            matched_target = find_matched_target(
+                layer_name=layer_name,
+                module=layer,
+                targets=self.sparsity_scheme_map.keys())
+            sparsity_scheme = self.sparsity_scheme_map.get(matched_target)
 
         if self.supports_cutlass_24(weight_quant=weight_quant,
                                     input_quant=input_quant,

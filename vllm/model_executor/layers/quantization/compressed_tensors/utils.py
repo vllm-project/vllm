@@ -101,13 +101,39 @@ def find_matched_target(layer_name: Optional[str], module: Module,
     if layer_name is None:
         layer_name = ""
 
-    matched_target = (_find_first_match(layer_name, targets)
-                      or _find_first_match(module.__class__.__name__, targets,
-                                           True))
+    # match layer_name with targets
+    matched_target = _find_first_match(layer_name, targets)
 
+    # Fused layers like gate_up_proj or qkv_proj will not be fused
+    # in the safetensors checkpoint. So, they will not be matched
+    # in the first match process. Here, we convert the name
+    # from the fused version to unfused + check to make sure that
+    # each shard of the fused layer has the same scheme.
     if matched_target is None:
-        raise ValueError(f"Unable to find matching target for {module} in the "
-                         "compressed-tensors config.")
+        proj_name = layer_name.split(".")[-1]
+        if proj_name in FUSED_LAYER_NAME_MAPPING:
+            shard_proj_names = FUSED_LAYER_NAME_MAPPING[proj_name]
+
+            # Convert fused_name --> [shard_names]
+            shard_names = [
+                layer_name.replace(proj_name, shard_proj_name)
+                for shard_proj_name in shard_proj_names
+            ]
+            # Layer should be matched if all shards are matched.
+            matched_target = _find_first_match(shard_names[0], targets)
+            for i in range(1, len(shard_names)):
+                shard_name = shard_names[i]
+                matched_target_shard = _find_first_match(shard_name, targets)
+                if matched_target_shard is None != matched_target is None:
+                    raise ValueError(
+                        f"Found a different quantization schemes for "
+                        f"{shard_proj_names} in {layer_name}. vLLM "
+                        "requires all to use the same scheme.")
+
+    # if layer_name is not matched, then match the class name with targets.
+    if matched_target is None:
+        matched_target = _find_first_match(module.__class__.__name__, targets,
+                                           True)
 
     return matched_target
 
