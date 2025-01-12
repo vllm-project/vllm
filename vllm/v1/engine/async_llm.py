@@ -57,12 +57,12 @@ class AsyncLLM(EngineClient):
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
-        self.tokenizer_group = init_tokenizer_from_configs(
+        self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config)
-        self.tokenizer_group.ping()
+        self.tokenizer.ping()
 
         # Request States (map of request_id -> RequestState).
         self.request_states: Dict[str, RequestState] = {}
@@ -72,7 +72,7 @@ class AsyncLLM(EngineClient):
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
-            tokenizer=self.tokenizer_group,
+            tokenizer=self.tokenizer,
             input_registry=input_registry,
         )
 
@@ -155,7 +155,7 @@ class AsyncLLM(EngineClient):
         # 2) Make a nnew RequestState and queue.
         queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
         self.request_states[request_id] = RequestState.from_new_request(
-            tokenizer=(await self.get_tokenizer()),
+            tokenizer=(await self.get_tokenizer(lora_request)),
             request=request,
             queue=queue,
         )
@@ -265,14 +265,13 @@ class AsyncLLM(EngineClient):
             kill_process_tree(os.getpid())
 
     async def abort(self, request_id: str) -> None:
-        """Abort a Request."""
+        """Abort RequestId in AsyncLLM and EngineCore."""
 
-        # Remove from EngineCore.
-        await self.engine_core.abort_requests_async([request_id])
+        request_ids = [request_id]
+        await self.engine_core.abort_requests_async(request_ids)
 
-        # Remove from AsyncLLM.
-        # Note: the request can finish during await, so check to make
-        # sure it is still active in the tracker before we pop.
+        # If a request finishes while we await then the request_id
+        # will be removed from the tracked queues before we get here.
         _ = self.request_states.pop(request_id, None)
 
     def _log_stats(
@@ -310,7 +309,7 @@ class AsyncLLM(EngineClient):
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
-        return self.tokenizer_group.get_lora_tokenizer(lora_request)
+        return self.tokenizer.get_lora_tokenizer(lora_request)
 
     async def is_tracing_enabled(self) -> bool:
         return False
