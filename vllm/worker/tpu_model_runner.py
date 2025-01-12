@@ -266,8 +266,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             torch._dynamo.mark_dynamic(t, 0)
             torch._dynamo.mark_dynamic(p, 0)
         # Dummy run.
-        self.model(token_ids, position_ids, attn_metadata, input_lens, t, p,
-                   num_samples, kv_caches)
+        with set_forward_context(None, self.vllm_config, 0):
+            self.model(token_ids, position_ids, attn_metadata, input_lens, t,
+                       p, num_samples, kv_caches)
 
     def warmup_model(
         self,
@@ -715,10 +716,13 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             input_lens = model_input.input_lens.to(self.device)
             for i in range(num_steps):
                 slot_mapping = attn_metadata.slot_mapping
-                output_token_ids = self.model(token_ids, position_ids,
-                                              attn_metadata, input_lens, t, p,
-                                              model_input.num_samples,
-                                              kv_caches)
+                with set_forward_context(model_input.attn_metadata,
+                                         self.vllm_config,
+                                         model_input.virtual_engine):
+                    output_token_ids = self.model(token_ids, position_ids,
+                                                  attn_metadata, input_lens, t,
+                                                  p, model_input.num_samples,
+                                                  kv_caches)
                 self.cached_step_outputs.append(output_token_ids)
 
                 if i < num_steps - 1:
