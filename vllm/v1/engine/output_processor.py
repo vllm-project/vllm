@@ -1,10 +1,12 @@
+import asyncio
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from vllm.transformers_utils.detokenizer_utils import AnyTokenizer
+from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.outputs import RequestOutput
-from vllm.v1.engine import EngineCoreOutputs
-from vllm.v1.engine.detokenizer import DetokenizerOutput
-from vllm.v1.engine.request_state import RequestState
+from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest
+from vllm.v1.engine.detokenizer import Detokenizer, DetokenizerOutput
 from vllm.v1.metrics.stats import IterationStats
 
 
@@ -16,15 +18,65 @@ class OutputProcessorOutput:
     iteration_stats: IterationStats
 
 
-class OutputProcessor:
+class RequestState:
 
     def __init__(
         self,
-        request_states: Dict[str, RequestState],
-        log_stats: bool,
+        request_id: str,
+        prompt: Optional[str],
+        prompt_token_ids: List[int],
+        detokenizer: Detokenizer,
+        queue: Optional[asyncio.Queue[RequestOutput]],
     ):
-        self.request_states = request_states
+        self.request_id = request_id
+        self.prompt = prompt
+        self.prompt_token_ids = prompt_token_ids
+        self.prompt_len = len(prompt_token_ids)
+        self.detokenizer = detokenizer
+        self.is_prefilling = True
+        self.queue = queue
+
+    @classmethod
+    def from_new_request(
+        cls,
+        tokenizer: AnyTokenizer,
+        request: EngineCoreRequest,
+        queue: Optional[asyncio.Queue[RequestOutput]] = None,
+    ) -> "RequestState":
+        return cls(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            prompt_token_ids=request.prompt_token_ids,
+            detokenizer=Detokenizer.from_new_request(
+                tokenizer=tokenizer,
+                request=request,
+            ),
+            queue=queue,
+        )
+
+
+class OutputProcessor:
+
+    def __init__(self, log_stats: bool, tokenizer: BaseTokenizerGroup):
         self.log_stats = log_stats
+        self.tokenizer = tokenizer
+        self.request_states: Dict[str, RequestState] = {}
+    
+    def add_request(
+        self,
+        request: EngineCoreRequest,
+        queue: Optional[asyncio.Queue[RequestOutput]] = None,
+    ) -> None:
+        request_id = request.request_id
+        if request_id in self.request_states:
+            raise ValueError(f"Request id {request_id} already running.")
+
+        self.request_states[request_id] = RequestState.from_new_request(
+            tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
+            request=request,
+            queue=queue
+        )
+
 
     def make_request_output(
         self,
@@ -50,8 +102,11 @@ class OutputProcessor:
 
         return request_output
 
-    def process_outputs(self,
-                        outputs: EngineCoreOutputs) -> OutputProcessorOutput:
+    def process_outputs(
+        self,
+        outputs: EngineCoreOutputs,
+        request_states: Dict[str, RequestState],
+    ) -> OutputProcessorOutput:
         """
         Process the EngineCoreOutputs:
         1) Compute stats for logging
@@ -84,7 +139,7 @@ class OutputProcessor:
         iteration_stats = IterationStats(self.log_stats)
         for engine_core_output in outputs.outputs:
             req_id = engine_core_output.request_id
-            req_state = self.request_states.get(req_id)
+            req_state = request_states.get(req_id)
             if req_state is None:
                 # Ignore output for already-aborted request.
                 continue
@@ -111,7 +166,7 @@ class OutputProcessor:
 
                 # Free completed requests.
                 if request_output.finished:
-                    self.request_states.pop(req_id)
+                    request_states.pop(req_id)
                     if not engine_core_output.finished:
                         # If req not finished in EngineCore, but Detokenizer
                         # detected stop string, abort needed in EngineCore.

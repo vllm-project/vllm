@@ -75,6 +75,7 @@ class AsyncLLM(EngineClient):
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(
             request_states=self.request_states,
+            tokenizer=self.tokenizer,
             log_stats=self.log_stats,
         )
 
@@ -138,25 +139,20 @@ class AsyncLLM(EngineClient):
     ) -> asyncio.Queue[RequestOutput]:
         """Add new request to the AsyncLLM."""
 
-        if request_id in self.request_states:
-            raise ValueError(f"Request id {request_id} already running.")
+        # 1) Create a new output queue for the request.
+        queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
 
-        # 1) Convert Input --> Request.
+        # 2) Convert Input --> Request.
         request = self.processor.process_inputs(request_id, prompt, params,
                                                 arrival_time, lora_request,
                                                 trace_headers,
                                                 prompt_adapter_request,
                                                 priority)
 
-        # 2) Add the request to AsyncLLM.
-        queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
-        self.request_states[request_id] = RequestState.from_new_request(
-            tokenizer=self.tokenizer.get_lora_tokenizer(lora_request),
-            request=request,
-            queue=queue,
-        )
+        # 3) Add the request to OutputProcessor (this process).
+        self.output_processor.add_request(request, queue)
 
-        # 3) Add the EngineCoreRequest to EngineCore (separate process).
+        # 4) Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
 
         if self.log_requests:
@@ -219,7 +215,7 @@ class AsyncLLM(EngineClient):
                 # task switching under load which helps performance).
                 out = q.get_nowait() if q.qsize() > 0 else await q.get()
 
-                # Note: OutputProcessor removes from request_states.
+                # Note: OutputProcessor handles removal from request_states.
                 if out.finished:
                     yield out
                     break
@@ -241,10 +237,9 @@ class AsyncLLM(EngineClient):
                 # 1) Pull EngineCoreOutputs from the EngineCore.
                 engine_core_outputs = await self.engine_core.get_output_async()
 
-                # 2) Process EngineCoreOutputs, pushing RequestOutputs into
-                # asyncio queues for handling by the per-req generate() task.
+                # 2) Process EngineCoreOutputs.
                 processed_outputs = self.output_processor.process_outputs(
-                    engine_core_outputs)
+                    engine_core_outputs, self.request_states)
 
                 # 3) Abort any reqs that finished due to stop strings.
                 await self.engine_core.abort_requests_async(
