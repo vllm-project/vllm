@@ -161,4 +161,7 @@ docker run -it \
 
 Where the `<path/to/model>` is the location where the model is stored, for example, the weights for llama2 or llama3 models.
 
-## Extra information
+## Supported features
+
+See <project:#feature-x-hardware> compatibility matrix for feature support information.
+

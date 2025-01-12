@@ -224,7 +224,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 ```{include} cuda.inc.md
 :start-after: "### Build image from source"
-:end-before: "## Extra information"
+:end-before: "## Supported features"
 ```
 
 :::
@@ -234,7 +234,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 ```{include} rocm.inc.md
 :start-after: "### Build image from source"
-:end-before: "## Extra information"
+:end-before: "## Supported features"
 ```
 
 :::
@@ -244,7 +244,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 ```{include} xpu.inc.md
 :start-after: "### Build image from source"
-:end-before: "## Extra information"
+:end-before: "## Supported features"
 ```
 
 :::
@@ -253,10 +253,26 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 ## Supported features
 
-See <project:#feature-x-hardware> compatibility matrix for CUDA and ROCm feature support information.
-
 ::::{tab-set}
 :sync-group: device
+
+:::{tab-item} CUDA
+:sync: cuda
+
+```{include} cuda.inc.md
+:start-after: "## Supported features"
+```
+
+:::
+
+:::{tab-item} ROCm
+:sync: rocm
+
+```{include} rocm.inc.md
+:start-after: "## Supported features"
+```
+
+:::
 
 :::{tab-item} XPU
 :sync: xpu

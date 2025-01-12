@@ -219,4 +219,6 @@ The latest code can contain bugs and may not be stable. Please use it with cauti
 
 See <project:#deployment-docker-build-image-from-source> for instructions on building the Docker image.
 
-## Extra information
+## Supported features
+
+See <project:#feature-x-hardware> compatibility matrix for feature support information.
