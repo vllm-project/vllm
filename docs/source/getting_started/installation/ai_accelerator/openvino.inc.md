@@ -1,63 +1,65 @@
-(installation-openvino)=
+# Installation
 
-# OpenVINO
-
-vLLM powered by OpenVINO supports all LLM models from [vLLM supported models list](#supported-models) and can perform optimal model serving on all x86-64 CPUs with, at least, AVX2 support, as well as on both integrated and discrete Intel® GPUs ([the list of supported GPUs](https://docs.openvino.ai/2024/about-openvino/release-notes-openvino/system-requirements.html#gpu)). OpenVINO vLLM backend supports the following advanced vLLM features:
-
-- Prefix caching (`--enable-prefix-caching`)
-- Chunked prefill (`--enable-chunked-prefill`)
-
-**Table of contents**:
-
-- [Requirements](#openvino-backend-requirements)
-- [Quick start using Dockerfile](#openvino-backend-quick-start-dockerfile)
-- [Build from source](#install-openvino-backend-from-source)
-- [Performance tips](#openvino-backend-performance-tips)
-- [Limitations](#openvino-backend-limitations)
-
-(openvino-backend-requirements)=
+vLLM powered by OpenVINO supports all LLM models from [vLLM supported models list](#supported-models) and can perform optimal model serving on all x86-64 CPUs with, at least, AVX2 support, as well as on both integrated and discrete Intel® GPUs ([the list of supported GPUs](https://docs.openvino.ai/2024/about-openvino/release-notes-openvino/system-requirements.html#gpu)).
 
 ## Requirements
 
 - OS: Linux
 - Instruction set architecture (ISA) requirement: at least AVX2.
 
-(openvino-backend-quick-start-dockerfile)=
+## Python
 
-## Quick start using Dockerfile
+### Pre-built wheels
+
+Currently, there are no pre-built OpenVINO wheels.
+
+### Build wheel from source
+
+First, install Python. For example, on Ubuntu 22.04, you can run:
+
+```console
+sudo apt-get update  -y
+sudo apt-get install python3
+```
+
+Second, install prerequisites vLLM OpenVINO backend installation:
+
+```console
+pip install --upgrade pip
+pip install -r requirements-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+Finally, install vLLM with OpenVINO backend:
+
+```console
+PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" VLLM_TARGET_DEVICE=openvino python -m pip install -v .
+```
+
+:::{tip}
+To use vLLM OpenVINO backend with a GPU device, ensure your system is properly set up. Follow the instructions provided here: [https://docs.openvino.ai/2024/get-started/configurations/configurations-intel-gpu.html](https://docs.openvino.ai/2024/get-started/configurations/configurations-intel-gpu.html).
+:::
+
+## Docker
+
+### Pre-built images
+
+Currently, there are no pre-built OpenVINO images.
+
+### Build image from source
 
 ```console
 docker build -f Dockerfile.openvino -t vllm-openvino-env .
 docker run -it --rm vllm-openvino-env
 ```
 
-(install-openvino-backend-from-source)=
+## Extra information
 
-## Install from source
+## Supported features
 
-- First, install Python. For example, on Ubuntu 22.04, you can run:
+OpenVINO vLLM backend supports the following advanced vLLM features:
 
-  ```console
-  sudo apt-get update  -y
-  sudo apt-get install python3
-  ```
-
-- Second, install prerequisites vLLM OpenVINO backend installation:
-
-  ```console
-  pip install --upgrade pip
-  pip install -r requirements-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
-  ```
-
-- Finally, install vLLM with OpenVINO backend:
-
-  ```console
-  PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" VLLM_TARGET_DEVICE=openvino python -m pip install -v .
-  ```
-
-- [Optional] To use vLLM OpenVINO backend with a GPU device, ensure your system is properly set up. Follow the instructions provided here: [https://docs.openvino.ai/2024/get-started/configurations/configurations-intel-gpu.html](https://docs.openvino.ai/2024/get-started/configurations/configurations-intel-gpu.html).
-
-(openvino-backend-performance-tips)=
+- Prefix caching (`--enable-prefix-caching`)
+- Chunked prefill (`--enable-chunked-prefill`)
 
 ## Performance tips
 
@@ -94,8 +96,6 @@ OpenVINO best known configuration for GPU is:
 $ VLLM_OPENVINO_DEVICE=GPU VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS=ON \
     python3 vllm/benchmarks/benchmark_throughput.py --model meta-llama/Llama-2-7b-chat-hf --dataset vllm/benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json
 ```
-
-(openvino-backend-limitations)=
 
 ## Limitations
 
