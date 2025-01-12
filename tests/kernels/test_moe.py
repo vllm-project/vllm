@@ -48,7 +48,7 @@ def test_fused_moe(
     triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
     torch_output = torch_moe(a, w1, w2, score, topk)
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
-    iterative_output = iterative_moe(a, w1, w2, score, topk)
+    iterative_output = iterative_moe(a, w1, w2, score, topk, renormalize=False)
     torch.testing.assert_close(iterative_output,
                                torch_output,
                                atol=2e-2,
