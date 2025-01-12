@@ -369,20 +369,24 @@ class VocabParallelEmbedding(torch.nn.Module):
         start_idx = self.shard_indices.org_vocab_start_index
         shard_size = self.shard_indices.org_vocab_end_index - start_idx
 
+        size_to_check = self.org_vocab_size
+
         # If param packed on the same dim we are sharding on, then
         # need to adjust offsets of loaded weight by pack_factor.
         if packed_dim is not None and packed_dim == output_dim:
             packed_factor = param.packed_factor if isinstance(
                 param, BasevLLMParameter) else param.pack_factor
-            assert loaded_weight.shape[output_dim] == (self.org_vocab_size //
-                                                       param.packed_factor)
+            size_to_check = self.org_vocab_size // param.packed_factor
             start_idx = start_idx // packed_factor
             shard_size = shard_size // packed_factor
-        else:
-            assert loaded_weight.shape[output_dim] == self.org_vocab_size
 
-        # Copy the data.
-        loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+        if loaded_weight.shape[output_dim] == size_to_check:
+            # Copy the data.
+            loaded_weight = loaded_weight.narrow(output_dim, start_idx,
+                                                 shard_size)
+        else:
+            # Assume sharding has been done on the weight.
+            assert loaded_weight.shape[output_dim] == shard_size
 
         if current_platform.is_hpu():
             # FIXME(kzawora): Weight copy with slicing bugs out on Gaudi here,
