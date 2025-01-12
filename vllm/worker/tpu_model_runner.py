@@ -266,7 +266,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             torch._dynamo.mark_dynamic(t, 0)
             torch._dynamo.mark_dynamic(p, 0)
         # Dummy run.
-        with set_forward_context(None, self.vllm_config, 0):
+        with set_forward_context(attn_metadata, self.vllm_config, 0):
             self.model(token_ids, position_ids, attn_metadata, input_lens, t,
                        p, num_samples, kv_caches)
 
