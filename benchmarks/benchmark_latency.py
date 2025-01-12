@@ -32,6 +32,7 @@ def main(args: argparse.Namespace):
         top_p=1.0,
         ignore_eos=True,
         max_tokens=args.output_len,
+        detokenize=args.detokenize,
     )
     print(sampling_params)
     dummy_prompt_token_ids = np.random.randint(10000,
@@ -144,6 +145,11 @@ if __name__ == '__main__':
         type=str,
         default=None,
         help='Path to save the latency results in JSON format.')
+    parser.add_argument(
+        '--detokenize',
+        action='store_true',
+        help=('Detokenize the response (detokenization time included in the '
+              'latency measurement)'))
 
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
