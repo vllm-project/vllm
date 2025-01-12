@@ -52,6 +52,7 @@ steps:
   - tests/worker
   - tests/standalone_tests/lazy_torch_compile.py
   commands:
+  - pip install git+https://github.com/Isotr0py/DeepSeek-VL2.git  # Used by multimoda processing test
   - python3 standalone_tests/lazy_torch_compile.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
@@ -368,6 +369,7 @@ steps:
   - tests/models/encoder_decoder/vision_language
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal
     - pytest -v -s models/decoder_only/audio_language -m 'core_model or quant_model'
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/vision_language -m core_model

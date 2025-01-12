@@ -10,7 +10,8 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.engine import EngineCoreOutput
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -400,7 +401,7 @@ class Scheduler:
         self,
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
-    ) -> List[EngineCoreOutput]:
+    ) -> EngineCoreOutputs:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs_token_ids_cpu = model_runner_output.logprob_token_ids_cpu
@@ -408,7 +409,7 @@ class Scheduler:
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
-        engine_core_outputs: List[EngineCoreOutput] = []
+        outputs: List[EngineCoreOutput] = []
         for request in self.running:
             req_id = request.request_id
             request.num_computed_tokens += num_scheduled_tokens[req_id]
@@ -460,12 +461,12 @@ class Scheduler:
                     new_token_ids=request.output_token_ids[-num_new_tokens:],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason,
                     logprobs_token_ids=logprobs_token_ids,
                     logprobs=logprobs,
                     prompt_logprobs_token_ids=prompt_logprobs_token_ids,
-                    prompt_logprobs=prompt_logprobs)
-                engine_core_outputs.append(output)
+                    prompt_logprobs=prompt_logprobs,
+                    stop_reason=request.stop_reason)
+                outputs.append(output)
 
                 # Breakout of the loop.
                 if stopped:
@@ -480,16 +481,19 @@ class Scheduler:
                     new_token_ids=[],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason,
                     logprobs_token_ids=[],
                     logprobs=[],
                     prompt_logprobs_token_ids=prompt_logprobs_token_ids,
-                    prompt_logprobs=prompt_logprobs)
-                engine_core_outputs.append(output)
+                    prompt_logprobs=prompt_logprobs,
+                    stop_reason=request.stop_reason)
+                outputs.append(output)
 
             new_running.append(request)
         self.running = new_running
-        return engine_core_outputs
+        return EngineCoreOutputs(
+            outputs=outputs,
+            scheduler_stats=self.make_stats(),
+        )
 
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len
@@ -557,6 +561,12 @@ class Scheduler:
 
     def has_unfinished_requests(self) -> bool:
         return self.get_num_unfinished_requests() > 0
+
+    def make_stats(self) -> SchedulerStats:
+        return SchedulerStats(
+            num_running_reqs=len(self.running),
+            num_waiting_reqs=len(self.waiting),
+        )
 
 
 @dataclass

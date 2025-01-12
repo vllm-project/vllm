@@ -17,9 +17,9 @@ vLLM is a Python library that also contains pre-compiled C++ and CUDA (12.1) bin
 You can create a new Python environment using `conda`:
 
 ```console
-$ # (Recommended) Create a new conda environment.
-$ conda create -n myenv python=3.12 -y
-$ conda activate myenv
+# (Recommended) Create a new conda environment.
+conda create -n myenv python=3.12 -y
+conda activate myenv
 ```
 
 ```{note}
@@ -29,9 +29,9 @@ $ conda activate myenv
 Or you can create a new Python environment using [uv](https://docs.astral.sh/uv/), a very fast Python environment manager. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment using the following command:
 
 ```console
-$ # (Recommended) Create a new uv environment. Use `--seed` to install `pip` and `setuptools` in the environment.
-$ uv venv myenv --python 3.12 --seed
-$ source myenv/bin/activate
+# (Recommended) Create a new uv environment. Use `--seed` to install `pip` and `setuptools` in the environment.
+uv venv myenv --python 3.12 --seed
+source myenv/bin/activate
 ```
 
 In order to be performant, vLLM has to compile many cuda kernels. The compilation unfortunately introduces binary incompatibility with other CUDA versions and PyTorch versions, even for the same PyTorch version with different building configurations.
@@ -43,18 +43,18 @@ Therefore, it is recommended to install vLLM with a **fresh new** environment. I
 You can install vLLM using either `pip` or `uv pip`:
 
 ```console
-$ # Install vLLM with CUDA 12.1.
-$ pip install vllm # If you are using pip.
-$ uv pip install vllm # If you are using uv.
+# Install vLLM with CUDA 12.1.
+pip install vllm # If you are using pip.
+uv pip install vllm # If you are using uv.
 ```
 
 As of now, vLLM's binaries are compiled with CUDA 12.1 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 11.8 and public PyTorch release versions:
 
 ```console
-$ # Install vLLM with CUDA 11.8.
-$ export VLLM_VERSION=0.6.1.post1
-$ export PYTHON_VERSION=310
-$ pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu118
+# Install vLLM with CUDA 11.8.
+export VLLM_VERSION=0.6.1.post1
+export PYTHON_VERSION=310
+pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu118
 ```
 
 (install-the-latest-code)=
@@ -66,7 +66,7 @@ LLM inference is a fast-evolving field, and the latest code may contain bug fixe
 ### Install the latest code using `pip`
 
 ```console
-$ pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 ```
 
 `--pre` is required for `pip` to consider pre-released versions.
@@ -74,8 +74,8 @@ $ pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), due to the limitation of `pip`, you have to specify the full URL of the wheel file by embedding the commit hash in the URL:
 
 ```console
-$ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
-$ pip install https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
+pip install https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 ```
 
 Note that the wheels are built with Python 3.8 ABI (see [PEP 425](https://peps.python.org/pep-0425/) for more details about ABI), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (`1.0.0.dev`) is just a placeholder to have a unified URL for the wheels, the actual versions of wheels are contained in the wheel metadata (the wheels listed in the extra index url have correct versions). Although we don't support Python 3.8 any more (because PyTorch 2.5 dropped support for Python 3.8), the wheels are still built with Python 3.8 ABI to keep the same wheel name as before.
@@ -85,14 +85,14 @@ Note that the wheels are built with Python 3.8 ABI (see [PEP 425](https://peps.p
 Another way to install the latest code is to use `uv`:
 
 ```console
-$ uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly
 ```
 
 If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
 
 ```console
-$ export VLLM_COMMIT=72d9c316d3f6ede485146fe5aabd4e61dbc59069 # use full commit hash from the main branch
-$ uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
+export VLLM_COMMIT=72d9c316d3f6ede485146fe5aabd4e61dbc59069 # use full commit hash from the main branch
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
 ```
 
 The `uv` approach works for vLLM `v0.6.6` and later and offers an easy-to-remember command. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
@@ -102,8 +102,8 @@ The `uv` approach works for vLLM `v0.6.6` and later and offers an easy-to-rememb
 Another way to access the latest code is to use the docker images:
 
 ```console
-$ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
-$ docker pull public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:${VLLM_COMMIT}
+export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
+docker pull public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:${VLLM_COMMIT}
 ```
 
 These docker images are used for CI and testing only, and they are not intended for production use. They will be expired after several days.
@@ -121,18 +121,18 @@ The latest code can contain bugs and may not be stable. Please use it with cauti
 If you only need to change Python code, you can build and install vLLM without compilation. Using `pip`'s [`--editable` flag](https://pip.pypa.io/en/stable/topics/local-project-installs/#editable-installs), changes you make to the code will be reflected when you run vLLM:
 
 ```console
-$ git clone https://github.com/vllm-project/vllm.git
-$ cd vllm
-$ VLLM_USE_PRECOMPILED=1 pip install --editable .
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+VLLM_USE_PRECOMPILED=1 pip install --editable .
 ```
 
-This will download the latest nightly wheel from https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl and use the compiled libraries from there in the installation.
+This will download the [latest nightly wheel](https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl) and use the compiled libraries from there in the installation.
 
 The `VLLM_PRECOMPILED_WHEEL_LOCATION` environment variable can be used instead of `VLLM_USE_PRECOMPILED` to specify a custom path or URL to the wheel file. For example, to use the [0.6.1.post1 PyPi wheel](https://pypi.org/project/vllm/#files):
 
 ```console
-$ export VLLM_PRECOMPILED_WHEEL_LOCATION=https://files.pythonhosted.org/packages/4a/4c/ee65ba33467a4c0de350ce29fbae39b9d0e7fcd887cc756fa993654d1228/vllm-0.6.3.post1-cp38-abi3-manylinux1_x86_64.whl
-$ pip install --editable .
+export VLLM_PRECOMPILED_WHEEL_LOCATION=https://files.pythonhosted.org/packages/4a/4c/ee65ba33467a4c0de350ce29fbae39b9d0e7fcd887cc756fa993654d1228/vllm-0.6.3.post1-cp38-abi3-manylinux1_x86_64.whl
+pip install --editable .
 ```
 
 You can find more information about vLLM's wheels [above](#install-the-latest-code).
@@ -147,9 +147,9 @@ It is recommended to use the same commit ID for the source code as the vLLM whee
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
 ```console
-$ git clone https://github.com/vllm-project/vllm.git
-$ cd vllm
-$ pip install -e .
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+pip install -e .
 ```
 
 ```{tip}
@@ -172,11 +172,11 @@ There are scenarios where the PyTorch dependency cannot be easily installed via 
 To build vLLM using an existing PyTorch installation:
 
 ```console
-$ git clone https://github.com/vllm-project/vllm.git
-$ cd vllm
-$ python use_existing_torch.py
-$ pip install -r requirements-build.txt
-$ pip install -e . --no-build-isolation
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+python use_existing_torch.py
+pip install -r requirements-build.txt
+pip install -e . --no-build-isolation
 ```
 
 #### Use the local cutlass for compilation
@@ -185,9 +185,9 @@ Currently, before starting the build process, vLLM fetches cutlass code from Git
 To achieve this, you can set the environment variable VLLM_CUTLASS_SRC_DIR to point to your local cutlass directory.
 
 ```console
-$ git clone https://github.com/vllm-project/vllm.git
-$ cd vllm
-$ VLLM_CUTLASS_SRC_DIR=/path/to/cutlass pip install -e .
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+VLLM_CUTLASS_SRC_DIR=/path/to/cutlass pip install -e .
 ```
 
 #### Troubleshooting
@@ -196,8 +196,8 @@ To avoid your system being overloaded, you can limit the number of compilation j
 to be run simultaneously, via the environment variable `MAX_JOBS`. For example:
 
 ```console
-$ export MAX_JOBS=6
-$ pip install -e .
+export MAX_JOBS=6
+pip install -e .
 ```
 
 This is especially useful when you are building on less powerful machines. For example, when you use WSL it only [assigns 50% of the total memory by default](https://learn.microsoft.com/en-us/windows/wsl/wsl-config#main-wsl-settings), so using `export MAX_JOBS=1` can avoid compiling multiple files simultaneously and running out of memory.
@@ -206,22 +206,22 @@ A side effect is a much slower build process.
 Additionally, if you have trouble building vLLM, we recommend using the NVIDIA PyTorch Docker image.
 
 ```console
-$ # Use `--ipc=host` to make sure the shared memory is large enough.
-$ docker run --gpus all -it --rm --ipc=host nvcr.io/nvidia/pytorch:23.10-py3
+# Use `--ipc=host` to make sure the shared memory is large enough.
+docker run --gpus all -it --rm --ipc=host nvcr.io/nvidia/pytorch:23.10-py3
 ```
 
 If you don't want to use docker, it is recommended to have a full installation of CUDA Toolkit. You can download and install it from [the official website](https://developer.nvidia.com/cuda-toolkit-archive). After installation, set the environment variable `CUDA_HOME` to the installation path of CUDA Toolkit, and make sure that the `nvcc` compiler is in your `PATH`, e.g.:
 
 ```console
-$ export CUDA_HOME=/usr/local/cuda
-$ export PATH="${CUDA_HOME}/bin:$PATH"
+export CUDA_HOME=/usr/local/cuda
+export PATH="${CUDA_HOME}/bin:$PATH"
 ```
 
 Here is a sanity check to verify that the CUDA Toolkit is correctly installed:
 
 ```console
-$ nvcc --version # verify that nvcc is in your PATH
-$ ${CUDA_HOME}/bin/nvcc --version # verify that nvcc is in your CUDA_HOME
+nvcc --version # verify that nvcc is in your PATH
+${CUDA_HOME}/bin/nvcc --version # verify that nvcc is in your CUDA_HOME
 ```
 
 ### Unsupported OS build
@@ -231,6 +231,6 @@ vLLM can fully run only on Linux but for development purposes, you can still bui
 Simply disable the `VLLM_TARGET_DEVICE` environment variable before installing:
 
 ```console
-$ export VLLM_TARGET_DEVICE=empty
-$ pip install -e .
+export VLLM_TARGET_DEVICE=empty
+pip install -e .
 ```
