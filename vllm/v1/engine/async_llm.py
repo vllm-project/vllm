@@ -233,7 +233,7 @@ class AsyncLLM(EngineClient):
             raise
 
     async def _run_output_handler(self):
-        """Busy loop: Pull From EngineCore -> Process -> Push to Queues"""
+        """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
 
         try:
             while True:
