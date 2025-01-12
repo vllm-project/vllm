@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.attention import AttentionMetadata, AttentionType
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -57,10 +58,12 @@ class Attention(nn.Module):
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
             is_attention_free = cache_config.is_attention_free
+            calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
             block_size = 16
             is_attention_free = False
+            calculate_kv_scales = False
         if num_kv_heads is None:
             num_kv_heads = num_heads
 
@@ -70,8 +73,9 @@ class Attention(nn.Module):
         # expect the pre-quantized k/v_scale to be loaded along
         # with the model weights.
         self.kv_cache_dtype = kv_cache_dtype
-        self._k_scale = 1.0
-        self._v_scale = 1.0
+        self.calculate_kv_scales = calculate_kv_scales
+        self._k_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._v_scale = torch.tensor(1.0, dtype=torch.float32)
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
         if quant_method is not None:
@@ -129,6 +133,9 @@ class Attention(nn.Module):
             ).parallel_config.pipeline_parallel_size)
         ]
 
+        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
+        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+
     def forward(
         self,
         query: torch.Tensor,
@@ -137,6 +144,9 @@ class Attention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        if self.calculate_kv_scales and \
+            attn_metadata.enable_kv_scales_calculation:
+            self.calc_kv_scales(key, value)
 
         if self.use_direct_call:
             return self.impl.forward(query, key, value, kv_cache,
@@ -160,6 +170,12 @@ class Attention(nn.Module):
         else:
             return torch.ops.vllm.unified_attention(query, key, value,
                                                     self.layer_name)
+
+    def calc_kv_scales(self, key, value):
+        self._k_scale.copy_(torch.abs(key).max() / self.k_range)
+        self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+        # We only calculate the scales once
+        self.calculate_kv_scales = False
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore

@@ -157,8 +157,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: HPUAttentionMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.

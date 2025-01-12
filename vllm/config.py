@@ -120,11 +120,6 @@ class ModelConfig:
             decoding draft models.
         quantization: Quantization method that was used to quantize the model
             weights. If None, we assume the model weights are not quantized.
-        quantization_param_path: Path to JSON file containing scaling factors.
-            Used to load KV cache scaling factors into the model when KV cache
-            type is FP8_E4M3 on ROCm (AMD GPU). In the future these will also
-            be used to load activation and weight scaling factors when the
-            model dtype is FP8_E4M3 on ROCm.
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
@@ -187,7 +182,6 @@ class ModelConfig:
         factors.append(self.model)
         factors.append(self.dtype)
         factors.append(self.quantization)
-        factors.append(self.quantization_param_path)
         factors.append(self.revision)
         factors.append(self.code_revision)
         factors.append(self.trust_remote_code)
@@ -212,7 +206,6 @@ class ModelConfig:
                  max_model_len: Optional[int] = None,
                  spec_target_max_model_len: Optional[int] = None,
                  quantization: Optional[str] = None,
-                 quantization_param_path: Optional[str] = None,
                  enforce_eager: Optional[bool] = None,
                  max_seq_len_to_capture: Optional[int] = None,
                  max_logprobs: int = 20,
@@ -271,7 +264,6 @@ class ModelConfig:
         else:
             self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
-        self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
         self.max_seq_len_to_capture = max_seq_len_to_capture
         self.max_logprobs = max_logprobs
@@ -985,6 +977,7 @@ class CacheConfig:
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
         cpu_offload_gb: float = 0,
+        calculate_kv_scales: Optional[bool] = None,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -995,7 +988,7 @@ class CacheConfig:
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
         self.cpu_offload_gb = cpu_offload_gb
-
+        self.calculate_kv_scales = calculate_kv_scales
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -1003,6 +996,10 @@ class CacheConfig:
         # Will be set after profiling.
         self.num_gpu_blocks: Optional[int] = None
         self.num_cpu_blocks: Optional[int] = None
+
+        # Set calculate_kv_scales to False if the value is unset.
+        if self.calculate_kv_scales is None:
+            self.calculate_kv_scales = False
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
@@ -3274,7 +3271,6 @@ class VllmConfig:
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
-            f"quantization_param_path={self.model_config.quantization_param_path},"
             f" device_config={self.device_config.device}, "
             f"decoding_config={self.decoding_config!r}, "
             f"observability_config={self.observability_config!r}, "

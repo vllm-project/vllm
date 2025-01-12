@@ -176,8 +176,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: IpexAttnMetadata,  # type: ignore
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with IPEX varlen_attention and PagedAttention.
@@ -193,7 +193,6 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert k_scale == 1.0 and v_scale == 1.0
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)

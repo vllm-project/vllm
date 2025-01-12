@@ -133,8 +133,8 @@ class FlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
@@ -148,10 +148,6 @@ class FlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
-        assert k_scale == 1.0 and v_scale == 1.0, (
-            "key/v_scale is not supported in FlashAttention.")
-
         assert output is not None, "Output tensor must be provided."
 
         if attn_metadata is None:

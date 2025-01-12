@@ -152,6 +152,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
             multi_modal_placeholder_index_maps=self.
             multi_modal_placeholder_index_maps,
+            enable_kv_scales_calculation=self.enable_kv_scales_calculation,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
@@ -181,6 +182,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
             multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=True,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,
@@ -419,8 +421,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
