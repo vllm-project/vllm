@@ -24,10 +24,12 @@ class IterationStats:
         self.num_generation_tokens = 0
         self.num_prompt_tokens = 0
 
-    def update_from_output(self,
-                           output: "EngineCoreOutput",
-                           is_prefilling: bool,
-                           prompt_len: int = 0):
+    def update_from_output(
+        self,
+        output: "EngineCoreOutput",
+        is_prefilling: bool,
+        prompt_len: int
+    ):
         """Update the IterationStats with the EngineCoreOutput."""
 
         if not self.log_stats:
