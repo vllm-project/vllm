@@ -24,15 +24,19 @@ def default_server_args():
         "2048",
         "--max-num-seqs",
         "128",
-        "--enforce-eager",
+        "--enforce-eager"
     ]
 
 
 @pytest.fixture(scope="module",
-                params=["", "--disable-frontend-multiprocessing"])
+                params=[["--no-enable-prefix-caching"],
+                        [
+                            "--no-enable-prefix-caching",
+                            "--disable-frontend-multiprocessing"
+                        ]])
 def server(default_server_args, request):
     if request.param:
-        default_server_args.append(request.param)
+        default_server_args.extend(request.param)
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
 
