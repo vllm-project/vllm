@@ -168,14 +168,14 @@ See <project:#deployment-docker-pre-built-image> for instructions on using the o
 You can use <gh-file:Dockerfile.tpu> to build a Docker image with TPU support.
 
 ```console
-$ docker build -f Dockerfile.tpu -t vllm-tpu .
+docker build -f Dockerfile.tpu -t vllm-tpu .
 ```
 
 Run the Docker image with the following command:
 
 ```console
-$ # Make sure to add `--privileged --net host --shm-size=16G`.
-$ docker run --privileged --net host --shm-size=16G -it vllm-tpu
+# Make sure to add `--privileged --net host --shm-size=16G`.
+docker run --privileged --net host --shm-size=16G -it vllm-tpu
 ```
 
 ```{note}
