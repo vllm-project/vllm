@@ -47,7 +47,7 @@ class AsyncLLM(EngineClient):
         self.log_stats = log_stats
         self.stat_loggers: List[StatLoggerBase] = [
             LoggingStatLogger(),
-            # PrometheusStatLogger(),
+            # TODO(rob): PrometheusStatLogger(),
         ]
         self.model_config = vllm_config.model_config
 
