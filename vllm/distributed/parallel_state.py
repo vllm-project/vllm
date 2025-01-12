@@ -1067,13 +1067,18 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
         return
 
     if all([
-            vllm_config.kv_transfer_config.need_kv_parallel_group,
+            vllm_config.kv_transfer_config.need_kv_transfer_agent,
             _KV_TRANSFER is None
     ]):
+        logger.info("Need to transfer KV caches."
+                    " Initializing transfer agent...")
         _KV_TRANSFER = kv_transfer.KVTransferAgent(
             rank=get_world_group().rank,
             local_rank=get_world_group().local_rank,
             config=vllm_config)
+    else:
+        logger.info("KV cache transfer not needed. "
+                    "Skip initializing the transfer agent.")
 
 
 def ensure_model_parallel_initialized(
