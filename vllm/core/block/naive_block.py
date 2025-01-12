@@ -361,6 +361,7 @@ class NaiveBlock(Block):
                  _cow_target: Optional[Block] = None,
                  extra_hash: Optional[int] = None):
         self._token_ids: List[int] = []
+        self._token_ids_len: int = 0
         self._block_size = block_size
         self._prev_block = prev_block
         self._block_id = block_id
@@ -389,12 +390,14 @@ class NaiveBlock(Block):
         Args:
             token_ids (List[int]): The token IDs to be appended to the block.
         """
-        if len(token_ids) == 0:
+        len_token_ids = len(token_ids)
+        if len_token_ids == 0:
             return
 
-        assert len(token_ids) <= self.num_empty_slots
+        assert len_token_ids <= self.num_empty_slots
 
         self._token_ids.extend(token_ids)
+        self._token_ids_len += len_token_ids
 
     @property
     def computed(self) -> bool:
@@ -426,7 +429,7 @@ class NaiveBlock(Block):
 
     @property
     def num_empty_slots(self) -> int:
-        return self._block_size - len(self.token_ids)
+        return self._block_size - self._token_ids_len
 
     @property
     def token_ids(self) -> List[int]:
