@@ -181,7 +181,7 @@ class Processor:
 
         return EngineCoreRequest(
             request_id=request_id,
-            prompt=None,  # core engine does not need original text prompt
+            prompt=decoder_inputs.prompt,
             prompt_token_ids=decoder_inputs.prompt_token_ids,
             mm_inputs=sorted_mm_inputs,
             mm_hashes=sorted_mm_hashes,
