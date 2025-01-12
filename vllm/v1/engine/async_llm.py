@@ -255,14 +255,12 @@ class AsyncLLM(EngineClient):
             kill_process_tree(os.getpid())
 
     async def abort(self, request_id: str) -> None:
-        """Abort RequestId in AsyncLLM and EngineCore."""
+        """Abort RequestId in OutputProcessor and EngineCore."""
 
         request_ids = [request_id]
         await self.engine_core.abort_requests_async(request_ids)
+        self.output_processor.abort_requests(request_ids)
 
-        # If a request finishes while we await then the request_id
-        # will be removed from the tracked queues before we get here.
-        _ = self.request_states.pop(request_id, None)
 
     def _log_stats(
         self,
