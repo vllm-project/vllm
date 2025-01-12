@@ -13,7 +13,9 @@ from vllm.model_executor.guided_decoding.outlines_logits_processors import (
 from vllm.sampling_params import GuidedDecodingParams
 
 MODEL_NAME = 'HuggingFaceH4/zephyr-7b-beta'
-GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
+GUIDED_DECODING_BACKENDS = [
+    "outlines", "lm-format-enforcer", "xgrammar", "guidance"
+]
 
 
 def test_guided_logits_processors(sample_regex, sample_json_schema):

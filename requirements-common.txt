@@ -20,6 +20,7 @@ prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer
 lm-format-enforcer >= 0.10.9, < 0.11
 outlines == 0.1.11 # Requires pytorch
+llguidance>=0.4.0
 lark == 1.2.2 
 xgrammar >= 0.1.6; platform_machine == "x86_64"
 typing_extensions >= 4.10
