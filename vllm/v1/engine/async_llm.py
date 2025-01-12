@@ -63,7 +63,7 @@ class AsyncLLM(EngineClient):
         # Request States (map of request_id -> RequestState).
         self.request_states: Dict[str, RequestState] = {}
 
-        # Processor (convert Inputs --> EngineCoreRequests).
+        # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
@@ -72,7 +72,7 @@ class AsyncLLM(EngineClient):
             input_registry=input_registry,
         )
 
-        # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
+        # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(
             request_states=self.request_states,
             log_stats=self.log_stats,
