@@ -141,14 +141,13 @@ class LLMEngine:
         self.engine_core.add_request(request)
 
     def step(self) -> List[RequestOutput]:
-        """Pull From EngineCore -> Process -> Return RequestOutput."""
 
-        # 1) Pull EngineCoreOutput from the EngineCore.
-        engine_core_outputs = self.engine_core.get_output()
+        # 1) Get EngineCoreOutput from the EngineCore.
+        outputs = self.engine_core.get_output()
 
         # 2) Process EngineCoreOutputs.
         processed_outputs = self.output_processor.process_outputs(
-            engine_core_outputs.output)
+            outputs.output)
 
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
