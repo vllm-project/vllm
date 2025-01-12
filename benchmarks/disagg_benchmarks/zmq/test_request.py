@@ -61,12 +61,14 @@ async def test_connect_completions(session):
     except aiohttp.ClientError as e:
         print(f"Error: {e}")
 
+
 def is_json(data):
     try:
         json.loads(data)
         return True
     except ValueError:
         return False
+
 
 def extract_data(responseText):
     reply = ""

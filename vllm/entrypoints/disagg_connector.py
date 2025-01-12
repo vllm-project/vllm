@@ -113,6 +113,7 @@ async def generate_stream_response(fisrt_reply: str,
     async for _, reply in generator:
         yield reply
 
+
 async def prefill(route: str, header: dict, original_request_data: dict):
     logger.info("start prefill")
     generator = execute_task_async(route, header, original_request_data,
@@ -124,7 +125,8 @@ async def prefill(route: str, header: dict, original_request_data: dict):
             response.status_code = 500
             return response
     return True
-        
+
+
 async def decode(route: str, header: dict, original_request_data: dict):
     logger.info("start decode")
     generator = execute_task_async(route, header, original_request_data,
