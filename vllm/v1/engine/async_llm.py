@@ -72,7 +72,7 @@ class AsyncLLM(EngineClient):
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
-            tokenizer_group=self.tokenizer_group,
+            tokenizer=self.tokenizer_group,
             input_registry=input_registry,
         )
 
