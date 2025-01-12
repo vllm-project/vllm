@@ -20,6 +20,7 @@ from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
@@ -31,7 +32,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings,
@@ -349,7 +350,22 @@ class ModifiedWhisperEncoder(WhisperEncoder):
                                         info=UltravoxProcessingInfo,
                                         dummy_inputs=UltravoxDummyInputsBuilder
                                         )
-class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
+class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
+
+    # LoRA specific attributes
+    #lm_head is not added for now since it requires logits_processor
+    # which is missing from ultravox
+    # TODO : Add LoRA to the audio tower and projector.
+    supported_lora_modules = [
+        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "lm_head"
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
@@ -379,6 +395,9 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
+        # logits_processor is added here to support 'lm_head' LoRA module
+        # for language model
+        self.logits_processor = self.language_model.logits_processor
         if config.text_model_id is not None:
             # this prefix is not for initialization, but for loading weights
             # note the trailing dot
@@ -396,6 +415,16 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
             return self.language_model.sampler
 
         return get_sampler()
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model.",
+            connector="multi_modal_projector.",
+            tower_model="audio_tower.",
+        )
 
     def _audio_features_to_embeddings(
             self, input_features: torch.Tensor) -> torch.Tensor:
