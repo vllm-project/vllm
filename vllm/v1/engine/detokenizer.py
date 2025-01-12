@@ -26,7 +26,6 @@ class Detokenizer:
     output_text: str
     tokens: List[str]
     token_ids: List[int]
-    # Length of the prompt (in token_ids)
     prompt_len: int
 
     # Stop strings
