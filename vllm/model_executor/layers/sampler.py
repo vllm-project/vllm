@@ -204,14 +204,15 @@ class Sampler(nn.Module):
         self._sampling_tensors = None
 
         # Initialize new sampling tensors
-        (sampling_tensors, do_penalties, do_top_p_top_k,
-         do_min_p) = SamplingTensors.from_sampling_metadata(
+        (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p,
+         do_dry) = SamplingTensors.from_sampling_metadata(
              sampling_metadata, vocab_size, logits.device, logits.dtype)
 
         self._sampling_tensors = sampling_tensors
         self._do_penalties = do_penalties
         self._do_top_p_top_k = do_top_p_top_k
         self._do_min_p = do_min_p
+        self._do_dry = do_dry
 
     def forward(
         self,
@@ -254,6 +255,7 @@ class Sampler(nn.Module):
         do_penalties = self._do_penalties
         do_top_p_top_k = self._do_top_p_top_k
         do_min_p = self._do_min_p
+        do_dry = self._do_dry
 
         logits = _apply_min_tokens_penalty(logits, sampling_metadata)
 
@@ -264,6 +266,15 @@ class Sampler(nn.Module):
                                      sampling_tensors.presence_penalties,
                                      sampling_tensors.frequency_penalties,
                                      sampling_tensors.repetition_penalties)
+
+        if do_dry:
+            logits = _apply_dry(logits, sampling_tensors.prompt_tokens,
+                                sampling_tensors.output_tokens,
+                                sampling_tensors.dry_multipliers,
+                                sampling_tensors.dry_bases,
+                                sampling_tensors.dry_allowed_lengths,
+                                sampling_tensors.dry_sequence_breakers_idss,
+                                sampling_tensors.dry_ranges)
 
         # Use float32 to apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
@@ -381,6 +392,116 @@ def _apply_min_tokens_penalty(
 
     # verifies that no rows in logits were missed unexpectedly
     assert logits_applied == logits.shape[0]
+    return logits
+
+
+def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
+                     output_tokens_tensor: torch.Tensor,
+                     presence_penalties: torch.Tensor,
+                     frequency_penalties: torch.Tensor,
+                     repetition_penalties: torch.Tensor) -> torch.Tensor:
+    num_seqs, vocab_size = logits.shape
+    _, prompt_mask = _get_bin_counts_and_mask(prompt_tokens_tensor, vocab_size,
+                                              num_seqs)
+    output_bin_counts, output_mask = _get_bin_counts_and_mask(
+        output_tokens_tensor, vocab_size, num_seqs)
+
+    repetition_penalties = repetition_penalties[:, None].repeat(1, vocab_size)
+    repetition_penalties[~(prompt_mask | output_mask)] = 1.0
+    logits = torch.where(logits > 0, logits / repetition_penalties,
+                         logits * repetition_penalties)
+
+    # We follow the definition in OpenAI API.
+    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
+    logits -= frequency_penalties.unsqueeze_(dim=1) * output_bin_counts
+    logits -= presence_penalties.unsqueeze_(dim=1) * output_mask
+    return logits
+
+
+def _apply_dry(
+    logits: torch.Tensor,
+    input_token_ids: torch.Tensor,
+    output_token_ids: torch.Tensor,
+    multipliers: torch.Tensor,
+    bases: torch.Tensor,
+    allowed_lengths: torch.Tensor,
+    sequence_breakers_ids: torch.Tensor,
+    ranges: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Apply Don't Repeat Yourself (DRY) sampling to the logits.
+
+    Reference: https://github.com/PygmalionAI/aphrodite-engine/blob/a3c03db7355b33c0dfd670b084e827d0aa7442d1/aphrodite/modeling/layers/sampler.py#L621-L702
+    """
+
+    VOCAB_SIZE = logits.size(-1)
+    MAX_NGRAM = 100
+
+    # Process each sequence that has a nonzero multiplier
+    applies_to = multipliers.nonzero(as_tuple=True)[0]
+    for irow in applies_to.tolist():
+        # DRY applies to input AND output tokens, so concat w/o padding tokens
+        prompt_len = (len(input_token_ids[irow]) -
+                      (input_token_ids[irow] == VOCAB_SIZE).sum().item())
+        ouput_len = (len(output_token_ids[irow]) -
+                     (output_token_ids[irow] == VOCAB_SIZE).sum().item())
+        token_seq = torch.cat((input_token_ids[irow][:prompt_len],
+                               output_token_ids[irow][:ouput_len]),
+                              dim=0)
+
+        range_limit = ranges[irow].item()
+        if range_limit:
+            token_seq = token_seq[-range_limit:]
+
+        last_token = token_seq[-1].item()
+        if last_token in sequence_breakers_ids[irow]:
+            continue  # early out for everything up to the min_ngram check?
+
+        # Build a mask of all the breaking tokens in the context
+        break_mask = torch.zeros(len(token_seq),
+                                 dtype=torch.bool,
+                                 device=logits.device)
+        for break_tok in sequence_breakers_ids[irow]:
+            break_mask.logical_or_(token_seq == break_tok)
+
+        # Find the most recent breaking token (sets ngram limit)
+        max_ngram = 0
+        for max_ngram in range(min(len(break_mask), MAX_NGRAM + 1)):
+            if break_mask[-max_ngram - 1]:
+                break
+
+        min_ngram = allowed_lengths[irow].item()
+        if max_ngram <= min_ngram:  # Too close to a break to match anything
+            continue
+
+        # If [token] is picked, what's the longest ngram that would match?
+        ngram_lens = torch.zeros(VOCAB_SIZE,
+                                 dtype=torch.int32,
+                                 device=logits.device)
+
+        # Find all instances of the last token- potential ngrams!
+        endpoint_indexes = torch.nonzero(token_seq == last_token,
+                                         as_tuple=True)[0].tolist()
+        # NOTE(alpin): This seems like the slow part.
+        for idx in endpoint_indexes[:-1]:  # Skip the last_token match
+            unwind = 0
+            # Check up to max_ngram tokens prior to idx (we know idx matches)
+            for unwind in range(1, min(idx, max_ngram) + 1):
+                if break_mask[idx - unwind]:
+                    break
+                if token_seq[idx - unwind] != token_seq[-unwind - 1]:
+                    break
+            next_tok = token_seq[idx + 1]
+            # The repeated tokens BEFORE next_tok (+1 to include [idx]).
+            ngram_lens[next_tok] = max(ngram_lens[next_tok].item(), unwind + 1)
+
+        # Convert ngram lengths to penalty exponents
+        penalty_mask = ngram_lens > 0
+        scales = bases[irow]**(ngram_lens[penalty_mask] - min_ngram)
+
+        # Calculate and apply penalties
+        logits[irow][penalty_mask] -= multipliers[irow] * scales
+
     return logits
 
 

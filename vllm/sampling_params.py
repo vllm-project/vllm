@@ -113,6 +113,25 @@ class SamplingParams(
             they appear in the prompt and the generated text so far. Values > 1
             encourage the model to use new tokens, while values < 1 encourage
             the model to repeat tokens.
+        dry_multiplier: Float that controls the magnitude of the DRY sampling
+            penalty. Higher values create stronger penalties against
+            repetition. The penalty is multiplied by this value before being
+            applied. Must be non-negative. 0 disables the sampler.
+        dry_base: Base for the exponential growth of the DRY sampling penalty.
+            Controls how quickly the penalty increases with longer repeated
+            sequences. Must be greater than 1. Higher values (e.g. 2.0) create
+            more aggressive penalties for longer repetitions. Defaults to 1.75.
+        dry_allowed_length: Maximum number of tokens that can be repeated
+            without incurring a DRY sampling penalty. Sequences longer than
+            this will be penalized exponentially. Must be at least 1.
+            Defaults to 2.
+        dry_sequence_breaker_ids: List of token IDs that stop
+            the matching of repeated content. These tokens will break up the
+            input into sections where repetition is evaluated separately.
+            Common examples are newlines, quotes, and other structural tokens.
+            Defaults to None.
+        dry_range: The range of tokens (input + output) to apply the DRY
+            sampler.
         temperature: Float that controls the randomness of the sampling. Lower
             values make the model more deterministic, while higher values make
             the model more random. Zero means greedy sampling.
@@ -173,6 +192,11 @@ class SamplingParams(
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     repetition_penalty: float = 1.0
+    dry_multiplier: float = 0.0
+    dry_base: float = 1.75
+    dry_allowed_length: int = 2
+    dry_sequence_breaker_ids: List[int] = []
+    dry_range: int = 0
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = -1
@@ -216,6 +240,11 @@ class SamplingParams(
         presence_penalty: Optional[float] = 0.0,
         frequency_penalty: Optional[float] = 0.0,
         repetition_penalty: Optional[float] = 1.0,
+        dry_multiplier: Optional[float] = 0.0,
+        dry_base: Optional[float] = 1.75,
+        dry_allowed_length: Optional[int] = 2,
+        dry_sequence_breaker_ids: Optional[List[int]] = None,
+        dry_range: Optional[int] = 0,
         temperature: Optional[float] = 1.0,
         top_p: Optional[float] = 1.0,
         top_k: int = -1,
@@ -256,6 +285,13 @@ class SamplingParams(
             if frequency_penalty is None else frequency_penalty,
             repetition_penalty=1.0
             if repetition_penalty is None else repetition_penalty,
+            dry_multiplier=0.0 if dry_multiplier is None else dry_multiplier,
+            dry_base=1.75 if dry_base is None else dry_base,
+            dry_allowed_length=2
+            if dry_allowed_length is None else dry_allowed_length,
+            dry_sequence_breaker_ids=[]
+            if dry_sequence_breaker_ids is None else dry_sequence_breaker_ids,
+            dry_range=0 if dry_range is None else dry_range,
             temperature=1.0 if temperature is None else temperature,
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
@@ -361,6 +397,21 @@ class SamplingParams(
         if not 0.0 < self.repetition_penalty <= 2.0:
             raise ValueError("repetition_penalty must be in (0, 2], got "
                              f"{self.repetition_penalty}.")
+        if self.dry_multiplier < 0.0:
+            raise ValueError("dry_multiplier must be non-negative, got "
+                             f"{self.dry_multiplier}.")
+        if self.dry_base <= 1.0:
+            raise ValueError("dry_base must be greater than 1, got "
+                             f"{self.dry_base}.")
+        if self.dry_allowed_length < 0:
+            raise ValueError("dry_allowed_length must be non-negative, got "
+                             f"{self.dry_allowed_length}.")
+        if self.dry_range < 0:
+            raise ValueError("dry_range must be non-negative, got "
+                             f"{self.dry_range}.")
+        if not (isinstance(self.dry_sequence_breaker_ids, list)):
+            raise ValueError("dry_sequence_breaker_ids must be a list, got "
+                             f"{self.dry_sequence_breaker_ids}.")
         if self.temperature < 0.0:
             raise ValueError(
                 f"temperature must be non-negative, got {self.temperature}.")
@@ -470,6 +521,11 @@ class SamplingParams(
             f"presence_penalty={self.presence_penalty}, "
             f"frequency_penalty={self.frequency_penalty}, "
             f"repetition_penalty={self.repetition_penalty}, "
+            f"dry_multiplier={self.dry_multiplier}, "
+            f"dry_base={self.dry_base}, "
+            f"dry_allowed_length={self.dry_allowed_length}, "
+            f"dry_sequence_breaker_ids={self.dry_sequence_breaker_ids}, "
+            f"dry_range={self.dry_range}, "
             f"temperature={self.temperature}, "
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "
