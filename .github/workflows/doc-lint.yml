@@ -13,7 +13,7 @@ on:
       - "docs/**"
 
 jobs:
-  sphinx-lint:
+  doc-lint:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -29,4 +29,4 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-lint.txt
       - name: Linting docs
-        run: tools/sphinx-lint.sh
+        run: tools/doc-lint.sh
