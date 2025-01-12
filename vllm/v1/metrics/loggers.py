@@ -17,12 +17,12 @@ class StatLoggerBase(ABC):
 
 
 class LoggingStatLogger(StatLoggerBase):
-    """Log Stats to standard output."""
 
     def __init__(self):
         self.last_log_time = time.monotonic()
 
     def log(self, scheduler_stats: SchedulerStats):
+        """Log Stats to standard output."""
 
         # Log every _LOCAL_LOGGING_INTERVAL_SEC.
         now = time.monotonic()
