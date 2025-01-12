@@ -12,6 +12,11 @@ def get_punica_wrapper(*args, **kwargs) -> PunicaWrapperBase:
         from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
         logger.info_once("Using PunicaWrapperGPU.")
         return PunicaWrapperGPU(*args, **kwargs)
+    elif current_platform.is_cpu():
+        # Lazy import to avoid ImportError
+        from vllm.lora.punica_wrapper.punica_cpu import PunicaWrapperCPU
+        logger.info_once("Using PunicaWrapperCPU.")
+        return PunicaWrapperCPU(*args, **kwargs)
     elif current_platform.is_hpu():
         # Lazy import to avoid ImportError
         from vllm.lora.punica_wrapper.punica_hpu import PunicaWrapperHPU
