@@ -28,7 +28,7 @@ QUANTIZATION_METHODS: List[str] = [
     "ipex",
 ]
 
-# The customized quantization methods which registered out-of-tree will be added to this dict.
+# The customized quantization methods which will be added to this dict.
 _CUSTOMIZED_METHOD_TO_QUANT_CONFIG = {}
 
 
@@ -52,13 +52,15 @@ def register_quantization_config(quantization: str):
         >>>
         >>> get_quantization_config("my_quant")
         <class 'MyQuantConfig'>
-    """
+    """  # noqa: E501
 
     def _wrapper(quant_config_cls):
         if quantization in QUANTIZATION_METHODS:
-            raise ValueError(f"The quantization method `{quantization}` is already exists.")
+            raise ValueError(
+                f"The quantization method `{quantization}` is already exists.")
         if not issubclass(quant_config_cls, QuantizationConfig):
-            raise ValueError("The quantization config must be a subclass of `QuantizationConfig`.")
+            raise ValueError("The quantization config must be a subclass of "
+                             "`QuantizationConfig`.")
         _CUSTOMIZED_METHOD_TO_QUANT_CONFIG[quantization] = quant_config_cls
         QUANTIZATION_METHODS.append(quantization)
         return quant_config_cls
