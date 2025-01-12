@@ -396,6 +396,27 @@ class NaiveBlock(Block):
 
         self._token_ids.extend(token_ids)
 
+    def insert_token_ids(self, slot_start: int, token_ids: List[int]) -> None:
+        """Inserts the given token IDs to the block and performs a
+        copy-on-write if necessary.
+
+        Args:
+            slot_start: (int): The start address of first token to be inserted
+            token_ids (Optional[List[int]]): The token IDs to be appended
+                to the block.
+        """
+        if len(token_ids) == 0:
+            return
+
+        slot_end = slot_start + len(token_ids)
+        assert slot_end <= self._block_size
+
+        self._token_ids[slot_start:slot_end] = token_ids
+
+        if self._block_id is not None:
+            self._block_id = (self._allocator.cow_block_if_not_appendable(
+                self._cow_target))
+
     @property
     def computed(self) -> bool:
         raise NotImplementedError

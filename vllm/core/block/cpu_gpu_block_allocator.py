@@ -375,6 +375,9 @@ class NullBlock(Block):
     def append_token_ids(self, token_ids: List[BlockId]):
         raise ValueError("null block should not be modified")
 
+    def insert_token_ids(self, slot_offset: int, token_ids: List[int]) -> None:
+        raise ValueError("null block should not be modified")
+
     @property
     def block_id(self):
         return self._proxy.block_id

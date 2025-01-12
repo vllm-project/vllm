@@ -298,7 +298,8 @@ def seq_group_metadata_builder():
                                  is_prompt=False,
                                  seq_data={},
                                  sampling_params=None,
-                                 block_tables={})
+                                 block_tables={},
+                                 slot_mappings={})
 
 
 def scheduler_running_outputs_builder():
@@ -595,7 +596,7 @@ class Scheduler:
 
             # NOTE(woosuk): Preemption happens only when there is no available
             # slot to keep all the sequence groups in the RUNNING state.
-            while not self._can_append_slots(seq_group, enable_chunking):
+            while not self._can_add_slots(seq_group, enable_chunking):
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
                 num_running_seqs = seq_group.get_max_num_running_seqs()
@@ -645,7 +646,7 @@ class Scheduler:
                 if not cont_loop:
                     break
             else:
-                self._append_slots(seq_group, blocks_to_copy, enable_chunking)
+                self._add_slots(seq_group, blocks_to_copy, enable_chunking)
                 is_prefill = seq_group.is_prefill()
 
                 scheduled_seq_group: ScheduledSequenceGroup = \
@@ -764,7 +765,7 @@ class Scheduler:
                 curr_loras.add(lora_int_id)
             swapped_queue.popleft()
             self._swap_in(seq_group, blocks_to_swap_in)
-            self._append_slots(seq_group, blocks_to_copy, enable_chunking)
+            self._add_slots(seq_group, blocks_to_copy, enable_chunking)
             is_prefill = seq_group.is_prefill()
             if is_prefill:
                 prefill_seq_groups.append(
@@ -1008,7 +1009,7 @@ class Scheduler:
             if enable_chunking and self.scheduler_config.is_multi_step:
                 blocks_to_copy: List[Tuple[int, int]] = []
                 # init_multi_step_from_lookahead_slots happens in append_slots
-                self._append_slots(seq_group, blocks_to_copy, enable_chunking)
+                self._add_slots(seq_group, blocks_to_copy, enable_chunking)
                 # This assert will trip when a copy-on-write happens. This is
                 # not a concern as the very first sequence-group block
                 # allocation happens above. Still, we have the assert to
@@ -1250,9 +1251,9 @@ class Scheduler:
         else:
             return self._schedule_default()
 
-    def _can_append_slots(self, seq_group: SequenceGroup,
-                          enable_chunking: bool) -> bool:
-        """Determine whether or not we have enough space in the KV cache to
+    def _can_add_slots(self, seq_group: SequenceGroup,
+                       enable_chunking: bool) -> bool:
+        """Determine whether we have enough space in the KV cache to
         continue generation of the sequence group.
         """
         # It is True only for testing case to trigger artificial preemption.
@@ -1267,11 +1268,11 @@ class Scheduler:
             is_prefill, enable_chunking)
 
         if is_prefill and num_lookahead_slots > 0:
-            # Appending prefill slots only happens multi-step and
+            # Appending prefill slots only happens when multi-step and
             # chunked-prefill are enabled together.
             assert self.scheduler_config.is_multi_step and enable_chunking
 
-        return self.block_manager.can_append_slots(
+        return self.block_manager.can_add_slots(
             seq_group=seq_group, num_lookahead_slots=num_lookahead_slots)
 
     def _allow_async_output_proc(self, seq_group: SequenceGroup) -> bool:
@@ -1309,11 +1310,14 @@ class Scheduler:
                 self.cache_id].get_object()
             seq_group_metadata.seq_data.clear()
             seq_group_metadata.block_tables.clear()
+            seq_group_metadata.slot_mappings.clear()
 
             # seq_id -> SequenceData
             seq_data: Dict[int, SequenceData] = {}
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
+            # seq_id -> token to slot mappings
+            slot_mappings: Dict[int, List[int]] = {}
 
             if seq_group.is_encoder_decoder():
                 # Encoder associated with SequenceGroup
@@ -1332,6 +1336,7 @@ class Scheduler:
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                slot_mappings[seq_id] = self.block_manager.get_slot_mapping(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
             if self.cache_config.enable_prefix_caching:
@@ -1368,6 +1373,7 @@ class Scheduler:
                     seq_data=seq_data,
                     sampling_params=seq_group.sampling_params,
                     block_tables=block_tables,
+                    slot_mappings=slot_mappings,
                     do_sample=do_sample,
                     pooling_params=seq_group.pooling_params,
                     token_chunk_size=token_chunk_size,
@@ -1398,6 +1404,7 @@ class Scheduler:
                     seq_data_delta,
                     seq_group.request_id,
                     block_tables,
+                    slot_mappings,
                     is_prompt,
                     do_sample=do_sample,
                     token_chunk_size=token_chunk_size,
@@ -1490,11 +1497,12 @@ class Scheduler:
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
 
-    def _append_slots(self,
-                      seq_group: SequenceGroup,
-                      blocks_to_copy: List[Tuple[int, int]],
-                      enable_chunking: bool = False) -> None:
-        """Appends new slots to the sequences in the given sequence group.
+    def _add_slots(self,
+                   seq_group: SequenceGroup,
+                   blocks_to_copy: List[Tuple[int, int]],
+                   enable_chunking: bool = False) -> None:
+        """Add new slots to the sequences in the given sequence group, which
+        could either append or insert the slots to/into the blocks.
 
         Args:
             seq_group (SequenceGroup): The sequence group containing the
@@ -1523,7 +1531,7 @@ class Scheduler:
             seq_status = None
 
         for seq in seq_group.get_seqs(status=seq_status):
-            cows = self.block_manager.append_slots(seq, num_lookahead_slots)
+            cows = self.block_manager.add_slots(seq, num_lookahead_slots)
             if len(cows) > 0:
                 blocks_to_copy.extend(cows)
 
