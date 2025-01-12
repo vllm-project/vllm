@@ -7,6 +7,7 @@ repos:
   rev: v0.9.1
   hooks:
   - id: ruff
+    files: (vllm|tests)/.*
     args: [ --output-format, github ]
 - repo: https://github.com/PyCQA/isort
   rev: 5.13.2
