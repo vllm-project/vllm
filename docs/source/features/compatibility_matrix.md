@@ -359,7 +359,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-     - [✗](gh-pr:4830)
+     - ✅
      - ✅
    * - <abbr title="Prompt Adapter">prmpt adptr</abbr>
      - ✅
