@@ -212,7 +212,7 @@ class AsyncLLM(EngineClient):
                 out = q.get_nowait() if q.qsize() > 0 else await q.get()
 
                 # Note: both OutputProcessor and EngineCore handle their
-                # own cleanup based on finished.
+                # own request cleanup based on finished.
                 if out.finished:
                     yield out
                     break
