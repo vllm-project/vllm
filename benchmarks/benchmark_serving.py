@@ -1,5 +1,4 @@
-r"""Benchmark online serving throughput.
-
+""""
 On the server side, run one of the following commands:
     vLLM OpenAI API server
     vllm serve <your_model> \
@@ -538,6 +537,7 @@ async def benchmark(
     ignore_eos: bool,
     gootput_config_dict: Dict[str, float],
     max_concurrency: Optional[int],
+    api_key: Optional[str],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -551,17 +551,16 @@ async def benchmark(
         # multi-modal benchmark is only available on OpenAI Chat backend.
         raise ValueError(
             "Multi-modal content is only supported on 'openai-chat' backend.")
-    test_input = RequestFuncInput(
-        model=model_id,
-        prompt=test_prompt,
-        api_url=api_url,
-        prompt_len=test_prompt_len,
-        output_len=test_output_len,
-        logprobs=logprobs,
-        best_of=best_of,
-        multi_modal_content=test_mm_content,
-        ignore_eos=ignore_eos,
-    )
+    test_input = RequestFuncInput(model=model_id,
+                                  prompt=test_prompt,
+                                  api_url=api_url,
+                                  prompt_len=test_prompt_len,
+                                  output_len=test_output_len,
+                                  logprobs=logprobs,
+                                  best_of=best_of,
+                                  multi_modal_content=test_mm_content,
+                                  ignore_eos=ignore_eos,
+                                  api_key=api_key)
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
         raise ValueError(
@@ -580,7 +579,8 @@ async def benchmark(
                                          logprobs=logprobs,
                                          best_of=best_of,
                                          multi_modal_content=test_mm_content,
-                                         ignore_eos=ignore_eos)
+                                         ignore_eos=ignore_eos,
+                                         api_key=api_key)
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
             print("Profiler started")
@@ -623,7 +623,8 @@ async def benchmark(
                                               logprobs=logprobs,
                                               best_of=best_of,
                                               multi_modal_content=mm_content,
-                                              ignore_eos=ignore_eos)
+                                              ignore_eos=ignore_eos,
+                                              api_key=api_key)
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
@@ -632,15 +633,14 @@ async def benchmark(
 
     if profile:
         print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            best_of=best_of,
-        )
+        profile_input = RequestFuncInput(model=model_id,
+                                         prompt=test_prompt,
+                                         api_url=base_url + "/stop_profile",
+                                         prompt_len=test_prompt_len,
+                                         output_len=test_output_len,
+                                         logprobs=logprobs,
+                                         best_of=best_of,
+                                         api_key=api_key)
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
             print("Profiler stopped")
@@ -892,6 +892,7 @@ def main(args: argparse.Namespace):
             ignore_eos=args.ignore_eos,
             gootput_config_dict=gootput_config_dict,
             max_concurrency=args.max_concurrency,
+            api_key=args.api_key,
         ))
 
     # Save config and results to json
@@ -1001,6 +1002,13 @@ if __name__ == "__main__":
         required=True,
         help="Name of the model.",
     )
+
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        help="API key for the server",
+    )
+
     parser.add_argument(
         "--tokenizer",
         type=str,
