@@ -21,7 +21,7 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.utils import GiB_bytes, memory_profiling
+from vllm.utils import GiB_bytes, bind_kv_cache, memory_profiling
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -285,6 +285,8 @@ class Worker(LocalOrDistributedWorkerBase):
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
+        bind_kv_cache(self.compilation_config.static_forward_context,
+                      self.gpu_cache)
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:

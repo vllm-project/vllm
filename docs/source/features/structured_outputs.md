@@ -5,7 +5,7 @@
 vLLM supports the generation of structured outputs using [outlines](https://github.com/dottxt-ai/outlines), [lm-format-enforcer](https://github.com/noamgat/lm-format-enforcer), or [xgrammar](https://github.com/mlc-ai/xgrammar) as backends for the guided decoding.
 This document shows you some examples of the different options that are available to generate structured outputs.
 
-## Online Inference (OpenAI API)
+## Online Serving (OpenAI API)
 
 You can generate structured outputs using the OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API.
 
@@ -239,7 +239,7 @@ The main available options inside `GuidedDecodingParams` are:
 - `backend`
 - `whitespace_pattern`
 
-These parameters can be used in the same way as the parameters from the Online Inference examples above.
+These parameters can be used in the same way as the parameters from the Online Serving examples above.
 One example for the usage of the `choices` parameter is shown below:
 
 ```python
@@ -257,4 +257,4 @@ outputs = llm.generate(
 print(outputs[0].outputs[0].text)
 ```
 
-Full example: <gh-file:examples/offline_inference/offline_inference_structured_outputs.py>
+Full example: <gh-file:examples/offline_inference/structured_outputs.py>

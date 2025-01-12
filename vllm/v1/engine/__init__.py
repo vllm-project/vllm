@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, List, Optional, Union
 import msgspec
 import torch
 
+from vllm.v1.metrics.stats import SchedulerStats
+
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
@@ -20,8 +22,8 @@ class EngineCoreRequest:
     # due to circular imports and typing we have in data.py
 
     request_id: str
-    #NOTE(Nick): I don't think we need to pass prompt here since it should
-    # always be tokenized?
+    # NOTE(ywang96): original text prompt is needed when a request is added to
+    # Detokenizer, but set to None when it is added to EngineCoreClient.
     prompt: Optional[str]
     prompt_token_ids: List[int]
     mm_inputs: Optional[List[Optional["MultiModalKwargs"]]]
@@ -61,6 +63,7 @@ class EngineCoreOutputs(
 
     # [num_reqs]
     outputs: List[EngineCoreOutput]
+    scheduler_stats: SchedulerStats
 
 
 @dataclass
