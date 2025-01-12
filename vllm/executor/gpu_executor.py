@@ -133,6 +133,12 @@ class GPUExecutor(ExecutorBase):
     def stop_profile(self) -> None:
         self.driver_worker.stop_profile()
 
+    def sleep(self) -> None:
+        self.driver_worker.sleep()
+
+    def wake_up(self) -> None:
+        self.driver_worker.wake_up()
+
 
 class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
 

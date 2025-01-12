@@ -1083,6 +1083,12 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
+    def sleep(self):
+        self.llm_engine.sleep()
+
+    def wake_up(self):
+        self.llm_engine.wake_up()
+
     # LEGACY
     def _convert_v1_inputs(
         self,
