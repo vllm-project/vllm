@@ -234,9 +234,17 @@ steps:
   source_file_dependencies:
   - vllm/spec_decode
   - tests/spec_decode
+  - vllm/model_executor/models/eagle.py
+  - vllm/model_executor/models/eagle.py
   commands:
     - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
     - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py
+
+- label: EAGLE Model tests # 8min
+  source_file_dependencies:
+  - vllm/model_executor/models/eagle.py
+  commands:
+    - pytest -v -s spec_decode/e2e/test_eagle_correctness.py
 
 - label: LoRA Test %N # 15min each
   mirror_hardwares: [amd]
