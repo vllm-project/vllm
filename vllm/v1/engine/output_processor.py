@@ -58,11 +58,12 @@ class OutputProcessor:
         1) Compute stats for logging
         2) Detokenize
         3) Create and handle RequestOutput objects:
-            * If self.stream_outputs (for usage with AsyncLLM), 
-              we put RequestOutput objects into the asyncio queue
-              for handling by the per-request generate() tasks.
-            * If not self.stream_outputs (for usage with LLMEngine), 
-              we return a list of RequestOutput objects.
+            * If there is a queue (for usage with AsyncLLM), 
+              put the RequestOutput objects into the queue for
+              handling by the per-request generate() tasks.
+
+            * If there is no queue (for usage with LLMEngine), 
+              return a list of RequestOutput objects.
 
         ****************** NOTE FOR DEVELOPERS ******************
 
