@@ -25,7 +25,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 :::
 
-:::{tab-item} Apple
+:::{tab-item} Apple silicon
 :sync: apple
 
 ```{include} apple.inc.md
@@ -64,7 +64,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 :::
 
-:::{tab-item} Apple
+:::{tab-item} Apple silicon
 :sync: apple
 
 ```{include} apple.inc.md
@@ -112,7 +112,7 @@ Currently, there are no pre-built CPU wheels.
 
 :::
 
-:::{tab-item} Apple
+:::{tab-item} Apple silicon
 :sync: apple
 
 ```{include} apple.inc.md
