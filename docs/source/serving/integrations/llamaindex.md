@@ -7,7 +7,7 @@ vLLM is also available via [LlamaIndex](https://github.com/run-llama/llama_index
 To install LlamaIndex, run
 
 ```console
-$ pip install llama-index-llms-vllm -q
+pip install llama-index-llms-vllm -q
 ```
 
 To run inference on a single or multiple GPUs, use `Vllm` class from `llamaindex`.

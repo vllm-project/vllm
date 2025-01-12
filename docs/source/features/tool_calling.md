@@ -55,21 +55,24 @@ print(f"Result: {get_weather(**json.loads(tool_call.arguments))}")
 ```
 
 Example output:
-```
+
+```text
 Function called: get_weather
 Arguments: {"location": "San Francisco, CA", "unit": "fahrenheit"}
 Result: Getting the weather for San Francisco, CA in fahrenheit...
 ```
 
 This example demonstrates:
-- Setting up the server with tool calling enabled
-- Defining an actual function to handle tool calls
-- Making a request with `tool_choice="auto"`
-- Handling the structured response and executing the corresponding function
+
+* Setting up the server with tool calling enabled
+* Defining an actual function to handle tool calls
+* Making a request with `tool_choice="auto"`
+* Handling the structured response and executing the corresponding function
 
 You can also specify a particular function using named function calling by setting `tool_choice={"type": "function", "function": {"name": "get_weather"}}`. Note that this will use the guided decoding backend - so the first time this is used, there will be several seconds of latency (or more) as the FSM is compiled for the first time before it is cached for subsequent requests.
 
 Remember that it's the callers responsibility to:
+
 1. Define appropriate tools in the request
 2. Include relevant context in the chat messages
 3. Handle the tool calls in your application logic
@@ -77,20 +80,21 @@ Remember that it's the callers responsibility to:
 For more advanced usage, including parallel tool calls and different model-specific parsers, see the sections below.
 
 ## Named Function Calling
+
 vLLM supports named function calling in the chat completion API by default. It does so using Outlines through guided decoding, so this is
 enabled by default, and will work with any supported model. You are guaranteed a validly-parsable function call - not a
 high-quality one.
 
-vLLM will use guided decoding to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter. 
+vLLM will use guided decoding to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
 For best results, we recommend ensuring that the expected output format / schema is specified in the prompt to ensure that the model's intended generation is aligned with the schema that it's being forced to generate by the guided decoding backend.
 
 To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and
 specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request.
 
-
 ## Automatic Function Calling
 
 To enable this feature, you should set the following flags:
+
 * `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it
 deems appropriate.
 * `--tool-call-parser` -- select the tool parser to use (listed below). Additional tool parsers
@@ -104,28 +108,28 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
-
 ### Hermes Models (`hermes`)
 
 All Nous Research Hermes-series models newer than Hermes 2 Pro should be supported.
+
 * `NousResearch/Hermes-2-Pro-*`
 * `NousResearch/Hermes-2-Theta-*`
 * `NousResearch/Hermes-3-*`
-
 
 _Note that the Hermes 2 **Theta** models are known to have degraded tool call quality & capabilities due to the merge
 step in their creation_.
 
 Flags: `--tool-call-parser hermes`
 
-
 ### Mistral Models (`mistral`)
 
 Supported models:
+
 * `mistralai/Mistral-7B-Instruct-v0.3` (confirmed)
 * Additional mistral function-calling models are compatible as well.
 
 Known issues:
+
 1. Mistral 7B struggles to generate parallel tool calls correctly.
 2. Mistral's `tokenizer_config.json` chat template requires tool call IDs that are exactly 9 digits, which is
 much shorter than what vLLM generates. Since an exception is thrown when this condition
@@ -136,13 +140,12 @@ it works with vLLM's tool call IDs (provided `tool_call_id` fields are truncated
 * `examples/tool_chat_template_mistral_parallel.jinja` - this is a "better" version that adds a tool-use system prompt
 when tools are provided, that results in much better reliability when working with parallel tool calling.
 
-
 Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
-
 
 ### Llama Models (`llama3_json`)
 
 Supported models:
+
 * `meta-llama/Meta-Llama-3.1-8B-Instruct`
 * `meta-llama/Meta-Llama-3.1-70B-Instruct`
 * `meta-llama/Meta-Llama-3.1-405B-Instruct`
@@ -152,6 +155,7 @@ The tool calling that is supported is the [JSON based tool calling](https://llam
 Other tool calling formats like the built in python tool calling or custom tool calling are not supported.
 
 Known issues:
+
 1. Parallel tool calls are not supported.
 2. The model can generate parameters with a wrong format, such as generating
    an array serialized as string instead of an array.
@@ -164,6 +168,7 @@ Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool
 #### IBM Granite
 
 Supported models:
+
 * `ibm-granite/granite-3.0-8b-instruct`
 
 Recommended flags: `--tool-call-parser granite --chat-template examples/tool_chat_template_granite.jinja`
@@ -182,42 +187,45 @@ Recommended flags: `--tool-call-parser granite-20b-fc --chat-template examples/t
 
 `examples/tool_chat_template_granite_20b_fc.jinja`: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
 
-
 ### InternLM Models (`internlm`)
 
 Supported models:
+
 * `internlm/internlm2_5-7b-chat` (confirmed)
 * Additional internlm2.5 function-calling models are compatible as well
 
 Known issues:
+
 * Although this implementation also supports InternLM2, the tool call results are not stable when testing with the `internlm/internlm2-chat-7b` model.
 
 Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
 
-
 ### Jamba Models (`jamba`)
+
 AI21's Jamba-1.5 models are supported.
+
 * `ai21labs/AI21-Jamba-1.5-Mini`
 * `ai21labs/AI21-Jamba-1.5-Large`
 
-
 Flags: `--tool-call-parser jamba`
-
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
 
 As a concrete example, these models may look up the weather in San Francisco and Seattle by generating:
+
 ```python
 [get_weather(city='San Francisco', metric='celsius'), get_weather(city='Seattle', metric='celsius')]
 ```
 
 Limitations:
+
 * The model must not generate both text and tool calls in the same generation. This may not be hard to change for a specific model, but the community currently lacks consensus on which tokens to emit when starting and ending tool calls.  (In particular, the Llama 3.2 models emit no such tokens.)
 * Llama's smaller models struggle to use tools effectively.
 
 Example supported models:
+
 * `meta-llama/Llama-3.2-1B-Instruct`\* (use with `examples/tool_chat_template_llama3.2_pythonic.jinja`)
 * `meta-llama/Llama-3.2-3B-Instruct`\* (use with `examples/tool_chat_template_llama3.2_pythonic.jinja`)
 * `Team-ACE/ToolACE-8B` (use with `examples/tool_chat_template_toolace.jinja`)
@@ -230,7 +238,6 @@ Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 Llama's smaller models frequently fail to emit tool calls in the correct format. Your mileage may vary.
 
 ---
-
 
 ## How to write a tool parser plugin
 
@@ -284,7 +291,8 @@ class ExampleToolParser(ToolParser):
 ```
 
 Then you can use this plugin in the command line like this.
-```
+
+```console
     --enable-auto-tool-choice \
     --tool-parser-plugin <absolute path of the plugin file>
     --tool-call-parser example \

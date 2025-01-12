@@ -1,4 +1,4 @@
-# Welcome to vLLM!
+# Welcome to vLLM
 
 ```{figure} ./assets/logos/vllm-logo-text-light.png
 :align: center
@@ -145,7 +145,7 @@ design/arch_overview
 design/huggingface_integration
 design/plugin_system
 design/kernel/paged_attention
-design/input_processing/model_inputs_index
+design/mm_processing
 design/automatic_prefix_caching
 design/multiprocessing
 ```
@@ -186,7 +186,7 @@ community/meetups
 community/sponsors
 ```
 
-# Indices and tables
+## Indices and tables
 
 - {ref}`genindex`
 - {ref}`modindex`
