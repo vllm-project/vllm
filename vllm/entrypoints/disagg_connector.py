@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 import signal
+import traceback
 import uuid
 # from fastapi.lifespan import Lifespan
 from asyncio import Queue
@@ -17,12 +19,14 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from vllm.logger import init_logger
 
 # default prefill and decode addr
+time_out = 3
 fastapi_port = 8001
 prefill_addr = "ipc://localhost:7010"
-socket_prefill_num = 5
+socket_prefill_num = 20
 decode_addr = "ipc://localhost:7020"
-socket_decode_num = 5
+socket_decode_num = 20
 context_type_json = "application/json"
+context_type_error = "error"
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger('vllm.entrypoints.connect')
@@ -51,7 +55,7 @@ app = FastAPI(lifespan=lifespan)
 # create async socket pool with num_sockets use ZMQ_DEALER
 async def create_socket_pool(url: str, num_sockets: int,
                              zmqctx: zmq.asyncio.Context) -> Queue:
-    sockets: Queue = Queue()
+    sockets: Queue[zmq.Socket] = Queue()
     for i in range(num_sockets):
         sock = zmqctx.socket(zmq.DEALER)
         identity = f"worker-{i}-{uuid.uuid4()}"
@@ -66,20 +70,23 @@ async def create_socket_pool(url: str, num_sockets: int,
 # select a socket and execute task
 async def execute_task_async(route: str, headers: dict, request: dict,
                              sockets: Queue):
-    sock = await sockets.get()
+    sock: zmq.Socket = await sockets.get()
     try:
         requestBody = json.dumps(request)
         headersJson = json.dumps(headers)
         logger.info("Sending requestBody: %s to %s with headers: %s",
                     requestBody, route, headersJson)
-        await sock.send_multipart(
+        await asyncio.wait_for(sock.send_multipart(
             [route.encode(),
              headersJson.encode(),
-             requestBody.encode()])
+             requestBody.encode()]),
+                               timeout=time_out)
         logger.info("Sent end")
         while True:
             logger.info("Waiting for reply")
-            [contentType, reply] = await sock.recv_multipart()
+            [contentType,
+             reply] = await asyncio.wait_for(sock.recv_multipart(),
+                                             timeout=time_out)
             contentType_str = contentType.decode()
             reply_str = reply.decode()
             logger.info("Received result: %s, %s", contentType_str, reply_str)
@@ -91,6 +98,11 @@ async def execute_task_async(route: str, headers: dict, request: dict,
             if "[DONE]" in reply_str:
                 logger.info("Received stop signal, return socket")
                 break
+    except asyncio.TimeoutError:
+        logger.error(traceback.format_exc())
+        logger.error("Timeout, return socket: %s",
+                     sock.getsockopt(zmq.IDENTITY))
+        yield (context_type_error, "System Error")
     finally:
         await sockets.put(sock)
 
@@ -101,16 +113,30 @@ async def generate_stream_response(fisrt_reply: str,
     async for _, reply in generator:
         yield reply
 
-
+async def prefill(route: str, header: dict, original_request_data: dict):
+    logger.info("start prefill")
+    generator = execute_task_async(route, header, original_request_data,
+                                   app.state.sockets_prefill)
+    async for contentType, reply in generator:
+        logger.info("contentType: %s, reply: %s", contentType, reply)
+        if context_type_error == contentType:
+            response = JSONResponse({"error": reply})
+            response.status_code = 500
+            return response
+    return True
+        
 async def decode(route: str, header: dict, original_request_data: dict):
     logger.info("start decode")
     generator = execute_task_async(route, header, original_request_data,
                                    app.state.sockets_decode)
-    logger.info("finish decode")
 
     async for contentType, reply in generator:
         logger.info("contentType: %s, reply: %s", contentType, reply)
-        if context_type_json == contentType:
+        if context_type_error == contentType:
+            response = JSONResponse({"error": reply})
+            response.status_code = 500
+            return response
+        elif context_type_json == contentType:
             return JSONResponse(reply)
         else:
             return StreamingResponse(generate_stream_response(
@@ -135,12 +161,17 @@ async def chat_completions(request: Request):
         prefill_request['max_tokens'] = 1
         route = "/v1/completions"
         # finish prefill
-        async for _ in execute_task_async(route, header, prefill_request,
-                                          app.state.sockets_prefill):
-            continue
-
-        logger.info("finish prefill start decode")
-        response = await decode(route, header, original_request_data)
+        try:
+            prefill_response = await prefill(route, header, prefill_request)
+            if isinstance(prefill_response, JSONResponse):
+                return prefill_response
+            logger.info("finish prefill start decode")
+            response = await decode(route, header, original_request_data)
+            logger.info("finish decode")
+        except Exception as e:
+            logger.error("Error occurred in disagg prefill proxy server, %s",
+                         e)
+            response = JSONResponse({"error": {"message": str(e)}})
         return response
 
     except Exception as e:

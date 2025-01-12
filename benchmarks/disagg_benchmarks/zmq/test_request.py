@@ -41,7 +41,7 @@ async def test_connect_completions(session):
                     async for chunk in response.content.iter_chunked(1024):
                         try:
                             decoded_chunk = chunk.decode('utf-8')
-                            print(f"Decoded chunk: {decoded_chunk!r}")
+                            # print(f"Decoded chunk: {decoded_chunk!r}")
                             responseText += decoded_chunk
                         except UnicodeDecodeError:
                             print(f"Error decoding chunk: {chunk!r}")
@@ -55,6 +55,7 @@ async def test_connect_completions(session):
                         response.json()))
             else:
                 print(f"Request failed with status code {response.status}")
+                print(f"Response : {await response.json()}")
             print(f"baseurl {base_url}")
             print(f"response data {extract_data(responseText)}")
     except aiohttp.ClientError as e:
@@ -98,7 +99,7 @@ def extract_data(responseText):
 async def main():
     async with aiohttp.ClientSession() as session:
         tasks = []
-        for _ in range(1):
+        for _ in range(2):
             tasks.append(test_connect_completions(session))
         await asyncio.gather(*tasks)
 

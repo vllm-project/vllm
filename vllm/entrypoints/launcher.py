@@ -9,6 +9,7 @@ from typing import Any, Optional
 import uvicorn
 import zmq
 import zmq.asyncio
+import zmq.devices
 from fastapi import FastAPI, Request, Response
 
 from vllm import envs
@@ -78,37 +79,28 @@ async def serve_http(app: FastAPI,
         return server.shutdown()
 
 
-def proxy(clients_addr: str, workers_addr: str,
-          ctx: zmq.asyncio.Context) -> None:
-    in_socket = ctx.socket(zmq.ROUTER)
-    in_socket.bind(clients_addr)
-    out_socket = ctx.socket(zmq.DEALER)
-    out_socket.bind(workers_addr)
-    try:
-        zmq.proxy(in_socket, out_socket)
-    except zmq.ContextTerminated:
-        print("proxy terminated")
-        in_socket.close()
-        out_socket.close()
-
-
 async def serve_zmq(arg, zmq_server_port: int, app: FastAPI) -> None:
     """Server routine"""
     logger.info("zmq Server start arg: %s, zmq_server_port: %d", arg,
                 zmq_server_port)
-    workers_addr = "inproc://workers"
+    # different zmq context can't communicate use inproc
+    workers_addr = "ipc://workers"
     clients_addr = f"ipc://127.0.0.1:{zmq_server_port}"
     # Prepare our context and sockets
     context = zmq.asyncio.Context.instance()
     try:
         tasks = [
             asyncio.create_task(worker_routine(workers_addr, app, context, i))
-            for i in range(5)
+            for i in range(20)
         ]
         logger.info("zmq tasks: %s", tasks)
-        proxy_task = asyncio.to_thread(proxy, clients_addr, workers_addr,
-                                       context)
-        await asyncio.gather(*tasks, proxy_task)
+        # thread safety proxy create socket in the background:
+        # https://pyzmq.readthedocs.io/en/latest/api/zmq.devices.html#proxy-devices
+        thread_proxy = zmq.devices.ThreadProxy(zmq.ROUTER, zmq.DEALER)
+        thread_proxy.bind_in(clients_addr)
+        thread_proxy.bind_out(workers_addr)
+        thread_proxy.start()
+        await asyncio.gather(*tasks)
     except KeyboardInterrupt:
         print("ZMQ Server interrupted")
     except zmq.ZMQError as e:
