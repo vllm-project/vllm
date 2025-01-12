@@ -440,6 +440,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
+                None,  # TODO support attn_bias
                 k_scale,
                 v_scale,
                 tp_rank=self.tp_rank,

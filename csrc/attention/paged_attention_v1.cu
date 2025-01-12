@@ -40,10 +40,10 @@
       <<<grid, block, shared_mem_size, stream>>>(                           \
           out_ptr, query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, \
           scale, block_tables_ptr, seq_lens_ptr, max_num_blocks_per_seq,    \
-          alibi_slopes_ptr, q_stride, kv_block_stride, kv_head_stride,      \
-          k_scale, v_scale, tp_rank, blocksparse_local_blocks,              \
-          blocksparse_vert_stride, blocksparse_block_size,                  \
-          blocksparse_head_sliding_step);
+          alibi_slopes_ptr, attn_bias_ptr, padded_max_seq_len, q_stride,    \
+          kv_block_stride, kv_head_stride, k_scale, v_scale, tp_rank,       \
+          blocksparse_local_blocks, blocksparse_vert_stride,                \
+          blocksparse_block_size, blocksparse_head_sliding_step);
 
 // TODO(woosuk): Tune NUM_THREADS.
 template <typename T, typename CACHE_T, int BLOCK_SIZE,
@@ -53,8 +53,9 @@ void paged_attention_v1_launcher(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int num_kv_heads, float scale,
     torch::Tensor& block_tables, torch::Tensor& seq_lens, int max_seq_len,
-    const std::optional<torch::Tensor>& alibi_slopes, float k_scale,
-    float v_scale, const int tp_rank, const int blocksparse_local_blocks,
+    const c10::optional<torch::Tensor>& alibi_slopes,
+    const c10::optional<torch::Tensor>& attn_bias, float k_scale, float v_scale,
+    const int tp_rank, const int blocksparse_local_blocks,
     const int blocksparse_vert_stride, const int blocksparse_block_size,
     const int blocksparse_head_sliding_step) {
   int num_seqs = query.size(0);
@@ -73,7 +74,21 @@ void paged_attention_v1_launcher(
       alibi_slopes
           ? reinterpret_cast<const float*>(alibi_slopes.value().data_ptr())
           : nullptr;
-
+  const float* attn_bias_ptr =
+      attn_bias ? reinterpret_cast<const float*>(attn_bias.value().data_ptr())
+                : nullptr;
+  const int padded_max_seq_len =
+      DIVIDE_ROUND_UP(max_seq_len, BLOCK_SIZE) * BLOCK_SIZE;
+  if (attn_bias_ptr) {
+    const torch::Tensor& abias = attn_bias.value();
+    TORCH_CHECK(abias.dtype() == torch::kFloat32,
+                "Unsupported bias dtype: ", abias.dtype());
+    TORCH_CHECK(abias.size(abias.dim() - 1) == padded_max_seq_len,
+                "The last dimension of the attention bias must "
+                "match the block-aligned maximum sequence length (",
+                padded_max_seq_len,
+                "). However, the given dimensions are: ", abias.sizes());
+  }
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
   CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(key_cache.data_ptr());
@@ -82,13 +97,11 @@ void paged_attention_v1_launcher(
   int* seq_lens_ptr = seq_lens.data_ptr<int>();
 
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
-  int padded_max_seq_len =
-      DIVIDE_ROUND_UP(max_seq_len, BLOCK_SIZE) * BLOCK_SIZE;
-  int logits_size = padded_max_seq_len * sizeof(float);
-  int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
+  const int logits_size = padded_max_seq_len * sizeof(float);
+  const int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
   // Python-side check in vllm.worker.worker._check_if_can_support_max_seq_len
   // Keep that in sync with the logic here!
-  int shared_mem_size = std::max(logits_size, outputs_size);
+  const int shared_mem_size = std::max(logits_size, outputs_size);
 
   dim3 grid(num_heads, num_seqs, 1);
   dim3 block(NUM_THREADS);
@@ -135,8 +148,8 @@ void paged_attention_v1_launcher(
   paged_attention_v1_launcher<T, CACHE_T, BLOCK_SIZE, KV_DTYPE,              \
                               IS_BLOCK_SPARSE>(                              \
       out, query, key_cache, value_cache, num_kv_heads, scale, block_tables, \
-      seq_lens, max_seq_len, alibi_slopes, k_scale, v_scale, tp_rank,        \
-      blocksparse_local_blocks, blocksparse_vert_stride,                     \
+      seq_lens, max_seq_len, alibi_slopes, attn_bias, k_scale, v_scale,      \
+      tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,            \
       blocksparse_block_size, blocksparse_head_sliding_step);
 
 #define CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE) \
@@ -176,7 +189,8 @@ void paged_attention_v1(
     torch::Tensor& block_tables,  // [num_seqs, max_num_blocks_per_seq]
     torch::Tensor& seq_lens,      // [num_seqs]
     int64_t block_size, int64_t max_seq_len,
-    const std::optional<torch::Tensor>& alibi_slopes,
+    const c10::optional<torch::Tensor>& alibi_slopes,
+    const c10::optional<torch::Tensor>& attn_bias,
     const std::string& kv_cache_dtype, double k_scale, double v_scale,
     const int64_t tp_rank, const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
