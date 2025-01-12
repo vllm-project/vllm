@@ -1,6 +1,8 @@
+from typing import TYPE_CHECKING
 from dataclasses import dataclass
 
-from vllm.v1.engine import EngineCoreOutput
+if TYPE_CHECKING:
+    from vllm.v1.engine import EngineCoreOutput
 
 
 @dataclass
@@ -23,7 +25,7 @@ class IterationStats:
         self.num_prompt_tokens = 0
 
     def update_from_output(self,
-                           output: EngineCoreOutput,
+                           output: "EngineCoreOutput",
                            is_prefilling: bool,
                            prompt_len: int = 0):
         """Update the IterationStats with the EngineCoreOutput."""
