@@ -10,7 +10,6 @@ ARM CPU backend currently supports Float32, FP16 and BFloat16 datatypes.
 - Compiler: `gcc/g++ >= 12.3.0` (optional, recommended)
 - Instruction Set Architecture (ISA): NEON support is required
 
-
 ## Python
 
 ### Pre-built wheels

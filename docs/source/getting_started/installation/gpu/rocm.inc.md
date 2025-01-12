@@ -134,19 +134,19 @@ Their values can be passed in when running `docker build` with `--build-arg` opt
 To build vllm on ROCm 6.2 for MI200 and MI300 series, you can use the default:
 
 ```console
-$ DOCKER_BUILDKIT=1 docker build -f Dockerfile.rocm -t vllm-rocm .
+DOCKER_BUILDKIT=1 docker build -f Dockerfile.rocm -t vllm-rocm .
 ```
 
 To build vllm on ROCm 6.2 for Radeon RX7900 series (gfx1100), you should specify `BUILD_FA` as below:
 
 ```console
-$ DOCKER_BUILDKIT=1 docker build --build-arg BUILD_FA="0" -f Dockerfile.rocm -t vllm-rocm .
+DOCKER_BUILDKIT=1 docker build --build-arg BUILD_FA="0" -f Dockerfile.rocm -t vllm-rocm .
 ```
 
 To run the above docker image `vllm-rocm`, use the below command:
 
 ```console
-$ docker run -it \
+docker run -it \
    --network=host \
    --group-add=video \
    --ipc=host \

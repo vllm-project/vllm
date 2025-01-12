@@ -94,26 +94,32 @@ Currently, there are no pre-built CPU wheels.
 
 :::{tab-item} x86
 :sync: x86
+
 ```{include} x86.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Docker"
 ```
+
 :::
 
 :::{tab-item} ARM
 :sync: arm
+
 ```{include} arm.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Docker"
 ```
+
 :::
 
 :::{tab-item} Apple
 :sync: apple
+
 ```{include} apple.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Docker"
 ```
+
 :::
 
 ::::
