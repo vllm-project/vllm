@@ -1957,21 +1957,20 @@ class LLMEngine:
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
 
-        if self.model_config.is_multimodal_model:
-            max_prompt_len = self.model_config.max_model_len
+        max_prompt_len = self.model_config.max_model_len
 
-            if len(prompt_ids) > max_prompt_len:
-                raise ValueError(
-                    f"The prompt (total length {len(prompt_ids)}) is too long "
-                    f"to fit into the model (context length {max_prompt_len}). "
-                    "Make sure that `max_model_len` is no smaller than the "
-                    "number of text tokens plus multimodal tokens. For image "
-                    "inputs, the number of image tokens depends on the number "
-                    "of images, and possibly their aspect ratios as well.")
+        if len(prompt_ids) > max_prompt_len:
+            raise ValueError(
+                f"The prompt (total length {len(prompt_ids)}) is too long "
+                f"to fit into the model (context length {max_prompt_len}). "
+                "Make sure that `max_model_len` is no smaller than the "
+                "number of text tokens plus multimodal tokens. For image "
+                "inputs, the number of image tokens depends on the number "
+                "of images, and possibly their aspect ratios as well.")
 
-            # TODO: Find out how many placeholder tokens are there so we can
-            # check that chunked prefill does not truncate them
-            # max_batch_len = self.scheduler_config.max_num_batched_tokens
+        # TODO: For multi-modal models, find out how many placeholder tokens
+        # there are to check that chunked prefill does not truncate them
+        # max_batch_len = self.scheduler_config.max_num_batched_tokens
 
     def _build_logits_processors(
             self, sampling_params: SamplingParams,
