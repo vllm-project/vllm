@@ -1,6 +1,7 @@
 import multiprocessing
 import os
 import weakref
+from collections import defaultdict
 from collections.abc import Sequence
 from typing import (Any, Callable, Dict, Generic, List, Optional, TypeVar,
                     Union, overload)
@@ -8,6 +9,7 @@ from typing import (Any, Callable, Dict, Generic, List, Optional, TypeVar,
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils import get_mp_context, kill_process_tree
 
 logger = init_logger(__name__)
@@ -140,8 +142,22 @@ def shutdown(proc: multiprocessing.Process, input_path: str, output_path: str):
 
 def bind_kv_cache(
     ctx: Dict[str, Any],
+    runner_kv_caches: List[torch.Tensor],
     kv_caches: Dict[str, torch.Tensor],
 ) -> None:
+    # bind kv_caches to ModelRunner's kv_caches
+    assert len(runner_kv_caches) == 0
+    index2name = defaultdict(list)
+    for layer_name in kv_caches:
+        index2name[extract_layer_index(layer_name)].append(layer_name)
+
+    for layer_index in sorted(index2name.keys()):
+        layer_names = index2name[layer_index]
+        for layer_name in layer_names[1:]:
+            assert kv_caches[layer_name] is kv_caches[layer_names[0]]
+        runner_kv_caches.append(kv_caches[layer_names[0]])
+
+    # bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
         # TODO: change [kv_cache] to kv_cache when dropping v0 which uses
         # virtual engine to support PP.

@@ -857,7 +857,6 @@ class GPUModelRunner:
                     elapsed_time, cuda_graph_size / (1 << 30))
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        assert len(self.kv_caches) == 0
         if len(kv_cache_config.groups) > 1:
             raise NotImplementedError("Multiple groups are not supported yet.")
 
@@ -880,7 +879,7 @@ class GPUModelRunner:
 
         bind_kv_cache(
             self.vllm_config.compilation_config.static_forward_context,
-            kv_caches)
+            self.kv_caches, kv_caches)
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
