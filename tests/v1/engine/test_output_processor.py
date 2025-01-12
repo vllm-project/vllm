@@ -142,7 +142,7 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind):
 
 @pytest.mark.parametrize("include_stop_str_in_output", [True, False])
 def test_stop_string(include_stop_str_in_output: bool):
-    output_processor = OutputProcessor(TOKENIZER_GROUP, log_stats=False)
+    output_processor = OutputProcessor(TOKENIZER_GROUP, log_stats=True)
     engine_core = MockEngineCore(GENERATION_TOKENS)
 
     # Make N requests.
@@ -157,13 +157,7 @@ def test_stop_string(include_stop_str_in_output: bool):
             mm_placeholders=None,
             eos_token_id=None,
             lora_request=None,
-            sampling_params=SamplingParams(
-                skip_special_tokens=False,
-                spaces_between_special_tokens=False,
-                output_kind=RequestOutputKind.DELTA,
-                stop=STOP_STRINGS,
-                include_stop_str_in_output=include_stop_str_in_output,
-            )) for idx, (
+            sampling_params=SamplingParams()) for idx, (
                 prompt,
                 prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
     ]
@@ -226,3 +220,24 @@ def test_stop_string(include_stop_str_in_output: bool):
 
     assert output_processor.get_num_unfinished_requests() == 0
     assert not output_processor.has_unfinished_requests()
+
+
+def test_iteration_stats():
+    output_processor = OutputProcessor(TOKENIZER_GROUP, log_stats=False)
+    engine_core = MockEngineCore(GENERATION_TOKENS)
+
+    # Make N requests.
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}",
+            prompt=prompt,
+            prompt_token_ids=prompt_tokens,
+            arrival_time=0,
+            mm_inputs=None,
+            mm_hashes=None,
+            mm_placeholders=None,
+            eos_token_id=None,
+            lora_request=None,
+            sampling_params=SamplingParams()
+        ) for idx, (prompt, prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
+    ]
