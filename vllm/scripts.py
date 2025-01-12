@@ -11,6 +11,7 @@ from openai.types.chat import ChatCompletionMessageParam
 
 import vllm.version
 from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.disagg_connector import run_disagg_connector
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
@@ -40,6 +41,10 @@ def serve(args: argparse.Namespace) -> None:
     args.model = args.model_tag
 
     uvloop.run(run_server(args))
+
+
+def connect(args: argparse.Namespace) -> None:
+    uvloop.run(run_disagg_connector(args))
 
 
 def interactive_cli(args: argparse.Namespace) -> None:
@@ -191,6 +196,25 @@ def main():
         help=("The system prompt to be added to the chat template, "
               "used for models that support system prompts."))
     chat_parser.set_defaults(dispatch_function=interactive_cli, command="chat")
+
+    connect_parser = subparsers.add_parser(
+        "connect",
+        help="Start the vLLM OpenAI Compatible API server And Connect to other"
+        "servers disaggreate prefill and decode",
+        usage="vllm connect <model_tag> [options]")
+    connect_parser.add_argument("--port",
+                                type=int,
+                                default=8001,
+                                help="The fastapi server port")
+    connect_parser.add_argument("--prefill-addr",
+                                type=str,
+                                required=True,
+                                help="The prefill address IP:PORT")
+    connect_parser.add_argument("--decode-addr",
+                                type=str,
+                                required=True,
+                                help="The decode address IP:PORT")
+    connect_parser.set_defaults(dispatch_function=connect)
 
     args = parser.parse_args()
     if args.subparser == "serve":
