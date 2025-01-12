@@ -6,9 +6,7 @@ Run `pytest tests/quantization/test_quark.py`.
 import torch
 
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
-    QuarkLinearMethod, QuarkW8A8Fp8,
-    QuarkW8A8Int8)
-from vllm.platforms import current_platform
+    QuarkLinearMethod, QuarkW8A8Fp8, QuarkW8A8Int8)
 
 
 def test_quark_fp8(vllm_runner):
@@ -30,7 +28,8 @@ def test_quark_fp8(vllm_runner):
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
-        
+
+
 def test_quark_int8(vllm_runner):
     model_path = "amd/Llama-3.1-8B-Instruct-w-int8-a-int8-sym-test"
     with vllm_runner(model_path) as llm:
