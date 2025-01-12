@@ -11,7 +11,11 @@ repos:
   rev: 5.13.2
   hooks:
   - id: isort
-# codespell
+- repo: https://github.com/codespell-project/codespell
+  rev: v2.3.0
+  hooks:
+  - id: codespell
+    args: [--toml, pyproject.toml]
 # clang-format
 - repo: https://github.com/jackdewinter/pymarkdown
   rev: v0.9.27

@@ -28,12 +28,11 @@ check_command() {
     fi
 }
 
+# TODO: run pre-commit here
 check_command mypy
-check_command codespell
 check_command clang-format
 
 MYPY_VERSION=$(mypy --version | awk '{print $2}')
-CODESPELL_VERSION=$(codespell --version)
 CLANGFORMAT_VERSION=$(clang-format --version | awk '{print $3}')
 
 # # params: tool name, tool version, required version
@@ -46,60 +45,12 @@ tool_version_check() {
 }
 
 tool_version_check "mypy" "$MYPY_VERSION"
-tool_version_check "codespell" "$CODESPELL_VERSION"
 tool_version_check "clang-format" "$CLANGFORMAT_VERSION"
 
 # Run mypy
 echo 'vLLM mypy:'
 tools/mypy.sh
 echo 'vLLM mypy: Done'
-
-
-# If git diff returns a file that is in the skip list, the file may be checked anyway:
-# https://github.com/codespell-project/codespell/issues/1915
-# Avoiding the "./" prefix and using "/**" globs for directories appears to solve the problem
-CODESPELL_EXCLUDES=(
-    '--skip' 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**'
-)
-
-# check spelling of specified files
-spell_check() {
-    codespell "$@"
-}
-
-spell_check_all(){
-  codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}"
-}
-
-# Spelling check of files that differ from main branch.
-spell_check_changed() {
-    # The `if` guard ensures that the list of filenames is not empty, which
-    # could cause ruff to receive 0 positional arguments, making it hang
-    # waiting for STDIN.
-    #
-    # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
-    # exist on both branches.
-    MERGEBASE="$(git merge-base origin/main HEAD)"
-    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
-        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-            codespell "${CODESPELL_EXCLUDES[@]}"
-    fi
-}
-
-# Run Codespell
-## This flag runs spell check of individual files. --files *must* be the first command line
-## arg to use this option.
-if [[ "$1" == '--files' ]]; then
-   spell_check "${@:2}"
-   # If `--all` is passed, then any further arguments are ignored and the
-   # entire python directory is linted.
-elif [[ "$1" == '--all' ]]; then
-   spell_check_all
-else
-   # Check spelling only of the files that changed in last commit.
-   spell_check_changed
-fi
-echo 'vLLM codespell: Done'
 
 # Clang-format section
 # Exclude some files for formatting because they are vendored
