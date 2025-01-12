@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 from vllm.transformers_utils.detokenizer_utils import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.outputs import RequestOutput
-from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.engine.detokenizer import Detokenizer, DetokenizerOutput
 from vllm.v1.metrics.stats import IterationStats
 
@@ -111,7 +111,7 @@ class OutputProcessor:
 
     def process_outputs(
         self,
-        outputs: EngineCoreOutputs,
+        engine_core_outputs: List[EngineCoreOutput],
     ) -> OutputProcessorOutput:
         """
         Process the EngineCoreOutputs:
@@ -143,7 +143,7 @@ class OutputProcessor:
         request_outputs: List[RequestOutput] = []
         reqs_to_abort: List[str] = []
         iteration_stats = IterationStats(self.log_stats)
-        for engine_core_output in outputs.outputs:
+        for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
             if req_state is None:
