@@ -8,7 +8,6 @@ from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 
-
 logger = init_logger(__name__)
 
 @dataclass

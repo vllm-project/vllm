@@ -1,6 +1,5 @@
-from typing import List, Optional
-
 import asyncio
+from typing import List, Optional
 
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.detokenizer_utils import AnyTokenizer
