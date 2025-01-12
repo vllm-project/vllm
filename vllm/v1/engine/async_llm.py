@@ -50,10 +50,6 @@ class AsyncLLM(EngineClient):
             LoggingStatLogger(),
             # TODO(rob): PrometheusStatLogger(),
         ]
-        self.stat_loggers: List[StatLoggerBase] = [
-            LoggingStatLogger(),
-            # TODO(rob): PrometheusStatLogger(),
-        ]
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
