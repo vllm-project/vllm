@@ -101,7 +101,9 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
+        self.sliding_window = sliding_window
         self.backend = backend_name_to_enum(attn_backend.get_name())
+        self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
