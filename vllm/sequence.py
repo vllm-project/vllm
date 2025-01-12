@@ -815,7 +815,20 @@ class SequenceGroup:
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
-        return 0 if self.first_seq.is_finished() else 1
+        if self.is_single_seq:
+            return 0 if self.first_seq.is_finished() else 1
+        if self.sampling_params:
+            n = self.sampling_params.n
+            assert isinstance(n, int)
+            if n > self.num_seqs():
+                # At prompt stage, the sequence group is not yet filled up
+                # and only have one sequence running. However, in the
+                # generation stage, we will have `n` sequences
+                # running.
+                return n
+        # At sampling stages, return the number of actual sequences
+        # that are not finished yet.
+        return self.num_seqs() - self.num_finished_seqs()
 
     def get_seqs(
         self,
@@ -824,7 +837,10 @@ class SequenceGroup:
         if status is None:
             return self.seqs
 
-        return self.seqs if self.first_seq.status == status else []
+        if self.is_single_seq:
+            return self.seqs if self.first_seq.status == status else []
+
+        return [seq for seq in self.seqs if seq.status == status]
 
     def is_encoder_decoder(self) -> bool:
         return self.encoder_seq is not None
@@ -833,19 +849,22 @@ class SequenceGroup:
         return self.encoder_seq
 
     def get_finished_seqs(self) -> List[Sequence]:
-        return self.seqs if self.first_seq.is_finished() else []
+        if self.is_single_seq:
+            return self.seqs if self.first_seq.is_finished() else []
+
+        return [seq for seq in self.seqs if seq.is_finished()]
 
     def update_num_computed_tokens(self, num_new_computed_tokens: int):
         """Update number of tokens computed so far."""
-        seq = self.first_seq
-        if not seq.is_finished():
-            seq.data.update_num_computed_tokens(num_new_computed_tokens)
+        for seq in self.seqs:
+            if not seq.is_finished():
+                seq.data.update_num_computed_tokens(num_new_computed_tokens)
 
     def get_num_uncomputed_tokens(self) -> int:
         num_uncomputed_tokens = 0
-        seq = self.first_seq
-        if not seq.is_finished():
-            num_uncomputed_tokens += seq.data.get_num_uncomputed_tokens()
+        for seq in self.seqs:
+            if not seq.is_finished():
+                num_uncomputed_tokens += seq.data.get_num_uncomputed_tokens()
         return num_uncomputed_tokens
 
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
@@ -860,10 +879,14 @@ class SequenceGroup:
         return len(self.get_seqs(status))
 
     def num_finished_seqs(self) -> int:
-        return 1 if self.first_seq.is_finished() else 0
+        if self.is_single_seq:
+            return 1 if self.seqs[0].is_finished() else 0
+        return len(self.get_finished_seqs())
 
     def is_finished(self) -> bool:
-        return self.first_seq.is_finished()
+        if self.is_single_seq:
+            return self.first_seq.is_finished()
+        return all(seq.is_finished() for seq in self.seqs)
 
     def is_prefill(self) -> bool:
         return self.first_seq.is_prefill()
@@ -1391,13 +1414,15 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
     @staticmethod
     def add_request(request_id: str, engine, params, **kwargs):
         original_params = params
-        params = original_params.clone()
-        params.n = 1
         group = ParallelSampleSequenceGroup(request_id)
         seqs = []
         for i in range(original_params.n):
             request_id_i = f"{request_id}_parallel_sample_{i}"
             group.seq_id_to_index[request_id_i] = i
+            params = copy.deepcopy(original_params)
+            params.n = 1
+            if params.seed is not None:
+                params.seed += i
             seq_group = engine._add_processed_request(
                 request_id_i,
                 params=params,
@@ -1432,10 +1457,11 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             self, seq_group: SequenceGroup) -> Optional[SequenceGroup]:
 
         # in the streaming mode, we will return the assembled sequence
-        # for the first sequence, and then return None for the rest of
-        # sequences
+        # for the first remaining sequence, and then return None for the
+        # rest of sequences
         if self.streaming:
-            if self.seq_id_to_index[seq_group.request_id] == 0:
+            first_remaining_id = next(iter(self.to_be_finished))
+            if seq_group.request_id == first_remaining_id:
                 return self.assembled_seq_group
             return None
 
