@@ -42,13 +42,22 @@ def is_block_tables_empty(block_tables: Union[None, Dict]):
 
 
 def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,
-                                   context_len: int, sliding_window: int):
+                                   block_size: int, sliding_window: int):
     """
     Compute the start index of slot mapping.
+
+    As paged attention starts from start of block, start_idx should be aligned
+    with block size. And in next decode, seq_len could be way over
+    sliding_window, as a result start_idx should be shifted toward left to
+    avoid uninitialized cache data from being used, give it one block margin.
     """
     start_idx = 0
-    if is_prompt and sliding_window is not None:
-        start_idx = max(0, query_len - sliding_window)
+    if is_prompt and sliding_window != 0:
+        num_query_blocks = (query_len + block_size - 1) // block_size
+        num_sliding_window_blocks = ((sliding_window + block_size - 1) //
+                                     block_size)
+        start_block_idx = num_query_blocks - num_sliding_window_blocks - 1
+        start_idx = max(0, start_block_idx * block_size)
     return start_idx
 
 
@@ -189,7 +198,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             # Compute slot mapping.
             is_profile_run = is_block_tables_empty(block_tables)
             start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
-                                                       context_len,
+                                                       self.block_size,
                                                        self.sliding_window)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
