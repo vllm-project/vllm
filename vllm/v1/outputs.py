@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -14,10 +14,6 @@ class SamplerOutput:
     logprob_token_ids: Optional[torch.Tensor]
     # [num_reqs, max_num_logprobs + 1]
     logprobs: Optional[torch.Tensor]
-
-    # TODO: Support prompt logprobs.
-    prompt_logprob_token_ids: Optional[torch.Tensor]
-    prompt_logprobs: Optional[torch.Tensor]
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -37,3 +33,7 @@ class ModelRunnerOutput:
     logprob_token_ids_cpu: Optional[torch.Tensor]
     # [num_reqs, max_num_logprobs + 1]
     logprobs_cpu: Optional[torch.Tensor]
+
+    # req_id -> (prompt_logprobs_token_ids, prompt_logprobs)
+    # [prompt_len, num_prompt_logprobs]
+    prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]]

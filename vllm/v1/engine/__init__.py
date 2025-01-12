@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Union
 
 import msgspec
+import torch
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
@@ -34,12 +35,16 @@ class EngineCoreRequest:
 
 class EngineCoreOutput(
         msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
+        array_like=False,  # type: ignore[call-arg]
         omit_defaults=True,  # type: ignore[call-arg]
         gc=False):  # type: ignore[call-arg]
 
     request_id: str
     new_token_ids: List[int]
+    logprobs: List[torch.Tensor]
+    logprobs_token_ids: List[torch.Tensor]
+    prompt_logprobs: Optional[torch.Tensor]
+    prompt_logprobs_token_ids: Optional[torch.Tensor]
     finished: bool
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
