@@ -1,6 +1,7 @@
 """Utilities for selecting and loading models."""
 import contextlib
-from typing import Tuple, Type
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Type
 
 import torch
 from torch import nn
@@ -49,3 +50,26 @@ def get_model_architecture(
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:
     return get_model_architecture(model_config)[1]
+
+
+@dataclass
+class ParamMapping:
+    """
+    A class to handle parameter mapping for model weight loading.
+    It creates a bidirectional mapping between packed parameters and their 
+    constituent parts.
+    """
+    packed_mapping: Dict[str, List[str]]
+    inverse_packed_mapping: Dict[str, Tuple[str,
+                                            int]] = field(default_factory=dict)
+
+    def __post_init__(self):
+        for packed_name, sub_params in self.packed_mapping.items():
+            # Skip self-contained cases (e.g., {"W_pack": ["W_pack"]})
+            if len(sub_params) == 1 and sub_params[0] == packed_name:
+                continue
+            for index, param_name in enumerate(sub_params):
+                self.inverse_packed_mapping[param_name] = (
+                    packed_name,
+                    index,
+                )
