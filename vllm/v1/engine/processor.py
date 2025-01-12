@@ -25,19 +25,18 @@ class Processor:
         model_config: ModelConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
-        tokenizer: BaseTokenizerGroup,
+        tokenizer_group: BaseTokenizerGroup,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 
         self.model_config = model_config
         self.lora_config = lora_config
-        self.tokenizer = tokenizer
 
         self.generation_config_fields = model_config.try_get_generation_config(
         )
         self.input_preprocessor = InputPreprocessor(model_config,
-                                                    self.tokenizer,
+                                                    tokenizer_group,
                                                     mm_registry)
         self.input_processor = input_registry.create_input_processor(
             model_config)
