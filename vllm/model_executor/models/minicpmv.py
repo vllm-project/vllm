@@ -657,7 +657,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
         quant_config: Optional[QuantizationConfig],
         prefix: str = "",
     ) -> nn.Module:
-        # TODO: refactor this vision model
+        # TODO: refactor vision model through timm wrapper from transformers
         try:
             import timm
         except ImportError:

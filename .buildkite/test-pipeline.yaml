@@ -52,6 +52,7 @@ steps:
   - tests/worker
   - tests/standalone_tests/lazy_torch_compile.py
   commands:
+  - pip install git+https://github.com/Isotr0py/DeepSeek-VL2.git  # Used by multimoda processing test
   - python3 standalone_tests/lazy_torch_compile.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine

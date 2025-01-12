@@ -54,6 +54,28 @@ def load_aria(question, image_urls: List[str]) -> ModelRequestData:
     )
 
 
+def load_deepseek_vl2(question: str, image_urls: List[str]):
+    model_name = "deepseek-ai/deepseek-vl2-small"
+
+    llm = LLM(model=model_name,
+              max_model_len=4096,
+              max_num_seqs=2,
+              hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]},
+              limit_mm_per_prompt={"image": len(image_urls)})
+
+    placeholder = "".join(f"image_{i}:<image>\n"
+                          for i, _ in enumerate(image_urls, start=1))
+    prompt = f"<|User|>: {placeholder}{question}\n\n<|Assistant|>:"
+
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=None,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
 def load_h2onvl(question: str, image_urls: List[str]) -> ModelRequestData:
     model_name = "h2oai/h2ovl-mississippi-2b"
 
@@ -372,6 +394,7 @@ def load_qwen2_vl(question, image_urls: List[str]) -> ModelRequestData:
 
 model_example_map = {
     "aria": load_aria,
+    "deepseek_vl2": load_deepseek_vl2,
     "h2ovl_chat": load_h2onvl,
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,
