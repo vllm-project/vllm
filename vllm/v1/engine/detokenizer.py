@@ -111,7 +111,7 @@ class Detokenizer:
         # TODO(woosuk): This method becomes very inefficient when the number of
         # new_token_ids is more than 1. We need to optimize this.
         decoded_text = ""
-        for new_token_id in output.new_token_ids:
+        for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
             (new_tokens, new_decoded_token_text, prefix_offset,
              read_offset) = detokenize_incrementally(
@@ -146,6 +146,8 @@ class Detokenizer:
                     self.output_text = self.output_text[:truncate_to]
                 finish_reason = "stop"  # TODO: use constant
                 stop_reason = stop_str
+
+        # TODO: handle stop_token_ids here too?
 
         # 3) Update the RequestOutput object with the new text.
         finished = bool(finish_reason)
