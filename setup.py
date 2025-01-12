@@ -9,6 +9,7 @@ from pathlib import Path
 from shutil import which
 from typing import Dict, List
 
+import datetime
 import torch
 from packaging.version import Version, parse
 from setuptools import Extension, find_packages, setup
@@ -449,6 +450,17 @@ def get_nvcc_cuda_version() -> Version:
 def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
 
+def find_version(filepath: str) -> str:
+    """Extract version information from the given filepath.
+
+    Adapted from https://github.com/ray-project/ray/blob/0b190ee1160eeca9796bc091e07eaebf4c85b511/python/setup.py
+    """
+    with open(filepath) as fp:
+        version_match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]",
+                                  fp.read(), re.M)
+        if version_match:
+            return version_match.group(1)
+        raise RuntimeError("Unable to find version string.")
 
 def get_gaudi_sw_version():
     """
@@ -467,15 +479,10 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
-    # TODO: Revisit this temporary approach: https://github.com/vllm-project/vllm/issues/9182#issuecomment-2404860236
-    try:
-        version = get_version(
-            write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
-        )
-    except LookupError:
-        version = "0.0.0"
-
-    sep = "+" if "+" not in version else "."  # dev versions might contain +
+    version = find_version(get_path("vllm", "version.py"))
+    sep = "+" if "+" not in version else "."
+    now = datetime.datetime.now()
+    datetime_stamp = now.strftime("%Y%m%d-%H%M%S")
 
     if _no_device():
         if envs.VLLM_TARGET_DEVICE == "empty":
@@ -517,7 +524,7 @@ def get_vllm_version() -> str:
         version += f"{sep}xpu"
     else:
         raise RuntimeError("Unknown runtime environment")
-
+    version += f"-dev-{datetime_stamp}"
     return version
 
 

@@ -4,6 +4,8 @@ from typing import Union
 
 
 def is_s3(model_or_path: str) -> bool:
+    if not model_or_path or not isinstance(model_or_path, str):
+        return False
     return model_or_path.lower().startswith('s3://')
 
 
