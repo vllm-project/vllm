@@ -5,7 +5,7 @@
 vLLM initially supports basic model inferencing and serving on x86 CPU platform, with data types FP32, FP16 and BF16. vLLM CPU backend supports the following vLLM features:
 
 - Tensor Parallel
-- Model Quantization (`INT8 W8A8, AWQ`)
+- Model Quantization (`INT8 W8A8, AWQ, GPTQ`)
 - Chunked-prefill
 - Prefix-caching
 - FP8-E5M2 KV-Caching (TODO)
@@ -95,7 +95,7 @@ $ VLLM_TARGET_DEVICE=cpu python setup.py install
 $ sudo apt-get install libtcmalloc-minimal4 # install TCMalloc library
 $ find / -name *libtcmalloc* # find the dynamic link library path
 $ export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD # prepend the library to LD_PRELOAD
-$ python examples/offline_inference/offline_inference.py # run vLLM
+$ python examples/offline_inference/basic.py # run vLLM
 ```
 
 - When using the online serving, it is recommended to reserve 1-2 CPU cores for the serving framework to avoid CPU oversubscription. For example, on a platform with 32 physical CPU cores, reserving CPU 30 and 31 for the framework and using CPU 0-29 for OpenMP:
@@ -132,7 +132,7 @@ CPU NODE SOCKET CORE L1d:L1i:L2:L3 ONLINE    MAXMHZ   MINMHZ      MHZ
 
 # On this platform, it is recommend to only bind openMP threads on logical CPU cores 0-7 or 8-15
 $ export VLLM_CPU_OMP_THREADS_BIND=0-7
-$ python examples/offline_inference/offline_inference.py
+$ python examples/offline_inference/basic.py
 ```
 
 - If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores using `VLLM_CPU_OMP_THREADS_BIND` to avoid cross NUMA node memory access.

@@ -145,7 +145,7 @@ design/arch_overview
 design/huggingface_integration
 design/plugin_system
 design/kernel/paged_attention
-design/input_processing/model_inputs_index
+design/mm_processing
 design/automatic_prefix_caching
 design/multiprocessing
 ```
