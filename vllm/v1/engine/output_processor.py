@@ -77,6 +77,13 @@ class OutputProcessor:
             queue=queue
         )
 
+    def abort_requests(
+        self,
+        request_ids: List[str],
+    ) -> None:
+        for request_id in request_ids:
+            self.request_states.pop(request_id, None)
+        
 
     def make_request_output(
         self,
