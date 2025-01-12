@@ -1,7 +1,7 @@
 """KV-Cache Utilities."""
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, List, NamedTuple, Optional, Tuple
+from typing import Any, List, NamedTuple, Optional, Tuple, TypedDict
 
 from vllm.logger import init_logger
 from vllm.v1.request import Request
@@ -22,6 +22,16 @@ class BlockHashType(NamedTuple):
     token_ids: Tuple[int, ...]
     # Extra keys for the block.
     extra_keys: Optional[Any] = None
+
+
+class PrefixCachingMetrics(TypedDict):
+    """Metrics for prefix caching."""
+
+    query_total: int
+    """The total number of queries."""
+
+    query_hit: int
+    """The number of queries that hit the prefix cache."""
 
 
 @dataclass
