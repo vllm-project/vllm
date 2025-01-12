@@ -200,6 +200,13 @@ void dynamic_per_token_scaled_fp8_quant(
     torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale,
     std::optional<torch::Tensor> const& scale_ub);
 
+int64_t make_q_matrix(torch::Tensor q_weight, torch::Tensor q_perm,
+                      torch::Tensor q_invperm, torch::Tensor q_scale,
+                      torch::Tensor q_scale_max, torch::Tensor q_groups,
+                      torch::Tensor q_group_map);
+
+torch::Tensor exl2_gemm(torch::Tensor a, int64_t b);
+
 void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const torch::Tensor& A, const torch::Tensor& B,
                         const torch::Tensor& C,

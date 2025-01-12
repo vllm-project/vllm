@@ -26,6 +26,7 @@ QUANTIZATION_METHODS: List[str] = [
     "experts_int8",
     "neuron_quant",
     "ipex",
+    "exl2"
 ]
 
 
@@ -41,6 +42,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .compressed_tensors.compressed_tensors import (  # noqa: E501
         CompressedTensorsConfig)
     from .deepspeedfp import DeepSpeedFPConfig
+    from .exllamav2 import Exl2Config
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
     from .fp8 import Fp8Config
@@ -79,6 +81,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "experts_int8": ExpertsInt8Config,
         "neuron_quant": NeuronQuantConfig,
         "ipex": IPEXConfig,
+        "exl2": Exl2Config,
     }
 
     return method_to_config[quantization]

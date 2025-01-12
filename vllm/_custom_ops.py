@@ -274,6 +274,20 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                             size_n, size_k)
 
 
+# exllamav2
+def exl2_make_q_matrix(q_weight: torch.Tensor, q_perm: torch.Tensor,
+                       q_invperm: torch.Tensor, q_scale: torch.Tensor,
+                       q_scale_max: torch.Tensor, q_groups: torch.Tensor,
+                       q_group_map: torch.Tensor) -> int:
+    return torch.ops._C.exl2_make_q_matrix(q_weight, q_perm, q_invperm,
+                                           q_scale, q_scale_max, q_groups,
+                                           q_group_map)
+
+
+def exl2_gemm(a: torch.Tensor, b: int) -> torch.Tensor:
+    return torch.ops._C.exl2_gemm(a, b)
+
+
 if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
     @register_fake("_C::gptq_marlin_24_gemm")
