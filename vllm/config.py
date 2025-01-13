@@ -928,6 +928,11 @@ class ModelConfig:
     def is_cross_encoder(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_cross_encoder_model(architectures)
+    
+    @property
+    def has_pooling(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.is_pooling_model(architectures)
 
     @property
     def supported_runner_types(self) -> Set[RunnerType]:
