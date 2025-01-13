@@ -6,7 +6,7 @@ The table below shows the compatibility of various quantization implementations 
 
 :::{list-table}
 :header-rows: 1
-:widths: 20 8 8 8 8 8 8 8 8 8 8
+:widths: 20 8 8 8 8 8 8 8 8 8 8 8
 
 - * Implementation
   * Volta
@@ -16,6 +16,7 @@ The table below shows the compatibility of various quantization implementations 
   * Hopper
   * AMD GPU
   * Intel GPU
+  * Intel Gaudi
   * x86 CPU
   * AWS Inferentia
   * Google TPU
@@ -27,6 +28,7 @@ The table below shows the compatibility of various quantization implementations 
   * ✅︎
   * ❌
   * ✅︎
+  * ❌
   * ✅︎
   * ❌
   * ❌
@@ -38,6 +40,7 @@ The table below shows the compatibility of various quantization implementations 
   * ✅︎
   * ❌
   * ✅︎
+  * ❌
   * ✅︎
   * ❌
   * ❌
@@ -52,12 +55,14 @@ The table below shows the compatibility of various quantization implementations 
   * ❌
   * ❌
   * ❌
+  * ❌
 - * INT8 (W8A8)
   * ❌
   * ✅︎
   * ✅︎
   * ✅︎
   * ✅︎
+  * ❌
   * ❌
   * ❌
   * ✅︎
@@ -74,12 +79,14 @@ The table below shows the compatibility of various quantization implementations 
   * ❌
   * ❌
   * ❌
+  * ❌
 - * BitBLAS (GPTQ)
   * ✅︎
   * ✅︎
   * ✅︎
   * ✅︎
   * ✅︎
+  * ❌
   * ❌
   * ❌
   * ❌
@@ -96,12 +103,14 @@ The table below shows the compatibility of various quantization implementations 
   * ❌
   * ❌
   * ❌
+  * ❌
 - * bitsandbytes
   * ✅︎
   * ✅︎
   * ✅︎
   * ✅︎
   * ✅︎
+  * ❌
   * ❌
   * ❌
   * ❌
@@ -118,6 +127,7 @@ The table below shows the compatibility of various quantization implementations 
   * ❌
   * ❌
   * ❌
+  * ❌
 - * GGUF
   * ✅︎
   * ✅︎
@@ -125,6 +135,7 @@ The table below shows the compatibility of various quantization implementations 
   * ✅︎
   * ✅︎
   * ✅︎
+  * ❌
   * ❌
   * ❌
   * ❌
@@ -140,6 +151,20 @@ The table below shows the compatibility of various quantization implementations 
   * ❌
   * ❌
   * ❌
+  * ❌
+- * INC (W8A8)
+  * ❌
+  * ❌
+  * ❌
+  * ❌
+  * ❌
+  * ❌
+  * ❌
+  * ✅︎
+  * ❌
+  * ❌
+  * ❌
+
 :::
 
 - Volta refers to SM 7.0, Turing to SM 7.5, Ampere to SM 8.0/8.6, Ada to SM 8.9, and Hopper to SM 9.0.
