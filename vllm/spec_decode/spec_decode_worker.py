@@ -14,6 +14,7 @@ from vllm.distributed.communication_op import (broadcast_tensor_dict,
                                                tensor_model_parallel_gather)
 from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.spec_decode_base_sampler import (
@@ -47,7 +48,7 @@ from vllm.spec_decode.util import (Timer, create_logprobs_output,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.utils import resolve_obj_by_qualname
-from vllm.worker.worker_base import LoRANotSupportedWorkerBase, WorkerBase
+from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -116,7 +117,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
 
 # Reminder: Please update docs/source/features/compatibility_matrix.md
 # If the feature combo become valid
-class SpecDecodeWorker(LoRANotSupportedWorkerBase):
+class SpecDecodeWorker(WorkerBase):
     """Worker which implements speculative decoding.
 
     Speculative decoding reduces decoding per-token latency by using a proposal
@@ -141,6 +142,18 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         correctness tests pass.
         More info here https://docs.google.com/document/d/1T-JaS2T1NRfdP51qzqpyakoCXxSXTtORppiwaj5asxA/edit.
     """
+
+    def add_lora(self, lora_request: LoRARequest):
+        pass
+
+    def remove_lora(self, lora_id: int):
+        pass
+
+    def pin_lora(self, lora_id: int):
+        pass
+
+    def list_loras(self):
+        pass
 
     @classmethod
     def create_worker(
