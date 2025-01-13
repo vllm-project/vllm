@@ -74,6 +74,9 @@ class EAGLE(nn.Module):
 
         # Modify layer normalization and residual connections as suggested
         # in the EAGLE framework: https://github.com/SafeAILab/EAGLE
+        # While weights and biases are generally not needed,
+        # they are retained here to support certain unit tests 
+        # (e.g., spec_decode/e2e/test_eagle_correctness.py).
         self.model.model.layers[0].input_layernorm = DummyInputLayerNorm(
             weight=self.model.model.layers[0].input_layernorm.weight)
         self.model.model.norm = DummyOutputNorm()
