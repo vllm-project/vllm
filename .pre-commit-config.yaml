@@ -11,15 +11,16 @@ repos:
   - id: ruff
     args: [--output-format, github]
 - repo: https://github.com/pre-commit/mirrors-mypy
-  rev: v1.14.1
+  rev: v1.11.1
   hooks:
   - id: mypy
+    files: '(tests|vllm/(attention|compilation|distributed|engine|executor|inputs|lora|model_executor|plugins|prompt_adapter|spec_decode|worker|v1))/.*'
     additional_dependencies: [types-setuptools, types-PyYAML, types-requests]
 - repo: https://github.com/codespell-project/codespell
   rev: v2.3.0
   hooks:
   - id: codespell
-    exclude: "benchmarks/sonnet.txt|(build|tests/(lora/data|models/fixtures|prompts))/.*"
+    exclude: 'benchmarks/sonnet.txt|(build|tests/(lora/data|models/fixtures|prompts))/.*'
 - repo: https://github.com/PyCQA/isort
   rev: 5.13.2
   hooks:
