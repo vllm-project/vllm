@@ -1,7 +1,8 @@
 import itertools
 import warnings
 from contextlib import contextmanager
-from typing import (Any, ClassVar, Optional, Sequence, Type, Union, cast, overload)
+from typing import (Any, ClassVar, Optional, Sequence, Type, Union, cast,
+                    overload)
 
 from tqdm import tqdm
 from typing_extensions import deprecated

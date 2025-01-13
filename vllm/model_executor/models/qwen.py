@@ -7,8 +7,8 @@
 import math
 import re
 from functools import partial
-from typing import (Any, Callable, Iterable, Literal, Mapping, Optional, TypedDict,
-                    Union)
+from typing import (Any, Callable, Iterable, Literal, Mapping, Optional,
+                    TypedDict, Union)
 
 import numpy as np
 import torch

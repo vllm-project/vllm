@@ -1,8 +1,8 @@
 import json
 from concurrent.futures.thread import ThreadPoolExecutor
 from http import HTTPStatus
-from typing import (Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence,
-                    TypedDict, Union)
+from typing import (Any, Callable, Iterable, Iterator, Mapping, Optional,
+                    Sequence, TypedDict, Union)
 
 from fastapi import Request
 from pydantic import Field

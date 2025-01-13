@@ -1,4 +1,3 @@
-
 import openai
 import pytest
 import pytest_asyncio

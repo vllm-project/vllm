@@ -23,8 +23,8 @@
 import math
 import re
 from functools import cached_property, partial
-from typing import (Any, Callable, Iterable, Literal, Mapping, Optional, TypedDict,
-                    Union)
+from typing import (Any, Callable, Iterable, Literal, Mapping, Optional,
+                    TypedDict, Union)
 
 import torch
 import torch.types

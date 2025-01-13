@@ -31,8 +31,8 @@ from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
-                    Generator, Generic, Iterator, Literal, NamedTuple, Optional,
-                    Type, TypeVar, Union, overload)
+                    Generator, Generic, Iterator, Literal, NamedTuple,
+                    Optional, Type, TypeVar, Union, overload)
 from uuid import uuid4
 
 import numpy as np

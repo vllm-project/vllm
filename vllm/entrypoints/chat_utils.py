@@ -5,8 +5,8 @@ from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import (Any, Awaitable, Callable, Generic, Iterable, Literal, Optional,
-                    TypeVar, Union, cast)
+from typing import (Any, Awaitable, Callable, Generic, Iterable, Literal,
+                    Optional, TypeVar, Union, cast)
 
 import jinja2.nodes
 import transformers.utils.chat_template_utils as hf_chat_utils

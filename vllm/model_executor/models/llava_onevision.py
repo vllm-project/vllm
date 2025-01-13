@@ -1,7 +1,7 @@
 import math
 from functools import cached_property
-from typing import (Final, Iterable, Literal, Mapping, Optional, Protocol, TypedDict,
-                    Union)
+from typing import (Final, Iterable, Literal, Mapping, Optional, Protocol,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn

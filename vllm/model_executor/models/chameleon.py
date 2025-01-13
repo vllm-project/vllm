@@ -1,5 +1,6 @@
 from functools import cached_property
-from typing import (Any, Iterable, Literal, Mapping, Optional, TypedDict, Union)
+from typing import (Any, Iterable, Literal, Mapping, Optional, TypedDict,
+                    Union)
 
 import torch
 import torch.nn as nn

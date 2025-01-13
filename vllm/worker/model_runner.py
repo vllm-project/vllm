@@ -6,7 +6,8 @@ import time
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Optional, Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Optional, Type, TypeVar,
+                    Union)
 
 import numpy as np
 import torch

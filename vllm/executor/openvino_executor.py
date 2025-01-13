@@ -1,4 +1,3 @@
-
 import openvino as ov
 
 import vllm.envs as envs

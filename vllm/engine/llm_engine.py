@@ -5,8 +5,8 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
-from typing import (TYPE_CHECKING, Callable, ClassVar, Deque, Iterable, Mapping,
-                    NamedTuple, Optional)
+from typing import (TYPE_CHECKING, Callable, ClassVar, Deque, Iterable,
+                    Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
 from typing import Type, Union, cast, overload
 

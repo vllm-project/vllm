@@ -14,8 +14,8 @@
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
 import math
-from typing import (Iterable, Literal, Mapping, NamedTuple, Optional, TypedDict,
-                    Union)
+from typing import (Iterable, Literal, Mapping, NamedTuple, Optional,
+                    TypedDict, Union)
 
 import torch
 import torch.utils.checkpoint

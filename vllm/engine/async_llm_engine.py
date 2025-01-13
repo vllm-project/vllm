@@ -3,8 +3,8 @@ import copy
 import time
 import weakref
 from functools import partial
-from typing import (Any, AsyncGenerator, Callable, Coroutine, Iterable, Mapping,
-                    Optional, Type, Union, overload)
+from typing import (Any, AsyncGenerator, Callable, Coroutine, Iterable,
+                    Mapping, Optional, Type, Union, overload)
 from weakref import ReferenceType
 
 from typing_extensions import deprecated

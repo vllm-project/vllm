@@ -1,4 +1,3 @@
-
 import torch
 
 from vllm.model_executor.layers.utils import apply_penalties

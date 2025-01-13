@@ -15,7 +15,6 @@
 # limitations under the License.
 """Exaone model configuration"""
 
-
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
