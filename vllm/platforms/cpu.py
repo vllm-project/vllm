@@ -109,3 +109,7 @@ class CpuPlatform(Platform):
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on CPU.")
         return False
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_cpu.PunicaWrapperCPU"
