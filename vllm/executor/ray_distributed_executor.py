@@ -280,7 +280,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
         # Set environment variables for the driver and workers.
         all_args_to_update_environment_variables = [({
-            f"{current_platform.device_name}_VISIBLE_DEVICES":
+            current_platform.device_control_env_var:
             ",".join(map(str, node_gpus[node_id])),
             "VLLM_TRACE_FUNCTION":
             str(envs.VLLM_TRACE_FUNCTION),
