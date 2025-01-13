@@ -475,6 +475,11 @@ class WorkerWrapperBase:
                 init_cached_hf_modules()
 
     def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
+        """
+        Adjust the rank based on the given mapping.
+        It is only used during the initialization of the executor,
+        to adjust the rank of workers after we create all workers.
+        """
         if self.rank in rank_mapping:
             self.rank = rank_mapping[self.rank]
 

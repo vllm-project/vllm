@@ -32,6 +32,11 @@ logger = init_logger(__name__)
 
 @dataclass
 class RayWorkerMetaData:
+    """
+    Metadata for a Ray worker.
+    The order of ray worker creation can be random,
+    and we need to reset the rank after creating all workers.
+    """
     worker: ActorHandle
     created_rank: int
     adjusted_rank: int = -1
