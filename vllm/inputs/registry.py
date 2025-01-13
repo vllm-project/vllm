@@ -313,9 +313,6 @@ class InputRegistry:
 
         The model is identified by ``model_config``.
 
-        See also:
-            :ref:`enabling-multimodal-inputs`
-
         Note:
             This should be called after
             :meth:`~MultiModalRegistry.init_mm_limits_per_prompt`.
@@ -384,10 +381,8 @@ class InputRegistry:
         Register an input processor to a model class.
 
         The provided function is invoked on each input to the model. This
-        happens before :meth:`~vllm.multimodal.MultiModalRegistry.map_input`.
-
-        See also:
-            :ref:`input-processing-pipeline`
+        happens before
+        :meth:`~vllm.multimodal.registry.MultiModalRegistry.map_input`.
         """
 
         def wrapper(model_cls: N) -> N:
@@ -429,9 +424,6 @@ class InputRegistry:
         Apply an input processor to an instance of model inputs.
 
         The model is identified by ``model_config``.
-
-        See also:
-            :ref:`input-processing-pipeline`
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
