@@ -91,8 +91,18 @@ class TpuPlatform(Platform):
                 else:
                     parallel_config.worker_cls = "vllm.worker.tpu_worker.TPUWorker"
 
+        # Adjust scheduler config for V1
+        # TODO: Add support for these
+        if envs.VLLM_USE_V1:
+            if vllm_config.cache_config.enable_prefix_caching:
+                logger.info("[V1][TPU] Disable prefix caching")
+                vllm_config.cache_config.enable_prefix_caching = False
+
+            if vllm_config.scheduler_config.chunked_prefill_enabled:
+                logger.info("[V1][TPU] Disable chunked prefill")
+                vllm_config.scheduler_config.chunked_prefill_enabled = False
+
     @classmethod
     def is_pin_memory_available(cls):
-        # TODO: Verify if it is indeed the case
         logger.warning("Pin memory is not supported on TPU.")
         return False
