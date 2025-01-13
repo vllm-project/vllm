@@ -24,21 +24,7 @@ Further update the model as follows:
   
   More conveniently, you can simply pass `**kwargs` to the {meth}`~torch.nn.Module.forward` method and retrieve the keyword parameters for multimodal inputs from it.
 
-- Implement the {class}`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
-
-  ```diff
-  + from vllm.model_executor.models.interfaces import SupportsMultiModal
-
-  - class YourModelForImage2Seq(nn.Module):
-  + class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
-  ```
-
-  ```{note}
-  The model class does not have to be named {code}`*ForCausalLM`.
-  Check out [the HuggingFace Transformers documentation](https://huggingface.co/docs/transformers/model_doc/auto#multimodal) for some examples.
-  ```
-
-  - Implement {meth}`~vllm.model_executor.models.interfaces.SupportsMultiModal.get_multimodal_embeddings` that returns the embeddings from running the multimodal inputs through the multimodal tokenizer of the model. Below we provide a boilerplate of a typical implementation pattern, but feel free to adjust it to your own needs.
+- Implement {meth}`~vllm.model_executor.models.interfaces.SupportsMultiModal.get_multimodal_embeddings` that returns the embeddings from running the multimodal inputs through the multimodal tokenizer of the model. Below we provide a boilerplate of a typical implementation pattern, but feel free to adjust it to your own needs.
 
     ```python
     class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
@@ -63,10 +49,10 @@ Further update the model as follows:
     ```
 
     ```{important}
-    The returned `multimodal_embeddings` must be either a 3D {class}`torch.Tensor` of shape `(num_items, feature_size, hidden_size)`, or a tuple of 2D {class}`torch.Tensor`s of shape `(feature_size, hidden_size)`, so that `multimodal_embeddings[i]` retrieves the embeddings generated from the `i`-th multimodal data item (e.g, image) of the request.
+    The returned `multimodal_embeddings` must be either a **3D {class}`torch.Tensor`** of shape `(num_items, feature_size, hidden_size)`, or a **list / tuple of 2D {class}`torch.Tensor`'s** of shape `(feature_size, hidden_size)`, so that `multimodal_embeddings[i]` retrieves the embeddings generated from the `i`-th multimodal data item (e.g, image) of the request.
     ```
 
-  - Implement {meth}`~vllm.model_executor.models.interfaces.SupportsMultiModal.get_input_embeddings` to merge `multimodal_embeddings` with text embeddings from the `input_ids`. If input processing for the model is implemented correctly (see sections below), then you can leverage the utility function we provide to easily merge the embeddings.
+- Implement {meth}`~vllm.model_executor.models.interfaces.SupportsMultiModal.get_input_embeddings` to merge `multimodal_embeddings` with text embeddings from the `input_ids`. If input processing for the model is implemented correctly (see sections below), then you can leverage the utility function we provide to easily merge the embeddings.
 
     ```python
     from .utils import merge_multimodal_embeddings
@@ -93,6 +79,20 @@ Further update the model as follows:
 
             return inputs_embeds
     ```
+
+- Once the above steps are done, update the model class with the {class}`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
+
+  ```diff
+  + from vllm.model_executor.models.interfaces import SupportsMultiModal
+
+  - class YourModelForImage2Seq(nn.Module):
+  + class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
+  ```
+
+  ```{note}
+  The model class does not have to be named {code}`*ForCausalLM`.
+  Check out [the HuggingFace Transformers documentation](https://huggingface.co/docs/transformers/model_doc/auto#multimodal) for some examples.
+  ```
 
 ## 2. Specify processing information
 
