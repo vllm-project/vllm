@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
@@ -9,6 +9,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          hash_block_tokens,
                                          hash_request_tokens)
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.utils import ConstantList
 
 logger = init_logger(__name__)
 
@@ -69,7 +70,8 @@ class KVCacheManager:
         # is finished.
         self.req_to_blocks: Dict[str, List[KVCacheBlock]] = {}
 
-    def get_computed_blocks(self, request: Request) -> List[KVCacheBlock]:
+    def get_computed_blocks(
+            self, request: Request) -> Tuple[List[KVCacheBlock], int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -81,7 +83,7 @@ class KVCacheManager:
         """
         if not self.enable_caching:
             # Prefix caching is disabled.
-            return []
+            return [], 0
 
         computed_blocks = []
 
@@ -92,6 +94,16 @@ class KVCacheManager:
                 hash_request_tokens(self.block_size, request))
         block_hashes = request.kv_block_hashes
 
+        if len(block_hashes) * self.block_size == request.num_tokens:
+            # When prompt length is divisible by the block size and all blocks
+            # are cached, we need to recompute the last token. This have to be
+            # achieved by re-computing an entire block because allocate_slots()
+            # assumes num_computed_tokens is always a multiple of the block
+            # size. This limitation can potentially be removed in the future to
+            # slightly improve the performance. To achieve this, the last block
+            # is removed from the computed block_hashes.
+            block_hashes = ConstantList(block_hashes[:-1])
+
         for block_hash in block_hashes:
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
@@ -101,7 +113,11 @@ class KVCacheManager:
             else:
                 break
 
-        return computed_blocks
+        # NOTE(woosuk): Since incomplete blocks are not eligible for
+        # sharing, `num_computed_tokens` is always a multiple of
+        # `block_size`.
+        num_computed_tokens = len(computed_blocks) * self.block_size
+        return computed_blocks, num_computed_tokens
 
     def append_slots(
         self,
