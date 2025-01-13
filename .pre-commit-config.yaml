@@ -17,7 +17,6 @@ repos:
   rev: v2.3.0
   hooks:
   - id: codespell
-    args: [--toml, pyproject.toml]
 - repo: https://github.com/PyCQA/isort
   rev: 5.13.2
   hooks:
