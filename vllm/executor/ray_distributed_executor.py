@@ -580,3 +580,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
             for worker in self.non_driver_workers
         ]
         return await asyncio.gather(*coros)
+
+    def check_health(self) -> None:
+        # Assume that the Ray workers are healthy.
+        # TODO: check the health of the Ray workers
+        return
