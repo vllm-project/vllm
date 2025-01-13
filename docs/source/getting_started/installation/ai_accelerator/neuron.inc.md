@@ -131,3 +131,5 @@ See <project:#deployment-docker-build-image-from-source> for instructions on bui
 Make sure to use <gh-file:Dockerfile.neuron> in place of the default Dockerfile.
 
 ## Extra information
+
+There is no extra information for this device.

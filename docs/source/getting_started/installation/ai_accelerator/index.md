@@ -336,10 +336,28 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-set}
 :sync-group: device
 
+:::{tab-item} TPU
+:sync: tpu
+
+```{include} tpu.inc.md
+:start-after: "## Extra information"
+```
+
+:::
+
 :::{tab-item} Intel Gaudi
 :sync: hpu-gaudi
 
 ```{include} hpu-gaudi.inc.md
+:start-after: "## Extra information"
+```
+
+:::
+
+:::{tab-item} Neuron
+:sync: neuron
+
+```{include} neuron.inc.md
 :start-after: "## Extra information"
 ```
 
