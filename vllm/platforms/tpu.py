@@ -11,6 +11,8 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
+import vllm.envs as envs
+
 logger = init_logger(__name__)
 
 
@@ -23,9 +25,15 @@ class TpuPlatform(Platform):
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
-        if selected_backend != _Backend.PALLAS:
-            logger.info("Cannot use %s backend on TPU.", selected_backend)
-        return _Backend.PALLAS
+        if envs.VLLM_USE_V1:
+            if selected_backend != _Backend.PALLAS_VLLM_V1:
+                logger.info("[V1] Cannot use %s backend on TPU.",
+                            selected_backend)
+            return _Backend.PALLAS_VLLM_V1
+        else:
+            if selected_backend != _Backend.PALLAS:
+                logger.info("Cannot use %s backend on TPU.", selected_backend)
+            return _Backend.PALLAS
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -37,6 +45,8 @@ class TpuPlatform(Platform):
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        if envs.VLLM_USE_V1:
+            return False
         return True
 
     @classmethod
@@ -52,12 +62,16 @@ class TpuPlatform(Platform):
             cache_config.block_size = 16
 
         compilation_config = vllm_config.compilation_config
-        if compilation_config.level == CompilationLevel.NO_COMPILATION:
-            # TPU does not support NO_COMPILATION
+
+        # TPU only supports DYNAMO_ONCE compilation level
+        if (compilation_config.level == CompilationLevel.NO_COMPILATION
+                or compilation_config.level == CompilationLevel.PIECEWISE):
+            logger.info("[TPU] Forcing DYNAMO_ONCE compilation level")
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
-        compilation_config.level = 2
-        # assert compilation_config.level < CompilationLevel.PIECEWISE,\
-        #     "TPU does not support Inductor. compilation_config.level = {}".format(compilation_config.level)
+
+        assert compilation_config.level < CompilationLevel.PIECEWISE,\
+            ("Current compilation level = {} but needs to be less"
+             " than  ".format(compilation_config.level, CompilationLevel.PIECEWISE))
 
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
@@ -68,11 +82,14 @@ class TpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
-            if scheduler_config.is_multi_step:
-                parallel_config.worker_cls = \
-                    "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker"
+            if envs.VLLM_USE_V1:
+                parallel_config.worker_cls = "vllm.v1.worker.tpu_worker.TRUWorker"
             else:
-                parallel_config.worker_cls = "vllm.worker.tpu_worker.TPUWorker"
+                if scheduler_config.is_multi_step:
+                    parallel_config.worker_cls = \
+                        "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker"
+                else:
+                    parallel_config.worker_cls = "vllm.worker.tpu_worker.TPUWorker"
 
     @classmethod
     def is_pin_memory_available(cls):
