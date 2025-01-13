@@ -65,7 +65,7 @@ def vllm_flash_attention_forward(
     hidden = query.shape[-2]
     query, key, value = [x.transpose(1,2) for x in (query, key, value)]
     query, key, value = [x.reshape(hidden,-1) for x in (query, key, value)]
-    return attention_interface(query, key, value, kv_cache=kv_caches[layer_idx],attn_metadata=attn_metadata), None
+    return attention_interface(query, key, value, _kv_cache=kv_caches[layer_idx],_attn_metadata=attn_metadata), None
 
 
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
