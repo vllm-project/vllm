@@ -355,10 +355,10 @@ class MQLLMEngine:
             self._errored_with = e
 
     def start_profile(self) -> None:
-        self.engine.model_executor.collective_rpc("start_profile")
+        self.engine.start_profile()
 
     def stop_profile(self) -> None:
-        self.engine.model_executor.collective_rpc("stop_profile")
+        self.engine.stop_profile()
 
 
 def signal_handler(*_) -> None:
