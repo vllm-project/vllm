@@ -47,7 +47,8 @@ def bench_int8(
         n: int,
         label: str,
         sub_label: str,
-        bench_filters: Optional[List[str]] = None) -> Iterable[TMeasurement]:
+        bench_kernels: Optional[List[str]] = None) -> Iterable[TMeasurement]:
+    """Benchmark INT8-based kernels."""
     assert dtype == torch.int8
     a, b = make_rand_tensors(torch.int8, m, n, k)
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
@@ -83,7 +84,8 @@ def bench_int8(
 
     timers = []
     for name, fn in bench_fns.items():
-        if bench_filters is None or any(f in name for f in bench_filters):
+        # If bench_kernels is None, run all. Otherwise, run only exact matches.
+        if bench_kernels is None or name in bench_kernels:
             print(f"Running {name}")
             timers.append(bench_fn(label, sub_label, name, fn))
 
@@ -97,7 +99,8 @@ def bench_fp8(
         n: int,
         label: str,
         sub_label: str,
-        bench_filters: Optional[List[str]] = None) -> Iterable[TMeasurement]:
+        bench_kernels: Optional[List[str]] = None) -> Iterable[TMeasurement]:
+    """Benchmark FP8-based kernels."""
     assert dtype == torch.float8_e4m3fn
     a, b = make_rand_tensors(torch.float8_e4m3fn, m, n, k)
     a_cont = a.contiguous()
@@ -161,7 +164,8 @@ def bench_fp8(
 
     timers = []
     for name, fn in bench_fns.items():
-        if bench_filters is None or any(f in name for f in bench_filters):
+        # If bench_kernels is None, run all. Otherwise, run only exact matches.
+        if bench_kernels is None or name in bench_kernels:
             print(f"Running {name}")
             timers.append(bench_fn(label, sub_label, name, fn))
 
@@ -174,11 +178,11 @@ def bench(dtype: torch.dtype,
           n: int,
           label: str,
           sub_label: str,
-          bench_filters: Optional[List[str]] = None) -> Iterable[TMeasurement]:
+          bench_kernels: Optional[List[str]] = None) -> Iterable[TMeasurement]:
     if dtype == torch.int8:
-        return bench_int8(dtype, m, k, n, label, sub_label, bench_filters)
+        return bench_int8(dtype, m, k, n, label, sub_label, bench_kernels)
     if dtype == torch.float8_e4m3fn:
-        return bench_fp8(dtype, m, k, n, label, sub_label, bench_filters)
+        return bench_fp8(dtype, m, k, n, label, sub_label, bench_kernels)
     raise ValueError("unsupported type")
 
 
@@ -190,7 +194,7 @@ def print_timers(timers: Iterable[TMeasurement]):
 
 def run(dtype: torch.dtype,
         MKNs: Iterable[Tuple[int, int, int]],
-        bench_filters: Optional[List[str]] = None) -> Iterable[TMeasurement]:
+        bench_kernels: Optional[List[str]] = None) -> Iterable[TMeasurement]:
     results = []
     for m, k, n in MKNs:
         timers = bench(dtype,
@@ -199,7 +203,7 @@ def run(dtype: torch.dtype,
                        n,
                        f"scaled-{dtype}-gemm",
                        f"MKN=({m}x{k}x{n})",
-                       bench_filters=bench_filters)
+                       bench_kernels=bench_kernels)
         print_timers(timers)
         results.extend(timers)
     return results
@@ -222,7 +226,7 @@ def run_square_bench(args):
     dim_sizes = list(
         range(args.dim_start, args.dim_end + 1, args.dim_increment))
     MKNs = list(zip(dim_sizes, dim_sizes, dim_sizes))
-    data = run(args.dtype, MKNs, bench_filters=args.filters)
+    data = run(args.dtype, MKNs, bench_kernels=args.kernels)
     make_output(data, MKNs, f"square_bench-{args.dtype}")
 
 
@@ -233,7 +237,7 @@ def run_range_bench(args):
     Ks = [args.k_constant] * n if args.k_constant is not None else dim_sizes
     Ns = [args.n_constant] * n if args.n_constant is not None else dim_sizes
     MKNs = list(zip(Ms, Ks, Ns))
-    data = run(args.dtype, MKNs, bench_filters=args.filters)
+    data = run(args.dtype, MKNs, bench_kernels=args.kernels)
     make_output(data, MKNs, f"range_bench-{args.dtype}")
 
 
@@ -259,7 +263,7 @@ def run_model_bench(args):
             for k, n in KNs:
                 MKNs.append((m, k, n))
 
-        data = run(args.dtype, MKNs, bench_filters=args.filters)
+        data = run(args.dtype, MKNs, bench_kernels=args.kernels)
         model_bench_data.append(data)
 
     # Print all results
@@ -310,13 +314,13 @@ Benchmark Cutlass GEMM.
                         required=True,
                         help="Available options are ['int8', 'fp8']")
     parser.add_argument(
-        "--filters",
+        "--kernels",
         nargs="+",
         type=str,
         default=None,
         help=
-        "Filter for the kernels to run. Multiple substrings can be provided. "
-        "If any of them is found in the kernel name, it will be benchmarked.")
+        "Exact names of the kernels to benchmark. If not set, runs all kernels."
+    )
 
     subparsers = parser.add_subparsers(dest="cmd")
 
