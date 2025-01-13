@@ -57,6 +57,7 @@ current_backend = "inductor"
 if current_platform.is_npu():
     current_backend = "npu"
 
+
 @torch.compile(backend=current_platform.simple_compile_backend)
 def layer_norm_func(hidden_states, weight, variance_epsilon):
     input_dtype = hidden_states.dtype

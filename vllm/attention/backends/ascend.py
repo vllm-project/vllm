@@ -409,7 +409,6 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
 
 class AscendAttentionBackendImpl(AttentionImpl):
 
-
     def __init__(
         self,
         num_heads: int,
