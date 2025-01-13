@@ -321,6 +321,17 @@ class DefaultModelLoader(BaseModelLoader):
 
             weights_iterator = _xla_weights_iterator(weights_iterator)
 
+        if current_platform.is_hpu():
+
+            import habana_frameworks.torch.core as htcore
+
+            def _hpu_weights_iterator(iterator: Generator):
+                for weights in iterator:
+                    yield weights
+                    htcore.mark_step()
+
+            weights_iterator = _hpu_weights_iterator(weights_iterator)
+
         # Apply the prefix.
         return ((source.prefix + name, tensor)
                 for (name, tensor) in weights_iterator)
