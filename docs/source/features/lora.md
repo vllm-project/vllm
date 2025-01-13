@@ -6,6 +6,8 @@ This document shows you how to use [LoRA adapters](https://arxiv.org/abs/2106.09
 
 LoRA adapters can be used with any vLLM model that implements {class}`~vllm.model_executor.models.interfaces.SupportsLoRA`.
 
+## Basic Usage
+
 Adapters can be efficiently served on a per request basis with minimal overhead. First we download the adapter(s) and save
 them locally with
 
@@ -48,6 +50,15 @@ outputs = llm.generate(
 ```
 
 Check out <gh-file:examples/offline_inference/multilora_inference.py> for an example of how to use LoRA adapters with the async engine and how to use more advanced configuration options.
+
+## Advanced Storage and Caching
+
+vLLM now supports advanced storage and caching features for LoRA adapters. See {doc}`adapter_storage` for detailed documentation on:
+
+- Loading adapters from S3 and local storage
+- Configuring memory and disk caches
+- Environment-based configuration
+- Best practices for production deployments
 
 ## Serving LoRA Adapters
 

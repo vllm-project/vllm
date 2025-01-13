@@ -2,12 +2,15 @@ from contextlib import contextmanager
 from typing import Any, Dict, List, Literal, Optional, Set, Type, Union
 
 import torch
+import asyncio
 
 from vllm.adapter_commons.utils import (add_adapter_worker,
                                         apply_adapters_worker,
                                         list_adapters_worker,
                                         set_active_adapters_worker)
 from vllm.adapter_commons.worker_manager import AbstractWorkerManager
+from vllm.adapter_commons.storage import StorageConfig
+from vllm.adapter_commons.storage.cache import CacheConfig
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.models import (LoRAModel, LoRAModelManager,
@@ -37,6 +40,8 @@ class WorkerLoRAManager(AbstractWorkerManager):
         embedding_padding_modules: List[str],
         lora_model_cls: Type[LoRAModel] = LoRAModel,
         max_position_embeddings: Optional[int] = None,
+        storage_config: Optional[StorageConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
     ):
         self._lora_model_cls = lora_model_cls
         self.embedding_modules = embedding_modules
@@ -47,6 +52,8 @@ class WorkerLoRAManager(AbstractWorkerManager):
         self.vocab_size = vocab_size
         self.lora_config = lora_config
         self.max_position_embeddings = max_position_embeddings
+        self.storage_config = storage_config
+        self.cache_config = cache_config
         super().__init__(device)
         # Lazily initialized by create_lora_manager.
         self._adapter_manager: LoRAModelManager
@@ -63,77 +70,119 @@ class WorkerLoRAManager(AbstractWorkerManager):
     def is_enabled(self) -> bool:
         return True
 
-    def create_lora_manager(
-        self,
-        model: torch.nn.Module,
-    ) -> Any:
-        lora_manager = create_lora_manager(
+    def create_lora_manager(self, model) -> LoRAModelManager:
+        """Create a LoRA manager for a given model."""
+        self._adapter_manager = self._manager_cls(
             model,
-            max_num_seqs=self.max_num_seqs,
-            max_num_batched_tokens=self.max_num_batched_tokens,
-            vocab_size=self.vocab_size,
-            lora_config=self.lora_config,
-            device=self.device,
-            lora_manager_cls=self._manager_cls,
+            self.max_num_seqs,
+            self.max_num_batched_tokens,
+            self.vocab_size,
+            self.lora_config,
+            self.device,
+            storage_config=self.storage_config,
+            cache_config=self.cache_config,
         )
-        self._adapter_manager = lora_manager
-        return lora_manager.model
+        return self._adapter_manager
 
-    def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
+    async def load_adapter(self, uri: str, **kwargs) -> LoRAModel:
+        """Load a LoRA adapter from a URI."""
+        if not hasattr(self, '_adapter_manager'):
+            raise RuntimeError("LoRA manager not initialized. Call create_lora_manager first.")
+        return await self._adapter_manager.load_adapter(uri, **kwargs)
+
+    def cleanup(self):
+        """Cleanup resources used by the manager."""
+        if hasattr(self, '_adapter_manager'):
+            self._adapter_manager.cleanup()
+        super().cleanup()
+
+    async def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
+        """Load a LoRA adapter from a request.
+        
+        This method supports both direct local path loading and URI-based loading
+        with storage providers. For models like Qwen2VL that require specific
+        weight mapping, it uses the model's hf_to_vllm_mapper.
+        
+        Args:
+            lora_request: The LoRA request containing adapter details.
+            
+        Returns:
+            LoRAModel: The loaded adapter model.
+            
+        Raises:
+            ValueError: If adapter loading fails or adapter not found.
+            RuntimeError: If loading fails for any other reason.
+        """
+        if not hasattr(self, '_adapter_manager'):
+            raise RuntimeError("LoRA manager not initialized")
+            
         try:
+            # Extract model configuration
             model = self._adapter_manager.model
             supported_lora_modules = model.supported_lora_modules
             packed_modules_mapping = model.packed_modules_mapping
+            
+            # Calculate expected LoRA modules (important for packed modules)
             expected_lora_modules: List[str] = []
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
-                    expected_lora_modules.extend(
-                        packed_modules_mapping[module])
+                    expected_lora_modules.extend(packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
-
             expected_lora_modules = list(set(expected_lora_modules))
-            lora_path = get_adapter_absolute_path(lora_request.lora_path)
-
-            # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
-            # to ensure correct loading of lora weights.
-            hf_to_vllm_mapper = None
-            if (hasattr(model, "hf_to_vllm_mapper")
-                    and model.hf_to_vllm_mapper is not None):
-                hf_to_vllm_mapper = model.hf_to_vllm_mapper
-
-            lora = self._lora_model_cls.from_local_checkpoint(
-                lora_path,
-                expected_lora_modules,
-                max_position_embeddings=self.max_position_embeddings,
-                lora_model_id=lora_request.lora_int_id,
-                device="cpu",
-                dtype=self.lora_config.lora_dtype,
-                target_embedding_padding=self.vocab_size +
-                self.lora_config.lora_extra_vocab_size,
-                embedding_modules=self.embedding_modules,
-                embedding_padding_modules=self.embedding_padding_modules,
-                weights_mapper=hf_to_vllm_mapper)
-
-        except FileNotFoundError as e:
-            # FileNotFoundError should be raised if both
-            # - No adapter found to download from huggingface (or in
-            #       offline mode)
-            # - No local adapter files found at `lora_request.lora_path`
-            raise ValueError(
-                f"Loading lora {lora_request.lora_name} failed: No adapter "
-                f"found for {lora_path}") from e
+            
+            # Common kwargs for both loading paths
+            # Preserving all parameters needed for different model types
+            load_kwargs = {
+                "max_position_embeddings": self.max_position_embeddings,
+                "lora_model_id": lora_request.lora_int_id,
+                "device": "cpu",
+                "dtype": self.lora_config.lora_dtype,
+                "target_embedding_padding": self.vocab_size + self.lora_config.lora_extra_vocab_size,
+                "embedding_modules": self.embedding_modules,
+                "embedding_padding_modules": self.embedding_padding_modules,
+                # Critical for models like Qwen2VL
+                "weights_mapper": model.hf_to_vllm_mapper if hasattr(model, "hf_to_vllm_mapper") else None
+            }
+            
+            adapter_path = lora_request.lora_path
+            
+            # Handle URI-based loading if storage is configured
+            if self.storage_config and adapter_path.startswith(("s3://", "local://")):
+                try:
+                    # Try loading through storage provider
+                    adapter = await self.lora_manager.load_adapter(
+                        adapter_path,
+                        expected_lora_modules=expected_lora_modules,
+                        **load_kwargs
+                    )
+                    self._adapter_refs[lora_request.lora_int_id] = adapter
+                    return adapter
+                except Exception as e:
+                    logger.debug(f"Failed to load as URI, trying local path: {str(e)}")
+                    # Fall through to local path handling
+            
+            # Local path loading (both fallback and primary path)
+            try:
+                # Get absolute path and load using local checkpoint
+                lora_path = get_adapter_absolute_path(adapter_path)
+                adapter = await self._lora_model_cls.from_local_checkpoint(
+                    lora_path,
+                    expected_lora_modules,
+                    **load_kwargs
+                )
+                self._adapter_refs[lora_request.lora_int_id] = adapter
+                return adapter
+                
+            except FileNotFoundError as e:
+                raise ValueError(
+                    f"Loading lora {lora_request.lora_name} failed: No adapter "
+                    f"found at {adapter_path}"
+                ) from e
+            
         except Exception as e:
-            raise RuntimeError(f"Loading lora {lora_path} failed") from e
-        if lora.rank > self.lora_config.max_lora_rank:
-            raise ValueError(
-                f"LoRA rank {lora.rank} is greater than max_lora_rank "
-                f"{self.lora_config.max_lora_rank}.")
-        if lora.extra_vocab_size > self.lora_config.lora_extra_vocab_size:
-            raise ValueError(f"LoRA added vocab size {lora.extra_vocab_size} "
-                             f"is greater than lora_extra_vocab_size "
-                             f"{self.lora_config.lora_extra_vocab_size}.")
-        return lora
+            logger.error(f"Failed to load adapter for request {lora_request}: {str(e)}")
+            raise RuntimeError(f"Loading lora {adapter_path} failed") from e
 
     def add_dummy_lora(self, lora_request: LoRARequest, rank: int) -> bool:
         if lora_request.lora_int_id in self.list_adapters():

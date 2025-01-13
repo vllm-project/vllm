@@ -15,6 +15,11 @@ from vllm.adapter_commons.models import (AdapterLRUCache, AdapterModel,
 from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
                                         get_adapter, list_adapters,
                                         remove_adapter, set_adapter_mapping)
+from vllm.adapter_commons.storage import (StorageProviderFactory, 
+                                        StorageConfig, S3StorageConfig,
+                                        LocalStorageConfig)
+from vllm.adapter_commons.storage.cache import (CacheFactory, CacheConfig,
+                                              MemoryCacheConfig, DiskCacheConfig)
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA,
@@ -176,7 +181,73 @@ class LoRAModel(AdapterModel):
                    scaling_factor=peft_helper.vllm_long_context_scaling_factor)
 
     @classmethod
-    def from_local_checkpoint(
+    async def from_uri(
+        cls,
+        uri: str,
+        expected_lora_modules: List[str],
+        *,
+        max_position_embeddings: Optional[int] = None,
+        lora_model_id: Optional[int] = None,
+        device: str = "cuda",
+        dtype: Optional[torch.dtype] = None,
+        target_embedding_padding: Optional[int] = None,
+        embedding_modules: Optional[Dict[str, str]] = None,
+        embedding_padding_modules: Optional[List[str]] = None,
+        weights_mapper: Optional[WeightsMapper] = None,
+        storage_config: Optional[StorageConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
+    ) -> "LoRAModel":
+        """Create a LoRAModel from a URI (local path or S3).
+        
+        Args:
+            uri: The URI to load the adapter from (local path or S3 URI)
+            expected_lora_modules: List of expected module names
+            storage_config: Optional storage configuration
+            cache_config: Optional cache configuration
+            Other args: Same as from_local_checkpoint
+        """
+        # Create storage provider based on URI
+        storage_factory = StorageProviderFactory()
+        storage = storage_factory.create_provider_for_uri(uri, storage_config)
+
+        # Create cache if configured
+        cache = None
+        if cache_config:
+            cache_factory = CacheFactory()
+            cache = cache_factory.create_backend(cache_config)
+
+        # Download adapter to local cache if needed
+        local_path = uri
+        if not uri.startswith("file://"):
+            if cache:
+                # Try to get from cache first
+                cached_path = await cache.get(uri)
+                if cached_path:
+                    local_path = cached_path
+                else:
+                    # Download and cache
+                    local_path = await storage.download_adapter(uri)
+                    await cache.put(uri, local_path)
+            else:
+                # Download without caching
+                local_path = await storage.download_adapter(uri)
+
+        # Load using existing local checkpoint logic
+        return await cls.from_local_checkpoint(
+            local_path,
+            expected_lora_modules,
+            max_position_embeddings=max_position_embeddings,
+            lora_model_id=lora_model_id,
+            device=device,
+            dtype=dtype,
+            target_embedding_padding=target_embedding_padding,
+            embedding_modules=embedding_modules,
+            embedding_padding_modules=embedding_padding_modules,
+            weights_mapper=weights_mapper,
+        )
+
+    @classmethod
+    async def from_local_checkpoint(
         cls,
         lora_dir: str,
         expected_lora_modules: List[str],
@@ -190,22 +261,10 @@ class LoRAModel(AdapterModel):
         embedding_padding_modules: Optional[List[str]] = None,
         weights_mapper: Optional[WeightsMapper] = None,
     ) -> "LoRAModel":
-        """Create a LoRAModel from a local checkpoint.
+        """Create a LoRAModel from a local checkpoint directory.
         
-        Args:
-            lora_dir: The local path that has lora data.
-            expected_lora_modules: Name of modules that are expected to be
-                replaced by lora.
-            max_position_embeddings: Max position embedding length. Used to
-                scaling the largest context length. If None, the lora model's
-                context length is not scaled.
-            lora_model_id: Lora model id. If not given, automatically set by
-                a global counter.
-            device: Device where the lora model is loaded.
-            dtype: dtype of the lora model weights.
-
-        Returns:
-            Loaded LoRA Model.
+        This method is now async to match the from_uri interface.
+        The implementation remains synchronous for backward compatibility.
         """
         lora_config_path = os.path.join(lora_dir, "adapter_config.json")
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
@@ -308,6 +367,8 @@ class LoRAModelManager(AdapterModelManager):
         vocab_size: int,
         lora_config: LoRAConfig,
         device: torch.device,
+        storage_config: Optional[StorageConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
     ):
         """Create a LoRAModelManager and adapter for a given model.
 
@@ -319,6 +380,8 @@ class LoRAModelManager(AdapterModelManager):
                 in a single batch.
             vocab_size: the vocab size of the model.
             lora_config: the LoRA configuration.
+            storage_config: Optional storage configuration for loading adapters.
+            cache_config: Optional cache configuration for adapter caching.
         """
         self.lora_config = lora_config
         self.device = device
@@ -329,8 +392,21 @@ class LoRAModelManager(AdapterModelManager):
         self.vocab_size = vocab_size
         self.long_lora_context: Optional[LongContextLoRAContext] = None
         self.punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
-                                                 max_batches=self.max_num_seqs,
-                                                 device=self.device)
+                                               max_batches=self.max_num_seqs,
+                                               device=self.device)
+        
+        # Initialize storage and cache if configured
+        self.storage_factory = StorageProviderFactory()
+        self.cache_factory = CacheFactory()
+        self.storage_config = storage_config
+        self.cache_config = cache_config
+        self.storage_provider = None
+        self.cache_backend = None
+        if storage_config:
+            self.storage_provider = self.storage_factory.create_provider(storage_config)
+        if cache_config:
+            self.cache_backend = self.cache_factory.create_backend(cache_config)
+
         # Scaling factor -> offset to the sin_cos_cache to it.
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}
@@ -664,6 +740,60 @@ class LoRAModelManager(AdapterModelManager):
 
     def get_adapter(self, adapter_id: int) -> Optional[Any]:
         return get_adapter(adapter_id, self._registered_adapters)
+
+    async def load_adapter(self, path: str, **kwargs) -> LoRAModel:
+        """Load a LoRA adapter from a path or URI.
+        
+        Args:
+            path: Local filesystem path or URI (s3:// or local://) to the adapter.
+            **kwargs: Additional arguments passed to from_local_checkpoint.
+            
+        Returns:
+            LoRAModel: The loaded adapter model.
+            
+        Raises:
+            ValueError: If the path/URI is invalid or adapter cannot be loaded.
+            Exception: If any other error occurs during loading.
+        """
+        try:
+            # First try direct local path loading for backwards compatibility
+            if not path.startswith(("s3://", "local://")):
+                return await LoRAModel.from_local_checkpoint(path, self.supported_lora_modules, **kwargs)
+                
+            # Handle URI-based loading if explicitly specified
+            if self.storage_provider and self.storage_provider.validate_uri(path):
+                # Get from cache if available
+                if self.cache_backend and await self.cache_backend.contains(path):
+                    local_path = await self.cache_backend.get(path)
+                    return await LoRAModel.from_local_checkpoint(local_path, self.supported_lora_modules, **kwargs)
+                
+                # Load from storage and cache if needed
+                adapter = await LoRAModel.from_uri(
+                    path,
+                    self.supported_lora_modules, 
+                    storage_provider=self.storage_provider,
+                    **kwargs
+                )
+                
+                if self.cache_backend:
+                    local_path = await self.storage_provider.download_adapter(path)
+                    await self.cache_backend.put(path, local_path)
+                
+                return adapter
+                
+            raise ValueError(f"Invalid adapter path or URI: {path}")
+                
+        except Exception as e:
+            logger.error(f"Failed to load adapter from {path}: {str(e)}")
+            raise
+
+    def cleanup(self):
+        """Cleanup resources used by the manager."""
+        if self.storage_provider:
+            self.storage_provider.cleanup()
+        if self.cache_backend:
+            self.cache_backend.cleanup()
+        super().cleanup()
 
 
 class LoRALRUCache(AdapterLRUCache[LoRAModel]):

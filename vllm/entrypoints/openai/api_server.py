@@ -14,7 +14,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncIterator, Dict, Optional, Set, Tuple, Union
+from typing import AsyncIterator, Dict, Optional, Set, Tuple, Union, Any
 
 import uvloop
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -569,27 +569,86 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         "Lora dynamic loading & unloading is enabled in the API server. "
         "This should ONLY be used for local development!")
 
-    @router.post("/v1/load_lora_adapter")
-    async def load_lora_adapter(request: LoadLoraAdapterRequest,
-                                raw_request: Request):
-        handler = models(raw_request)
-        response = await handler.load_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(content=response.model_dump(),
-                                status_code=response.code)
+    class LoadLoRARequest(BaseModel):
+        """Request to load a LoRA adapter.
+        
+        Args:
+            lora_name: Name of the adapter.
+            lora_path: Local filesystem path or URI (s3:// or local://) to the adapter.
+            lora_id: Optional integer ID for the adapter. If not provided, one will be generated.
+        """
+        lora_name: str
+        lora_path: str
+        lora_id: Optional[int] = None
 
-        return Response(status_code=200, content=response)
+    @router.post("/v1/load_lora_adapter")
+    async def load_lora_adapter(request: LoadLoRARequest) -> Dict[str, Any]:
+        """Load a LoRA adapter from a path or URI.
+        
+        The adapter can be loaded from:
+        - A local filesystem path (default)
+        - An S3 URI (s3://)
+        - A local URI (local://)
+        """
+        try:
+            # Generate ID if not provided
+            lora_id = request.lora_id if request.lora_id is not None else _generate_lora_id()
+            
+            # Create LoRA request
+            lora_request = LoRARequest(
+                lora_name=request.lora_name,
+                lora_int_id=lora_id,
+                lora_path=request.lora_path,
+            )
+            
+            # Load adapter
+            await engine.add_lora(lora_request)
+            return {"success": True, "lora_id": lora_id}
+            
+        except Exception as e:
+            logger.error(f"Failed to load LoRA adapter: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to load LoRA adapter: {str(e)}"
+            )
 
     @router.post("/v1/unload_lora_adapter")
-    async def unload_lora_adapter(request: UnloadLoraAdapterRequest,
-                                  raw_request: Request):
-        handler = models(raw_request)
-        response = await handler.unload_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(content=response.model_dump(),
-                                status_code=response.code)
+    async def unload_lora_adapter(request: LoadLoRARequest) -> Dict[str, Any]:
+        """Unload a LoRA adapter."""
+        try:
+            lora_id = request.lora_id
+            if lora_id is None:
+                raise ValueError("lora_id is required for unloading")
+            
+            lora_request = LoRARequest(
+                lora_name=request.lora_name,
+                lora_int_id=lora_id,
+                lora_path=request.lora_path,
+            )
+            
+            await engine.remove_lora(lora_request)
+            return {"success": True}
+            
+        except Exception as e:
+            logger.error(f"Failed to unload LoRA adapter: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to unload LoRA adapter: {str(e)}"
+            )
 
-        return Response(status_code=200, content=response)
+    @router.get("/v1/list_lora_adapters")
+    async def list_lora_adapters() -> Dict[str, Any]:
+        """List all loaded LoRA adapters."""
+        try:
+            adapters = await engine.list_loras()
+            return {"success": True, "adapters": adapters}
+            
+        except Exception as e:
+            logger.error(f"Failed to list LoRA adapters: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to list LoRA adapters: {str(e)}"
+            )
 
 
 def build_app(args: Namespace) -> FastAPI:
