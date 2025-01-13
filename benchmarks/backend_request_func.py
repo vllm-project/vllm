@@ -423,14 +423,13 @@ def get_tokenizer(
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     if pretrained_model_name_or_path is not None and not os.path.exists(
-        pretrained_model_name_or_path
-    ):
-        pretrained_model_name_or_path = get_model(pretrained_model_name_or_path)
+        pretrained_model_name_or_path):
+        pretrained_model_name_or_path = get_model(
+            pretrained_model_name_or_path)
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
             raise ValueError(
-                "Cannot use the fast tokenizer in slow tokenizer mode."
-            )
+                "Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
     if tokenizer_mode == "mistral":
         vllm_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -439,7 +438,8 @@ def get_tokenizer(
             MistralTokenizer
         )
 
-        return MistralTokenizer.from_pretrained(str(pretrained_model_name_or_path))
+        return MistralTokenizer.from_pretrained(
+            str(pretrained_model_name_or_path))
     else:
         return AutoTokenizer.from_pretrained(
             pretrained_model_name_or_path,
