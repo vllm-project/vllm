@@ -64,6 +64,8 @@ class RocmPlatform(Platform):
     device_name: str = "rocm"
     device_type: str = "cuda"
     dispatch_key: str = "CUDA"
+    ray_device_key: str = "GPU"
+
     supported_quantization: list[str] = [
         "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
         "fbgemm_fp8", "gguf"

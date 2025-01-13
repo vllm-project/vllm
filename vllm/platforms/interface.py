@@ -82,6 +82,10 @@ class Platform:
     # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134 # noqa
     # use "CPU" as a fallback for platforms not registered in PyTorch
     dispatch_key: str = "CPU"
+    # available ray device keys:
+    # https://github.com/ray-project/ray/blob/10ba5adadcc49c60af2c358a33bb943fb491a171/python/ray/_private/ray_constants.py#L438 # noqa
+    # empty string means the device does not support ray
+    ray_device_key: str = ""
     # The torch.compile backend for compiling simple and
     # standalone functions. The default value is "inductor" to keep
     # the same behavior as PyTorch.
