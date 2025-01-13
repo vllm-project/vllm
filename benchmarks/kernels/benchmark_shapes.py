@@ -73,3 +73,24 @@ WEIGHT_SHAPES = {
         [7168, 8192],
     ],
 }
+
+WEIGHT_SHAPES_MOE = {
+    "nm-testing/Mixtral-8x7B-Instruct-v0.1": [
+        [8, 4096, 28672],
+        [8, 14336, 4096],
+    ],
+    "nm-testing/deepseekv2-lite": [
+        [64, 2048, 352],
+        [64, 1408, 256],
+        [64, 128, 5632],
+        [64, 88, 4096],
+    ],
+    "ibm-granite/granite-3.0-1b-a400m": [
+        [32, 1024, 2048],
+        [32, 1024, 1024],
+    ],
+    "ibm-granite/granite-3.0-3b-a800m": [
+        [40, 1536, 2048],
+        [40, 1024, 1536],
+    ],
+}

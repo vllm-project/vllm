@@ -490,6 +490,13 @@ def cutlass_scaled_mm(a: torch.Tensor,
     return out
 
 
+def cutlass_grouped_mm(out: List[torch.Tensor], a: List[torch.Tensor],
+                       b: List[torch.Tensor], scale_a: List[torch.Tensor],
+                       scale_b: List[torch.Tensor]) -> torch.Tensor:
+    torch.ops._C.cutlass_grouped_mm(out, a, b, scale_a, scale_b)
+    return out
+
+
 def cutlass_scaled_mm_azp(a: torch.Tensor,
                           b: torch.Tensor,
                           scale_a: torch.Tensor,
