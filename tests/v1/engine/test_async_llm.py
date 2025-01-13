@@ -85,10 +85,10 @@ async def test_abort(monkeypatch):
                 asyncio.create_task(
                     generate(engine, request_id, NUM_EXPECTED_TOKENS)))
 
-        # API server cancels requests when they are aborted.
+        # API server cancels requests when they disconnect.
         for idx in REQUEST_IDS_TO_ABORT:
             tasks[idx].cancel()
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.1)
 
         # Confirm the other requests are okay.
         for idx, task in enumerate(tasks):
