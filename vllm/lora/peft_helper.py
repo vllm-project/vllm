@@ -1,9 +1,12 @@
 # Adapted from: https://github.com/huggingface/peft/blob/main/src/peft/tuners/lora/config.py
 
+import json
 import math
+import os
 from dataclasses import MISSING, dataclass, field, fields
 from typing import Literal, Optional, Union
 
+from vllm.config import LoRAConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -11,6 +14,12 @@ logger = init_logger(__name__)
 
 @dataclass
 class PEFTHelper:
+    """ 
+    A helper class for PEFT configurations, specifically designed for LoRA.
+    This class handles configuration validation, compatibility checks for 
+    various LoRA implementations.
+    """
+
     # Required fields
     r: int
     lora_alpha: int
@@ -78,3 +87,28 @@ class PEFTHelper:
             for k, v in config_dict.items() if k in class_fields
         }
         return cls(**filtered_dict)
+
+    @classmethod
+    def from_local_dir(cls, lora_path: str,
+                       max_position_embeddings: Optional[int]) -> "PEFTHelper":
+        lora_config_path = os.path.join(lora_path, "adapter_config.json")
+
+        with open(lora_config_path) as f:
+            config = json.load(f)
+        config["vllm_max_position_embeddings"] = max_position_embeddings
+        return cls.from_dict(config)
+
+    def post_validity(self, lora_config: LoRAConfig) -> None:
+        """
+        Validates the LoRA configuration settings against application 
+        constraints and requirements.
+        """
+        error_msg = []
+        if self.r > lora_config.max_lora_rank:
+            error_msg.append(f"LoRA rank {self.r} is greater than max rank "
+                             f"{lora_config.max_lora_rank}.")
+        if self.bias != "none" and lora_config.bias_enabled:
+            error_msg.append(
+                "Adapter bias cannot be used without bias_enabled.")
+            if error_msg:
+                raise ValueError(f"{', '.join(error_msg)}")
