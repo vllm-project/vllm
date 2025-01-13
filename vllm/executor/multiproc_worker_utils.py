@@ -12,7 +12,6 @@ from typing import (Any, Callable, Dict, Generic, List, Optional, TextIO,
 
 import torch
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.triton_utils.importing import HAS_TRITON
