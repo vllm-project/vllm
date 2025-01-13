@@ -225,15 +225,9 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q,
-                                k,
-                                v,
-                                kv_cache,
-                                attn_metadata,
-                                fp8_comp_scales=[self.attn._q_scale,
-                                                 self.attn._prob_scale,
-                                                 self.o_proj.input_scale if
-                                                 self.attn_fp8_out else None])
+        attn_output = self.attn(
+            q, k, v, kv_cache, attn_metadata,
+            self.o_proj.input_scale if self.attn_fp8_out else None)
         output, _ = self.o_proj(attn_output)
         return output
 

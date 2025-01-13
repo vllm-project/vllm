@@ -178,8 +178,10 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         attn_metadata: IpexAttnMetadata,  # type: ignore
         k_scale: float = 1.0,
         v_scale: float = 1.0,
+        q_scale: Optional[torch.Tensor] = None,
+        prob_scale: Optional[torch.Tensor] = None,
+        fp8_out_scale: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
-        fp8_comp_scales: List[Optional[torch.Tensor]] = None,
     ) -> torch.Tensor:
         """Forward pass with IPEX varlen_attention and PagedAttention.
 

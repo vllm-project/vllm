@@ -251,7 +251,9 @@ class AttentionImpl(ABC, Generic[T]):
         attn_metadata: T,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
+        q_scale: Optional[torch.Tensor] = None,
+        prob_scale: Optional[torch.Tensor] = None,
+        fp8_out_scale: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
-        fp8_comp_scales: List[Optional[torch.Tensor]] = None,
     ) -> torch.Tensor:
         raise NotImplementedError

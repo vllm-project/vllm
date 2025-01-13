@@ -1,5 +1,5 @@
 """Attention layer."""
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -146,7 +146,7 @@ class Attention(nn.Module):
         value: torch.Tensor,
         _kv_cache: torch.Tensor,
         _attn_metadata: AttentionMetadata,
-        fp8_comp_scales: List[Optional[torch.Tensor]] = [],
+        fp8_out_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales and \
             _attn_metadata.enable_kv_scales_calculation:
@@ -165,18 +165,18 @@ class Attention(nn.Module):
                 value = value.view(-1, self.num_kv_heads, self.head_size)
             if self.use_direct_call:
                 unified_attention_with_output(query, key, value, output,
-                                              self.layer_name, fp8_comp_scales)
+                                              self.layer_name, fp8_out_scale)
             else:
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name)
+                    query, key, value, output, self.layer_name, fp8_out_scale)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
                 return unified_attention(query, key, value, self.layer_name,
-                                         fp8_comp_scales)
+                                         fp8_out_scale)
             else:
                 return torch.ops.vllm.unified_attention(
-                    query, key, value, self.layer_name, fp8_comp_scales)
+                    query, key, value, self.layer_name, fp8_out_scale)
 
     def calc_kv_scales(self, query, key, value):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
@@ -262,20 +262,15 @@ def unified_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
-    fp8_comp_scales: List[Optional[torch.Tensor]],
+    fp8_out_scale: Optional[torch.Tensor],
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    return self.impl.forward(query,
-                             key,
-                             value,
-                             kv_cache,
-                             attn_metadata,
-                             self._k_scale,
-                             self._v_scale,
-                             fp8_comp_scales=fp8_comp_scales)
+    return self.impl.forward(query, key, value, kv_cache, attn_metadata,
+                             self._k_scale, self._v_scale, self._q_scale,
+                             self._prob_scale, fp8_out_scale)
 
 
 def unified_attention_fake(
@@ -283,7 +278,7 @@ def unified_attention_fake(
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
-    fp8_comp_scales: List[Optional[torch.Tensor]],
+    fp8_out_scale: Optional[torch.Tensor],
 ) -> torch.Tensor:
     return torch.empty_like(query).contiguous()
 
@@ -303,9 +298,8 @@ def unified_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    fp8_comp_scales: List[Optional[torch.Tensor]],
+    fp8_out_scale: Optional[torch.Tensor],
 ) -> None:
-    assert not fp8_comp_scales
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
@@ -317,6 +311,9 @@ def unified_attention_with_output(
                       attn_metadata,
                       self._k_scale,
                       self._v_scale,
+                      self._q_scale,
+                      self._prob_scale,
+                      fp8_out_scale,
                       output=output)
 
 
@@ -326,7 +323,7 @@ def unified_attention_with_output_fake(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    fp8_comp_scales: List[Optional[torch.Tensor]],
+    fp8_out_scale: Optional[torch.Tensor],
 ) -> None:
     return
 
