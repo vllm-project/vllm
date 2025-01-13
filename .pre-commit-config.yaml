@@ -8,15 +8,16 @@ repos:
   hooks:
   - id: ruff
     args: [ --output-format, github ]
-- repo: https://github.com/PyCQA/isort
-  rev: 5.13.2
-  hooks:
-  - id: isort
+# mypy
 - repo: https://github.com/codespell-project/codespell
   rev: v2.3.0
   hooks:
   - id: codespell
     args: [--toml, pyproject.toml]
+- repo: https://github.com/PyCQA/isort
+  rev: 5.13.2
+  hooks:
+  - id: isort
 - repo: https://github.com/pre-commit/mirrors-clang-format
   rev: v19.1.6
   hooks:
