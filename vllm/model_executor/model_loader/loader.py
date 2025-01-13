@@ -1012,7 +1012,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         if not hasattr(model, "packed_modules_mapping"):
             raise AttributeError(
                 f"Model {type(model).__name__} does not support BitsAndBytes "
-                "quantization yet.")
+                "quantization yet. No 'packed_modules_mapping' found.")
 
         self.modules_mapping = ParamMapping(
             copy.deepcopy(model.packed_modules_mapping))
