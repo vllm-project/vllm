@@ -1,7 +1,7 @@
 # Dockerfile
 
 We provide a <gh-file:Dockerfile> to construct the image for running an OpenAI compatible server with vLLM.
-More information about deploying with Docker can be found [here](../../serving/deploying_with_docker.md).
+More information about deploying with Docker can be found [here](#deployment-docker).
 
 Below is a visual representation of the multi-stage Dockerfile. The build graph contains the following nodes:
 
@@ -17,7 +17,7 @@ The edges of the build graph represent:
 
 - `RUN --mount=(.\*)from=...` dependencies (with a dotted line and an empty diamond arrow head)
 
-  > ```{figure} ../../assets/dev/dockerfile-stages-dependency.png
+  > ```{figure} /assets/contributing/dockerfile-stages-dependency.png
   > :align: center
   > :alt: query
   > :width: 100%

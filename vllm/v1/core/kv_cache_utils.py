@@ -11,8 +11,10 @@ logger = init_logger(__name__)
 
 class BlockHashType(NamedTuple):
     """Hash value of a block (int), the token IDs in the block, and extra keys.
-    The reason we keep a tuple of token IDs and extra keys is to make sure
-    no hash collision happens when the hash value is the same.
+    We keep a tuple of token IDs and extra keys to reduce the likelihood of
+    hash collisions when the hash value is the same. But please note that 
+    hash collisions can still theoretically occur, albeit with an extremely 
+    low probability.
     """
     # Hash value of the block in an integer.
     hash_value: int
@@ -218,8 +220,8 @@ def generate_block_hash_extra_keys(
                 continue
 
             # The block contains the current mm input.
-            mm_start = max(0, start_token_idx - offset)
-            extra_keys.append((mm_hashes[curr_mm_idx], mm_start))
+            extra_keys.append(mm_hashes[curr_mm_idx])
+
             if end_token_idx >= offset + length:
                 # If this block contains the end of the current mm input,
                 # move to the next mm input as this block may also contain

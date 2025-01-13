@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
 from collections import UserDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Generic, NamedTuple, Optional, TypeVar
+from typing import (TYPE_CHECKING, Any, Generic, NamedTuple, Optional, TypeVar,
+                    Union)
 
 import numpy as np
 import torch
@@ -12,19 +13,26 @@ from vllm.utils import is_list_of
 
 from .audio import resample_audio
 from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfVideoItem,
-                     ImageItem, ModalityData, MultiModalDataDict,
-                     NestedTensors, VideoItem)
+                     ImageItem, ModalityData, MultiModalDataDict, VideoItem)
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
 
 
 class ModalityDataItems(ABC, Generic[_T, _I]):
+    """
+    Represents data items for a modality in :class:`MultiModalDataItems`.
+    """
 
-    def __init__(self, data: _T) -> None:
+    def __init__(self, data: _T, modality: str) -> None:
         super().__init__()
 
         self.data = data
+        self.modality = modality
+
+    def __repr__(self) -> str:
+        return (f"{type(self).__name__}(modality={self.modality!r}, "
+                f"len={len(self)})")
 
     def __len__(self) -> int:
         return self.get_count()
@@ -63,14 +71,7 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
 
 
 class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
-
-    def __init__(self, data: Sequence[_T], modality: str) -> None:
-        super().__init__(data)
-
-        self.modality = modality
-
-    def __repr__(self) -> str:
-        return (f"{type(self).__name__}(modality={self.modality!r})")
+    """Base class for data items that are arranged in a list."""
 
     def get_count(self) -> int:
         return len(self.data)
@@ -85,20 +86,17 @@ class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
         return {}
 
 
-class EmbeddingItems(ModalityDataItems[NestedTensors, torch.Tensor]):
-
-    def __init__(self, data: NestedTensors, modality: str) -> None:
-        super().__init__(data)
-
-        self.modality = modality
-
-    def __repr__(self) -> str:
-        return (f"{type(self).__name__}(modality={self.modality!r})")
+class EmbeddingItems(ModalityDataItems[Union[torch.Tensor, list[torch.Tensor]],
+                                       torch.Tensor]):
+    """
+    Base class for data items that are expressed as a batched embedding tensor,
+    or a list of embedding tensors (one per item).
+    """
 
     def get_count(self) -> int:
         return len(self.data)
 
-    def get(self, index: int) -> object:
+    def get(self, index: int) -> torch.Tensor:
         return self.data[index]
 
     def get_processor_data(self) -> Mapping[str, object]:
@@ -106,6 +104,9 @@ class EmbeddingItems(ModalityDataItems[NestedTensors, torch.Tensor]):
 
     def get_passthrough_data(self) -> Mapping[str, object]:
         return {f"{self.modality}_embeds": self.data}
+
+    def get_feature_size(self, item_idx: int) -> int:
+        return len(self.get(item_idx))
 
 
 class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
@@ -116,7 +117,7 @@ class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
 
 class AudioEmbeddingItems(EmbeddingItems):
 
-    def __init__(self, data: NestedTensors) -> None:
+    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]]) -> None:
         super().__init__(data, "audio")
 
 
@@ -144,7 +145,7 @@ class ImageProcessorItems(ProcessorBatchItems[HfImageItem]):
 
 class ImageEmbeddingItems(EmbeddingItems):
 
-    def __init__(self, data: NestedTensors) -> None:
+    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]]) -> None:
         super().__init__(data, "image")
 
 
@@ -153,10 +154,24 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
     def __init__(self, data: Sequence[HfVideoItem]) -> None:
         super().__init__(data, "video")
 
+    def get_num_frames(self, item_idx: int) -> int:
+        return len(self.get(item_idx))
+
+    def get_frame_size(self, item_idx: int) -> ImageSize:
+        image = self.get(item_idx)[0]  # Assume that the video isn't empty
+
+        if isinstance(image, Image):
+            return ImageSize(*image.size)
+        if isinstance(image, (np.ndarray, torch.Tensor)):
+            _, h, w = image.shape
+            return ImageSize(w, h)
+
+        assert_never(image)
+
 
 class VideoEmbeddingItems(EmbeddingItems):
 
-    def __init__(self, data: NestedTensors) -> None:
+    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]]) -> None:
         super().__init__(data, "video")
 
 
@@ -165,8 +180,8 @@ _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
     """
-    As :class:`MultiModalDataDict`, but normalized such that each entry
-    corresponds to a list.
+    As :data:`~vllm.multimodal.inputs.MultiModalDataDict`, but normalized
+    such that each entry corresponds to a list.
     """
 
     def get_count(self, modality: str, *, strict: bool = True) -> int:
@@ -193,7 +208,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
     def get_items(
         self,
         modality: str,
-        typ: type[_D],
+        typ: Union[type[_D], tuple[type[_D], ...]],
     ) -> _D:
         """
         Get the data items belonging to a modality,
@@ -210,7 +225,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
                             f"Expected type: {typ}, but "
                             f"found type: {type(items)}")
 
-        return items
+        return items  # type: ignore[return-value]
 
 
 ModalityDataParser: TypeAlias = Callable[[ModalityData[Any]],
@@ -219,7 +234,12 @@ ModalityDataParser: TypeAlias = Callable[[ModalityData[Any]],
 
 class MultiModalDataParser:
     """
-    Parses :class:`MultiModalDataDict` into :class:`MultiModalDataItems`.
+    Parses :data:`~vllm.multimodal.inputs.MultiModalDataDict` into
+    :class:`MultiModalDataItems`.
+
+    Args:
+        target_sr (float, optional): Enables automatic resampling of audio
+            items to the model's expected sampling rate.
     """
 
     def __init__(self, *, target_sr: Optional[float] = None) -> None:
@@ -227,7 +247,9 @@ class MultiModalDataParser:
 
         self.target_sr = target_sr
 
-    def _is_embeddings(self, data: object) -> TypeGuard[NestedTensors]:
+    def _is_embeddings(
+            self, data: object
+    ) -> TypeGuard[Union[torch.Tensor, list[torch.Tensor]]]:
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
         if is_list_of(data, torch.Tensor):

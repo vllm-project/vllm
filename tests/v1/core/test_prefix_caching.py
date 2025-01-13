@@ -1,8 +1,7 @@
 """Compare the with and without prefix caching."""
 import pytest
 
-from vllm.inputs import token_inputs
-from vllm.multimodal.inputs import PlaceholderRange
+from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
@@ -13,12 +12,18 @@ def make_request(request_id,
                  prompt_token_ids,
                  mm_positions=None,
                  mm_hashes=None):
+    if mm_positions is None:
+        multi_modal_inputs = None
+    else:
+        multi_modal_inputs = [MultiModalKwargs({})] * len(mm_positions)
+
     return Request(
         request_id=request_id,
-        inputs=token_inputs(prompt_token_ids=prompt_token_ids,
-                            multi_modal_placeholders={"image": mm_positions}
-                            if mm_positions else None,
-                            multi_modal_hashes=mm_hashes),
+        prompt=None,
+        prompt_token_ids=prompt_token_ids,
+        multi_modal_inputs=multi_modal_inputs,
+        multi_modal_hashes=mm_hashes,
+        multi_modal_placeholders=mm_positions,
         sampling_params=SamplingParams(max_tokens=17),
         eos_token_id=100,
         arrival_time=0,
@@ -469,9 +474,9 @@ def test_mm_prefix_caching():
     # Completed block should have hashes with extra keys.
     assert not computed_blocks
     assert len(req0.kv_block_hashes) == 3
-    assert req0.kv_block_hashes[0].extra_keys == (("aaa", 0), )
-    assert req0.kv_block_hashes[1].extra_keys == (("aaa", 5), ("bbb", 0))
-    assert req0.kv_block_hashes[2].extra_keys == (("bbb", 2), )
+    assert req0.kv_block_hashes[0].extra_keys == ("aaa", )
+    assert req0.kv_block_hashes[1].extra_keys == ("aaa", "bbb")
+    assert req0.kv_block_hashes[2].extra_keys == ("bbb", )
 
     blocks = manager.allocate_slots(req0, 59, computed_blocks)
     assert [b.block_id for b in blocks] == [0, 1, 2, 3, 4]
@@ -485,7 +490,7 @@ def test_mm_prefix_caching():
 
     # The just completed block should have hashes with extra keys.
     assert len(req0.kv_block_hashes) == 4
-    assert req0.kv_block_hashes[3].extra_keys == (("ccc", 0), )
+    assert req0.kv_block_hashes[3].extra_keys == ("ccc", )
 
     # Cache hit.
     unique_token_ids = [-1] * 7 + [200] * 5
