@@ -56,6 +56,7 @@ class MyModelForCausalLM(nn.Module):
 ```
 
 ### Computation Code
+
 - Add a `get_input_embeddings` method inside `MyModel` module that returns the text embeddings given `input_ids`. This is equivalent to directly calling the text embedding layer, but provides a unified interface in case `MyModel` is used within a composite multimodal model.
 
 ```python

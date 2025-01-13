@@ -38,8 +38,7 @@ Further update the model as follows:
   Check out [the HuggingFace Transformers documentation](https://huggingface.co/docs/transformers/model_doc/auto#multimodal) for some examples.
   ```
 
-  - Implement {meth}`~vllm.model_executor.models.interfaces.SupportsMultiModal.get_multimodal_embeddings` that returns the embeddings from running the multimodal inputs through the multimodal tokenizer of the model. Below we provide a 
-  boilerplate of a typical implementation pattern, but feel free to adjust it to your own needs.
+  - Implement {meth}`~vllm.model_executor.models.interfaces.SupportsMultiModal.get_multimodal_embeddings` that returns the embeddings from running the multimodal inputs through the multimodal tokenizer of the model. Below we provide a boilerplate of a typical implementation pattern, but feel free to adjust it to your own needs.
 
     ```python
     class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
