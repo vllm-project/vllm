@@ -355,13 +355,13 @@ class _ModelRegistry:
     def _try_load_model_cls(self,
                             model_arch: str) -> Optional[Type[nn.Module]]:
         if model_arch not in self.models:
-            return None
+            return _try_load_model_cls(model_arch, self.models["TransformersModel"])
 
         return _try_load_model_cls(model_arch, self.models[model_arch])
 
     def _try_inspect_model_cls(self, model_arch: str) -> Optional[_ModelInfo]:
         if model_arch not in self.models:
-            return None
+            return _try_inspect_model_cls(model_arch, self.models["TransformersModel"])
 
         return _try_inspect_model_cls(model_arch, self.models[model_arch])
 
