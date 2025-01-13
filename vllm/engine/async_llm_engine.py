@@ -1181,13 +1181,13 @@ class AsyncLLMEngine(EngineClient):
         self.engine.remove_logger(logger_name=logger_name)
 
     async def start_profile(self) -> None:
-        self.engine.model_executor.collective_rpc("start_profile")
+        self.engine.model_executor.start_profile()
 
     async def stop_profile(self) -> None:
-        self.engine.model_executor.collective_rpc("stop_profile")
+        self.engine.model_executor.stop_profile()
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
-        self.engine.model_executor.collective_rpc("add_lora")
+        self.engine.model_executor.add_lora(lora_request)
 
 
 # TODO(v1): Remove this class proxy when V1 goes default.
