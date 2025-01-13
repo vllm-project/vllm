@@ -12,7 +12,7 @@ repos:
   rev: v1.14.1
   hooks:
   - id: mypy
-    additional_dependencies: [types-setuptools types-PyYAML types-requests]
+    additional_dependencies: [types-setuptools, types-PyYAML, types-requests]
 - repo: https://github.com/codespell-project/codespell
   rev: v2.3.0
   hooks:
