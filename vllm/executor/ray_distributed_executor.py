@@ -42,6 +42,7 @@ class RayWorkerMetaData:
     adjusted_rank: int = -1
     ip: str = ""
 
+
 class RayDistributedExecutor(DistributedExecutorBase):
 
     uses_ray: bool = True
@@ -217,7 +218,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # close to each other, and the workers on the driver
         # node will be placed first.
         sorted_worker_metadata = sorted(worker_metadata,
-                        key=sort_by_driver_then_worker_ip)
+                                        key=sort_by_driver_then_worker_ip)
         start_rank = 0 if self.use_ray_spmd_worker else 1
         for i, item in enumerate(sorted_worker_metadata):
             item.adjusted_rank = i + start_rank

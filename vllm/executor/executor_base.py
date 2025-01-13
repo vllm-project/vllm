@@ -151,7 +151,7 @@ class ExecutorBase(ABC):
         sets = self.collective_rpc("list_prompt_adapters")
         for s in sets:
             assert (s == sets[0]
-            ), "All workers should have the same prompt adapters."
+                    ), "All workers should have the same prompt adapters."
         return sets[0]
 
     def start_profile(self) -> None:
