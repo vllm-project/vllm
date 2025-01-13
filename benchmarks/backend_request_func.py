@@ -436,8 +436,8 @@ def get_tokenizer(
             from vllm.transformers_utils.tokenizer import MistralTokenizer
         except ImportError as e:
             raise ImportError("MistralTokenizer requires vllm package.\n"
-                "Please install it with `pip install vllm` "
-                "to use mistral tokenizer mode.") from e
+                              "Please install it with `pip install vllm` "
+                              "to use mistral tokenizer mode.") from e
         return MistralTokenizer.from_pretrained(
             str(pretrained_model_name_or_path))
     else:
