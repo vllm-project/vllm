@@ -74,8 +74,9 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     # are added and included in the implementation of the vocab_size
     # property, but not in get_vocab(); if there is an implementation
     # of vocab size, we should take the greater value.
-    with contextlib.suppress(NotImplementedError):
-        max_token_id = max(max_token_id, tokenizer.vocab_size)
+    if hasattr(tokenizer, "vocab_size"):
+        with contextlib.suppress(NotImplementedError):
+            max_token_id = max(max_token_id, tokenizer.vocab_size)
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
 
