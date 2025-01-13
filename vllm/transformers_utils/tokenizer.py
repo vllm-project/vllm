@@ -1,3 +1,4 @@
+import contextlib
 import os
 import warnings
 from pathlib import Path
@@ -67,7 +68,14 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
         tokenizer.all_special_tokens_extended)
     tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
     tokenizer_len = len(tokenizer)
+
     max_token_id = max(tokenizer.get_vocab().values())
+    # Some tokenizers (e.g., QwenTokenizer) have special tokens that
+    # are added and included in the implementation of the vocab_size
+    # property, but not in get_vocab(); if there is an implementation
+    # of vocab size, we should take the greater value.
+    with contextlib.suppress(NotImplementedError):
+        max_token_id = max(max_token_id, tokenizer.vocab_size)
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
 
