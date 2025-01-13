@@ -11,6 +11,7 @@ from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally,
     detokenize_non_incrementally)
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.engine.output_processor import RequestState
 
 logger = init_logger(__name__)
 
@@ -333,7 +334,8 @@ class IncrementalDetokenizer:
 
     def update_from_output(
         self,
-        output: EngineCoreOutput
+        output: EngineCoreOutput,
+        request_state: RequestState,
     ) -> Optional[DetokenizerOutput]:
         """
         Update RequestState for the request_id by:
@@ -347,10 +349,10 @@ class IncrementalDetokenizer:
         new_token_ids = output.new_token_ids
         finish_reason = output.finish_reason
         stop_reason = output.stop_reason
-        new_logprobs_token_ids = output.new_logprobs_token_ids
-        new_logprobs = output.new_logprobs
-        new_prompt_logprobs_token_ids = output.new_prompt_logprobs_token_ids
-        new_prompt_logprobs = output.new_prompt_logprobs
+        new_logprobs_token_ids = output.logprobs_token_ids
+        new_logprobs = output.logprobs
+        new_prompt_logprobs_token_ids = output.prompt_logprobs_token_ids
+        new_prompt_logprobs = output.prompt_logprobs
 
         # 1) Detokenize the new token ids incrementally.
         # TODO(woosuk): This method becomes very inefficient when the number of
@@ -402,7 +404,7 @@ class IncrementalDetokenizer:
         # 4) Make Prompt Logprobs.
         prompt_logprobs = self._update_prompt_logprobs(
             new_prompt_logprobs_token_ids, new_prompt_logprobs,
-            self.prompt_token_ids)
+            request_state.prompt_token_ids)
 
         # 5) Makes the RequestOutput object with the new text.
         finished = bool(finish_reason)
@@ -417,9 +419,15 @@ class IncrementalDetokenizer:
         prompt_logprobs = prompt_logprobs if delta else self.prompt_logprobs
 
         return DetokenizerOutput(
-            output_text,
-            token_ids, finished,
-                                 finish_reason, stop_reason, logprobs, prompt_logprobs, self.cumulative_logprob )
+            output_text=output_text,
+            token_ids=token_ids,
+            finished=finished,
+            finish_reason=finish_reason,
+            stop_reason=stop_reason,
+            logprobs=logprobs,
+            prompt_logprobs=prompt_logprobs,
+            cumulative_logprob=self.cumulative_logprob,
+        )
 
     def _get_next_output_text(self, finished: bool, delta: bool) -> str:
         """If delta is True, only new text since the last call to

@@ -149,7 +149,7 @@ class OutputProcessor:
 
             # 2) Detokenize the token ids into text.
             detokenizer_output = req_state.detokenizer.update_from_output(
-                engine_core_output)
+                engine_core_output, req_state)
 
             # 3) Create and handle RequestOutput objects.
             if request_output := self._make_request_output(
