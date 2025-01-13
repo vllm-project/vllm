@@ -22,13 +22,13 @@ def test_run(my_rank, pipe):
         x2 = pipe.recv_tensor()
         print(f"rank {my_rank} received x2 = ", x2)
         y2 = pipe.recv_tensor()
-        print(f"rank {my_rank} received y2 = ", x2)
+        print(f"rank {my_rank} received y2 = ", y2)
 
     else:
         x2 = pipe.recv_tensor()
         print(f"rank {my_rank} received x2 = ", x2)
         y2 = pipe.recv_tensor()
-        print(f"rank {my_rank} received y2 = ", x2)
+        print(f"rank {my_rank} received y2 = ", y2)
         pipe.send_tensor(x)
         print(f"rank {my_rank} sent tensor x")
         pipe.send_tensor(y)
