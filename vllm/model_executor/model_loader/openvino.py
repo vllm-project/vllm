@@ -1,6 +1,6 @@
 # ruff: noqa: SIM117
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 import openvino as ov
 import torch
@@ -145,7 +145,7 @@ class OpenVINOCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: list[Tuple[ov.Tensor, ov.Tensor]],
+        kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
         attn_metadata: OpenVINOAttentionMetadata,
     ) -> torch.Tensor:
         flatten_kv_cache = _flattenize_inputs(kv_caches)

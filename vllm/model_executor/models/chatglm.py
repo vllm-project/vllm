@@ -3,7 +3,7 @@
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
 from array import array
-from typing import (Dict, Iterable, Mapping, Optional, Set, Tuple, TypedDict)
+from typing import (Dict, Iterable, Mapping, Optional, Set, TypedDict)
 
 import torch
 from PIL import Image
@@ -659,7 +659,7 @@ class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         # Merge two ColumnParallelLinear into one MergedColumnParallelLinear
         merged_weights_dict: Dict[str, Dict[str, Optional[torch.Tensor]]] = {

@@ -7,7 +7,7 @@ The class provides two primary abstract methods:
 """
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Tuple, Union
+from typing import TYPE_CHECKING, Union
 
 import torch
 
@@ -87,7 +87,7 @@ class KVConnectorBase(ABC):
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: list[torch.Tensor]
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+    ) -> tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
         """
         Receive KV caches and hidden states from the connector.

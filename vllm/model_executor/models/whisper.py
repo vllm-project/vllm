@@ -1,5 +1,5 @@
 import math
-from typing import (Iterable, Mapping, Optional, Set, Tuple, TypedDict, Union)
+from typing import (Iterable, Mapping, Optional, Set, TypedDict, Union)
 
 import numpy as np
 import torch
@@ -530,7 +530,7 @@ class WhisperModel(nn.Module):
             attn_metadata=attn_metadata,
         )
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -725,7 +725,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
         loaded_weights = [(name, loaded_weight)

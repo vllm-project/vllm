@@ -1,4 +1,4 @@
-from typing import Callable, Tuple, Union
+from typing import Callable, Union
 
 import torch
 
@@ -55,7 +55,7 @@ class NoBadWordsLogitsProcessor:
 
     def __call__(
         self,
-        past_tokens_ids: Union[list[int], Tuple[int]],
+        past_tokens_ids: Union[list[int], tuple[int]],
         logits: torch.FloatTensor,
     ) -> torch.Tensor:
         if self.word_bias is None:

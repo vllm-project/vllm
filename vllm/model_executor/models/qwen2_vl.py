@@ -23,7 +23,7 @@
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from functools import cached_property, partial
 from typing import (Any, Callable, Iterable, Literal, Mapping, Optional, Set,
-                    Tuple, Type, TypedDict, Union)
+                    Type, TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -613,7 +613,7 @@ class Qwen2VisionTransformer(nn.Module):
         x = self.merger(x)
         return x
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -1216,7 +1216,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return inputs_embeds
 
     def get_multimodal_embeddings(
-            self, **kwargs) -> Optional[list[Tuple[NestedTensors, str]]]:
+            self, **kwargs) -> Optional[list[tuple[NestedTensors, str]]]:
 
         image_input = self._parse_and_validate_image_input(**kwargs)
         video_input = self._parse_and_validate_video_input(**kwargs)
@@ -1228,7 +1228,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         # get_multimodal_embeddings and get_input_embeddings are called
         # separately.
         # TODO(ywang96): Add support for mixed-modality inference for v1.
-        multimodal_embeddings: list[Tuple[NestedTensors, str]] = []
+        multimodal_embeddings: list[tuple[NestedTensors, str]] = []
 
         if image_input is not None:
             image_embeds = self._process_image_input(image_input)
@@ -1242,7 +1242,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[list[Tuple[NestedTensors,
+        multimodal_embeddings: Optional[list[tuple[NestedTensors,
                                                    str]]] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
@@ -1339,7 +1339,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
 
         loader = AutoWeightsLoader(self)

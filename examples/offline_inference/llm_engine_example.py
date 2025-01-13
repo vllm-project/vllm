@@ -1,11 +1,10 @@
 import argparse
-from typing import Tuple
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.utils import FlexibleArgumentParser
 
 
-def create_test_prompts() -> list[Tuple[str, SamplingParams]]:
+def create_test_prompts() -> list[tuple[str, SamplingParams]]:
     """Create a list of test prompts with their sampling parameters."""
     return [
         ("A robot may not injure a human being",
@@ -22,7 +21,7 @@ def create_test_prompts() -> list[Tuple[str, SamplingParams]]:
 
 
 def process_requests(engine: LLMEngine,
-                     test_prompts: list[Tuple[str, SamplingParams]]):
+                     test_prompts: list[tuple[str, SamplingParams]]):
     """Continuously process a list of prompts and handle the outputs."""
     request_id = 0
 

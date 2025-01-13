@@ -1,7 +1,7 @@
 import copy
 from collections import defaultdict
 from functools import cached_property
-from typing import Any, Dict, Optional, Set, Tuple, Type
+from typing import Any, Dict, Optional, Set, Type
 
 import torch
 
@@ -372,7 +372,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.set_include_gpu_probs_tensor()
         self.proposer_worker.set_should_modify_greedy_probs_inplace()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of cache blocks to use.
 
         This is done by profiling the scorer model (which is typically the
@@ -779,7 +779,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposal_scores: SpeculativeScores,
         proposals: SpeculativeProposals,
         max_proposal_len: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Determine which speculative tokens are accepted using the
         probabilities of each token according to the proposer and scorer models.
 
@@ -862,7 +862,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         accepted_token_ids: torch.Tensor,  # shape: [batch_size, k+1]
         target_logprobs: torch.Tensor,  # shape: [batch_size, k+1, vocab_size]
         k: int,
-        stage_times: Tuple[float, float, float],
+        stage_times: tuple[float, float, float],
     ) -> list[SamplerOutput]:
         """Given the accepted token ids, create a list of SamplerOutput.
 
@@ -970,7 +970,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         batch_size: int,
         num_steps: int,
         num_top_k: int,
-    ) -> Tuple[list[list[int]], list[list[float]],
+    ) -> tuple[list[list[int]], list[list[float]],
                list[list[list[Optional[float]]]],
                list[list[list[Optional[int]]]]]:
         """
@@ -1014,7 +1014,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         target_logprobs_by_step: torch.Tensor,
         accepted_token_ids_by_step: torch.Tensor,
         num_top_k: int,
-    ) -> Tuple[list[list[int]], list[list[float]],
+    ) -> tuple[list[list[int]], list[list[float]],
                list[list[list[Optional[float]]]],
                list[list[list[Optional[int]]]]]:
         """

@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Type, overload
+from typing import Optional, Type, overload
 
 import pytest
 from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
@@ -34,7 +34,7 @@ models = [
 ]
 
 
-def vllm_to_hf_output(vllm_output: Tuple[list[int], str,
+def vllm_to_hf_output(vllm_output: tuple[list[int], str,
                                          Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
@@ -62,8 +62,8 @@ def _get_inputs(
     image_assets: _ImageAssets,
     *,
     size_factors: Optional[list[float]] = None,
-    sizes: Optional[list[Tuple[int, int]]] = None,
-) -> list[Tuple[list[str], PromptImageInput]]:
+    sizes: Optional[list[tuple[int, int]]] = None,
+) -> list[tuple[list[str], PromptImageInput]]:
     images = [asset.pil_image for asset in image_assets]
 
     if size_factors is not None:
@@ -115,7 +115,7 @@ def run_test(
     image_assets: _ImageAssets,
     model: str,
     *,
-    sizes: list[Tuple[int, int]],
+    sizes: list[tuple[int, int]],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -132,7 +132,7 @@ def run_test(
     model: str,
     *,
     size_factors: Optional[list[float]] = None,
-    sizes: Optional[list[Tuple[int, int]]] = None,
+    sizes: Optional[list[tuple[int, int]]] = None,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -155,7 +155,7 @@ def run_test(
 def _run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    inputs: list[Tuple[list[str], PromptImageInput]],
+    inputs: list[tuple[list[str], PromptImageInput]],
     model: str,
     *,
     dtype: str,

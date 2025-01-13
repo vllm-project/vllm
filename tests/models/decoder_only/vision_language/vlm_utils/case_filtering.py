@@ -4,7 +4,7 @@ handling multimodal placeholder substitution, and so on.
 """
 import itertools
 from collections import OrderedDict
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable
 
 import pytest
 
@@ -120,7 +120,7 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
 
 def get_wrapped_test_sizes(
         test_info: VLMTestInfo,
-        test_type: VLMTestType) -> Tuple[ImageSizeWrapper, ...]:
+        test_type: VLMTestType) -> tuple[ImageSizeWrapper, ...]:
     """Given a test info which may have size factors or fixed sizes, wrap them
     and combine them into an iterable, each of which will be used in parameter
     expansion.

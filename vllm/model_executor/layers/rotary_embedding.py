@@ -21,7 +21,7 @@
 # limitations under the License.
 """Rotary Positional Embeddings."""
 import math
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -124,7 +124,7 @@ class RotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """A PyTorch-native implementation of forward()."""
         if offsets is not None:
             positions = positions + offsets
@@ -154,7 +154,7 @@ class RotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         from vllm import _custom_ops as ops
 
         self.cos_sin_cache = self.cos_sin_cache.to(query.device,
@@ -177,7 +177,7 @@ class RotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         from vllm._ipex_ops import ipex_ops as ops
 
         self.cos_sin_cache = self.cos_sin_cache.to(positions.device,
@@ -200,7 +200,7 @@ class RotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         from habana_frameworks.torch.hpex.kernels import (
             RotaryPosEmbeddingMode, apply_rotary_pos_emb)
         positions = positions.flatten()
@@ -398,7 +398,7 @@ def _yarn_find_correction_range(
         high_rot: int,
         dim: int,
         base: float = 10000,
-        max_position_embeddings: int = 2048) -> Tuple[int, int]:
+        max_position_embeddings: int = 2048) -> tuple[int, int]:
     low = math.floor(
         _yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings))
     high = math.ceil(
@@ -577,7 +577,7 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         query = query.view(*query.shape[:-1], -1, self.head_size)
         key = key.view(*key.shape[:-1], -1, self.head_size)
 
@@ -676,7 +676,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         query_rot = query[..., :self.rotary_dim]
         key_rot = key[..., :self.rotary_dim]
@@ -782,7 +782,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward().
 
         Args:
@@ -838,7 +838,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         spatial_merge_size: int,
         context_len: int = 0,
         seq_len: Optional[int] = None,
-    ) -> Tuple[list[list[int]], int]:
+    ) -> tuple[list[list[int]], int]:
         """Get mrope input positions and delta value."""
 
         if isinstance(image_grid_thw, torch.Tensor):
@@ -931,7 +931,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         ]
 
 
-_ROPE_DICT: Dict[Tuple, RotaryEmbedding] = {}
+_ROPE_DICT: Dict[tuple, RotaryEmbedding] = {}
 
 
 def get_rope(

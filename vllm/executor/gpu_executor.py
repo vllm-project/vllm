@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Set, Tuple, Union
+from typing import Any, Dict, Optional, Set, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
@@ -61,7 +61,7 @@ class GPUExecutor(ExecutorBase):
             rank=rank,
             distributed_init_method=distributed_init_method))
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """

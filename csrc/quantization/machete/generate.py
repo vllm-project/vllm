@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass, fields
 from functools import reduce
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Union
 
 import jinja2
 # yapf conflicts with isort for this block
@@ -245,8 +245,8 @@ TmaCoop = EpilogueScheduleType.TmaWarpSpecializedCooperative
 
 @dataclass(frozen=True)
 class ScheduleConfig:
-    tile_shape_mn: Tuple[int, int]
-    cluster_shape_mnk: Tuple[int, int, int]
+    tile_shape_mn: tuple[int, int]
+    cluster_shape_mnk: tuple[int, int, int]
     kernel_schedule: MixedInputKernelScheduleType
     epilogue_schedule: EpilogueScheduleType
     tile_scheduler: TileSchedulerType
@@ -276,7 +276,7 @@ class PrepackTypeConfig:
 class ImplConfig:
     types: TypeConfig
     schedules: list[ScheduleConfig]
-    heuristic: list[Tuple[Optional[str], ScheduleConfig]]
+    heuristic: list[tuple[Optional[str], ScheduleConfig]]
 
 
 def generate_sch_sig(schedule_config: ScheduleConfig) -> str:

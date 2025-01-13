@@ -3,7 +3,7 @@ import dataclasses
 import json
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, Literal, Mapping, Optional,
-                    Tuple, Type, Union, cast, get_args)
+                    Type, Union, cast, get_args)
 
 import torch
 
@@ -150,7 +150,7 @@ class EngineArgs:
     max_prompt_adapter_token: int = 0
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
-    long_lora_scaling_factors: Optional[Tuple[float]] = None
+    long_lora_scaling_factors: Optional[tuple[float]] = None
     lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'

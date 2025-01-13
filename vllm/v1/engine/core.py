@@ -4,7 +4,7 @@ import signal
 import threading
 import time
 from multiprocessing.connection import Connection
-from typing import Tuple, Type
+from typing import Type
 
 import psutil
 import zmq
@@ -62,7 +62,7 @@ class EngineCore:
             vllm_config.model_config)
 
     def _initialize_kv_caches(self,
-                              cache_config: CacheConfig) -> Tuple[int, int]:
+                              cache_config: CacheConfig) -> tuple[int, int]:
         start = time.time()
         num_gpu_blocks, _ = self.model_executor.determine_num_available_blocks(
         )

@@ -4,7 +4,7 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from functools import lru_cache, wraps
-from typing import (TYPE_CHECKING, Callable, Optional, Tuple, TypeVar, Union)
+from typing import (TYPE_CHECKING, Callable, Optional, TypeVar, Union)
 
 import pynvml
 import torch
@@ -242,7 +242,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @with_nvml_context
     def has_device_capability(
         cls,
-        capability: Union[Tuple[int, int], int],
+        capability: Union[tuple[int, int], int],
         device_id: int = 0,
     ) -> bool:
         try:

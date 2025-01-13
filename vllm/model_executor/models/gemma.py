@@ -14,7 +14,7 @@
 # limitations under the License.
 """Inference-only Gemma model compatible with HuggingFace weights."""
 from functools import lru_cache
-from typing import Iterable, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Union
 
 import torch
 from torch import nn
@@ -234,7 +234,7 @@ class GemmaDecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -416,7 +416,7 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)

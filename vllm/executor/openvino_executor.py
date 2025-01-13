@@ -1,4 +1,4 @@
-from typing import Set, Tuple
+from typing import Set
 
 import openvino as ov
 
@@ -49,7 +49,7 @@ class OpenVINOExecutor(ExecutorBase):
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """

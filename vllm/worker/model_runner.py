@@ -6,8 +6,8 @@ import time
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Set, Tuple,
-                    Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Set, Type,
+                    TypeVar, Union)
 
 import numpy as np
 import torch
@@ -1023,7 +1023,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.graph_runners: list[Dict[int, CUDAGraphRunner]] = [
             {} for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
-        self.graph_memory_pool: Optional[Tuple[
+        self.graph_memory_pool: Optional[tuple[
             int, int]] = None  # Set during graph capture.
 
         self.has_inner_state = model_config.has_inner_state
@@ -1871,7 +1871,7 @@ class CUDAGraphRunner(nn.Module):
         intermediate_inputs: Optional[IntermediateTensors],
         kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        memory_pool: Optional[Tuple[int, int]],
+        memory_pool: Optional[tuple[int, int]],
         stream: torch.cuda.Stream,
         **kwargs,
     ):

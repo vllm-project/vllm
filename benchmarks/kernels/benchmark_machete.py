@@ -7,7 +7,7 @@ import pickle as pkl
 import time
 from dataclasses import dataclass
 from itertools import product
-from typing import Callable, Iterable, Optional, Tuple
+from typing import Callable, Iterable, Optional
 
 import pandas as pd
 import torch
@@ -100,7 +100,7 @@ def quantize_and_pack(atype: torch.dtype,
     return w_ref, w_q, w_s, w_zp
 
 
-def create_bench_tensors(shape: Tuple[int, int, int], types: TypeConfig,
+def create_bench_tensors(shape: tuple[int, int, int], types: TypeConfig,
                          group_size: Optional[int]) -> list[BenchmarkTensors]:
     m, n, k = shape
 
@@ -417,7 +417,7 @@ def print_timers(timers: list[TMeasurement]):
     compare.print()
 
 
-def run(args, MKNs: Iterable[Tuple[int, int, int]]) -> Iterable[TMeasurement]:
+def run(args, MKNs: Iterable[tuple[int, int, int]]) -> Iterable[TMeasurement]:
     types = TypeConfig(
         act_type=args.act_type,
         weight_type=scalar_types.uint4b8 if args.group_zero_type is None \
@@ -448,7 +448,7 @@ def run(args, MKNs: Iterable[Tuple[int, int, int]]) -> Iterable[TMeasurement]:
 # output makers
 def make_output(
     data: list[TMeasurement],
-    MKNs: Iterable[Tuple[int, int, int]],
+    MKNs: Iterable[tuple[int, int, int]],
     base_description: str,
     timestamp=None,
 ):
@@ -495,7 +495,7 @@ def run_model_bench(args):
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")
 
-    def model_shapes(model_name: str, tp_size: int) -> list[Tuple[int, int]]:
+    def model_shapes(model_name: str, tp_size: int) -> list[tuple[int, int]]:
         KNs = []
         for KN, tp_split_dim in copy.deepcopy(WEIGHT_SHAPES[model_name]):
             KN[tp_split_dim] = KN[tp_split_dim] // tp_size

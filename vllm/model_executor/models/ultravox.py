@@ -2,8 +2,8 @@
 """PyTorch Ultravox model."""
 import math
 from functools import cached_property
-from typing import (Any, Iterable, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Any, Iterable, Literal, Mapping, Optional, Set, TypedDict,
+                    Union)
 
 import torch
 import torch.utils.checkpoint
@@ -548,7 +548,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
 
         loader = AutoWeightsLoader(self,

@@ -1,8 +1,8 @@
 """Types for writing multimodal model tests."""
 from enum import Enum
 from pathlib import PosixPath
-from typing import (Any, Callable, Dict, Iterable, NamedTuple, Optional, Tuple,
-                    Type, Union)
+from typing import (Any, Callable, Dict, Iterable, NamedTuple, Optional, Type,
+                    Union)
 
 import torch
 from PIL.Image import Image
@@ -34,7 +34,7 @@ VIDEO_BASE_PROMPT = f"{TEST_VIDEO_PLACEHOLDER}Why is this video funny?"
 
 IMAGE_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0)]
 EMBEDDING_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0)]
-RunnerOutput = Tuple[list[int], str, Optional[SampleLogprobs]]
+RunnerOutput = tuple[list[int], str, Optional[SampleLogprobs]]
 # yapf: enable
 
 
@@ -52,7 +52,7 @@ class SizeType(Enum):
 
 
 class CustomTestOptions(NamedTuple):
-    inputs: list[Tuple[list[str], list[Union[list[Image], Image]]]]
+    inputs: list[tuple[list[str], list[Union[list[Image], Image]]]]
     limit_mm_per_prompt: Dict[str, int]
     # kwarg to pass multimodal data in as to vllm/hf runner instances.
     runner_mm_key: str = "images"
@@ -62,7 +62,7 @@ class ImageSizeWrapper(NamedTuple):
     type: SizeType
     # A size factor is a wrapper of 0+ floats,
     # while a fixed size contains an iterable of integer pairs
-    data: Union[Iterable[float], Iterable[Tuple[int, int]]]
+    data: Union[Iterable[float], Iterable[tuple[int, int]]]
 
 
 class VLMTestInfo(NamedTuple):
@@ -128,12 +128,12 @@ class VLMTestInfo(NamedTuple):
     # Default expandable params per test; these defaults can be overridden in
     # instances of this object; the complete set of test cases for the model
     # is all combinations of .models + all fields below
-    max_tokens: Union[int, Tuple[int]] = 128
-    num_logprobs: Union[int, Tuple[int]] = 5
+    max_tokens: Union[int, tuple[int]] = 128
+    num_logprobs: Union[int, tuple[int]] = 5
     dtype: Union[str, Iterable[str]] = "half"
     distributed_executor_backend: Optional[Union[str, Iterable[str]]] = None
     # Only expanded in video tests
-    num_video_frames: Union[int, Tuple[int]] = 16
+    num_video_frames: Union[int, tuple[int]] = 16
 
     # Fixed image sizes / image size factors; most tests use image_size_factors
     # The values provided for these two fields will be stacked and expanded
@@ -141,7 +141,7 @@ class VLMTestInfo(NamedTuple):
     # once per tests (much like concatenating and wrapping in one parametrize
     # call)
     image_size_factors: Iterable[Iterable[float]] = IMAGE_SIZE_FACTORS
-    image_sizes: Optional[Iterable[Iterable[Tuple[int, int]]]] = None
+    image_sizes: Optional[Iterable[Iterable[tuple[int, int]]]] = None
 
     # Hack for updating a prompt to take into a local path; currently only used
     # for Qwen-VL, which requires encoding the image path / url into the prompt

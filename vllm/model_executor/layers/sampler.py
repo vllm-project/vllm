@@ -4,7 +4,7 @@ import warnings
 from dataclasses import dataclass
 from importlib.util import find_spec
 from math import inf
-from typing import Dict, Iterator, Optional, Tuple, Union
+from typing import Dict, Iterator, Optional, Union
 
 import msgspec
 import torch
@@ -41,14 +41,14 @@ def get_sampler() -> torch.nn.Module:
 
 
 # (num_token_ids, num_parent_ids) per sequence group.
-SampleResultType = list[Tuple[list[int], list[int]]]
+SampleResultType = list[tuple[list[int], list[int]]]
 
 # Types of temporary data structures used for
 # computing sample_result
-SampleMetadataType = Dict[SamplingType, Tuple[list[int],
+SampleMetadataType = Dict[SamplingType, tuple[list[int],
                                               list[SequenceGroupToSample]]]
 MultinomialSamplesType = Dict[SamplingType, torch.Tensor]
-SampleResultsDictType = Dict[int, Tuple[list[int], list[int]]]
+SampleResultsDictType = Dict[int, tuple[list[int], list[int]]]
 
 
 # Encapsulates temporary data structures for computing
@@ -76,7 +76,7 @@ class SampleResultArgsType:
 MaybeDeferredSampleResultType = Union[SampleResultType, SampleResultArgsType]
 
 # Abbreviation of the _sample() return type
-SampleReturnType = Tuple[MaybeDeferredSampleResultType, Optional[torch.Tensor]]
+SampleReturnType = tuple[MaybeDeferredSampleResultType, Optional[torch.Tensor]]
 
 
 class SamplerOutput(
@@ -345,7 +345,7 @@ def _apply_min_tokens_penalty(
         have not been generated yet
     """
     # list of indices in logits that will be set to -inf
-    logits_to_penalize: list[Tuple[int, int]] = []
+    logits_to_penalize: list[tuple[int, int]] = []
     logits_applied = 0
     for seq_group in sampling_metadata.seq_groups:
         seq_ids = seq_group.seq_ids
@@ -883,7 +883,7 @@ def get_logprobs(
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
     sample_results: SampleResultType,
-) -> Tuple[list[Optional[PromptLogprobs]], list[SampleLogprobs]]:
+) -> tuple[list[Optional[PromptLogprobs]], list[SampleLogprobs]]:
     """Return sample logprobs and prompt logprobs.
 
     The logic consists of 3 parts.
@@ -1046,7 +1046,7 @@ def _get_prompt_logprob_if_needed(
         for idx, token_id in enumerate(next_prompt_tokens):
             # Calculate the prompt logprob of the real prompt tokens.
             # {token_id: (logprob, rank_from_vocab)}
-            prompt_logprobs_dict: Dict[int, Tuple[float, int]] = {
+            prompt_logprobs_dict: Dict[int, tuple[float, int]] = {
                 token_id: (selected_logprob_items[idx], rank_items[idx])
             }
 
@@ -1078,7 +1078,7 @@ def _get_prompt_logprob_if_needed(
 
 def _get_sampled_logprob_if_needed(
     seq_group: SequenceGroupToSample,
-    sample_result: Tuple[list[int], list[int]],
+    sample_result: tuple[list[int], list[int]],
     selected_logprobs: torch.Tensor,
     ranks: torch.Tensor,
     top_token_ids: torch.Tensor,
@@ -1201,7 +1201,7 @@ def _build_sampler_output(
     sampling_metadata: SamplingMetadata,
     prompt_logprobs: Optional[list[Optional[PromptLogprobs]]],
     sample_logprobs: Optional[list[SampleLogprobs]],
-    on_device_tensors: Optional[Tuple[torch.Tensor, torch.Tensor,
+    on_device_tensors: Optional[tuple[torch.Tensor, torch.Tensor,
                                       torch.Tensor]],
     skip_sampler_cpu_output: bool = False,
 ) -> SamplerOutput:

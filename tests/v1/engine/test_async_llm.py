@@ -1,5 +1,4 @@
 import asyncio
-from typing import Tuple
 
 import pytest
 
@@ -18,7 +17,7 @@ ENGINE_ARGS = AsyncEngineArgs(model="meta-llama/Llama-3.2-1B",
 
 
 async def generate(engine: AsyncLLM, request_id: str,
-                   max_tokens: int) -> Tuple[int, str]:
+                   max_tokens: int) -> tuple[int, str]:
     count = 0
     async for _ in engine.generate(request_id=request_id,
                                    prompt="Hello my name is Robert and",

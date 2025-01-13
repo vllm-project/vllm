@@ -15,8 +15,8 @@
 # limitations under the License.
 """ PyTorch Fuyu model."""
 import math
-from typing import (Iterable, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Iterable, Literal, Mapping, Optional, Set, TypedDict,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -400,7 +400,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         next_tokens = self.language_model.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

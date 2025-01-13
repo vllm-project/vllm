@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from functools import cached_property
 from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, Literal,
-                    Optional, Tuple, Union, cast)
+                    Optional, Union, cast)
 
 import torch
 from typing_extensions import NotRequired, TypedDict, TypeVar, assert_never
@@ -397,7 +397,7 @@ def zip_enc_dec_prompts(
 
 def to_enc_dec_tuple_list(
     enc_dec_prompts: Iterable[ExplicitEncoderDecoderPrompt[_T1, _T2]],
-) -> list[Tuple[_T1, Optional[_T2]]]:
+) -> list[tuple[_T1, Optional[_T2]]]:
     return [(enc_dec_prompt["encoder_prompt"],
              enc_dec_prompt["decoder_prompt"])
             for enc_dec_prompt in enc_dec_prompts]

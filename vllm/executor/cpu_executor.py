@@ -1,6 +1,6 @@
 import os
 from functools import partial
-from typing import Any, Awaitable, Optional, Set, Tuple, Union
+from typing import Any, Awaitable, Optional, Set, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
@@ -163,7 +163,7 @@ class CPUExecutor(ExecutorBase):
         return [driver_worker_output
                 ] + [output.get() for output in worker_outputs]
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """

@@ -5,7 +5,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from functools import partial
-from typing import Iterable, Optional, Set, Tuple
+from typing import Iterable, Optional, Set
 
 import torch
 import torch.nn as nn
@@ -461,7 +461,7 @@ class InternVisionModel(nn.Module):
 
         return encoder_outputs
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()

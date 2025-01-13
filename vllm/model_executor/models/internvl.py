@@ -6,8 +6,8 @@
 # --------------------------------------------------------
 import re
 from functools import cached_property, partial
-from typing import (Iterable, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Iterable, Literal, Mapping, Optional, Set, TypedDict,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -106,7 +106,7 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height,
 
 def calculate_num_blocks(orig_width: int, orig_height: int, min_num: int,
                          max_num: int, image_size: int,
-                         use_thumbnail: bool) -> Tuple[int, int, int]:
+                         use_thumbnail: bool) -> tuple[int, int, int]:
     aspect_ratio = orig_width / orig_height
 
     # calculate the existing image aspect ratio
@@ -660,7 +660,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     def _process_image_input(
         self,
         image_input: InternVLImageInputs,
-    ) -> Tuple[torch.Tensor]:
+    ) -> tuple[torch.Tensor]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
@@ -771,7 +771,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

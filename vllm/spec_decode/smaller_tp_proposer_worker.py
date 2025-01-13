@@ -1,4 +1,4 @@
-from typing import Optional, Set, Tuple
+from typing import Optional, Set
 
 import torch
 
@@ -97,7 +97,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         with self._patch_tensor_parallel_group():
             self._worker.load_model()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         if self._is_dummy:
             # this case is not used now
             return -1, -1
@@ -118,7 +118,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
         seq_ids_with_bonus_token_in_last_step: Set[int],
-    ) -> Tuple[list[SamplerOutput], bool]:
+    ) -> tuple[list[SamplerOutput], bool]:
         # Do not check _is_dummy, as it's always called by get_spec_proposals
         return self._worker.sampler_output(
             execute_model_req, sample_len,

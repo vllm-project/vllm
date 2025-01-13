@@ -21,7 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Union
 
 import torch
 from torch import nn
@@ -106,7 +106,7 @@ class Qwen2Attention(nn.Module):
                  rope_theta: float = 10000,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 rope_scaling: Optional[Tuple] = None,
+                 rope_scaling: Optional[tuple] = None,
                  prefix: str = "",
                  attn_type: str = AttentionType.DECODER) -> None:
         super().__init__()
@@ -234,7 +234,7 @@ class Qwen2DecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -349,7 +349,7 @@ class Qwen2Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -493,7 +493,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
@@ -575,7 +575,7 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights = self.hf_to_vllm_mapper.apply(weights)
         weights = ((name, data) for name, data in weights
                    if not name.startswith("lm_head."))

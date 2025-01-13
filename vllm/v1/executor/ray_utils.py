@@ -1,6 +1,6 @@
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Optional
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
@@ -39,7 +39,7 @@ try:
         def get_node_ip(self) -> str:
             return get_ip()
 
-        def get_node_and_gpu_ids(self) -> Tuple[str, list[int]]:
+        def get_node_and_gpu_ids(self) -> tuple[str, list[int]]:
             node_id = ray.get_runtime_context().get_node_id()
             device_key = current_platform.ray_device_key
             if not device_key:

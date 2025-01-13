@@ -1,5 +1,5 @@
 """Inference-only Snowflake Arctic model."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Union
 
 import torch
 from torch import nn
@@ -482,7 +482,7 @@ class ArcticForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -491,8 +491,8 @@ class ArcticForCausalLM(nn.Module, SupportsPP):
             ("qkv_proj", "v_proj", "v"),
         ]
 
-        mlp_params_mapping: list[Tuple[str, str, int]] = []
-        expert_params_mapping: list[Tuple[str, str, int]] = []
+        mlp_params_mapping: list[tuple[str, str, int]] = []
+        expert_params_mapping: list[tuple[str, str, int]] = []
         num_layers = self.config.num_hidden_layers
 
         for layer in range(num_layers):

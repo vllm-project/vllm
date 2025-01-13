@@ -14,7 +14,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncIterator, Dict, Optional, Set, Tuple, Union
+from typing import AsyncIterator, Dict, Optional, Set, Union
 
 import uvloop
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -752,7 +752,7 @@ async def init_app_state(
     state.task = model_config.task
 
 
-def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
+def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     family = socket.AF_INET
     if is_valid_ipv6_address(addr[0]):
         family = socket.AF_INET6

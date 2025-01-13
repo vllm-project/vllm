@@ -20,7 +20,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Type, Union
+from typing import Any, Dict, Iterable, Optional, Set, Type, Union
 
 import torch
 from torch import nn
@@ -265,7 +265,7 @@ class LlamaDecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -371,7 +371,7 @@ class LlamaModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -586,7 +586,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
@@ -606,7 +606,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         name: str,
         loaded_weight: torch.Tensor,
-    ) -> Tuple[str, torch.Tensor]:
+    ) -> tuple[str, torch.Tensor]:
 
         def permute(w: torch.Tensor, n_heads: int):
             attn_in = self.config.head_dim * n_heads

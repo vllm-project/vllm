@@ -4,7 +4,7 @@ import itertools
 import random
 import unittest
 from numbers import Number
-from typing import (Any, Dict, NamedTuple, Optional, Sequence, Tuple, Union)
+from typing import (Any, Dict, NamedTuple, Optional, Sequence, Union)
 
 import pytest
 import torch
@@ -18,13 +18,13 @@ from vllm.utils import (STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL,
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.
-DEFAULT_OPCHECK_TEST_UTILS: Tuple[str, ...] = (
+DEFAULT_OPCHECK_TEST_UTILS: tuple[str, ...] = (
     "test_schema",
     "test_autograd_registration",
     "test_faketensor",
 )
 
-ALL_OPCHECK_TEST_UTILS: Tuple[str, ...] = (
+ALL_OPCHECK_TEST_UTILS: tuple[str, ...] = (
     "test_schema",
     "test_autograd_registration",
     "test_faketensor",
@@ -296,7 +296,7 @@ def make_qkv(
     force_kv_seq_lens: Optional[list[int]] = None,
     attn_type: AttentionType = AttentionType.ENCODER_DECODER,
     force_max_len: bool = False,
-) -> Tuple[QKVInputs, QKVInputs, QKVInputs]:
+) -> tuple[QKVInputs, QKVInputs, QKVInputs]:
     '''
     Construct QKV test tensors for self- and cross-attention.
 
@@ -428,7 +428,7 @@ def make_qkv(
 
 def pack_tensor(
         unpacked_tensor: torch.Tensor, seq_lens: list[int],
-        device: Union[torch.device, str]) -> Tuple[torch.Tensor, list[int]]:
+        device: Union[torch.device, str]) -> tuple[torch.Tensor, list[int]]:
     '''
     Pack a batch_size x padded_seq_len x num_heads x head_size tensor into an
     unpadded number_of_tokens x num_heads x head_size tensor, where
@@ -539,7 +539,7 @@ def _make_metadata_tensors(
     context_lens: Optional[list[int]],
     encoder_seq_lens: Optional[list[int]],
     device: Union[torch.device, str],
-) -> Tuple[torch.Tensor, torch.Tensor, Any, Any, Optional[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, Any, Any, Optional[torch.Tensor],
            torch.Tensor, torch.Tensor, Optional[int]]:
     '''
     Build scalar & tensor values required to build attention metadata structure.
@@ -712,7 +712,7 @@ def make_block_tables_slot_mapping(
         block_size: int,
         seq_lens: list[int],
         device: Union[torch.device, str],
-        block_base_addr: int = 0) -> Tuple[torch.Tensor, list[int], int]:
+        block_base_addr: int = 0) -> tuple[torch.Tensor, list[int], int]:
     '''
     Construct fake block tables & slot mappings.
 
@@ -1084,7 +1084,7 @@ def torch_moe_single(a, w, score, topk):
 # and a patched version of allclose that supports fp8 types.
 def opcheck(op: Union[torch._ops.OpOverload, torch._ops.OpOverloadPacket,
                       torch._library.custom_ops.CustomOpDef],
-            args: Tuple[Any, ...],
+            args: tuple[Any, ...],
             kwargs: Optional[Dict[str, Any]] = None,
             *,
             test_utils: Union[str, Sequence[str]] = ALL_OPCHECK_TEST_UTILS,

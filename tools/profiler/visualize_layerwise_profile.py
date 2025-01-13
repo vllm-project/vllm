@@ -4,7 +4,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -22,7 +22,7 @@ def largest_dist_from_leaf(node: dict, depth: int = 0):
 
 
 def get_entries_at_depth(depth: int,
-                         entries_and_traces: list[Tuple[Any, Any]],
+                         entries_and_traces: list[tuple[Any, Any]],
                          node: dict,
                          curr_depth: int = 0,
                          trace=()):
@@ -430,7 +430,7 @@ def main(
     def prepare_data(profile_json: dict, step_keys: list[str]) -> pd.DataFrame:
 
         def get_entries_and_traces(key: str):
-            entries_and_traces: list[Tuple[Any, Any]] = []
+            entries_and_traces: list[tuple[Any, Any]] = []
             for root in profile_json[key]["summary_stats"]:
                 # Fold nodes in the traces as per user request. i.e. simply
                 # make the requested nodes leaf-nodes.

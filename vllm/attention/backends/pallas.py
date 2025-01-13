@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any, Dict, Optional, Type
 
 import torch
 import torch_xla.experimental.custom_kernel  # Required to register custom ops.
@@ -33,7 +33,7 @@ class PallasAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return (num_kv_heads, num_blocks, block_size, head_size)
 
     @staticmethod
@@ -47,8 +47,8 @@ class PallasAttentionBackend(AttentionBackend):
     @torch.compile(backend="openxla")
     @staticmethod
     def copy_blocks(
-        kv_caches: list[Tuple[torch.Tensor, torch.Tensor]],
-        src_to_dists: Tuple[torch.Tensor, torch.Tensor],
+        kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
+        src_to_dists: tuple[torch.Tensor, torch.Tensor],
     ) -> None:
         src_indices, dst_indices = src_to_dists
         for k_cache, v_cache in kv_caches:
@@ -153,7 +153,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Tuple[torch.Tensor, torch.Tensor],
+        kv_cache: tuple[torch.Tensor, torch.Tensor],
         attn_metadata: PallasMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,

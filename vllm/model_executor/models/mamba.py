@@ -1,5 +1,5 @@
 """PyTorch MAMBA model."""
-from typing import Iterable, Optional, Set, Tuple
+from typing import Iterable, Optional, Set
 
 import torch
 from torch import nn
@@ -30,7 +30,7 @@ from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
 class MambaDecoderLayer(nn.Module):
@@ -255,7 +255,7 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
     def _get_mamba_cache_shape(
-            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+            self) -> tuple[tuple[int, int], tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
         conv_state_shape = (
             self.config.intermediate_size // world_size,
@@ -281,7 +281,7 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()

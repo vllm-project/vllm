@@ -1,6 +1,6 @@
 from functools import cached_property
 from importlib.util import find_spec
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
 import torch.jit
@@ -160,7 +160,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         draft_probs: torch.Tensor,  # [batch_size, k, vocab_size]
         draft_token_ids: torch.Tensor,  # [batch_size, k]
         seeded_seqs: Optional[Dict[int, torch.Generator]],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Perform modified rejection sampling on each sequence.
 
         Returns:

@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, Optional, Set
 
 import torch
 
@@ -82,7 +82,7 @@ class TPUExecutor(ExecutorBase):
                     num_cpu_blocks)
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
         underlying worker."""
         return self.driver_worker.determine_num_available_blocks()

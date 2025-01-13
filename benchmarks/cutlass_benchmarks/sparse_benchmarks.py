@@ -3,7 +3,7 @@ import copy
 import itertools
 import pickle as pkl
 import time
-from typing import Callable, Iterable, Tuple
+from typing import Callable, Iterable
 
 import torch
 import torch.utils.benchmark as TBenchmark
@@ -226,7 +226,7 @@ def print_timers(timers: Iterable[TMeasurement]):
 
 
 def run(dtype: torch.dtype,
-        MKNs: Iterable[Tuple[int, int, int]]) -> Iterable[TMeasurement]:
+        MKNs: Iterable[tuple[int, int, int]]) -> Iterable[TMeasurement]:
     results = []
     for m, k, n in MKNs:
         timers = bench(dtype, m, k, n, f"scaled-{dtype}-gemm",
@@ -239,7 +239,7 @@ def run(dtype: torch.dtype,
 
 # output makers
 def make_output(data: Iterable[TMeasurement],
-                MKNs: Iterable[Tuple[int, int, int]],
+                MKNs: Iterable[tuple[int, int, int]],
                 base_description: str,
                 timestamp=None):
     print(f"== All Results {base_description} ====")
@@ -280,7 +280,7 @@ def run_model_bench(args):
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")
 
-    def model_shapes(model_name: str, tp_size: int) -> list[Tuple[int, int]]:
+    def model_shapes(model_name: str, tp_size: int) -> list[tuple[int, int]]:
         KNs = []
         for KN, tp_split_dim in copy.deepcopy(WEIGHT_SHAPES[model_name]):
             KN[tp_split_dim] = KN[tp_split_dim] // tp_size

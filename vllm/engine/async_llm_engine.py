@@ -4,7 +4,7 @@ import time
 import weakref
 from functools import partial
 from typing import (Any, AsyncGenerator, Callable, Coroutine, Dict, Iterable,
-                    Mapping, Optional, Set, Tuple, Type, Union, overload)
+                    Mapping, Optional, Set, Type, Union, overload)
 from weakref import ReferenceType
 
 from typing_extensions import deprecated
@@ -132,7 +132,7 @@ class RequestTracker:
     def __init__(self) -> None:
         self._request_streams: Dict[str, AsyncStream] = {}
         self._aborted_requests: asyncio.Queue[str] = asyncio.Queue()
-        self._new_requests: asyncio.Queue[Tuple[AsyncStream,
+        self._new_requests: asyncio.Queue[tuple[AsyncStream,
                                                 dict]] = asyncio.Queue()
         self.new_requests_event = asyncio.Event()
 
@@ -228,7 +228,7 @@ class RequestTracker:
         if stream is not None:
             stream.finish(exception=exception)
 
-    def get_new_and_aborted_requests(self) -> Tuple[list[Dict], Set[str]]:
+    def get_new_and_aborted_requests(self) -> tuple[list[Dict], Set[str]]:
         """Get the new requests and finished requests to be
         sent to the engine."""
         new_requests: list[Dict] = []

@@ -1,4 +1,4 @@
-from typing import Iterable, Optional, Set, Tuple
+from typing import Iterable, Optional, Set
 
 import torch
 from torch import nn
@@ -358,7 +358,7 @@ class BertModel(nn.Module):
                 token_type_ids=token_type_ids)
         return self.encoder(hidden_states, kv_caches, attn_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -437,7 +437,7 @@ class BertEmbeddingModel(nn.Module):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights = self.hf_to_vllm_mapper.apply(weights)
         weights = ((name, data) for name, data in weights
                    if not name.startswith("lm_head."))
@@ -484,7 +484,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self._pooler = CrossEncodingPooler(config, self.classifier,
                                            self.bert.pooler)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
         self_weights = []
 

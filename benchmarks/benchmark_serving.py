@@ -33,7 +33,7 @@ import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, AsyncGenerator, Collection, Dict, Optional, Tuple
+from typing import Any, AsyncGenerator, Collection, Dict, Optional
 
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
@@ -68,22 +68,22 @@ class BenchmarkMetrics:
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
-    percentiles_ttft_ms: list[Tuple[float, float]]
+    percentiles_ttft_ms: list[tuple[float, float]]
     mean_tpot_ms: float
     median_tpot_ms: float
     std_tpot_ms: float
-    percentiles_tpot_ms: list[Tuple[float, float]]
+    percentiles_tpot_ms: list[tuple[float, float]]
     mean_itl_ms: float
     median_itl_ms: float
     std_itl_ms: float
-    percentiles_itl_ms: list[Tuple[float, float]]
+    percentiles_itl_ms: list[tuple[float, float]]
     # E2EL stands for end-to-end latency per request.
     # It is the time taken on the client side from sending
     # a request to receiving a complete response.
     mean_e2el_ms: float
     median_e2el_ms: float
     std_e2el_ms: float
-    percentiles_e2el_ms: list[Tuple[float, float]]
+    percentiles_e2el_ms: list[tuple[float, float]]
 
 
 def sample_sharegpt_requests(
@@ -91,7 +91,7 @@ def sample_sharegpt_requests(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
-) -> list[Tuple[str, int, int, None]]:
+) -> list[tuple[str, int, int, None]]:
     # Load the dataset.
     with open(dataset_path, encoding='utf-8') as f:
         dataset = json.load(f)
@@ -105,7 +105,7 @@ def sample_sharegpt_requests(
     random.shuffle(dataset)
 
     # Filter out sequences that are too long or too short
-    filtered_dataset: list[Tuple[str, int, int]] = []
+    filtered_dataset: list[tuple[str, int, int]] = []
     for i in range(len(dataset)):
         if len(filtered_dataset) == num_requests:
             break
@@ -136,7 +136,7 @@ def sample_sonnet_requests(
     output_len: int,
     prefix_len: int,
     tokenizer: PreTrainedTokenizerBase,
-) -> list[Tuple[str, str, int, int, None]]:
+) -> list[tuple[str, str, int, int, None]]:
     assert (
         input_len > prefix_len
     ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
@@ -177,7 +177,7 @@ def sample_sonnet_requests(
     prefix_lines = poem_lines[:num_prefix_lines]
 
     # Sample the rest of lines per request.
-    sampled_requests: list[Tuple[str, int, int]] = []
+    sampled_requests: list[tuple[str, int, int]] = []
     for _ in range(num_requests):
         num_lines_needed = num_input_lines - num_prefix_lines
         sampled_lines = "".join(prefix_lines +
@@ -204,8 +204,8 @@ def sample_mmmu_pro_vision_requests(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
-) -> list[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
-    sampled_requests: list[Tuple[str, int, int, Dict[str,
+) -> list[tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
+    sampled_requests: list[tuple[str, int, int, Dict[str,
                                                      Collection[str]]]] = []
     for data in dataset:
         if len(sampled_requests) == num_requests:
@@ -257,7 +257,7 @@ def sample_hf_requests(
     tokenizer: PreTrainedTokenizerBase,
     random_seed: int,
     fixed_output_len: Optional[int] = None,
-) -> list[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
+) -> list[tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
 
     # Special case for MMMU-Pro vision dataset
     if dataset_path == 'MMMU/MMMU_Pro' and dataset_subset == 'vision':
@@ -281,7 +281,7 @@ def sample_hf_requests(
         "HF Dataset must have 'conversations' column.")
     filter_func = lambda x: len(x["conversations"]) >= 2
     filtered_dataset = dataset.shuffle(seed=random_seed).filter(filter_func)
-    sampled_requests: list[Tuple[str, int, int, Dict[str,
+    sampled_requests: list[tuple[str, int, int, Dict[str,
                                                      Collection[str]]]] = []
     for data in filtered_dataset:
         if len(sampled_requests) == num_requests:
@@ -344,7 +344,7 @@ def sample_random_requests(
     num_prompts: int,
     range_ratio: float,
     tokenizer: PreTrainedTokenizerBase,
-) -> list[Tuple[str, int, int]]:
+) -> list[tuple[str, int, int]]:
     prefix_token_ids = np.random.randint(0,
                                          tokenizer.vocab_size,
                                          size=prefix_len).tolist()
@@ -373,10 +373,10 @@ def sample_random_requests(
 
 
 async def get_request(
-    input_requests: list[Tuple[str, int, int]],
+    input_requests: list[tuple[str, int, int]],
     request_rate: float,
     burstiness: float = 1.0,
-) -> AsyncGenerator[Tuple[str, int, int], None]:
+) -> AsyncGenerator[tuple[str, int, int], None]:
     """
     Asynchronously generates requests at a specified rate 
     with OPTIONAL burstiness.
@@ -417,14 +417,14 @@ async def get_request(
 
 
 def calculate_metrics(
-    input_requests: list[Tuple[str, int, int]],
+    input_requests: list[tuple[str, int, int]],
     outputs: list[RequestFuncOutput],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
     gootput_config_dict: Dict[str, float],
-) -> Tuple[BenchmarkMetrics, list[int]]:
+) -> tuple[BenchmarkMetrics, list[int]]:
     actual_output_lens: list[int] = []
     total_input = 0
     completed = 0
@@ -526,7 +526,7 @@ async def benchmark(
     base_url: str,
     model_id: str,
     tokenizer: PreTrainedTokenizerBase,
-    input_requests: list[Tuple[str, int, int]],
+    input_requests: list[tuple[str, int, int]],
     logprobs: Optional[int],
     best_of: int,
     request_rate: float,

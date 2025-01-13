@@ -2,7 +2,7 @@
 
 Run `pytest tests/kernels/test_semi_structured.py`.
 """
-from typing import Optional, Tuple, Type
+from typing import Optional, Type
 
 import pytest
 import torch
@@ -67,7 +67,7 @@ def prune_to_2_4(tensor):
 
 def make_rand_sparse_tensors(
         dtype: torch.dtype, m: int, n: int, k: int
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     a = torch.randn((m, k), device='cuda') * 5
     b = torch.randn((n, k), device='cuda').t() * 5
 

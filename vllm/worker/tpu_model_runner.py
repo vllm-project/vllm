@@ -1,8 +1,7 @@
 import enum
 import time
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple, Type,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Type, Union)
 from unittest.mock import patch
 
 import numpy as np
@@ -162,7 +161,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         self,
         batch_size: int,
         seq_len: int,
-        kv_caches: list[Tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
         exec_mode: ExecutionMode,
     ) -> None:
         exec_mode = ExecutionMode(exec_mode)
@@ -272,7 +271,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
     def warmup_model(
         self,
-        kv_caches: list[Tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
     ) -> None:
         # Prefill
         logger.info("Compiling the model with different input shapes...")
@@ -340,7 +339,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
     def _prepare_prompt(
         self,
         seq_group_metadata_list: list[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: list[int] = []
         input_positions: list[int] = []
@@ -431,7 +430,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
     def _prepare_decode(
         self,
         seq_group_metadata_list: list[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: list[list[int]] = []
         input_positions: list[list[int]] = []
@@ -502,7 +501,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         self,
         seq_group_metadata_list: list[SequenceGroupMetadata],
         padded_batch_size: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, list[int]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
         assert len(seq_group_metadata_list) > 0
         t = []
         p = []
@@ -772,7 +771,7 @@ class ModelWrapper(nn.Module):
         t: torch.Tensor,
         p: torch.Tensor,
         num_samples: int,
-        kv_caches: list[Tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 

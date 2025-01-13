@@ -4,7 +4,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any, Dict, Optional, Type
 
 import torch
 import vllm_hpu_extension.ops as ops
@@ -44,7 +44,7 @@ class HPUAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return HPUPagedAttention.get_kv_cache_shape(num_blocks, block_size,
                                                     num_kv_heads, head_size)
 

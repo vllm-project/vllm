@@ -1,5 +1,5 @@
 import random
-from typing import Optional, Tuple
+from typing import Optional
 
 import pytest
 import torch
@@ -131,7 +131,7 @@ def test_paged_attention(
     kv_cache_factory,
     version: str,
     num_seqs: int,
-    num_heads: Tuple[int, int],
+    num_heads: tuple[int, int],
     head_size: int,
     use_alibi: bool,
     block_size: int,
@@ -376,7 +376,7 @@ def ref_multi_query_kv_attention(
 @torch.inference_mode()
 def test_multi_query_kv_attention(
     num_seqs: int,
-    num_heads: Tuple[int, int],
+    num_heads: tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
     seed: int,

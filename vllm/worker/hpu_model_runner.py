@@ -16,7 +16,7 @@ from array import array
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import (TYPE_CHECKING, Any, Callable, Dict, NamedTuple, Optional,
-                    Set, Tuple, Type, TypeVar, Union)
+                    Set, Type, TypeVar, Union)
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -75,12 +75,12 @@ class Singleton(type):
 
 @dataclass
 class HPUBucketingGlobalState(metaclass=Singleton):
-    prompt_bs_bucket_cfg: Tuple[int, int, int] = field(init=False)
-    decode_bs_bucket_cfg: Tuple[int, int, int] = field(init=False)
-    prompt_seq_bucket_cfg: Tuple[int, int, int] = field(init=False)
-    decode_block_bucket_cfg: Tuple[int, int, int] = field(init=False)
-    prompt_buckets: list[Tuple[int, int]] = field(init=False)
-    decode_buckets: list[Tuple[int, int]] = field(init=False)
+    prompt_bs_bucket_cfg: tuple[int, int, int] = field(init=False)
+    decode_bs_bucket_cfg: tuple[int, int, int] = field(init=False)
+    prompt_seq_bucket_cfg: tuple[int, int, int] = field(init=False)
+    decode_block_bucket_cfg: tuple[int, int, int] = field(init=False)
+    prompt_buckets: list[tuple[int, int]] = field(init=False)
+    decode_buckets: list[tuple[int, int]] = field(init=False)
 
 
 def subtuple(obj: object,
@@ -118,7 +118,7 @@ def read_bucket_settings(phase: str, dim: str, **defaults):
     return values
 
 
-def warmup_range(config: Tuple[int, int, int]):
+def warmup_range(config: tuple[int, int, int]):
     """Generate a warmup range.
 
     Start from bmin and multiply by 2 until you reach bstep.
@@ -220,7 +220,7 @@ def round_up(value: int, k: int):
     return (value + k - 1) // k * k
 
 
-def find_bucket(value: int, config: Tuple[int, int, int]):
+def find_bucket(value: int, config: tuple[int, int, int]):
     bmin, bstep, _ = config
     next_step = round_up(value, bstep)
     next_pow = next_pow2(value, bmin)
@@ -1061,7 +1061,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: list[SequenceGroupMetadata],
-    ) -> Tuple[TModelInputForHPU, SamplingMetadata]:
+    ) -> tuple[TModelInputForHPU, SamplingMetadata]:
         if len(seq_group_metadata_list) == 0:
             return self._model_input_cls(), None
 
@@ -1436,8 +1436,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         idx = 0
         phase = f'Graph/{"Prompt" if is_prompt else "Decode"}'
         num_candidates = len(buckets)
-        ordering : Union[Callable[[Any], Tuple[Any, Any]], \
-            Callable[[Any], Tuple[Any, Any, Any]]]
+        ordering : Union[Callable[[Any], tuple[Any, Any]], \
+            Callable[[Any], tuple[Any, Any, Any]]]
         if strategy == 'min_tokens':
             ordering = lambda b: (b[0] * b[1], b[1], b[0])
         elif strategy == 'max_bs':

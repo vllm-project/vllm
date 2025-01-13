@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 from .tokenizer import AnyTokenizer
 
@@ -52,7 +52,7 @@ def convert_prompt_ids_to_tokens(
     tokenizer: AnyTokenizer,
     prompt_ids: list[int],
     skip_special_tokens: bool = False,
-) -> Tuple[list[str], int, int]:
+) -> tuple[list[str], int, int]:
     """Converts the prompt ids to tokens and returns the tokens and offsets
     for incremental detokenization.
 
@@ -83,7 +83,7 @@ def detokenize_incrementally(
     read_offset: int,
     skip_special_tokens: bool = False,
     spaces_between_special_tokens: bool = True,
-) -> Tuple[list[str], str, int, int]:
+) -> tuple[list[str], str, int, int]:
     """Detokenizes the input ids incrementally and returns the new tokens
     and the new text.
 

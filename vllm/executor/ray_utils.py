@@ -1,7 +1,7 @@
 import os
 import time
 from collections import defaultdict
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Union
 
 import msgspec
 
@@ -46,7 +46,7 @@ try:
         def get_node_ip(self) -> str:
             return get_ip()
 
-        def get_node_and_gpu_ids(self) -> Tuple[str, list[int]]:
+        def get_node_and_gpu_ids(self) -> tuple[str, list[int]]:
             node_id = ray.get_runtime_context().get_node_id()
             device_key = current_platform.ray_device_key
             if not device_key:
@@ -58,7 +58,7 @@ try:
 
         def execute_model_spmd(
             self, req_or_tuple: Union[bytes,
-                                      Tuple[bytes,
+                                      tuple[bytes,
                                             Optional[IntermediateTensors]]]
         ) -> bytes:
             """Execute model in SPMD fashion: used only when SPMD worker and

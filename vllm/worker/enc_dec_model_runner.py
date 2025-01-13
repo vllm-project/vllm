@@ -1,6 +1,6 @@
 import dataclasses
 import itertools
-from typing import Any, Dict, Optional, Tuple, Type, cast
+from typing import Any, Dict, Optional, Type, cast
 
 import torch
 import torch.distributed
@@ -344,7 +344,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         self,
         seq_group_metadata_list: list[SequenceGroupMetadata],
         model_input: EncoderDecoderModelInput,
-    ) -> Tuple[AttentionMetadata, Optional[torch.Tensor],
+    ) -> tuple[AttentionMetadata, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """Helper method to prepare the encoder- and cross-attn-related
         model inputs based on a given sequence group. These additional inputs

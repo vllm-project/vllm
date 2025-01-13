@@ -5,7 +5,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 from unittest.mock import patch
 
 import torch
@@ -166,7 +166,7 @@ class Handle:
     connect_ip: str
     local_reader_ranks: list[int] = field(default_factory=list)
 
-    buffer_handle: Optional[Tuple[int, int, int, str]] = None
+    buffer_handle: Optional[tuple[int, int, int, str]] = None
     local_subscribe_port: Optional[int] = None
     remote_subscribe_port: Optional[int] = None
 

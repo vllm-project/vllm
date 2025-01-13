@@ -18,7 +18,7 @@
 """PyTorch Falcon model."""
 
 import math
-from typing import Iterable, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Union
 
 import torch
 from torch import nn
@@ -475,7 +475,7 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         total_num_heads = self.config.num_attention_heads
         if self.config.new_decoder_architecture:

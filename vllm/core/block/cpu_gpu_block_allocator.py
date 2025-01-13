@@ -1,4 +1,4 @@
-from typing import Dict, FrozenSet, Optional, Tuple
+from typing import Dict, FrozenSet, Optional
 
 from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
@@ -298,12 +298,12 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         """
         return self._allocators[device].get_num_full_blocks_touched(blocks)
 
-    def clear_copy_on_writes(self) -> list[Tuple[int, int]]:
+    def clear_copy_on_writes(self) -> list[tuple[int, int]]:
         """Clears the copy-on-write (CoW) state and returns the mapping of
             source to destination block IDs.
 
         Returns:
-            list[Tuple[int, int]]: A list mapping source block IDs to 
+            list[tuple[int, int]]: A list mapping source block IDs to 
                 destination block IDs.
         """
         # CoW only supported on GPU
@@ -339,13 +339,13 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         assert device in self._allocators
         return self._allocators[device].get_prefix_cache_hit_rate()
 
-    def get_and_reset_swaps(self) -> list[Tuple[int, int]]:
+    def get_and_reset_swaps(self) -> list[tuple[int, int]]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called after every swapping operations for now, and after every
         schedule when BlockManagerV2 become default. Currently not useful.
 
         Returns:
-            list[Tuple[int, int]]: A mapping of source to destination block IDs.
+            list[tuple[int, int]]: A mapping of source to destination block IDs.
         """
         mapping = self._swap_mapping.copy()
         self._swap_mapping.clear()

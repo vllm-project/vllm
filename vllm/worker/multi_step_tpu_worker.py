@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
 
@@ -18,7 +18,7 @@ class MultiStepTPUWorker(TPUWorker):
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
-    ) -> Tuple[ModelInputForTPU, WorkerInput, Dict[str, torch.Tensor]]:
+    ) -> tuple[ModelInputForTPU, WorkerInput, Dict[str, torch.Tensor]]:
         assert self.is_driver_worker
         assert execute_model_req.virtual_engine == 0
 
@@ -69,7 +69,7 @@ class MultiStepTPUWorker(TPUWorker):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> Optional[Tuple[ModelInputForTPU, WorkerInput, Dict[str,
+    ) -> Optional[tuple[ModelInputForTPU, WorkerInput, Dict[str,
                                                             torch.Tensor]]]:
         if self.is_driver_worker:
             if execute_model_req is None:

@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.distributed
@@ -111,7 +111,7 @@ class Worker:
         self.model_runner.load_model()
 
     @torch.inference_mode()
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
 

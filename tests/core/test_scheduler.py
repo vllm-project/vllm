@@ -1,6 +1,6 @@
 import time
 from collections import deque
-from typing import Set, Tuple
+from typing import Set
 from unittest.mock import MagicMock
 
 import pytest  # noqa
@@ -650,7 +650,7 @@ def test_schedule_swapped_max_loras():
                                      num_cpu_blocks=32,
                                      num_gpu_blocks=32)
     curr_loras: Set[int] = set()
-    blocks_to_swap_out: list[Tuple[int, int]] = []
+    blocks_to_swap_out: list[tuple[int, int]] = []
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
@@ -681,7 +681,7 @@ def test_schedule_swapped_cannot_swap_in():
                                      num_cpu_blocks=32,
                                      num_gpu_blocks=32)
     curr_loras = None
-    blocks_to_swap_out: list[Tuple[int, int]] = []
+    blocks_to_swap_out: list[tuple[int, int]] = []
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
@@ -712,7 +712,7 @@ def test_infeasible_swap():
                                      num_cpu_blocks=32,
                                      num_gpu_blocks=32)
     curr_loras = None
-    blocks_to_swap_out: list[Tuple[int, int]] = []
+    blocks_to_swap_out: list[tuple[int, int]] = []
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
@@ -750,7 +750,7 @@ def test_schedule_swapped_blocks_to_copy():
                                        block_size=block_size)
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
-    blocks_to_swap_out: list[Tuple[int, int]] = []
+    blocks_to_swap_out: list[tuple[int, int]] = []
     scheduler._swap_out(seq_group, blocks_to_swap_out)
     scheduler._add_seq_group_to_swapped(seq_group)
 

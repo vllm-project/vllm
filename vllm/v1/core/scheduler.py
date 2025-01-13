@@ -1,7 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Deque, Dict, Iterable, Optional, Set, Tuple,
-                    Union)
+from typing import (TYPE_CHECKING, Deque, Dict, Iterable, Optional, Set, Union)
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
@@ -331,7 +330,7 @@ class Scheduler:
         num_computed_tokens: int,
         num_new_tokens: int,
         encoder_budget: int,
-    ) -> Tuple[list[int], int, int]:
+    ) -> tuple[list[int], int, int]:
         """
         Determine which encoder inputs need to be scheduled in the current step,
         and update `num_new_tokens` and encoder token budget accordingly.
@@ -615,4 +614,4 @@ class SchedulerOutput:
 
     preempted_req_ids: Set[str]
     finished_req_ids: Set[str]
-    free_encoder_input_ids: list[Tuple[str, int]]
+    free_encoder_input_ids: list[tuple[str, int]]

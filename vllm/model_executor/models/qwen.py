@@ -8,7 +8,7 @@ import math
 import re
 from functools import partial
 from typing import (Any, Callable, Dict, Iterable, Literal, Mapping, Optional,
-                    Set, Tuple, TypedDict, Union)
+                    Set, TypedDict, Union)
 
 import numpy as np
 import torch
@@ -533,7 +533,7 @@ class QWenBlock(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -969,7 +969,7 @@ class QWenBaseModel(nn.Module, SupportsPP, SupportsLoRA):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)

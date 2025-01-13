@@ -1,5 +1,5 @@
 import ast
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import pytest
@@ -84,7 +84,7 @@ def evaluate_json_response(model_response, golden_response):
 
 def generate(
     llm: vllm.LLM,
-    inputs: Tuple[str, SamplingParams, Optional[LoRARequest]],
+    inputs: tuple[str, SamplingParams, Optional[LoRARequest]],
 ):
     prompts, sampling_param, lora_request = inputs
     outputs = llm.generate(prompts, sampling_param, lora_request=lora_request)
@@ -93,7 +93,7 @@ def generate(
 
 def batched_generate(
     llm: vllm.LLM,
-    inputs: list[Tuple[str, SamplingParams, Optional[LoRARequest]]],
+    inputs: list[tuple[str, SamplingParams, Optional[LoRARequest]]],
 ):
     for input in inputs:
         prompt, sampling_param, lora_req = input
@@ -175,7 +175,7 @@ def test_batched_rope_kernel(lora_llm, long_context_infos):
     # Create batched results
     # Each element of the batch must be
     # (prompt, prompt_sampling_params, prompt_lora_request)
-    batched_prompts: list[Tuple[str, SamplingParams,
+    batched_prompts: list[tuple[str, SamplingParams,
                                 Optional[LoRARequest]]] = []
     for lora_id, info in long_context_infos.items():
         context_len = info["context_length"]
@@ -200,7 +200,7 @@ def test_self_consistency(lora_llm, long_context_infos):
     num_loras = len(long_context_infos)
 
     # Create results in order of long_context_infos
-    batched_prompts: list[Tuple[str, SamplingParams,
+    batched_prompts: list[tuple[str, SamplingParams,
                                 Optional[LoRARequest]]] = []
     for lora_id, info in long_context_infos.items():
         context_len = info["context_length"]
@@ -282,7 +282,7 @@ def test_max_len(lora_llm, long_context_infos):
             generate(lora_llm, (bad_prompt, sampling_params, lora_request))
 
     # Also test batched
-    batched_prompts: list[Tuple[str, SamplingParams,
+    batched_prompts: list[tuple[str, SamplingParams,
                                 Optional[LoRARequest]]] = []
     for lora_id_with_bad_inputs in long_context_infos:
         for lora_id, info in long_context_infos.items():

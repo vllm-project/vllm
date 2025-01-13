@@ -1,5 +1,5 @@
 from collections import deque
-from typing import Deque, FrozenSet, Iterable, Optional, Tuple
+from typing import Deque, FrozenSet, Iterable, Optional
 
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
@@ -239,11 +239,11 @@ class NaiveBlockAllocator(BlockAllocator):
 
         return trg_block_id
 
-    def clear_copy_on_writes(self) -> list[Tuple[BlockId, BlockId]]:
+    def clear_copy_on_writes(self) -> list[tuple[BlockId, BlockId]]:
         """Returns the copy-on-write source->destination mapping and clears it.
 
         Returns:
-            list[Tuple[BlockId, BlockId]]: A list mapping source
+            list[tuple[BlockId, BlockId]]: A list mapping source
                 block indices to destination block indices.
         """
         return self._cow_tracker.clear_cows()

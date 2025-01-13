@@ -1,4 +1,4 @@
-from typing import Optional, Set, Tuple
+from typing import Optional, Set
 
 import torch
 
@@ -115,7 +115,7 @@ class Top1Proposer(SpeculativeProposer):
         self,
         seq_group_metadata_list: list[SequenceGroupMetadata],
         proposal_len: int,
-    ) -> Tuple[list[int], list[SequenceGroupMetadata], list[int]]:
+    ) -> tuple[list[int], list[SequenceGroupMetadata], list[int]]:
         """Split sequences by two groups:
         1. Sequences with non-zero proposal length.
         2. Sequences with zero proposal length (due to disabled speculation
@@ -219,7 +219,7 @@ class Top1Proposer(SpeculativeProposer):
         proposal_lens: list[int],
         nonzero_proposal_len_indices: list[int],
         sampler_transposed: bool,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """After speculations are produced, merge the speculation results with
         the skipped sequences.
         """

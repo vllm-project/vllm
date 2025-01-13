@@ -1,7 +1,7 @@
 """KV-Cache Utilities."""
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, NamedTuple, Optional, Tuple
+from typing import Any, NamedTuple, Optional
 
 from vllm.logger import init_logger
 from vllm.v1.request import Request
@@ -19,7 +19,7 @@ class BlockHashType(NamedTuple):
     # Hash value of the block in an integer.
     hash_value: int
     # Token IDs in the block.
-    token_ids: Tuple[int, ...]
+    token_ids: tuple[int, ...]
     # Extra keys for the block.
     extra_keys: Optional[Any] = None
 
@@ -168,7 +168,7 @@ class FreeKVCacheBlockQueue:
 
 def generate_block_hash_extra_keys(
         request: Request, start_token_idx: int, end_token_idx: int,
-        start_mm_idx: int) -> Tuple[Optional[Tuple[Any, ...]], int]:
+        start_mm_idx: int) -> tuple[Optional[tuple[Any, ...]], int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs and request specific metadata (e.g., LoRA ID).
     For multi-modal inputs, the extra keys are (mm_hash, start_offset) that
@@ -239,7 +239,7 @@ def generate_block_hash_extra_keys(
 def hash_block_tokens(
         parent_block_hash: Optional[int],
         curr_block_token_ids: Sequence[int],
-        extra_keys: Optional[Tuple[Any, ...]] = None) -> BlockHashType:
+        extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHashType:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
     prefix caching. We use LRU cache for this function to avoid recomputing

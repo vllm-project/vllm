@@ -1,5 +1,4 @@
 import random
-from typing import Tuple
 
 import pytest
 import torch
@@ -64,7 +63,7 @@ def test_copy_blocks(
     src_blocks = random.sample(range(num_blocks), num_mappings)
     remainig_blocks = list(set(range(num_blocks)) - set(src_blocks))
     dst_blocks = random.sample(remainig_blocks, 2 * num_mappings)
-    block_mapping: list[Tuple[int, int]] = []
+    block_mapping: list[tuple[int, int]] = []
     for i in range(num_mappings):
         src = src_blocks[i]
         dst1 = dst_blocks[2 * i]
@@ -330,7 +329,7 @@ def test_reshape_and_cache_flash(
 @torch.inference_mode()
 def test_swap_blocks(
     kv_cache_factory,
-    direction: Tuple[str, str],
+    direction: tuple[str, str],
     num_mappings: int,
     num_heads: int,
     head_size: int,

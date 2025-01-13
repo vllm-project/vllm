@@ -2,7 +2,7 @@
 import sys
 from bisect import bisect_left
 from os.path import commonprefix
-from typing import (Callable, Dict, FrozenSet, Iterable, Optional, Set, Tuple)
+from typing import (Callable, Dict, FrozenSet, Iterable, Optional, Set)
 
 from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
                                     get_all_blocks_recursively)
@@ -499,11 +499,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         return trg_block_id
 
-    def clear_copy_on_writes(self) -> list[Tuple[BlockId, BlockId]]:
+    def clear_copy_on_writes(self) -> list[tuple[BlockId, BlockId]]:
         """Returns the copy-on-write source->destination mapping and clears it.
 
         Returns:
-            list[Tuple[BlockId, BlockId]]: A list mapping source
+            list[tuple[BlockId, BlockId]]: A list mapping source
                 block indices to destination block indices.
         """
         return self._cow_tracker.clear_cows()

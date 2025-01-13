@@ -3,7 +3,7 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
 from vllm_hpu_extension import cache_ops, ops
@@ -35,7 +35,7 @@ class HPUPagedAttention:
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -43,7 +43,7 @@ class HPUPagedAttention:
         kv_cache: torch.Tensor,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         key_cache = kv_cache[0]
         value_cache = kv_cache[1]
         return key_cache, value_cache

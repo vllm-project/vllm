@@ -2,7 +2,7 @@
 import functools
 import json
 import os
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import triton
@@ -206,7 +206,7 @@ def fused_moe_kernel(
 
 def moe_align_block_size(
         topk_ids: torch.Tensor, block_size: int,
-        num_experts: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_experts: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
     size for matrix multiplication.
@@ -404,8 +404,8 @@ def get_default_config(
 
 
 def try_get_optimal_moe_config(
-    w1_shape: Tuple[int, ...],
-    w2_shape: Tuple[int, ...],
+    w1_shape: tuple[int, ...],
+    w2_shape: tuple[int, ...],
     top_k: int,
     dtype: Optional[str],
     M: int,

@@ -1,7 +1,7 @@
 import math
 from functools import cached_property
 from typing import (Final, Iterable, Literal, Mapping, Optional, Protocol, Set,
-                    Tuple, TypedDict, Union)
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -810,7 +810,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         return image_feature
 
     def get_multimodal_embeddings(
-            self, **kwargs) -> Optional[list[Tuple[NestedTensors, str]]]:
+            self, **kwargs) -> Optional[list[tuple[NestedTensors, str]]]:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return None
@@ -836,7 +836,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[list[Tuple[NestedTensors,
+        multimodal_embeddings: Optional[list[tuple[NestedTensors,
                                                    str]]] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
@@ -897,7 +897,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

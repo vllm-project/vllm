@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from functools import reduce
 from typing import Any, Callable, DefaultDict, Dict, Mapping, Optional
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple, Union
+from typing import Set, Union
 
 import msgspec
 import torch
@@ -159,7 +159,7 @@ class SequenceData(msgspec.Struct,
 
     ### The below fields should not be passed as an argument ###
     _cumulative_logprob: float = 0.0
-    _prompt_token_ids_tuple: Tuple[int,
+    _prompt_token_ids_tuple: tuple[int,
                                    ...] = msgspec.field(default_factory=tuple)
     # The number of tokens that are computed (that run against the model).
     _num_computed_tokens: int = 0
@@ -177,7 +177,7 @@ class SequenceData(msgspec.Struct,
 
     @staticmethod
     def from_prompt_token_counts(
-            *token_counts: Tuple[int, int]) -> "SequenceData":
+            *token_counts: tuple[int, int]) -> "SequenceData":
         """
         Construct a :class:`SequenceData` instance by concatenating
         prompt token sequences.
@@ -219,7 +219,7 @@ class SequenceData(msgspec.Struct,
     def __post_init__(self) -> None:
         assert self._prompt_token_ids.typecode == "l"
         assert self._output_token_ids.typecode == "l"
-        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(
+        self._prompt_token_ids_tuple: tuple[int, ...] = tuple(
             self._prompt_token_ids)
         self._update_cached_all_tokens()
 
@@ -234,7 +234,7 @@ class SequenceData(msgspec.Struct,
         return self._cumulative_logprob
 
     @property
-    def prompt_token_ids(self) -> Tuple[int, ...]:
+    def prompt_token_ids(self) -> tuple[int, ...]:
         return self._prompt_token_ids_tuple
 
     @prompt_token_ids.setter
@@ -251,7 +251,7 @@ class SequenceData(msgspec.Struct,
         return self._prompt_token_ids
 
     @property
-    def output_token_ids(self) -> Tuple[int, ...]:
+    def output_token_ids(self) -> tuple[int, ...]:
         return tuple(self._output_token_ids)
 
     @output_token_ids.setter
@@ -299,7 +299,7 @@ class SequenceData(msgspec.Struct,
 
     def get_prefix_token_ids(
             self, num_tokens: int
-    ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
+    ) -> tuple[tuple[int, ...], Optional[tuple[int, ...]]]:
         """Get prefix tokens, and make the return value hashable"""
         prompt_length = self.get_prompt_len()
         if num_tokens > prompt_length:
@@ -350,10 +350,10 @@ class SequenceData(msgspec.Struct,
             return self._prompt_token_ids[-1]
         return self._output_token_ids[-1]
 
-    def get_prompt_token_ids(self) -> Tuple[int, ...]:
+    def get_prompt_token_ids(self) -> tuple[int, ...]:
         return self.prompt_token_ids
 
-    def get_output_token_ids(self) -> Tuple[int, ...]:
+    def get_output_token_ids(self) -> tuple[int, ...]:
         return self.output_token_ids
 
     def get_delta_and_reset(self) -> SequenceDataDelta:
@@ -565,13 +565,13 @@ class Sequence:
     def get_token_ids(self) -> list[int]:
         return self.data.get_token_ids()
 
-    def get_prompt_token_ids(self) -> Tuple[int, ...]:
+    def get_prompt_token_ids(self) -> tuple[int, ...]:
         return self.data.get_prompt_token_ids()
 
     def get_last_token_id(self) -> int:
         return self.data.get_last_token_id()
 
-    def get_output_token_ids(self) -> Tuple[int, ...]:
+    def get_output_token_ids(self) -> tuple[int, ...]:
         return self.data.get_output_token_ids()
 
     def get_cumulative_logprob(self) -> float:
@@ -1165,7 +1165,7 @@ def get_all_seq_ids(
 
 def get_all_seq_ids_and_request_ids(
     seq_group_metadata_list: list[SequenceGroupMetadata]
-) -> Tuple[list[int], Dict[str, Set[int]]]:
+) -> tuple[list[int], Dict[str, Set[int]]]:
     """Given a list of SequenceGroupMetadata, create a list of all
     sequence ids.
     """
@@ -1274,13 +1274,13 @@ class ExecuteModelRequest(
     seq_group_metadata_list: list[Union[SequenceGroupMetadata,
                                         SequenceGroupMetadataDelta]]
     # Blocks to swap in. List of CPU -> GPU block number.
-    blocks_to_swap_in: list[Tuple[int,
+    blocks_to_swap_in: list[tuple[int,
                                   int]] = msgspec.field(default_factory=list)
     # Blocks to swap out. List of GPU -> CPU block number.
-    blocks_to_swap_out: list[Tuple[int,
+    blocks_to_swap_out: list[tuple[int,
                                    int]] = msgspec.field(default_factory=list)
     # Blocks to copy. Source to dest block.
-    blocks_to_copy: list[Tuple[int, int]] = msgspec.field(default_factory=list)
+    blocks_to_copy: list[tuple[int, int]] = msgspec.field(default_factory=list)
     # Virtual engine ID for pipeline parallel.
     virtual_engine: int = 0
     # The number of slots for lookahead decoding.

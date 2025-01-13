@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -16,7 +16,7 @@ class ipex_ops:
 
     @staticmethod
     def _reshape_activation_tensor(
-            x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+            x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         num = x.size(0)
         d = x.size(1) // 2
         x = x.reshape(num, 2, d)

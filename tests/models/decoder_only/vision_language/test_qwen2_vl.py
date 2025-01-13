@@ -1,4 +1,4 @@
-from typing import Any, Optional, Tuple, Type, TypedDict, Union
+from typing import Any, Optional, Type, TypedDict, Union
 
 import numpy.typing as npt
 import pytest
@@ -233,7 +233,7 @@ def batch_make_video_embeddings(
 
 def run_embedding_input_test(
     vllm_runner: Type[VllmRunner],
-    inputs: list[Tuple[list[str], PromptImageInput, PromptVideoInput]],
+    inputs: list[tuple[list[str], PromptImageInput, PromptVideoInput]],
     model: str,
     *,
     dtype: str,
@@ -320,7 +320,7 @@ def test_qwen2_vl_image_embeddings_input(vllm_runner, image_assets, model,
                                          num_logprobs: int) -> None:
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_case: list[Tuple[
+    inputs_per_case: list[tuple[
         list[str], PromptImageInput, PromptVideoInput]] = [(
             [prompt for _ in size_factors],
             [rescale_image_size(image, factor) for factor in size_factors],
@@ -362,7 +362,7 @@ def test_qwen2_vl_multiple_image_embeddings_input(vllm_runner, image_assets,
                                                   num_logprobs: int) -> None:
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_case: list[Tuple[list[str], PromptImageInput,
+    inputs_per_case: list[tuple[list[str], PromptImageInput,
                                 PromptVideoInput]] = [(
                                     [MULTIIMAGE_PROMPT for _ in size_factors],
                                     [[
@@ -410,7 +410,7 @@ def test_qwen2_vl_video_embeddings_input(vllm_runner, video_assets, model,
         for asset in video_assets
     ]
 
-    inputs_per_case: list[Tuple[
+    inputs_per_case: list[tuple[
         list[str], PromptImageInput, PromptVideoInput]] = [(
             [prompt for _ in size_factors],
             [],

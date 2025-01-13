@@ -1,5 +1,5 @@
-from typing import (Callable, Iterable, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Callable, Iterable, Mapping, Optional, Set, TypedDict,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -87,7 +87,7 @@ class AriaVisionModel(nn.Module):
         self,
         pixel_values: torch.Tensor,
         pixel_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         patch_attention_mask = self._create_patch_attention_mask(pixel_mask)
 
         vit_oup = self.vision_model(
@@ -368,7 +368,7 @@ class AriaMoELMModel(LlamaModel):
 
     # Adapted from LlamaModel.load_weights with the modification of adding
     # the expert weights mapping to `stacked_params_mapping`
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -610,7 +610,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def _process_image_input(
         self, image_input: AriaImagePixelInputs
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         assert self.vision_tower is not None
 
         pixel_values = image_input['pixel_values']
@@ -682,7 +682,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
         loader = AutoWeightsLoader(self)
         loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

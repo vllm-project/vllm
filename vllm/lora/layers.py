@@ -1,7 +1,7 @@
 # pylint: disable=unused-argument
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Dict, Optional, Union, cast
 
 import torch
 import torch.nn as nn
@@ -136,7 +136,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def __init__(self, base_layer: VocabParallelEmbedding) -> None:
         super().__init__()
         self.base_layer = base_layer
-        self.embeddings_slice: Optional[Tuple[int, int]]
+        self.embeddings_slice: Optional[tuple[int, int]]
         self.embeddings_weights: Optional[torch.Tensor]
 
     def create_lora_weights(
@@ -276,9 +276,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.base_layer = base_layer
         self.input_size = self.base_layer.input_size
         self.device = _get_lora_device(self.base_layer)
-        self.lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]] = None
+        self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = None
 
-        self.output_slices: Tuple[int, ...]
+        self.output_slices: tuple[int, ...]
         self.tp_size: int
         self.output_size: int
         self.n_slices: int
@@ -345,7 +345,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             self.lora_b_stacked[s_index][index] = 0
             if self.lora_config.bias_enabled:
                 # Make mypy happy
-                self.lora_bias_stacked = cast(Tuple[torch.Tensor, ...],
+                self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
                                               self.lora_bias_stacked)
                 self.lora_bias_stacked[s_index][index] = 0
 
@@ -379,7 +379,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                                    lora_b.T, non_blocking=True)
         if lora_bias is not None:
 
-            self.lora_bias_stacked = cast(Tuple[torch.Tensor, ...],
+            self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
                                           self.lora_bias_stacked)
             assert len(self.lora_bias_stacked)
             self.lora_bias_stacked[0][index, 0, :lora_bias.shape[0]].copy_(
@@ -407,7 +407,7 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def forward(
         self, input_: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward of ReplicatedLinearWithLoRA
 
         Args:
@@ -500,7 +500,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def forward(
         self, input_: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward of ColumnParallelLinear
 
         Args:
@@ -658,7 +658,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                         lora_b_i.T, non_blocking=True)
 
         if lora_bias is not None:
-            self.lora_bias_stacked = cast(Tuple[torch.Tensor, ...],
+            self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
                                           self.lora_bias_stacked)
             for i in range(self.n_slices):
                 if (lora_bias_i := lora_bias[i]) is not None:
@@ -839,7 +839,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def forward(
         self, input_: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward of RowParallelLinear
 
         Args:
@@ -1169,7 +1169,7 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.base_layer(
             positions,
             query,

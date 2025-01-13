@@ -1,6 +1,6 @@
 from functools import cached_property
 from typing import (Any, Dict, Iterable, Literal, Mapping, Optional, Set,
-                    Tuple, TypedDict, Union)
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -301,7 +301,7 @@ class ChameleonAttention(nn.Module):
                               prefix=f"{prefix}.attn")
 
     def _apply_qk_norm(self, q: torch.Tensor,
-                       k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                       k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # reshape for layernorm
         q = q.reshape(-1, self.num_heads, self.head_dim)
         k = k.reshape(-1, self.num_kv_heads, self.head_dim)
@@ -380,7 +380,7 @@ class ChameleonDecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
 
         if residual is None:
             residual = hidden_states
@@ -455,7 +455,7 @@ class ChameleonSwinDecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
 
         residual = hidden_states
         hidden_states = self.self_attn(
@@ -792,7 +792,7 @@ class ChameleonVQVAE(nn.Module):
 
     def encode(
         self, pixel_values: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         hidden_states = self.encoder(pixel_values)
         hidden_states = self.quant_conv(hidden_states)
         quant, emb_loss, indices = self.quantize(hidden_states)
@@ -1083,7 +1083,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)

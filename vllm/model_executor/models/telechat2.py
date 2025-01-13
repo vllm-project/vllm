@@ -17,7 +17,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Iterable, Set, Tuple
+from typing import Iterable, Set
 
 import torch
 
@@ -46,7 +46,7 @@ class TeleChat2Model(LlamaModel):
                 layer.mlp.gate_up_proj.bias = None
                 layer.mlp.gate_up_proj.skip_bias_add = True
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             ('gate_up_proj', 'gate_proj', 0),
@@ -121,7 +121,7 @@ class TeleChat2ForCausalLM(LlamaForCausalLM):
     def _init_model(self, vllm_config: VllmConfig, prefix: str = ""):
         return TeleChat2Model(vllm_config=vllm_config, prefix=prefix)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
 
         loader = AutoWeightsLoader(

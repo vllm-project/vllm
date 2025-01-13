@@ -6,7 +6,7 @@ import dataclasses
 import pickle
 import time
 from collections import deque
-from typing import Any, Deque, Dict, Optional, Sequence, Tuple
+from typing import Any, Deque, Dict, Optional, Sequence
 
 import torch
 from torch.distributed import TCPStore
@@ -59,7 +59,7 @@ def split_tensor_along_last_dim(
 
 
 def get_pp_indices(num_hidden_layers: int, pp_rank: int,
-                   pp_size: int) -> Tuple[int, int]:
+                   pp_size: int) -> tuple[int, int]:
     """Try to evenly distribute layers across partitions.
     If the number of layers is not divisible by the number of partitions,
     the last partition will have the remaining layers.
@@ -111,7 +111,7 @@ class StatelessProcessGroup:
         default_factory=dict)
 
     # A deque to store the data entries, with key and timestamp.
-    entries: Deque[Tuple[str,
+    entries: Deque[tuple[str,
                          float]] = dataclasses.field(default_factory=deque)
 
     def __post_init__(self):

@@ -30,7 +30,7 @@ import dataclasses
 import json
 import random
 import time
-from typing import Optional, Tuple
+from typing import Optional
 
 from transformers import PreTrainedTokenizerBase
 
@@ -76,7 +76,7 @@ def sample_requests_from_dataset(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
-    input_length_range: Tuple[int, int],
+    input_length_range: tuple[int, int],
     fixed_output_len: Optional[int],
 ) -> list[Request]:
     if fixed_output_len is not None and fixed_output_len < 4:
@@ -121,7 +121,7 @@ def sample_requests_from_dataset(
 def sample_requests_from_random(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
-    input_length_range: Tuple[int, int],
+    input_length_range: tuple[int, int],
     fixed_output_len: Optional[int],
     prefix_len: int,
 ) -> list[Request]:

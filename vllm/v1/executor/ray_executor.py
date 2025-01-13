@@ -1,7 +1,7 @@
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -211,7 +211,7 @@ class RayExecutor(Executor):
             distributed_init_method=distributed_init_method,
         )
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """
         Determine the number of available KV blocks.
         
@@ -248,7 +248,7 @@ class RayExecutor(Executor):
         self,
         method: str,
         *args,
-        all_args: Optional[list[Tuple[Any, ...]]] = None,
+        all_args: Optional[list[tuple[Any, ...]]] = None,
         all_kwargs: Optional[list[Dict[str, Any]]] = None,
         **kwargs,
     ) -> Any:

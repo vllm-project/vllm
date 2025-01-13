@@ -5,7 +5,7 @@ typically specific to a small subset of models.
 import re
 import types
 from pathlib import PosixPath
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 import torch
 from PIL.Image import Image
@@ -50,7 +50,7 @@ def fuyu_vllm_to_hf_output(vllm_output: RunnerOutput,
 
 def qwen_vllm_to_hf_output(
         vllm_output: RunnerOutput,
-        model: str) -> Tuple[list[int], str, Optional[SampleLogprobs]]:
+        model: str) -> tuple[list[int], str, Optional[SampleLogprobs]]:
     """Sanitize vllm output [qwen models] to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -61,7 +61,7 @@ def qwen_vllm_to_hf_output(
 
 def qwen2_vllm_to_hf_output(
         vllm_output: RunnerOutput,
-        model: str) -> Tuple[list[int], str, Optional[SampleLogprobs]]:
+        model: str) -> tuple[list[int], str, Optional[SampleLogprobs]]:
     """Sanitize vllm output [qwen2 models] to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -79,7 +79,7 @@ def llava_image_vllm_to_hf_output(vllm_output: RunnerOutput,
 
 def llava_video_vllm_to_hf_output(
         vllm_output: RunnerOutput,
-        model: str) -> Tuple[list[int], str, Optional[SampleLogprobs]]:
+        model: str) -> tuple[list[int], str, Optional[SampleLogprobs]]:
     config = AutoConfig.from_pretrained(model)
     mm_token_id = config.video_token_index
     return _llava_vllm_to_hf_output(vllm_output, model, mm_token_id)

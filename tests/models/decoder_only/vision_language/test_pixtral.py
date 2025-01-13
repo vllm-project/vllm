@@ -5,7 +5,7 @@ Run `pytest tests/models/test_mistral.py`.
 import json
 import uuid
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import pytest
 from mistral_common.multimodal import download_image
@@ -127,7 +127,7 @@ assert FIXTURES_PATH.exists()
 FIXTURE_LOGPROBS_CHAT = FIXTURES_PATH / "pixtral_chat.json"
 FIXTURE_LOGPROBS_ENGINE = FIXTURES_PATH / "pixtral_chat_engine.json"
 
-OutputsLogprobs = list[Tuple[list[int], str, Optional[SampleLogprobs]]]
+OutputsLogprobs = list[tuple[list[int], str, Optional[SampleLogprobs]]]
 
 
 # For the test author to store golden output in JSON

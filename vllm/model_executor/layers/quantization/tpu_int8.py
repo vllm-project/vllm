@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import torch
 from torch.nn import Module
@@ -73,7 +73,7 @@ class TPUInt8LinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
 
     def _quantize_weight(
-            self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+            self, weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         weight_dtype = weight.dtype
         weight = weight.cpu().to(torch.float32)
         n_bit = 8

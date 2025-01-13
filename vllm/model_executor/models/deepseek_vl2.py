@@ -2,8 +2,8 @@
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 import math
 from functools import cached_property, partial
-from typing import (Iterable, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Iterable, Literal, Mapping, Optional, Set, TypedDict,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -653,7 +653,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
 
         loader = AutoWeightsLoader(self)

@@ -1,5 +1,5 @@
 import os
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 import torch_xla.core.xla_model as xm
@@ -94,7 +94,7 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         head_size = self.model_config.get_head_size()
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
@@ -155,8 +155,8 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         head_size = self.model_config.get_head_size()
 
-        self.cpu_cache: list[Tuple[torch.Tensor, torch.Tensor]] = []
-        self.tpu_cache: list[Tuple[torch.Tensor, torch.Tensor]] = []
+        self.cpu_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self.tpu_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
         tpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
             num_gpu_blocks, self.block_size, num_kv_heads, head_size)
         cpu_cache_shape = self.model_runner.attn_backend.get_kv_cache_shape(
@@ -266,10 +266,10 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
 
 def _make_src_to_dst(
-    mapping: list[Tuple[int, int]],
+    mapping: list[tuple[int, int]],
     src_device: Union[torch.device, str],
     dst_device: Union[torch.device, str],
-) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
     if not mapping:
         return None
 

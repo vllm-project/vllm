@@ -1,7 +1,7 @@
 import random
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 from unittest.mock import patch
 
 import pytest
@@ -96,7 +96,7 @@ def populate_loras(
     layer_weights: torch.Tensor,
     generate_embeddings_tensor: int = 0,
     repeats: int = 1,
-) -> Tuple[Dict[int, LoRALayerWeights], Dict[int, list[LoRALayerWeights]]]:
+) -> tuple[Dict[int, LoRALayerWeights], Dict[int, list[LoRALayerWeights]]]:
     """This method populates the lora layers with lora weights.
 
     Args:
@@ -156,11 +156,11 @@ def populate_loras(
 def create_random_inputs(
     active_lora_ids: list[int],
     num_inputs: int,
-    input_size: Tuple[int, ...],
-    input_range: Tuple[float, float],
+    input_size: tuple[int, ...],
+    input_range: tuple[float, float],
     input_type: torch.dtype = torch.int,
     device: torch.device = "cuda"
-) -> Tuple[list[torch.Tensor], list[int], list[int]]:
+) -> tuple[list[torch.Tensor], list[int], list[int]]:
     """Creates random inputs.
 
     Args:

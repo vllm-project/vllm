@@ -5,7 +5,7 @@ import json
 import random
 import time
 from functools import cache
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
 import uvloop
@@ -76,7 +76,7 @@ lora_tokenizer_cache: Dict[int, AnyTokenizer] = {}
 
 def get_random_lora_request(
         args: argparse.Namespace
-) -> Tuple[LoRARequest, Optional[AnyTokenizer]]:
+) -> tuple[LoRARequest, Optional[AnyTokenizer]]:
     global lora_tokenizer_cache
     lora_id = random.randint(1, args.max_loras)
     lora_request = LoRARequest(lora_name=str(lora_id),

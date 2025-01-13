@@ -15,7 +15,7 @@
 
 import math
 from typing import (Dict, Iterable, Literal, Mapping, NamedTuple, Optional,
-                    Set, Tuple, TypedDict, Union)
+                    Set, TypedDict, Union)
 
 import torch
 import torch.utils.checkpoint
@@ -136,7 +136,7 @@ def _resize_output_size(height: int,
                         width: int,
                         max_len: Optional[int] = None,
                         min_len: Optional[int] = 1,
-                        max_size: Optional[int] = None) -> Tuple[int, int]:
+                        max_size: Optional[int] = None) -> tuple[int, int]:
     # Set default value for max_len if not provided
     max_len = max(height, width) if max_len is None else max_len
     aspect_ratio = width / height
@@ -165,10 +165,10 @@ def _resize_output_size(height: int,
 
 
 def _get_resize_output_image_size(
-    image_size: Tuple[int, int],
+    image_size: tuple[int, int],
     resolution_max_side: int,
     max_image_size: int = 1820,
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     if resolution_max_side > max_image_size:
         raise ValueError(
             "`resolution_max_side` cannot be larger than `max_image_size`")
@@ -762,7 +762,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

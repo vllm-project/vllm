@@ -2,7 +2,7 @@ import asyncio
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import msgspec
 
@@ -299,7 +299,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
         method: str,
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
-        all_args: Optional[list[Tuple[Any, ...]]] = None,
+        all_args: Optional[list[tuple[Any, ...]]] = None,
         all_kwargs: Optional[list[Dict[str, Any]]] = None,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,

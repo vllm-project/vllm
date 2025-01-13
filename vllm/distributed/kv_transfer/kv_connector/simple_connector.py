@@ -7,7 +7,7 @@ MooncakePipe.
 
 But the logic can be extended to support other pipe and lookup buffer.
 """
-from typing import TYPE_CHECKING, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
@@ -201,7 +201,7 @@ class SimpleConnector(KVConnectorBase):
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: list[torch.Tensor]
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+    ) -> tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
 
         # When bypass_model_exec is set to False, it means that at least for one

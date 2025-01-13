@@ -2,7 +2,7 @@ import dataclasses
 import os
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Set, Tuple, Type, Union
+from typing import Any, Dict, Optional, Set, Type, Union
 
 import torch
 
@@ -55,14 +55,14 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
 
         The implementation may run profiling or other heuristics to determine
         the size of caches.
 
-        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
+        Returns a tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
         are blocks that are "active" on the device and can be appended to.
         num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
         appended to.
@@ -241,7 +241,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def _get_worker_input_from_broadcast(
         self
-    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
+    ) -> Optional[tuple[BroadcastableModelInput, WorkerInput, Dict[
             str, torch.Tensor]]]:
         """ Get the worker input from the broadcasted tensor dict. """
         assert self.do_metadata_broadcast
@@ -261,7 +261,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
-    ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
+    ) -> tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
         """ Get the driver input and broadcast it to other workers.  """
         assert self.is_driver_worker
 
@@ -291,7 +291,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
+    ) -> Optional[tuple[BroadcastableModelInput, WorkerInput, Dict[
             str, torch.Tensor]]]:
         """
         Prepare the inputs to ModelRunner and workers.

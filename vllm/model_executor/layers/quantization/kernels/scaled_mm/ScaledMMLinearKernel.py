@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -22,7 +22,7 @@ class ScaledMMLinearKernel(ABC):
     @classmethod
     @abstractmethod
     def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+            cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
         raise NotImplementedError
 
     def __init__(self, c: ScaledMMLinearLayerConfig, w_q_param_name: str,
@@ -49,7 +49,7 @@ class ScaledMMLinearKernel(ABC):
 
     def _get_weight_params(
             self, layer: torch.nn.Module
-    ) -> Tuple[torch.Tensor,  # weight
+    ) -> tuple[torch.Tensor,  # weight
                torch.Tensor,  # weight_scale
                Optional[torch.Tensor],  # input_scale, 
                Optional[torch.Tensor],  # input_zp

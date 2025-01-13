@@ -1,6 +1,6 @@
 """Attention layer ROCm GPUs."""
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Dict, Optional, Type
 
 import torch
 
@@ -55,7 +55,7 @@ class ROCmFlashAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
                                                  num_kv_heads, head_size)
 

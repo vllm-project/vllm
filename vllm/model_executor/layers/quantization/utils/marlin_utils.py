@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy
 import torch
@@ -50,7 +50,7 @@ def _check_marlin_supported(
         quant_type: ScalarType,
         group_size: Optional[int],
         has_zp: bool,
-        device_capability: Optional[int] = None) -> Tuple[bool, Optional[str]]:
+        device_capability: Optional[int] = None) -> tuple[bool, Optional[str]]:
 
     if device_capability is None:
         capability_tuple = current_platform.get_device_capability()
@@ -123,7 +123,7 @@ def verify_marlin_supports_shape(output_size_per_partition: int,
 def check_marlin_supports_shape(output_size_per_partition: int,
                                 input_size_per_partition: int,
                                 input_size: int, group_size: int) \
-                                    -> Tuple[bool, Optional[str]]:
+                                    -> tuple[bool, Optional[str]]:
     try:
         verify_marlin_supports_shape(output_size_per_partition,
                                      input_size_per_partition, input_size,
@@ -167,7 +167,7 @@ def marlin_make_empty_zp(device: torch.device) -> torch.Tensor:
 
 
 def marlin_sort_g_idx(
-        g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        g_idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     g_idx_sort_indices = torch.argsort(g_idx).to(torch.int)
     return g_idx[g_idx_sort_indices], g_idx_sort_indices
 

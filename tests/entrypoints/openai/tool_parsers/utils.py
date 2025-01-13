@@ -1,4 +1,4 @@
-from typing import Iterable, Tuple, Union
+from typing import Iterable, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
@@ -70,7 +70,7 @@ def run_tool_extraction(
     request: Union[ChatCompletionRequest, None] = None,
     streaming: bool = False,
     assert_one_tool_per_delta: bool = True,
-) -> Tuple[Union[str, None], list[ToolCall]]:
+) -> tuple[Union[str, None], list[ToolCall]]:
     if streaming:
         reconstructor = run_tool_extraction_streaming(
             tool_parser,

@@ -6,8 +6,7 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import (Any, Callable, Dict, Generator, Iterable, Optional, Tuple,
-                    Union)
+from typing import (Any, Callable, Dict, Generator, Iterable, Optional, Union)
 
 import filelock
 import gguf
@@ -360,7 +359,7 @@ _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elap
 def np_cache_weights_iterator(
     model_name_or_path: str, cache_dir: Optional[str], hf_folder: str,
     hf_weights_files: list[str]
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model np files.
 
     Will dump the model weights to numpy files if they are not already dumped.
@@ -404,7 +403,7 @@ def np_cache_weights_iterator(
 
 def safetensors_weights_iterator(
     hf_weights_files: list[str]
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     enable_tqdm = not torch.distributed.is_initialized(
     ) or torch.distributed.get_rank() == 0
@@ -422,7 +421,7 @@ def safetensors_weights_iterator(
 
 def runai_safetensors_weights_iterator(
     hf_weights_files: list[str]
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     enable_tqdm = not torch.distributed.is_initialized(
     ) or torch.distributed.get_rank() == 0
@@ -439,7 +438,7 @@ def runai_safetensors_weights_iterator(
 
 def pt_weights_iterator(
     hf_weights_files: list[str]
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model bin/pt files."""
     enable_tqdm = not torch.distributed.is_initialized(
     ) or torch.distributed.get_rank() == 0
@@ -466,7 +465,7 @@ def get_gguf_extra_tensor_names(
 
 def gguf_quant_weights_iterator(
     gguf_file: str, gguf_to_hf_name_map: Dict[str, str]
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+) -> Generator[tuple[str, torch.Tensor], None, None]:
     """
     Iterate over the quant weights in the model gguf files and convert
     them to torch tensors
@@ -498,7 +497,7 @@ def gguf_quant_weights_iterator(
 
 def kv_cache_scales_loader(
         filename: str, tp_rank: int, tp_size: int, num_hidden_layers: int,
-        model_type: Optional[str]) -> Iterable[Tuple[int, float]]:
+        model_type: Optional[str]) -> Iterable[tuple[int, float]]:
     """
     A simple utility to read in KV cache scaling factors that have been
     previously serialized to disk. Used by the model to populate the appropriate

@@ -1,4 +1,4 @@
-from typing import Set, Tuple
+from typing import Set
 
 import torch
 
@@ -14,7 +14,7 @@ def apply_min_token_penalties(logits: torch.Tensor,
     Applies minimum token penalty by setting the logits of the stop tokens
     to -inf.
     """
-    min_tokens_logits_to_penalize: list[Tuple[int, int]] = []
+    min_tokens_logits_to_penalize: list[tuple[int, int]] = []
     for index, min_token in enumerate(min_tokens):
         if len(output_token_ids[index]) < min_token:
             for stop_token_id in stop_token_ids[index]:

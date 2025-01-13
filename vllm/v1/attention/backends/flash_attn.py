@@ -1,6 +1,6 @@
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any, Dict, Optional, Type
 
 import numpy as np
 import torch
@@ -37,7 +37,7 @@ class FlashAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
@@ -309,7 +309,7 @@ def cascade_attention(
     max_kv_len: int,
     softmax_scale: float,
     alibi_slopes: Optional[torch.Tensor],
-    sliding_window: Tuple[int, int],
+    sliding_window: tuple[int, int],
     logits_soft_cap: float,
     block_table: torch.Tensor,
     common_prefix_len: int,

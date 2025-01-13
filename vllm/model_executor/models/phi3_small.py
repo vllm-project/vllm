@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Union
 
 import torch
 from torch import nn
@@ -231,8 +231,8 @@ class Phi3SmallSelfAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
-               Optional[Tuple[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[tuple[torch.Tensor]]]:
         qkv, _ = self.query_key_value(hidden_states)
 
         qkv = qkv.view(qkv.shape[:-1] +
@@ -462,7 +462,7 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
                                    sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
 
         params_dict = dict(self.named_parameters())

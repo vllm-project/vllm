@@ -1,7 +1,6 @@
 import enum
 from abc import ABC, abstractmethod
 from typing import Sequence as GenericSequence
-from typing import Tuple
 
 from vllm.sequence import Sequence, SequenceGroup
 from vllm.utils import Device
@@ -58,7 +57,7 @@ class BlockSpaceManager(ABC):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
-    ) -> list[Tuple[int, int]]:
+    ) -> list[tuple[int, int]]:
         pass
 
     @abstractmethod
@@ -71,7 +70,7 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def swap_in(self, seq_group: SequenceGroup) -> list[Tuple[int, int]]:
+    def swap_in(self, seq_group: SequenceGroup) -> list[tuple[int, int]]:
         pass
 
     @abstractmethod
@@ -79,7 +78,7 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def swap_out(self, seq_group: SequenceGroup) -> list[Tuple[int, int]]:
+    def swap_out(self, seq_group: SequenceGroup) -> list[tuple[int, int]]:
         pass
 
     @abstractmethod

@@ -3,8 +3,8 @@ import os
 import tempfile
 from collections import UserList
 from enum import Enum
-from typing import (Any, Callable, Dict, Optional, Tuple, Type, TypedDict,
-                    TypeVar, Union)
+from typing import (Any, Callable, Dict, Optional, Type, TypedDict, TypeVar,
+                    Union)
 
 import numpy as np
 import pytest
@@ -47,7 +47,7 @@ _M = TypeVar("_M")
 _PromptMultiModalInput = Union[list[_M], list[list[_M]]]
 
 PromptImageInput = _PromptMultiModalInput[Image.Image]
-PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
+PromptAudioInput = _PromptMultiModalInput[tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 
@@ -384,13 +384,13 @@ class HfRunner:
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
         **kwargs: Any,
-    ) -> list[Tuple[list[list[int]], list[str]]]:
+    ) -> list[tuple[list[list[int]], list[str]]]:
         all_inputs = self.get_inputs(prompts,
                                      images=images,
                                      videos=videos,
                                      audios=audios)
 
-        outputs: list[Tuple[list[list[int]], list[str]]] = []
+        outputs: list[tuple[list[list[int]], list[str]]] = []
         for inputs in all_inputs:
             output_ids = self.model.generate(
                 **self.wrap_device(inputs, device=self.model.device.type),
@@ -414,7 +414,7 @@ class HfRunner:
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
         **kwargs: Any,
-    ) -> list[Tuple[list[int], str]]:
+    ) -> list[tuple[list[int], str]]:
         outputs = self.generate(prompts,
                                 do_sample=False,
                                 max_new_tokens=max_tokens,
@@ -431,7 +431,7 @@ class HfRunner:
         prompts: list[str],
         beam_width: int,
         max_tokens: int,
-    ) -> list[Tuple[list[list[int]], list[str]]]:
+    ) -> list[tuple[list[list[int]], list[str]]]:
         outputs = self.generate(prompts,
                                 do_sample=False,
                                 max_new_tokens=max_tokens,
@@ -479,7 +479,7 @@ class HfRunner:
 
     def _hidden_states_to_seq_logprobs(
         self,
-        hidden_states: Tuple[Tuple[torch.Tensor, ...], ...],
+        hidden_states: tuple[tuple[torch.Tensor, ...], ...],
     ) -> list[torch.Tensor]:
         output_embeddings = self.model.get_output_embeddings()
 
@@ -499,9 +499,9 @@ class HfRunner:
 
     def _hidden_states_to_logprobs(
         self,
-        hidden_states: Tuple[Tuple[torch.Tensor, ...], ...],
+        hidden_states: tuple[tuple[torch.Tensor, ...], ...],
         num_logprobs: int,
-    ) -> Tuple[list[Dict[int, float]], int]:
+    ) -> tuple[list[Dict[int, float]], int]:
         seq_logprobs = self._hidden_states_to_seq_logprobs(hidden_states)
         output_len = len(hidden_states)
 
@@ -734,7 +734,7 @@ class VllmRunner:
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
-    ) -> list[Tuple[list[list[int]], list[str]]]:
+    ) -> list[tuple[list[list[int]], list[str]]]:
         inputs = self.get_inputs(prompts,
                                  images=images,
                                  videos=videos,
@@ -743,7 +743,7 @@ class VllmRunner:
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
 
-        outputs: list[Tuple[list[list[int]], list[str]]] = []
+        outputs: list[tuple[list[list[int]], list[str]]] = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt
             prompt_ids = req_output.prompt_token_ids
@@ -823,7 +823,7 @@ class VllmRunner:
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
-    ) -> list[Tuple[list[int], str]]:
+    ) -> list[tuple[list[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts,
                                 greedy_params,
@@ -886,7 +886,7 @@ class VllmRunner:
         prompts: Union[list[str], list[list[int]]],
         beam_width: int,
         max_tokens: int,
-    ) -> list[Tuple[list[list[int]], list[str]]]:
+    ) -> list[tuple[list[list[int]], list[str]]]:
         if is_list_of(prompts, str, check="all"):
             prompts = [TextPrompt(prompt=prompt) for prompt in prompts]
         else:

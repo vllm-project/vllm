@@ -22,7 +22,7 @@
 # limitations under the License.
 """Inference-only DeciLM model compatible with HuggingFace weights."""
 
-from typing import Iterable, Set, Tuple
+from typing import Iterable, Set
 
 import torch
 
@@ -57,7 +57,7 @@ class DeciLMForCausalLM(LlamaForCausalLM):
         delattr(config, "num_key_value_heads_per_layer")
         super().__init__(vllm_config=vllm_config)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)

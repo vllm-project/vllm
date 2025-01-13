@@ -27,7 +27,7 @@ from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Union)
 from unittest.mock import patch
 
 import torch
@@ -54,13 +54,13 @@ TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
 def _split_tensor_dict(
     tensor_dict: Dict[str, Union[torch.Tensor, Any]]
-) -> Tuple[list[Tuple[str, Any]], list[torch.Tensor]]:
+) -> tuple[list[tuple[str, Any]], list[torch.Tensor]]:
     """Split the tensor dictionary into two parts:
     1. A list of (key, value) pairs. If the value is a tensor, it is replaced
          by its metadata.
     2. A list of tensors.
     """
-    metadata_list: list[Tuple[str, Any]] = []
+    metadata_list: list[tuple[str, Any]] = []
     tensor_list: list[torch.Tensor] = []
     for key, value in tensor_dict.items():
         if isinstance(value, torch.Tensor):
@@ -588,7 +588,7 @@ class GroupCoordinator:
 
         rank_in_group = self.rank_in_group
         if rank_in_group == src:
-            metadata_list: list[Tuple[Any, Any]] = []
+            metadata_list: list[tuple[Any, Any]] = []
             assert isinstance(
                 tensor_dict,
                 dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
@@ -678,7 +678,7 @@ class GroupCoordinator:
             dst = (self.rank_in_group + 1) % self.world_size
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
-        metadata_list: list[Tuple[Any, Any]] = []
+        metadata_list: list[tuple[Any, Any]] = []
         assert isinstance(
             tensor_dict,
             dict), f"Expecting a dictionary, got {type(tensor_dict)}"

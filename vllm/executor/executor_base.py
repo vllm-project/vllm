@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Optional, Set, Tuple
+from typing import Optional, Set
 
 from vllm.config import VllmConfig
 from vllm.lora.request import LoRARequest
@@ -40,7 +40,7 @@ class ExecutorBase(ABC):
         pass
 
     @abstractmethod
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
 
@@ -48,7 +48,7 @@ class ExecutorBase(ABC):
         ExecutorBase may require modification of the result, e.g. to ensure the
         selected cache sizes are compatible with all workers.
 
-        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
+        Returns a tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
         are blocks that are "active" on the device and can be appended to.
         num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
         appended to.

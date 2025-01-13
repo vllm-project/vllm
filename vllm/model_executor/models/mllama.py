@@ -13,8 +13,8 @@
 # limitations under the License.
 """PyTorch Mllama model."""
 import math
-from typing import (Iterable, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Iterable, Literal, Mapping, Optional, Set, TypedDict,
+                    Union)
 
 import numpy as np
 import torch
@@ -279,8 +279,8 @@ class ColumnParallelConv2dPatch(torch.nn.Module):
         self,
         in_channels: int,
         out_channels: int,
-        kernel_size: Union[int, Tuple[int, int]],
-        stride: Union[int, Tuple[int, int]],
+        kernel_size: Union[int, tuple[int, int]],
+        stride: Union[int, tuple[int, int]],
         bias: bool = False,
     ) -> None:
         super().__init__()
@@ -512,7 +512,7 @@ class MllamaVisionEncoder(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-    ) -> Union[Tuple, BaseModelOutput]:
+    ) -> Union[tuple, BaseModelOutput]:
         encoder_states = ()
 
         for i, encoder_layer in enumerate(self.layers):
@@ -784,7 +784,7 @@ class MllamaTextCrossAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
-        kv_range_for_decode: Optional[list[Tuple[int, int]]],
+        kv_range_for_decode: Optional[list[tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
@@ -826,7 +826,7 @@ class MllamaTextCrossAttention(nn.Module):
         v: torch.Tensor,
         kv_cache: torch.Tensor,
         attention_mask: torch.Tensor,
-        kv_range_for_decode: list[Tuple[int, int]],
+        kv_range_for_decode: list[tuple[int, int]],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         # Skip writing kv-cache for the initial profiling run.
@@ -935,7 +935,7 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
         hidden_states: torch.Tensor,
         cross_attention_states: torch.Tensor,
         cross_attention_mask: torch.Tensor,
-        kv_range_for_decode: Optional[list[Tuple[int, int]]],
+        kv_range_for_decode: Optional[list[tuple[int, int]]],
         full_text_row_masked_out_mask: torch.Tensor,
         kv_cache: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
@@ -1010,8 +1010,8 @@ class MllamaTextModel(nn.Module):
         positions: Optional[torch.LongTensor],
         cross_attention_states: Optional[torch.LongTensor],
         cross_attention_mask: Optional[torch.LongTensor],
-        kv_range_for_decode: Optional[list[Tuple[int, int]]],
-        full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor,
+        kv_range_for_decode: Optional[list[tuple[int, int]]],
+        full_text_row_masked_out_mask: Optional[tuple[torch.Tensor,
                                                       torch.Tensor]],
         kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
@@ -1080,8 +1080,8 @@ class MllamaForCausalLM(nn.Module):
         positions: Optional[torch.LongTensor],
         cross_attention_states: Optional[torch.LongTensor],
         cross_attention_mask: Optional[torch.LongTensor],
-        kv_range_for_decode: Optional[list[Tuple[int, int]]],
-        full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor,
+        kv_range_for_decode: Optional[list[tuple[int, int]]],
+        full_text_row_masked_out_mask: Optional[tuple[torch.Tensor,
                                                       torch.Tensor]],
         kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
@@ -1275,7 +1275,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         image_inputs: MllamaImagePixelInputs,
         attn_metadata: AttentionMetadata,
         actual_encoder_seq_lens: list[int],
-    ) -> Tuple[torch.Tensor]:
+    ) -> tuple[torch.Tensor]:
         # NOTE: llama's reference implementation runs vision model on CPU
         pixel_values = image_inputs['data']
         aspect_ratio_ids = image_inputs['aspect_ratio_ids']
@@ -1302,7 +1302,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         num_tiles: list[list[int]],
         num_tokens_per_tile: int,
         dtype: torch.dtype,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         token_ids = input_ids.tolist()
         start = 0
         batch_token_ids = []
@@ -1356,7 +1356,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         **kwargs: object,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+    ) -> Union[tuple, CausalLMOutputWithPast]:
         if attn_metadata.num_prefill_tokens > 0 and \
             attn_metadata.num_decode_tokens > 0:
             raise ValueError("Chunk prefill not supported")
@@ -1417,7 +1417,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         return outputs
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -1473,7 +1473,7 @@ def convert_sparse_cross_attention_mask_to_dense(
     sparse_mask: list[list[list[int]]],
     num_tiles: list[list[int]],
     lengths: list[int],
-) -> Tuple[np.ndarray, list[Tuple[int, int]]]:
+) -> tuple[np.ndarray, list[tuple[int, int]]]:
     total_length = sum(lengths)
     total_tiles = sum([sum(tiles) for tiles in num_tiles])
     dense_mask = np.zeros(shape=(total_length, total_tiles), dtype=np.int64)

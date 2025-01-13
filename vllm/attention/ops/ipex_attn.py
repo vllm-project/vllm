@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 try:
     import intel_extension_for_pytorch.llm.modules as ipex_modules
@@ -24,7 +24,7 @@ class _PagedAttention:
         num_kv_heads: int,
         head_size: int,
         *args,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return (2, num_blocks, block_size * num_kv_heads * head_size)
 
     @staticmethod
@@ -33,7 +33,7 @@ class _PagedAttention:
         num_kv_heads: int,
         head_size: int,
         *args,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         x = 16 // kv_cache.element_size()
         num_blocks = kv_cache.shape[1]
 
@@ -132,7 +132,7 @@ class _IPEXPagedAttention(_PagedAttention):
         num_kv_heads: int,
         head_size: int,
         *args,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         num_blocks = kv_cache.shape[1]
 
         key_cache = kv_cache[0]

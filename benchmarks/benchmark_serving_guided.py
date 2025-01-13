@@ -30,7 +30,7 @@ import random
 import time
 import warnings
 from dataclasses import dataclass
-from typing import AsyncGenerator, Optional, Tuple
+from typing import AsyncGenerator, Optional
 
 import datasets
 import numpy as np
@@ -65,22 +65,22 @@ class BenchmarkMetrics:
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
-    percentiles_ttft_ms: list[Tuple[float, float]]
+    percentiles_ttft_ms: list[tuple[float, float]]
     mean_tpot_ms: float
     median_tpot_ms: float
     std_tpot_ms: float
-    percentiles_tpot_ms: list[Tuple[float, float]]
+    percentiles_tpot_ms: list[tuple[float, float]]
     mean_itl_ms: float
     median_itl_ms: float
     std_itl_ms: float
-    percentiles_itl_ms: list[Tuple[float, float]]
+    percentiles_itl_ms: list[tuple[float, float]]
     # E2EL stands for end-to-end latency per request.
     # It is the time taken on the client side from sending
     # a request to receiving a complete response.
     mean_e2el_ms: float
     median_e2el_ms: float
     std_e2el_ms: float
-    percentiles_e2el_ms: list[Tuple[float, float]]
+    percentiles_e2el_ms: list[tuple[float, float]]
 
 
 @dataclasses.dataclass
@@ -216,7 +216,7 @@ async def get_request(
     input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
-) -> AsyncGenerator[Tuple[int, SampleRequest], None]:
+) -> AsyncGenerator[tuple[int, SampleRequest], None]:
     """
     Asynchronously generates requests at a specified rate 
     with OPTIONAL burstiness.
@@ -257,13 +257,13 @@ async def get_request(
 
 
 def calculate_metrics(
-    input_requests: list[Tuple[str, int, int]],
+    input_requests: list[tuple[str, int, int]],
     outputs: list[RequestFuncOutput],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
-) -> Tuple[BenchmarkMetrics, list[int]]:
+) -> tuple[BenchmarkMetrics, list[int]]:
     actual_output_lens: list[int] = []
     total_input = 0
     completed = 0

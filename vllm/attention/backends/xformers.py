@@ -1,6 +1,6 @@
 """Attention layer with xFormers and PagedAttention."""
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any, Dict, Optional, Type
 
 import torch
 from xformers import ops as xops
@@ -50,7 +50,7 @@ class XFormersBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
                                                  num_kv_heads, head_size)
 

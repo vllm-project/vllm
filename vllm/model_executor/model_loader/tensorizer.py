@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass
 from functools import partial
-from typing import BinaryIO, Generator, Optional, Tuple, Type, Union
+from typing import BinaryIO, Generator, Optional, Type, Union
 
 import torch
 from torch import nn
@@ -362,7 +362,7 @@ class TensorizerAgent:
 
 def tensorizer_weights_iterator(
     tensorizer_args: "TensorizerArgs"
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+) -> Generator[tuple[str, torch.Tensor], None, None]:
     logger.warning("Deserializing HuggingFace models is not optimized for "
                    "loading on vLLM, as tensorizer is forced to load to CPU. "
                    "Consider deserializing a vLLM model instead for faster "

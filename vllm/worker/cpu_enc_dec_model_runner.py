@@ -1,5 +1,5 @@
 import dataclasses
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Type, cast
+from typing import TYPE_CHECKING, Any, Dict, Optional, Type, cast
 
 import torch
 
@@ -120,7 +120,7 @@ class CPUEncoderDecoderModelRunner(
         self,
         seq_group_metadata_list: list[SequenceGroupMetadata],
         model_input: EncoderDecoderModelInputForCPU,
-    ) -> Tuple[AttentionMetadata, Optional[torch.Tensor],
+    ) -> tuple[AttentionMetadata, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """Helper method to prepare the encoder- and cross-attn-related
         model inputs based on a given sequence group. These additional inputs

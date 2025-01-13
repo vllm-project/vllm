@@ -1,5 +1,5 @@
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import triton
@@ -35,7 +35,7 @@ def apply_w8a8_block_fp8_linear(
 def input_to_float8(
     x: torch.Tensor,
     dtype: torch.dtype = torch.float8_e4m3fn
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """This function quantizes input values to float8 values "
     "with tensor-wise quantization."""
     finfo = torch.finfo(dtype)
@@ -50,7 +50,7 @@ def block_quant_to_tensor_quant(
     x_q_block: torch.Tensor,
     x_s: torch.Tensor,
     block_size: list[int],
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """This function converts block-wise quantization to tensor-wise
     quantization. The inputs are block-wise quantization tensor `x_q_block`,
     block-wise quantization scale and the block size.
@@ -126,7 +126,7 @@ def per_token_group_quant_fp8(
     group_size: int,
     eps: float = 1e-10,
     dtype: torch.dtype = torch.float8_e4m3fn,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
     It converts the tensor values into signed float8 values and returns the
     quantized tensor along with the scaling factor used for quantization.
@@ -137,7 +137,7 @@ def per_token_group_quant_fp8(
         dtype: The dype of output tensor. Note that only `torch.float8_e4m3fn`
         is supported for now.
     Returns:
-        Tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
+        tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
         scaling factor for quantization.
     """
     assert (x.shape[-1] % group_size == 0), (

@@ -1,6 +1,6 @@
 from array import array
 from itertools import chain, count
-from typing import Iterator, Optional, Tuple
+from typing import Iterator, Optional
 
 import torch
 
@@ -112,7 +112,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         seq_group_metadata_list: list[SequenceGroupMetadata],
         proposal_token_ids_list: list[list[TokenId]],
         proposal_lens_list: list[int],
-    ) -> Tuple[list[int], list[int], list[SequenceGroupMetadata], int]:
+    ) -> tuple[list[int], list[int], list[SequenceGroupMetadata], int]:
         """Given the input sequences and potentially multiple corresponding
         proposal tokens, create a new batch where each sequence has a single
         query token.
@@ -148,7 +148,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         target_sampler_output: SamplerOutput, proposals: SpeculativeProposals,
         num_scoring_tokens: int, non_spec_indices: list[int],
         spec_indices: list[int], k: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
                Optional[torch.Tensor]]:
         """Contract the expanded batch back into its original size.
         This maps the scores of speculative tokens back to their original
@@ -225,7 +225,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         self,
         target_sampler_output: SamplerOutput,
         proposals: SpeculativeProposals,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
                Optional[torch.Tensor]]:
         """Contract the expanded batch back into its original size.
         This maps the scores of speculative tokens back to their original
@@ -374,7 +374,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
     @staticmethod
     def _split_scoring_output(
         sampler_output: SamplerOutput, num_scoring_tokens: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
                Optional[torch.Tensor], torch.Tensor, torch.Tensor,
                torch.Tensor, Optional[torch.Tensor]]:
         """Split the target model output into speculative and non-speculative

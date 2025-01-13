@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 def compute_meta(
     token_lora_tensor: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, bool]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, bool]:
     """
     Get the information required for the sgmv kernel. With the  features:
     1. If consecutive requests in the batch use the same LoRA, this function
@@ -47,7 +47,7 @@ def convert_mapping(
     extra_vocab_size: int,
     device: torch.device,
     long_lora_context: Optional["LongContextLoRAContext"] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
            Optional[torch.Tensor], list[int]]:
     """Converts LoRAMapping to index tensors.
 

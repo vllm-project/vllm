@@ -1,7 +1,7 @@
 import itertools
 import random
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 from unittest.mock import Mock, patch
 
 import pytest
@@ -28,7 +28,7 @@ class MockLogitsSampler(Sampler):
 
 def _prepare_test(
         batch_size: int
-) -> Tuple[torch.Tensor, torch.Tensor, MockLogitsSampler]:
+) -> tuple[torch.Tensor, torch.Tensor, MockLogitsSampler]:
     input_tensor = torch.rand((batch_size, 1024), dtype=torch.float16)
     fake_logits = torch.full((batch_size, VOCAB_SIZE),
                              1e-2,

@@ -1,4 +1,4 @@
-from typing import Set, Tuple
+from typing import Set
 
 import numpy as np
 import pytest
@@ -85,7 +85,7 @@ def _create_default_sampling_metadata(
 def _generate_min_token_penalties_and_stop_tokens(
     num_output_tokens: int, batch_size: int, vocab_size: int,
     batch_indices_for_min_token_penalty: list[int]
-) -> Tuple[list[int], list[Set[int]]]:
+) -> tuple[list[int], list[Set[int]]]:
     """
     Generates and returns a list of minimum token penalties (`min_tokens`) 
     and a corresponding list of stop token IDs (`stop_token_ids`) for each 
@@ -116,7 +116,7 @@ def _generate_min_token_penalties_and_stop_tokens(
 
 def _create_weighted_output_token_list(
         batch_size: int,
-        vocab_size: int) -> Tuple[list[list[int]], list[list[int]]]:
+        vocab_size: int) -> tuple[list[list[int]], list[list[int]]]:
     """
     Creates an output token list where each token occurs a distinct 
     number of times.
@@ -126,7 +126,7 @@ def _create_weighted_output_token_list(
     list, each with a different frequency.
 
     Returns:
-        Tuple[list[list[int]], list[list[int]]]:
+        tuple[list[list[int]], list[list[int]]]:
             - The first element is the output token list, where each sublist 
               corresponds to a batch and contains tokens with weighted 
               frequencies.

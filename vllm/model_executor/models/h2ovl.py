@@ -6,7 +6,7 @@
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
 from functools import partial
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 from PIL import Image
@@ -34,7 +34,7 @@ def calculate_num_blocks(
     image_size: int,
     use_thumbnail: bool,
     prior_aspect_ratio=None,
-) -> Tuple[int, int, int, Tuple[int, int]]:
+) -> tuple[int, int, int, tuple[int, int]]:
     aspect_ratio = orig_width / orig_height
 
     # calculate the existing image aspect ratio
@@ -73,8 +73,8 @@ def dynamic_preprocess(
     max_num: int,
     image_size: int,
     use_thumbnail: bool,
-    prior_aspect_ratio: Optional[Tuple[int, int]] = None,
-) -> Tuple[list[Image.Image], Tuple[int, int]]:
+    prior_aspect_ratio: Optional[tuple[int, int]] = None,
+) -> tuple[list[Image.Image], tuple[int, int]]:
     orig_width, orig_height = image.size
 
     # calculate the number of blocks based on prior aspect ratio if available
@@ -114,8 +114,8 @@ def load_image(
     min_num=1,
     max_num=6,
     use_thumbnail=True,
-    prior_aspect_ratio: Optional[Tuple[int, int]] = None,
-) -> Tuple[torch.Tensor, Tuple[int, int]]:
+    prior_aspect_ratio: Optional[tuple[int, int]] = None,
+) -> tuple[torch.Tensor, tuple[int, int]]:
     transform = build_transform(input_size=input_size)
     images, target_aspect_ratio = dynamic_preprocess(
         image,

@@ -4,7 +4,7 @@
 
 import gc
 import os
-from typing import Optional, Set, Tuple, Type
+from typing import Optional, Set, Type
 
 import habana_frameworks.torch as htorch  # noqa:F401
 import torch
@@ -125,7 +125,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         self.model_runner.load_model()
 
     @torch.inference_mode()
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
 
@@ -396,11 +396,11 @@ class HPUCacheEngine(CacheEngine):
         self,
         num_blocks: int,
         device: str,
-    ) -> list[Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         """Allocates KV cache on the specified device."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
-        kv_cache: list[Tuple[torch.Tensor, torch.Tensor]] = []
+        kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
         for _ in range(self.num_attention_layers):
             key_cache = torch.zeros(kv_cache_shape,
                                     dtype=self.dtype,

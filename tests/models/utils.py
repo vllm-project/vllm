@@ -1,5 +1,5 @@
 import warnings
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import Dict, Optional, Sequence, Union
 
 import torch
 
@@ -7,7 +7,7 @@ from vllm.config import ModelConfig, TaskOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
-TokensText = Tuple[list[int], str]
+TokensText = tuple[list[int], str]
 
 
 def check_outputs_equal(
@@ -44,7 +44,7 @@ def check_outputs_equal(
 # * List of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TokensTextLogprobs = Tuple[list[int], str, Optional[Union[list[Dict[int,
+TokensTextLogprobs = tuple[list[int], str, Optional[Union[list[Dict[int,
                                                                     float]],
                                                           SampleLogprobs]]]
 
@@ -55,7 +55,7 @@ TokensTextLogprobs = Tuple[list[int], str, Optional[Union[list[Dict[int,
 # * Optional list of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TextTextLogprobs = Tuple[list[str], str, Optional[Union[list[Dict[str, float]],
+TextTextLogprobs = tuple[list[str], str, Optional[Union[list[Dict[str, float]],
                                                         list[Dict[str,
                                                                   Logprob]]]]]
 
@@ -66,7 +66,7 @@ TextTextLogprobs = Tuple[list[str], str, Optional[Union[list[Dict[str, float]],
 # * Optional list of top prompt logprobs for each prompt token
 #
 # Allows prompt logprobs to be requested.
-TokensTextLogprobsPromptLogprobs = Tuple[
+TokensTextLogprobsPromptLogprobs = tuple[
     list[int], str, Optional[Union[list[Dict[int, float]], SampleLogprobs]],
     Optional[Union[list[Optional[Dict[int, float]]], PromptLogprobs]]]
 

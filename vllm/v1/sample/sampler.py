@@ -1,5 +1,4 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -107,7 +106,7 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         logprobs = logits.log_softmax(dim=-1, dtype=torch.float32)
         # FIXME: Mask the sampled token_id, get topk logprobs,
         # and concatenate the topk with the sampled token_id.

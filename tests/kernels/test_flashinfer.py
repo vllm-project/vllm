@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 import flashinfer
 import pytest
@@ -77,7 +77,7 @@ def ref_paged_attn(
 @torch.inference_mode
 def test_flashinfer_decode_with_paged_kv(
     kv_lens: list[int],
-    num_heads: Tuple[int, int],
+    num_heads: tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
     block_size: int,
@@ -164,8 +164,8 @@ def test_flashinfer_decode_with_paged_kv(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("soft_cap", [None, 30.0, 50.0])
 @torch.inference_mode
-def test_flashinfer_prefill_with_paged_kv(seq_lens: list[Tuple[int, int]],
-                                          num_heads: Tuple[int, int],
+def test_flashinfer_prefill_with_paged_kv(seq_lens: list[tuple[int, int]],
+                                          num_heads: tuple[int, int],
                                           head_size: int, dtype: torch.dtype,
                                           block_size: int,
                                           soft_cap: Optional[float]) -> None:
@@ -264,7 +264,7 @@ def test_flashinfer_prefill_with_paged_kv(seq_lens: list[Tuple[int, int]],
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("soft_cap", [None, 30.0, 50.0])
 def test_flashinfer_prefill_with_paged_fp8_kv(
-        seq_lens: list[Tuple[int, int]], num_heads: Tuple[int, int],
+        seq_lens: list[tuple[int, int]], num_heads: tuple[int, int],
         head_size: int, dtype: torch.dtype, block_size: int,
         soft_cap: Optional[float]) -> None:
     torch.set_default_device("cuda")
@@ -373,7 +373,7 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
 @torch.inference_mode
 def test_flashinfer_decode_with_paged_fp8_kv(
     kv_lens: list[int],
-    num_heads: Tuple[int, int],
+    num_heads: tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
     block_size: int,

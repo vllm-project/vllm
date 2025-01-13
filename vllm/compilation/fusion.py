@@ -1,4 +1,4 @@
-from typing import Callable, Dict, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, NamedTuple, Optional
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -99,7 +99,7 @@ class QuantMultiOutputMatch(MultiOutputMatch):
         self.QUANT_OP = quant_op  # in-place quant op
         self.FUSED_OP = fused_op  # in-place fused quant op
 
-    def insert_fused_node(self, fused_return_mapping: Dict[int, Tuple[fx.Node,
+    def insert_fused_node(self, fused_return_mapping: Dict[int, tuple[fx.Node,
                                                                       int]],
                           **kwargs):
         """

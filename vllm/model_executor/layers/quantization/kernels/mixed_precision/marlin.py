@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -22,7 +22,7 @@ class MarlinLinearKernel(MPLinearKernel):
 
     @classmethod
     def can_implement(cls,
-                      c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+                      c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
         if c.zero_points:
             return False, "Zero points currently not supported by "\
                           " MarlinLinearKernel. Will be added when AWQMarlin "\

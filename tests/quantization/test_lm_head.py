@@ -2,7 +2,6 @@
 
 Run `pytest tests/quantization/test_quant_lm_head_true.py --forked`.
 """
-from typing import Tuple
 
 import pytest
 import torch
@@ -25,7 +24,7 @@ MODELS_QUANT = [(
 @pytest.mark.parametrize("model_lm_head_quant", MODELS_QUANT)
 def test_lm_head(
     vllm_runner,
-    model_lm_head_quant: Tuple[str, bool],
+    model_lm_head_quant: tuple[str, bool],
 ) -> None:
     model, lm_head_quantized = model_lm_head_quant
     vllm_model = vllm_runner(model, dtype=torch.float16, max_model_len=2048)

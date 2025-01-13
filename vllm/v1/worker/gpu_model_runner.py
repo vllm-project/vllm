@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, Tuple, cast
+from typing import TYPE_CHECKING, Dict, cast
 
 import numpy as np
 import torch
@@ -490,7 +490,7 @@ class GPUModelRunner:
 
         # Batch the multi-modal inputs.
         mm_inputs: list[MultiModalKwargs] = []
-        req_input_ids: list[Tuple[str, int]] = []
+        req_input_ids: list[tuple[str, int]] = []
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
             for input_id in encoder_input_ids:

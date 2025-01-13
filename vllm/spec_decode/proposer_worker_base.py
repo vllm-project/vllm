@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Optional, Set, Tuple
+from typing import Optional, Set
 
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
@@ -22,7 +22,7 @@ class ProposerWorkerBase(LoraNotSupportedWorkerBase, SpeculativeProposer):
         # the KV cache for token generation. It is not used by workers that
         # do not utilize the KV cache.
         seq_ids_with_bonus_token_in_last_step: Set[int]
-    ) -> Tuple[Optional[list[SamplerOutput]], bool]:
+    ) -> tuple[Optional[list[SamplerOutput]], bool]:
         raise NotImplementedError
 
     def set_include_gpu_probs_tensor(self) -> None:
@@ -42,7 +42,7 @@ class NonLLMProposerWorkerBase(ProposerWorkerBase, ABC):
         """get_spec_proposals is used to get the proposals"""
         return []
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """This is never called on the proposer, only the target model"""
         raise NotImplementedError
 

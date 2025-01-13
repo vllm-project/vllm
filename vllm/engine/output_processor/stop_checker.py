@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
@@ -94,7 +94,7 @@ class StopChecker:
         new_char_count: int,
         stop: list[str],
         include_in_output: bool,
-    ) -> Optional[Tuple[str, int]]:
+    ) -> Optional[tuple[str, int]]:
         """Check if any stop strings are matched and truncate sequence
         output text accordingly.
 

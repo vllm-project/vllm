@@ -1,6 +1,6 @@
 from array import array
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
 
@@ -198,7 +198,7 @@ def _prepare_seq_groups(
     device: str,
     generators: Optional[Dict[str, torch.Generator]] = None,
     cache: Optional[SamplingMetadataCache] = None,
-) -> Tuple[list[SequenceGroupToSample], list[int], Dict[SamplingType,
+) -> tuple[list[SequenceGroupToSample], list[int], Dict[SamplingType,
                                                         list[int]], int, ]:
     """Prepare sequence groups and indices for sampling.
 
@@ -382,7 +382,7 @@ class SamplingTensors:
         vocab_size: int,
         device: torch.device,
         dtype: torch.dtype,
-    ) -> Tuple["SamplingTensors", bool, bool, bool]:
+    ) -> tuple["SamplingTensors", bool, bool, bool]:
         prompt_tokens: list[array] = []
         output_tokens: list[array] = []
         top_ks: list[int] = []

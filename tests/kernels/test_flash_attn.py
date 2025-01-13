@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 import pytest
 import torch
@@ -84,7 +84,7 @@ def ref_paged_attn(
 def test_flash_attn_with_paged_kv(
     use_out: bool,
     kv_lens: list[int],
-    num_heads: Tuple[int, int],
+    num_heads: tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
     block_size: int,
@@ -162,8 +162,8 @@ def test_flash_attn_with_paged_kv(
 @torch.inference_mode()
 def test_varlen_with_paged_kv(
     use_out: bool,
-    seq_lens: list[Tuple[int, int]],
-    num_heads: Tuple[int, int],
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
     head_size: int,
     sliding_window: Optional[int],
     dtype: torch.dtype,

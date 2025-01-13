@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Tuple, Type
+from typing import Type
 
 from vllm.config import VllmConfig
 from vllm.v1.outputs import ModelRunnerOutput
@@ -34,7 +34,7 @@ class Executor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         raise NotImplementedError
 
     @abstractmethod

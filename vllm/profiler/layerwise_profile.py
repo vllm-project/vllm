@@ -1,7 +1,7 @@
 import copy
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Dict, Optional, Tuple, TypeAlias, Union
+from typing import Callable, Dict, Optional, TypeAlias, Union
 
 import pandas as pd
 from torch._C._autograd import DeviceType, _KinetoEvent, _ProfilerResult
@@ -140,7 +140,7 @@ class LayerwiseProfileResults(profile):
         }
 
     @staticmethod
-    def _indent_row_names_based_on_depth(depths_rows: list[Tuple[int,
+    def _indent_row_names_based_on_depth(depths_rows: list[tuple[int,
                                                                  StatsEntry]],
                                          indent_style: Union[Callable[[int],
                                                                       str],
@@ -236,7 +236,7 @@ class LayerwiseProfileResults(profile):
         def build_summary_stats_tree_df(
             node: _ModuleTreeNode,
             parent: Optional[_StatsTreeNode] = None,
-            summary_trace: Tuple[str] = ()):
+            summary_trace: tuple[str] = ()):
 
             if event_has_module(node.event):
                 name = event_module_repr(node.event)
@@ -311,8 +311,8 @@ class LayerwiseProfileResults(profile):
             self._model_stats_tree.append(build_model_stats_tree_df(root))
 
     def _flatten_stats_tree(
-            self, tree: list[_StatsTreeNode]) -> list[Tuple[int, StatsEntry]]:
-        entries: list[Tuple[int, StatsEntry]] = []
+            self, tree: list[_StatsTreeNode]) -> list[tuple[int, StatsEntry]]:
+        entries: list[tuple[int, StatsEntry]] = []
 
         def df_traversal(node: _StatsTreeNode, depth=0):
             entries.append((depth, node.entry))

@@ -2,7 +2,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from time import sleep
-from typing import Any, Tuple
+from typing import Any
 
 import pytest
 
@@ -16,7 +16,7 @@ class DummyWorker:
     def __init__(self, rank: int):
         self.rank = rank
 
-    def worker_method(self, worker_input: Any) -> Tuple[int, Any]:
+    def worker_method(self, worker_input: Any) -> tuple[int, Any]:
         sleep(0.05)
 
         if isinstance(worker_input, Exception):
@@ -26,7 +26,7 @@ class DummyWorker:
         return self.rank, input
 
 
-def _start_workers() -> Tuple[list[ProcessWorkerWrapper], WorkerMonitor]:
+def _start_workers() -> tuple[list[ProcessWorkerWrapper], WorkerMonitor]:
     result_handler = ResultHandler()
     workers = [
         ProcessWorkerWrapper(result_handler, partial(DummyWorker, rank=rank))

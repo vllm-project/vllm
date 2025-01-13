@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 import pytest
 import torch
@@ -20,7 +20,7 @@ def run_preprocessing_test(
     image: Image,
     config,
     max_dynamic_patch: Optional[int] = None,
-) -> Tuple[torch.Tensor, int]:
+) -> tuple[torch.Tensor, int]:
     """Test the image preprocessing and calculate expected blocks."""
 
     if max_dynamic_patch is None:

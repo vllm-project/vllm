@@ -4,7 +4,7 @@ import dataclasses
 import json
 import random
 import time
-from typing import Optional, Tuple
+from typing import Optional
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -17,7 +17,7 @@ def sample_requests(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int],
-) -> list[Tuple[str, int, int]]:
+) -> list[tuple[str, int, int]]:
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
 
@@ -34,7 +34,7 @@ def sample_requests(
     random.shuffle(dataset)
 
     # Filter out sequences that are too long or too short
-    filtered_dataset: list[Tuple[str, int, int]] = []
+    filtered_dataset: list[tuple[str, int, int]] = []
     for i in range(len(dataset)):
         if len(filtered_dataset) == num_requests:
             break
@@ -63,7 +63,7 @@ def sample_requests(
 
 
 def run_vllm(
-    requests: list[Tuple[str, int, int]],
+    requests: list[tuple[str, int, int]],
     n: int,
     engine_args: EngineArgs,
 ) -> float:

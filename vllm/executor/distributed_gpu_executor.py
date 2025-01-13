@@ -1,6 +1,6 @@
 import asyncio
 from abc import abstractmethod
-from typing import Any, Awaitable, Dict, Optional, Set, Tuple, Union
+from typing import Any, Awaitable, Dict, Optional, Set, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
@@ -25,7 +25,7 @@ class DistributedGPUExecutor(GPUExecutor):
 
         super().__init__(*args, **kwargs)
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of available KV blocks.
 
         This invokes `determine_num_available_blocks` on each worker and takes

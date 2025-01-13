@@ -1,5 +1,5 @@
 # pylint: disable=unused-argument
-from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Optional, Union, cast
 
 import torch
 import torch.nn as nn
@@ -268,7 +268,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         if bias is None:
             return bias
-        self.lora_bias_stacked = cast(Tuple[torch.Tensor, ...],
+        self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
                                       self.lora_bias_stacked)
         shard_size = self.lora_bias_stacked[0].shape[2]
         start_idx = self.tp_rank * shard_size

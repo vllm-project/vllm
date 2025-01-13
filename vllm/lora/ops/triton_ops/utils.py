@@ -1,5 +1,5 @@
 import functools
-from typing import Dict, Tuple
+from typing import Dict
 
 import torch
 
@@ -48,8 +48,8 @@ def get_lora_op_configs(op_type: str, batch: int,
     return config
 
 
-_LORA_A_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
-_LORA_B_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
+_LORA_A_PTR_DICT: Dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
+_LORA_B_PTR_DICT: Dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
 
 
 def _get_lora_a_ptr(lora_a_weights: list[torch.Tensor], device: str):

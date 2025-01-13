@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Deque, Dict, Iterable, Optional
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple, Union
+from typing import Set, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
@@ -137,11 +137,11 @@ class SchedulerOutputs:
     # Total number of batched tokens.
     num_batched_tokens: int
     # Blocks to swap in. List of CPU -> GPU block number.
-    blocks_to_swap_in: list[Tuple[int, int]]
+    blocks_to_swap_in: list[tuple[int, int]]
     # Blocks to swap out. List of GPU -> CPU block number.
-    blocks_to_swap_out: list[Tuple[int, int]]
+    blocks_to_swap_out: list[tuple[int, int]]
     # Blocks to copy. Source to dest block.
-    blocks_to_copy: list[Tuple[int, int]]
+    blocks_to_copy: list[tuple[int, int]]
     # Sequence groups that are going to be ignored.
     ignored_seq_groups: list[SequenceGroup]
     # The number of slots for lookahead decoding.
@@ -213,9 +213,9 @@ class SchedulerRunningOutputs:
     # Sequences that are swapped out.
     swapped_out: list[SequenceGroup]
     # The blocks to swap out.
-    blocks_to_swap_out: list[Tuple[int, int]]
+    blocks_to_swap_out: list[tuple[int, int]]
     # The blocks to copy.
-    blocks_to_copy: list[Tuple[int, int]]
+    blocks_to_copy: list[tuple[int, int]]
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int
 
@@ -251,9 +251,9 @@ class SchedulerSwappedInOutputs:
     # phase. I.e., it means the prefill has been chunked.
     prefill_seq_groups: list[ScheduledSequenceGroup]
     # The blocks to swap in.
-    blocks_to_swap_in: list[Tuple[int, int]]
+    blocks_to_swap_in: list[tuple[int, int]]
     # The blocks to copy.
-    blocks_to_copy: list[Tuple[int, int]]
+    blocks_to_copy: list[tuple[int, int]]
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int
     # Infeasible sequence groups.
@@ -552,8 +552,8 @@ class Scheduler:
         ret.prefill_seq_groups_list.clear()
 
         # Blocks that need to be swapped or copied before model execution.
-        blocks_to_swap_out: list[Tuple[int, int]] = ret.blocks_to_swap_out
-        blocks_to_copy: list[Tuple[int, int]] = ret.blocks_to_copy
+        blocks_to_swap_out: list[tuple[int, int]] = ret.blocks_to_swap_out
+        blocks_to_copy: list[tuple[int, int]] = ret.blocks_to_copy
 
         decode_seq_groups: list[ScheduledSequenceGroup] = ret.decode_seq_groups
         prefill_seq_groups: list[
@@ -703,8 +703,8 @@ class Scheduler:
             SchedulerSwappedInOutputs.
         """
         # Blocks that need to be swapped or copied before model execution.
-        blocks_to_swap_in: list[Tuple[int, int]] = []
-        blocks_to_copy: list[Tuple[int, int]] = []
+        blocks_to_swap_in: list[tuple[int, int]] = []
+        blocks_to_copy: list[tuple[int, int]] = []
         decode_seq_groups: list[ScheduledSequenceGroup] = []
         prefill_seq_groups: list[ScheduledSequenceGroup] = []
         infeasible_seq_groups: list[SequenceGroup] = []
@@ -812,7 +812,7 @@ class Scheduler:
             return prompt_limit
 
     def _get_priority(self,
-                      seq_group: SequenceGroup) -> Tuple[Optional[int], float]:
+                      seq_group: SequenceGroup) -> tuple[Optional[int], float]:
         """ Get the priority of the sequence group.
         Highest preference to user-defined priority, followed by arrival time.
         Args:
@@ -840,7 +840,7 @@ class Scheduler:
 
         running_queue = deque(sorted(self.running, key=self._get_priority))
 
-        blocks_to_swap_out: list[Tuple[int, int]] = []
+        blocks_to_swap_out: list[tuple[int, int]] = []
         force_preemption_count = 0
 
         if waiting_queue:
@@ -1006,7 +1006,7 @@ class Scheduler:
             self._allocate_and_set_running(seq_group)
 
             if enable_chunking and self.scheduler_config.is_multi_step:
-                blocks_to_copy: list[Tuple[int, int]] = []
+                blocks_to_copy: list[tuple[int, int]] = []
                 # init_multi_step_from_lookahead_slots happens in append_slots
                 self._append_slots(seq_group, blocks_to_copy, enable_chunking)
                 # This assert will trip when a copy-on-write happens. This is
@@ -1283,7 +1283,7 @@ class Scheduler:
 
     def schedule(
             self
-    ) -> Tuple[list[SequenceGroupMetadata], SchedulerOutputs, bool]:
+    ) -> tuple[list[SequenceGroupMetadata], SchedulerOutputs, bool]:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
@@ -1492,14 +1492,14 @@ class Scheduler:
 
     def _append_slots(self,
                       seq_group: SequenceGroup,
-                      blocks_to_copy: list[Tuple[int, int]],
+                      blocks_to_copy: list[tuple[int, int]],
                       enable_chunking: bool = False) -> None:
         """Appends new slots to the sequences in the given sequence group.
 
         Args:
             seq_group (SequenceGroup): The sequence group containing the
                 sequences to append slots to.
-            blocks_to_copy (list[Tuple[int, int]]): A list of tuple of two
+            blocks_to_copy (list[tuple[int, int]]): A list of tuple of two
                 ints, the first int is the source block index, and the second
                 int is the destination block index. This list is updated with
                 the new source and destination block indices for the appended
@@ -1528,7 +1528,7 @@ class Scheduler:
                 blocks_to_copy.extend(cows)
 
     def _preempt(self, seq_group: SequenceGroup,
-                 blocks_to_swap_out: list[Tuple[int, int]]) -> PreemptionMode:
+                 blocks_to_swap_out: list[tuple[int, int]]) -> PreemptionMode:
         # If preemption mode is not specified, we determine the mode as follows:
         # We use recomputation by default since it incurs lower overhead than
         # swapping. However, when the sequence group has multiple sequences
@@ -1584,14 +1584,14 @@ class Scheduler:
     def _preempt_by_swap(
         self,
         seq_group: SequenceGroup,
-        blocks_to_swap_out: list[Tuple[int, int]],
+        blocks_to_swap_out: list[tuple[int, int]],
     ) -> None:
         self._swap_out(seq_group, blocks_to_swap_out)
 
     def _swap_in(
         self,
         seq_group: SequenceGroup,
-        blocks_to_swap_in: list[Tuple[int, int]],
+        blocks_to_swap_in: list[tuple[int, int]],
     ) -> None:
         mapping = self.block_manager.swap_in(seq_group)
         blocks_to_swap_in.extend(mapping)
@@ -1601,7 +1601,7 @@ class Scheduler:
     def _swap_out(
         self,
         seq_group: SequenceGroup,
-        blocks_to_swap_out: list[Tuple[int, int]],
+        blocks_to_swap_out: list[tuple[int, int]],
     ) -> None:
         if not self.block_manager.can_swap_out(seq_group):
             # FIXME(woosuk): Abort the sequence group instead of aborting the
@@ -1665,7 +1665,7 @@ class Scheduler:
         status: SequenceStatus,
         enable_chunking: bool,
         budget: SchedulingBudget,
-    ) -> Tuple[int, int]:
+    ) -> tuple[int, int]:
         """
         Returns the number of new uncached and cached tokens to schedule for a
         given sequence group that's in a given `status`.

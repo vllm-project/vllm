@@ -1,7 +1,7 @@
 import itertools
 from dataclasses import dataclass, field
 from typing import (Callable, Dict, Iterable, Literal, Mapping, Optional,
-                    Protocol, Set, Tuple, Union, overload)
+                    Protocol, Set, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -54,8 +54,8 @@ class WeightsMapper:
         return key
 
     def apply(
-        self, weights: Iterable[Tuple[str, torch.Tensor]]
-    ) -> Iterable[Tuple[str, torch.Tensor]]:
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
         return ((out_name, data) for name, data in weights
                 if (out_name := self._map_name(name)) is not None)
 
@@ -91,8 +91,8 @@ class AutoWeightsLoader:
 
     def _groupby_prefix(
         self,
-        weights: Iterable[Tuple[str, torch.Tensor]],
-    ) -> Iterable[Tuple[str, Iterable[Tuple[str, torch.Tensor]]]]:
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> Iterable[tuple[str, Iterable[tuple[str, torch.Tensor]]]]:
         weights_by_parts = ((weight_name.split(".", 1), weight_data)
                             for weight_name, weight_data in weights)
 
@@ -125,7 +125,7 @@ class AutoWeightsLoader:
         self,
         base_prefix: str,
         param: nn.Parameter,
-        weights: Iterable[Tuple[str, torch.Tensor]],
+        weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
         for weight_name, weight_data in weights:
             weight_qualname = self._get_qualname(base_prefix, weight_name)
@@ -158,7 +158,7 @@ class AutoWeightsLoader:
         self,
         base_prefix: str,
         module: nn.Module,
-        weights: Iterable[Tuple[str, torch.Tensor]],
+        weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
         if isinstance(module, PPMissingLayer):
             return
@@ -223,7 +223,7 @@ class AutoWeightsLoader:
 
     def load_weights(
         self,
-        weights: Iterable[Tuple[str, torch.Tensor]],
+        weights: Iterable[tuple[str, torch.Tensor]],
         *,
         mapper: Optional[WeightsMapper] = None,
     ) -> Set[str]:
@@ -542,7 +542,7 @@ def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
     prefix: str,
-) -> Tuple[int, int, torch.nn.ModuleList]:
+) -> tuple[int, int, torch.nn.ModuleList]:
     """Make a list of layers with the given layer function, taking
     pipeline parallelism into account.
     """

@@ -1,5 +1,5 @@
 """Core test implementation to be shared across modalities."""
-from typing import Any, Callable, Dict, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, Optional, Type, Union
 
 import torch
 from PIL.Image import Image
@@ -16,7 +16,7 @@ def run_test(
     *,
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    inputs: list[Tuple[list[str], list[Union[list[Image], Image]]]],
+    inputs: list[tuple[list[str], list[Union[list[Image], Image]]]],
     model: str,
     dtype: str,
     max_tokens: int,

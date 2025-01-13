@@ -3,8 +3,7 @@ import time
 import weakref
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple, Type,
-                    TypeVar)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Type, TypeVar)
 
 import torch
 import torch.nn as nn
@@ -150,7 +149,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
     def _prepare_prompt(
         self,
         seq_group_metadata_list: list[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor, AttentionMetadata, list[int],
                BatchedTensorInputs]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: list[int] = []
@@ -277,7 +276,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
     def _prepare_decode(
         self,
         seq_group_metadata_list: list[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata]:
+    ) -> tuple[torch.Tensor, torch.Tensor, AttentionMetadata]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: list[int] = []
         input_positions: list[int] = []

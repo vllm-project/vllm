@@ -1,5 +1,5 @@
 import weakref
-from typing import Optional, Set, Tuple
+from typing import Optional, Set
 
 import torch
 
@@ -52,7 +52,7 @@ class NGramWorker(NonLLMProposerWorkerBase):
         # Unused parameter. NGramWorker does not use the KV Cache and
         # therefore does not need this parameter.
         seq_ids_with_bonus_token_in_last_step: Set[int],
-    ) -> Tuple[Optional[list[Optional[SamplerOutput]]], bool]:
+    ) -> tuple[Optional[list[Optional[SamplerOutput]]], bool]:
         """NGram match algo to pick proposal candidate. Returns the list of
         sampler output, one per SequenceGroupMetadata.
 

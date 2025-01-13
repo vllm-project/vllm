@@ -2,7 +2,6 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, Optional
 from typing import Sequence as GenericSequence
-from typing import Tuple
 
 from vllm import SamplingParams
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
@@ -21,7 +20,7 @@ def create_dummy_prompt(
     prompt_tokens: Optional[list[int]] = None,
     min_tokens: int = 0,
     max_tokens: int = 16,
-) -> Tuple[Sequence, SequenceGroup]:
+) -> tuple[Sequence, SequenceGroup]:
     if not block_size:
         block_size = prompt_length
 
@@ -72,7 +71,7 @@ def create_dummy_prompt_encoder_decoder(
     block_size: Optional[int] = None,
     lora_request: Optional[LoRARequest] = None,
     best_of: int = 1,
-) -> Tuple[Sequence, Sequence, SequenceGroup]:
+) -> tuple[Sequence, Sequence, SequenceGroup]:
     if not block_size:
         block_size = decoder_prompt_length
 
@@ -251,6 +250,6 @@ class SchedulerProxy:
         return wrapper
 
     def last_schedule_ret(
-        self, ) -> Tuple[list[SequenceGroupMetadata], SchedulerOutputs, Any]:
+        self, ) -> tuple[list[SequenceGroupMetadata], SchedulerOutputs, Any]:
         _, _, ret = self.call_history["schedule"][-1]
         return ret

@@ -1,5 +1,5 @@
 import os
-from typing import Optional, Tuple
+from typing import Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -49,7 +49,7 @@ class UniprocExecutor(Executor):
             distributed_init_method=distributed_init_method,
         )
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """

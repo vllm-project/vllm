@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, NamedTuple, Optional, Tuple
+from typing import Dict, NamedTuple, Optional
 
 import openvino as ov
 import torch
@@ -295,7 +295,7 @@ class OpenVINOModelRunner(ModelRunnerBase):
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: list[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, OpenVINOAttentionMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, OpenVINOAttentionMetadata,
                SamplingMetadata, BatchedTensorInputs]:
         # Prepare input tensors.
         (
@@ -327,7 +327,7 @@ class OpenVINOModelRunner(ModelRunnerBase):
     def execute_model(
         self,
         seq_group_metadata_list: list[SequenceGroupMetadata],
-        kv_caches: list[Tuple["ov.Tensor", "ov.Tensor"]],
+        kv_caches: list[tuple["ov.Tensor", "ov.Tensor"]],
     ) -> Optional[SamplerOutput]:
         (
             input_tokens,

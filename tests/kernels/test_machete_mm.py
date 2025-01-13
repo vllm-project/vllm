@@ -5,7 +5,7 @@ Run `pytest tests/kernels/test_machete_mm.py`.
 
 import math
 from dataclasses import dataclass, fields
-from typing import Optional, Tuple
+from typing import Optional
 
 import pytest
 import torch
@@ -74,7 +74,7 @@ class Tensors:
 #  Ch Scales Type, Tok Scales Type)
 # NOTE: None "Scale Type" means the act type is floating point
 #       None "Output Type" means the output type is the same as the act type
-TestTypeTuple = Tuple[list[torch.dtype], ScalarType, Optional[torch.dtype],
+TestTypeTuple = tuple[list[torch.dtype], ScalarType, Optional[torch.dtype],
                       Optional[torch.dtype], bool]
 TEST_TYPES = [
     # GPTQ style
@@ -135,7 +135,7 @@ def maybe_convert_zeropoints(zps: Optional[torch.Tensor], s: torch.Tensor):
     return zps if zps is None else -1 * s * (zps.to(s.dtype))
 
 
-def group_size_valid(shape: Tuple[int, int, int],
+def group_size_valid(shape: tuple[int, int, int],
                      group_size: Optional[int]) -> bool:
     return group_size is None or group_size == -1 or group_size % shape[2] == 0
 
@@ -165,7 +165,7 @@ def machete_quantize_and_pack(atype: torch.dtype,
     return w_ref, w_q_machete, w_s, w_zp
 
 
-def create_test_tensors(shape: Tuple[int, int, int],
+def create_test_tensors(shape: tuple[int, int, int],
                         types: TypeConfig,
                         group_size: Optional[int],
                         subset_stride_factor: Optional[int] = None) -> Tensors:

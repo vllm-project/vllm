@@ -15,7 +15,7 @@
 # limitations under the License.
 """PyTorch Idefics2 model."""
 
-from typing import Iterable, Optional, Set, Tuple
+from typing import Iterable, Optional, Set
 
 import torch
 from torch import nn
@@ -316,7 +316,7 @@ class Idefics2VisionTransformer(nn.Module):
         last_hidden_state = self.post_layernorm(encoder_outputs)
         return last_hidden_state
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)

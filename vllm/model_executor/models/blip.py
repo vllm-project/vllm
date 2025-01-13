@@ -1,6 +1,6 @@
 """Minimal implementation of BlipVisionModel intended to be only used 
 within a vision language model."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Union
 
 import torch
 import torch.nn as nn
@@ -292,7 +292,7 @@ class BlipVisionModel(nn.Module):
 
         return self.post_layernorm(hidden_states)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)

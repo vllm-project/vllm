@@ -1,6 +1,6 @@
 import itertools
 from abc import abstractmethod
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
 import torch.nn.functional as F
@@ -45,8 +45,8 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
 
 
 def adjust_bitsandbytes_4bit_shard(param: Parameter,
-                                   shard_offsets: Dict[str, Tuple[int, int]],
-                                   loaded_shard_id: str) -> Tuple[int, int]:
+                                   shard_offsets: Dict[str, tuple[int, int]],
+                                   loaded_shard_id: str) -> tuple[int, int]:
     """Adjust the quantization offsets and sizes for BitsAndBytes sharding."""
 
     total, _ = shard_offsets["total"]
@@ -240,7 +240,7 @@ class ReplicatedLinear(LinearBase):
 
     def forward(
         self, x: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
         output = self.quant_method.apply(self, x, bias)
@@ -496,7 +496,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             current_shard_offset = 0
             use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
                                             False)
-            shard_offsets: list[Tuple[int, int, int]] = []
+            shard_offsets: list[tuple[int, int, int]] = []
             for i, output_size in enumerate(self.output_sizes):
                 shard_offsets.append((i, current_shard_offset, output_size))
                 current_shard_offset += output_size
@@ -595,7 +595,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         """
 
         current_shard_offset = 0
-        shard_offsets: list[Tuple[int, int, int]] = []
+        shard_offsets: list[tuple[int, int, int]] = []
         for i, output_size in enumerate(self.output_sizes):
             shard_offsets.append((i, current_shard_offset, output_size))
             current_shard_offset += output_size

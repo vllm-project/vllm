@@ -3,7 +3,7 @@ import re
 from array import array
 from dataclasses import dataclass
 from functools import lru_cache, partial
-from typing import Iterable, Mapping, Optional, Set, Tuple, TypedDict
+from typing import Iterable, Mapping, Optional, Set, TypedDict
 
 import torch
 from einops import rearrange
@@ -80,7 +80,7 @@ class MolmoImageInputs(TypedDict):
     `(batch_size, num_crops, num_patch)`
     """
 
-    image_start_end: Tuple[int, int]
+    image_start_end: tuple[int, int]
     """Starting and ending index of placeholder 
     tokens
     """
@@ -88,7 +88,7 @@ class MolmoImageInputs(TypedDict):
 
 @dataclass
 class VisionBackboneConfig:
-    image_default_input_size: Tuple[int, int] = (336, 336)
+    image_default_input_size: tuple[int, int] = (336, 336)
     image_patch_size: int = 14
     image_pos_patch_size: int = 14
     image_emb_dim: int = 1024
@@ -432,7 +432,7 @@ class MolmoAttention(nn.Module):
         )
 
     def _apply_qk_norm(self, q: torch.Tensor,
-                       k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                       k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.tp_size > 1:
             q = tensor_model_parallel_all_gather(q.contiguous())
             k = tensor_model_parallel_all_gather(k.contiguous())
@@ -581,7 +581,7 @@ class MolmoDecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -611,7 +611,7 @@ class MolmoDecoderNormAfterLayer(MolmoDecoderLayer):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
         # Self Attention
         residual = hidden_states
         hidden_states = self.self_attn(
@@ -704,7 +704,7 @@ class MolmoVisionBackbone(nn.Module):
 
     def forward(
         self, images: torch.Tensor, image_masks: torch.Tensor
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
 
         # image_features: (batch_size, num_crops(=num_image), num_patch, nximage_emb_dim) # noqa: E501
         batch_size, num_image = images.shape[:2]
@@ -755,7 +755,7 @@ class MolmoVisionBackbone(nn.Module):
         # image_features: (batch_size, num_image, num_patch, d_model)
         return image_features
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -875,7 +875,7 @@ class MolmoModel(nn.Module):
             hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
@@ -1375,7 +1375,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
         loader = AutoWeightsLoader(self)
         weights = _get_weights_with_merged_embedding(weights)
@@ -1393,8 +1393,8 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
 
 
 def _get_weights_with_merged_embedding(
-    weights: Iterable[Tuple[str, torch.Tensor]]
-) -> Iterable[Tuple[str, torch.Tensor]]:
+    weights: Iterable[tuple[str, torch.Tensor]]
+) -> Iterable[tuple[str, torch.Tensor]]:
     embedding_weights = {}
     for name, weight in weights:
         if "wte.embedding" in name:

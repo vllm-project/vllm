@@ -2,7 +2,7 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from itertools import accumulate
-from typing import TYPE_CHECKING, Any, Dict, Tuple, Type, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Dict, Type, TypeVar, Union
 
 import numpy as np
 import torch
@@ -530,7 +530,7 @@ def get_seq_len_block_table_args(
 def get_num_prefill_decode_query_kv_tokens(
     attn_metadata,
     attn_type: str,
-) -> Tuple[int, int, int]:
+) -> tuple[int, int, int]:
     """
     Calculate the number of prefill and decode tokens for query, key/value
     based on the attention metadata and the specified attention type.
@@ -539,7 +539,7 @@ def get_num_prefill_decode_query_kv_tokens(
         attn_metadata (FlashAttentionMetadata): Attention Metadata object.
         attn_type (AttentionType): The type of attention being used.
     Returns:
-        Tuple[int, int, int]: A tuple containing three integers:
+        tuple[int, int, int]: A tuple containing three integers:
             - The number of prefill query tokens.
             - The number of prefill key/value tokens.
             - The number of decode query tokens.

@@ -11,8 +11,7 @@ import os
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import (Any, Callable, Dict, Generator, Iterable, Optional, Tuple,
-                    cast)
+from typing import (Any, Callable, Dict, Generator, Iterable, Optional, cast)
 
 import gguf
 import huggingface_hub
@@ -217,7 +216,7 @@ class DefaultModelLoader(BaseModelLoader):
         model_name_or_path: str,
         revision: Optional[str],
         fall_back_to_pt: bool,
-    ) -> Tuple[str, list[str], bool]:
+    ) -> tuple[str, list[str], bool]:
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
@@ -294,7 +293,7 @@ class DefaultModelLoader(BaseModelLoader):
 
     def _get_weights_iterator(
             self, source: "Source"
-    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
             source.model_or_path, source.revision, source.fall_back_to_pt)
@@ -332,7 +331,7 @@ class DefaultModelLoader(BaseModelLoader):
         self,
         model_config: ModelConfig,
         model: nn.Module,
-    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         primary_weights = DefaultModelLoader.Source(
             model_config.model,
             model_config.revision,
@@ -441,7 +440,7 @@ class TensorizerLoader(BaseModelLoader):
         self.tensorizer_config.verify_with_parallel_config(parallel_config)
 
     def _get_weights_iterator(
-        self, ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+        self, ) -> Generator[tuple[str, torch.Tensor], None, None]:
         tensorizer_args = self.tensorizer_config._construct_tensorizer_args()
         return tensorizer_weights_iterator(tensorizer_args)
 
@@ -552,7 +551,7 @@ class ShardedStateLoader(BaseModelLoader):
         Filter out all tensors that share the same memory or a subset of the
         memory of another tensor.
         """
-        same_storage_groups: Dict[Any, list[Tuple[str, torch.Tensor]]] = (
+        same_storage_groups: Dict[Any, list[tuple[str, torch.Tensor]]] = (
             collections.defaultdict(list))
         for key, tensor in tensors.items():
             if tensor.numel():
@@ -716,7 +715,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         model_name_or_path: str,
         allowed_patterns: list[str],
         revision: Optional[str] = None,
-    ) -> Tuple[list[str], str]:
+    ) -> tuple[list[str], str]:
         """Retrieve weight files. Download the files if necessary.
 
         Return the weight files and the file pattern."""
@@ -747,7 +746,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             f"No model weights found in: `{model_name_or_path}`")
 
     def _prepare_weights(self, model_name_or_path: str,
-                         revision: Optional[str]) -> Tuple[list[str], bool]:
+                         revision: Optional[str]) -> tuple[list[str], bool]:
         """Prepare weight files for the model."""
 
         allowed_patterns = ["*.safetensors", "*.bin", "*.pt"]
@@ -780,7 +779,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         revision: Optional[str],
         pre_quant: bool,
         load_8bit: bool,
-    ) -> Tuple[Generator[Tuple[str, torch.Tensor], None, None], Dict[str,
+    ) -> tuple[Generator[tuple[str, torch.Tensor], None, None], Dict[str,
                                                                      Any]]:
         """Get an iterator to the model weights with bitsandbytes quantization,
         as well as the quantization state dictionary."""
@@ -1225,7 +1224,7 @@ class GGUFModelLoader(BaseModelLoader):
 
     def _get_weights_iterator(
         self, model_name_or_path: str, gguf_to_hf_name_map: Dict[str, str]
-    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         return gguf_quant_weights_iterator(model_name_or_path,
                                            gguf_to_hf_name_map)
 
@@ -1318,7 +1317,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
 
     def _get_weights_iterator(
             self, model_or_path: str,
-            revision: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
+            revision: str) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
         return runai_safetensors_weights_iterator(hf_weights_files)

@@ -2,7 +2,7 @@ import asyncio
 import time
 from typing import AsyncGenerator, AsyncIterator, Dict, Optional
 from typing import Sequence as GenericSequence
-from typing import Tuple, Union, cast
+from typing import Union, cast
 
 from fastapi import Request
 
@@ -235,7 +235,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
-        result_generator: AsyncIterator[Tuple[int, RequestOutput]],
+        result_generator: AsyncIterator[tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
         model_name: str,

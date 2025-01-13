@@ -1,5 +1,4 @@
 """Tests for rejection sampling."""
-from typing import Tuple
 
 import pytest
 import torch
@@ -475,7 +474,7 @@ class _CorrectnessTestHelper:
 
     def generate_probs_for_test(
         self, draft_and_target_probs_equal: bool
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         draft_probs, target_probs = (F.softmax(
             torch.rand(self.vocab_size, dtype=torch.float32),
             dim=-1,
@@ -497,7 +496,7 @@ class _CorrectnessTestHelper:
     def run_and_compare_distributions(self, draft_probs: torch.Tensor,
                                       target_probs: torch.Tensor,
                                       reference_probs: torch.Tensor,
-                                      num_samples: int) -> Tuple[float, float]:
+                                      num_samples: int) -> tuple[float, float]:
         # Sample using rejection sampling.
         rej_sample_probs = self._estimate_rejection_sampling_pdf(
             draft_probs, target_probs, num_samples)

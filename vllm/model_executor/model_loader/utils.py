@@ -1,6 +1,6 @@
 """Utilities for selecting and loading models."""
 import contextlib
-from typing import Tuple, Type
+from typing import Type
 
 import torch
 from torch import nn
@@ -22,7 +22,7 @@ def set_default_torch_dtype(dtype: torch.dtype):
 
 
 def get_model_architecture(
-        model_config: ModelConfig) -> Tuple[Type[nn.Module], str]:
+        model_config: ModelConfig) -> tuple[Type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
 
     # Special handling for quantized Mixtral.

@@ -1,6 +1,6 @@
 import time
 from contextlib import contextmanager
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence
 
 import torch
 
@@ -35,7 +35,7 @@ def get_sampled_token_logprobs(
         # shape [num_steps, batch_size, vocab_size]
         logprob_tensor: torch.Tensor,
         sampled_token_ids: torch.Tensor,  # shape [num_steps, batch_size]
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Get the logprobs for the sampled tokens. Returns the ranks and logprobs.
     """
     num_steps, batch_size, vocab_size = logprob_tensor.shape
@@ -129,15 +129,15 @@ def create_sequence_group_output(
 def split_batch_by_proposal_len(
     seq_group_metadata_list: list[SequenceGroupMetadata],
     proposal_lens: list[int],
-) -> Tuple[Tuple[list[SequenceGroupMetadata], list[int]], Tuple[
+) -> tuple[tuple[list[SequenceGroupMetadata], list[int]], tuple[
         list[SequenceGroupMetadata], list[int]]]:
     """Utility function that splits a batch based on whether the proposal len is
     zero or not. We should remove this once vLLM supports per-sequence proposal
     lens in a batch.
     """
 
-    nonzero_lists: Tuple[list[SequenceGroupMetadata], list[int]] = ([], [])
-    zero_lists: Tuple[list[SequenceGroupMetadata], list[int]] = ([], [])
+    nonzero_lists: tuple[list[SequenceGroupMetadata], list[int]] = ([], [])
+    zero_lists: tuple[list[SequenceGroupMetadata], list[int]] = ([], [])
     for i, (seq_group, proposal_len) in enumerate(
             zip(seq_group_metadata_list, proposal_lens)):
         seq_groups, indices = nonzero_lists if proposal_len else zero_lists
@@ -148,7 +148,7 @@ def split_batch_by_proposal_len(
 
 def sampler_output_to_torch(
     sampler_output_list: Sequence[SamplerOutput], sampler_transposed: bool
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Utility function which converts a list of SamplerOutput to tensors.
 
         sampler_transposed here is used as the indicator for whether

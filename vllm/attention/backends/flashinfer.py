@@ -1,7 +1,7 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional, Set, Tuple, Type
+from typing import TYPE_CHECKING, Any, Dict, Optional, Set, Type
 
 from vllm.multimodal import MultiModalPlaceholderMap
 
@@ -66,7 +66,7 @@ class FlashInferBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod

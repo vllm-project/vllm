@@ -1,5 +1,5 @@
 import itertools
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Optional
 
 import torch
 from torch import nn
@@ -22,8 +22,8 @@ from .interfaces import SupportsCrossEncoding
 
 
 def roberta_task_weights_filter(
-    all_weights: Iterable[Tuple[str, torch.Tensor]]
-) -> Tuple[Iterable[Tuple[str, torch.Tensor]], Iterable[Tuple[str,
+    all_weights: Iterable[tuple[str, torch.Tensor]]
+) -> tuple[Iterable[tuple[str, torch.Tensor]], Iterable[tuple[str,
                                                               torch.Tensor]]]:
     """
     Separate task-specific weights that are applied on top
@@ -177,7 +177,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
                          prefix=prefix,
                          embedding_class=RobertaEmbedding)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights = self.hf_to_vllm_mapper.apply(weights)
         # Separate weights in "roberta"-prefixed and all else (not in memory).
         # For use with models like FacebookAI/roberta-base.
@@ -216,7 +216,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self.classifier = RobertaClassificationHead(config)
         self._pooler = CrossEncodingPooler(config, self.classifier)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
         bert_weights, task_weights = roberta_task_weights_filter(weights)
         self.roberta.load_weights(bert_weights)

@@ -1,8 +1,8 @@
 import itertools
 import warnings
 from contextlib import contextmanager
-from typing import (Any, ClassVar, Dict, Optional, Sequence, Tuple, Type,
-                    Union, cast, overload)
+from typing import (Any, ClassVar, Dict, Optional, Sequence, Type, Union,
+                    cast, overload)
 
 from tqdm import tqdm
 from typing_extensions import deprecated
@@ -505,7 +505,7 @@ class LLM:
             pos = [0] + list(
                 itertools.accumulate(
                     len(instance.beams) for instance in instances))
-            instance_start_and_end: list[Tuple[int, int]] = list(
+            instance_start_and_end: list[tuple[int, int]] = list(
                 zip(pos[:-1], pos[1:]))
 
             if len(all_beams) == 0:

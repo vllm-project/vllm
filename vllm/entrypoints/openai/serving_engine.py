@@ -2,7 +2,7 @@ import json
 from concurrent.futures.thread import ThreadPoolExecutor
 from http import HTTPStatus
 from typing import (Any, Callable, Dict, Iterable, Iterator, Mapping, Optional,
-                    Sequence, Tuple, TypedDict, Union)
+                    Sequence, TypedDict, Union)
 
 from fastapi import Request
 from pydantic import Field
@@ -139,7 +139,7 @@ class OpenAIServing:
 
     def _maybe_get_adapters(
         self, request: AnyRequest
-    ) -> Union[Tuple[None, None], Tuple[LoRARequest, None], Tuple[
+    ) -> Union[tuple[None, None], tuple[LoRARequest, None], tuple[
             None, PromptAdapterRequest]]:
         if self._is_model_supported(request.model):
             return None, None
@@ -338,7 +338,7 @@ class OpenAIServing:
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
-    ) -> Tuple[list[TextTokensPrompt], list[TokensPrompt]]:
+    ) -> tuple[list[TextTokensPrompt], list[TokensPrompt]]:
         request_prompts = await self._tokenize_prompt_input_or_inputs_async(
             request,
             tokenizer,
@@ -369,7 +369,7 @@ class OpenAIServing:
         tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = False,
-    ) -> Tuple[list[ConversationMessage], Sequence[RequestPrompt],
+    ) -> tuple[list[ConversationMessage], Sequence[RequestPrompt],
                list[TokensPrompt]]:
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,

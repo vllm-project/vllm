@@ -1,7 +1,7 @@
 """Helpers for building inputs that can be leveraged for different test types.
 """
 from pathlib import PosixPath
-from typing import Callable, Iterable, Optional, Tuple, Union
+from typing import Callable, Iterable, Optional, Union
 
 import torch
 
@@ -217,7 +217,7 @@ def build_video_inputs_from_test_info(
     ) for video, prompt in zip(sampled_vids, model_prompts)]
 
 
-def apply_image_size_scaling(image, size: Union[float, Tuple[int, int]],
+def apply_image_size_scaling(image, size: Union[float, tuple[int, int]],
                              size_type: SizeType):
     """Applies a size scaler to one image; this can be a an image size factor,
     which scales the image while maintaining the aspect ratio"""

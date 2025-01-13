@@ -1,7 +1,7 @@
 import enum
 import heapq
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple
+from typing import Dict
 
 
 class EvictionPolicy(enum.Enum):
@@ -25,7 +25,7 @@ class Evictor(ABC):
         pass
 
     @abstractmethod
-    def evict(self) -> Tuple[int, int]:
+    def evict(self) -> tuple[int, int]:
         """Runs the eviction algorithm and returns the evicted block's
         content hash along with physical block id along with physical block id
         """
@@ -84,7 +84,7 @@ class LRUEvictor(Evictor):
     def __contains__(self, block_id: int) -> bool:
         return block_id in self.free_table
 
-    def evict(self) -> Tuple[int, int]:
+    def evict(self) -> tuple[int, int]:
         if len(self.free_table) == 0:
             raise ValueError("No usable cache memory left")
 
@@ -122,7 +122,7 @@ class LRUEvictor(Evictor):
             self._cleanup()
 
     def _cleanup(self):
-        new_priority_queue: list[Tuple[float, int, int, int]] = []
+        new_priority_queue: list[tuple[float, int, int, int]] = []
 
         for block_id, block in self.free_table.items():
             new_priority_queue.append(

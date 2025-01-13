@@ -1,5 +1,5 @@
 import operator
-from typing import Dict, Iterable, Optional, Tuple, Union
+from typing import Dict, Iterable, Optional, Union
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -109,7 +109,7 @@ class FixFunctionalizationPass(VllmInductorPass):
                         graph: torch.fx.Graph,
                         node: torch.fx.Node,
                         mutated_args: Dict[int, Union[torch.fx.Node, str]],
-                        args: Optional[Tuple[Union[torch.fx.Node, str],
+                        args: Optional[tuple[Union[torch.fx.Node, str],
                                              ...]] = None):
         """
         De-functionalize a node by replacing it with a call to the original.
@@ -152,7 +152,7 @@ class FixFunctionalizationPass(VllmInductorPass):
     def insert_defunctionalized(self,
                                 graph: torch.fx.Graph,
                                 node: torch.fx.Node,
-                                args: Optional[Tuple[Union[torch.fx.Node, str],
+                                args: Optional[tuple[Union[torch.fx.Node, str],
                                                      ...]] = None):
         """
         Insert a new defunctionalized node into the graph before node.

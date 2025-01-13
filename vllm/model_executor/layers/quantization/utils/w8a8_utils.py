@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 
@@ -45,7 +45,7 @@ def all_close_1d(x: torch.Tensor) -> bool:
 
 def convert_to_channelwise(
         weight_scale: torch.Tensor,
-        logical_widths: list[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        logical_widths: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     # Create channelwise buffer
     weight_scale_channel = torch.empty((sum(logical_widths), 1),
                                        dtype=torch.float32,
@@ -63,7 +63,7 @@ def convert_to_channelwise(
 
 def requantize_with_max_scale(
         weight: torch.Tensor, weight_scale: torch.Tensor,
-        logical_widths: list[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        logical_widths: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
     max_w_scale = weight_scale.max()
 
@@ -205,7 +205,7 @@ def normalize_e4m3fn_to_e4m3fnuz(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     input_scale: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     assert weight.dtype == torch.float8_e4m3fn
     # The bits pattern 10000000(-128) represents zero in e4m3fn
     # but NaN in e4m3fnuz. So here we set it to 0.

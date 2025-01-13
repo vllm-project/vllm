@@ -6,7 +6,7 @@ from collections import defaultdict, deque
 from functools import lru_cache, partial
 from pathlib import Path
 from typing import (Any, Awaitable, Callable, Dict, Generic, Iterable, Literal,
-                    Optional, Tuple, TypeVar, Union, cast)
+                    Optional, TypeVar, Union, cast)
 
 import jinja2.nodes
 import transformers.utils.chat_template_utils as hf_chat_utils
@@ -914,7 +914,7 @@ def parse_chat_messages(
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
     content_format: _ChatTemplateContentFormat,
-) -> Tuple[list[ConversationMessage], Optional[MultiModalDataDict]]:
+) -> tuple[list[ConversationMessage], Optional[MultiModalDataDict]]:
     conversation: list[ConversationMessage] = []
     mm_tracker = MultiModalItemTracker(model_config, tokenizer)
 
@@ -937,7 +937,7 @@ def parse_chat_messages_futures(
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
     content_format: _ChatTemplateContentFormat,
-) -> Tuple[list[ConversationMessage], Awaitable[Optional[MultiModalDataDict]]]:
+) -> tuple[list[ConversationMessage], Awaitable[Optional[MultiModalDataDict]]]:
     conversation: list[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
 

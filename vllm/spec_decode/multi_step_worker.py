@@ -1,6 +1,6 @@
 import copy
 import weakref
-from typing import Dict, Set, Tuple
+from typing import Dict, Set
 
 import torch
 
@@ -56,7 +56,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
         self.model_runner.model.sampler.should_modify_greedy_probs_inplace = (
             True)
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         return self.worker.determine_num_available_blocks()
 
     def get_cache_block_size_bytes(self) -> int:
@@ -74,7 +74,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
         seq_ids_with_bonus_token_in_last_step: Set[int],
-    ) -> Tuple[list[SamplerOutput], bool]:
+    ) -> tuple[list[SamplerOutput], bool]:
         """Run the model forward pass sample_len times. Returns the list of
         sampler output, one per model forward pass, along with indicator of
         whether torch tensor in sampler output need to be transposed in latter
@@ -131,7 +131,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
     def _expand_execute_model_request(
         execute_model_req: ExecuteModelRequest,
         seq_with_bonus_token_in_last_step: set,
-    ) -> Tuple[ExecuteModelRequest, list[int]]:
+    ) -> tuple[ExecuteModelRequest, list[int]]:
         """
         Expands the execute model request based on sequences with bonus
         tokens.
@@ -148,7 +148,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
             contain bonus tokens.
 
         Returns:
-            Tuple[ExecuteModelRequest, list[int]]: The updated execute model
+            tuple[ExecuteModelRequest, list[int]]: The updated execute model
             request with expanded sequences and a list of indices corresponding
             to the original sequence groups.
         """

@@ -11,8 +11,8 @@ import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import (AbstractSet, Callable, Dict, Optional, Tuple, Type,
-                    TypeVar, Union)
+from typing import (AbstractSet, Callable, Dict, Optional, Type, TypeVar,
+                    Union)
 
 import cloudpickle
 import torch.nn as nn
@@ -378,7 +378,7 @@ class _ModelRegistry:
     def inspect_model_cls(
         self,
         architectures: Union[str, list[str]],
-    ) -> Tuple[_ModelInfo, str]:
+    ) -> tuple[_ModelInfo, str]:
         architectures = self._normalize_archs(architectures)
 
         for arch in architectures:
@@ -391,7 +391,7 @@ class _ModelRegistry:
     def resolve_model_cls(
         self,
         architectures: Union[str, list[str]],
-    ) -> Tuple[Type[nn.Module], str]:
+    ) -> tuple[Type[nn.Module], str]:
         architectures = self._normalize_archs(architectures)
 
         for arch in architectures:

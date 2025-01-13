@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Tuple, Type
+from typing import Type
 
 import torch
 
@@ -42,7 +42,7 @@ class MockAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         raise NotImplementedError
 
     @staticmethod

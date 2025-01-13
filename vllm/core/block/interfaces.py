@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, FrozenSet, Optional, Protocol, Tuple
+from typing import Dict, FrozenSet, Optional, Protocol
 
 from vllm.utils import Device
 
@@ -155,7 +155,7 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def clear_copy_on_writes(self) -> list[Tuple[int, int]]:
+    def clear_copy_on_writes(self) -> list[tuple[int, int]]:
         pass
 
     @abstractmethod
@@ -248,7 +248,7 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def clear_copy_on_writes(self) -> list[Tuple[int, int]]:
+    def clear_copy_on_writes(self) -> list[tuple[int, int]]:
         pass
 
     @abstractmethod

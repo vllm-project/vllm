@@ -1,7 +1,7 @@
 import dataclasses
 import functools
 from dataclasses import dataclass, field
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Union)
 
 import torch
 
@@ -676,7 +676,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         return self._base_model_runner.vocab_size
 
 
-DeferredLogprobsReturnType = Tuple[Optional[list[Optional[PromptLogprobs]]],
+DeferredLogprobsReturnType = tuple[Optional[list[Optional[PromptLogprobs]]],
                                    Optional[list[SampleLogprobs]]]
 
 

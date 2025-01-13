@@ -14,7 +14,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional
 
 import torch
 
@@ -80,7 +80,7 @@ class PyNcclPipe(KVPipeBase):
 
     def _get_device_send_recv_impl(
         self, group: StatelessProcessGroup
-    ) -> Tuple[Callable[[torch.Tensor, int], None], Callable[
+    ) -> tuple[Callable[[torch.Tensor, int], None], Callable[
         [torch.Tensor, int], None]]:
 
         send: Callable[[torch.Tensor, int], None]

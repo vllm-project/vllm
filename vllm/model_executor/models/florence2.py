@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, Optional, Set, Tuple
+from typing import Iterable, Optional, Set
 
 import torch
 import torch.nn as nn
@@ -158,7 +158,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -254,7 +254,7 @@ class Florence2ForConditionalGeneration(nn.Module):
     ) -> SamplerOutput:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         skip_prefixes = [
             'image_projection', "vision_tower", "image_proj_norm",

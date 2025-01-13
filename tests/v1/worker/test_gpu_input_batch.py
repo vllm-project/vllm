@@ -1,4 +1,4 @@
-from typing import Dict, Set, Tuple
+from typing import Dict, Set
 
 import numpy as np
 import pytest
@@ -20,9 +20,9 @@ MAX_NUM_PROMPT_TOKENS = 64
 
 def _remove_requests(
         input_batch: InputBatch, batch_size: int,
-        reqs: list[CachedRequestState]) -> Tuple[Set[str], list[int]]:
+        reqs: list[CachedRequestState]) -> tuple[Set[str], list[int]]:
     """
-    Remove some requests randomly from the batch and returns a Tuple
+    Remove some requests randomly from the batch and returns a tuple
     of 1) set of request removed 2) indices of the requests removed
     ordered in descending order
     """

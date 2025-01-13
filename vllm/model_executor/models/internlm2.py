@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Type, Union
+from typing import Any, Dict, Iterable, Optional, Set, Type, Union
 
 import torch
 from torch import nn
@@ -228,7 +228,7 @@ class InternLMDecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -398,7 +398,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)

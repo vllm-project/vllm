@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, Generic, NamedTuple,
-                    Optional, Sequence, Tuple, Type, TypeVar, Union)
+                    Optional, Sequence, Type, TypeVar, Union)
 
 from torch import nn
 
@@ -272,7 +272,7 @@ class MultiModalPlaceholderMap:
     @classmethod
     def from_seq_group(
         cls, seq_group: "SequenceGroupMetadata", positions: range
-    ) -> Tuple[Optional[MultiModalDataDict], dict[str,
+    ) -> tuple[Optional[MultiModalDataDict], dict[str,
                                                   "MultiModalPlaceholderMap"]]:
         """
         Returns the multi-modal items that intersect with the portion of a

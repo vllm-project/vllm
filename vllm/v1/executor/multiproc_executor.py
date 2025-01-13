@@ -7,7 +7,7 @@ import weakref
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing.process import BaseProcess
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import psutil
 import zmq
@@ -99,7 +99,7 @@ class MultiprocExecutor(Executor):
         self.collective_rpc("initialize_cache", args=(num_gpu_blocks, ))
         self.collective_rpc("compile_or_warm_up_model")
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """
         Determine the number of available KV blocks by invoking the
         underlying worker.
@@ -117,7 +117,7 @@ class MultiprocExecutor(Executor):
     def collective_rpc(self,
                        method: str,
                        timeout: Optional[float] = None,
-                       args: Tuple = (),
+                       args: tuple = (),
                        kwargs: Optional[Dict] = None) -> list[Any]:
         """
         Execute an RPC call on workers.

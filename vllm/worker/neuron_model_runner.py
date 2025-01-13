@@ -1,7 +1,7 @@
 import os
 from dataclasses import dataclass
 from importlib.util import find_spec
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 
 import torch
 from torch import nn
@@ -116,7 +116,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     def _prepare_prompt(
         self,
         seq_group_metadata_list: list[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int],
                BatchedTensorInputs]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: list[list[int]] = []
@@ -180,7 +180,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     def _prepare_decode(
         self,
         seq_group_metadata_list: list[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: list[list[int]] = []
         input_positions: list[list[int]] = []

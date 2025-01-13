@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -138,7 +138,7 @@ def get_masked_input_and_mask(
         input_: torch.Tensor, org_vocab_start_index: int,
         org_vocab_end_index: int, num_org_vocab_padding: int,
         added_vocab_start_index: int,
-        added_vocab_end_index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        added_vocab_end_index: int) -> tuple[torch.Tensor, torch.Tensor]:
     # torch.compile will fuse all of the pointwise ops below
     # into a single kernel, making it very fast
     org_vocab_mask = (input_ >= org_vocab_start_index) & (input_ <

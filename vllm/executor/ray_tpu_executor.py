@@ -2,8 +2,7 @@ import asyncio
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import (TYPE_CHECKING, Any, Awaitable, Dict, Optional, Tuple,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Awaitable, Dict, Optional, Union)
 
 import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorAsyncBase
@@ -203,7 +202,7 @@ class RayTPUExecutor(TPUExecutor):
         method: str,
         *args,
         async_run_remote_workers_only: bool = False,
-        all_args: Optional[list[Tuple[Any, ...]]] = None,
+        all_args: Optional[list[tuple[Any, ...]]] = None,
         all_kwargs: Optional[list[Dict[str, Any]]] = None,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
@@ -259,7 +258,7 @@ class RayTPUExecutor(TPUExecutor):
         async_run_remote_workers_only to complete."""
         ray.get(parallel_worker_tasks)
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         num_blocks = self._run_workers("determine_num_available_blocks", )
         num_tpu_blocks = min(b[0] for b in num_blocks)
         num_cpu_blocks = min(b[1] for b in num_blocks)

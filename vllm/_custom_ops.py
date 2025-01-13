@@ -1,6 +1,6 @@
 import contextlib
 import importlib
-from typing import TYPE_CHECKING, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch.library
@@ -196,7 +196,7 @@ def rms_norm_dynamic_per_token_quant(
     quant_dtype: torch.dtype,
     scale_ub: Optional[torch.Tensor] = None,
     residual: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     output = torch.empty_like(input, dtype=quant_dtype)
     scales = torch.empty((input.numel() // input.shape[-1], 1),
                          device=input.device,
@@ -497,7 +497,7 @@ def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
 
 
 def cutlass_sparse_compress(a: torch.Tensor) \
-    -> Tuple[torch.Tensor, torch.Tensor]:
+    -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compresses a sparse matrix for use with Cutlass sparse operations.
 
@@ -514,7 +514,7 @@ def cutlass_sparse_compress(a: torch.Tensor) \
             - `torch.float16`
 
     Returns:
-        Tuple[torch.Tensor, torch.Tensor]: 
+        tuple[torch.Tensor, torch.Tensor]: 
             A tuple containing:
             - `a_nzs` (torch.Tensor): A tensor containing non-zero elements of `a`.
             - `a_meta` (torch.Tensor): A tensor containing metadata for the sparse representation.
@@ -743,7 +743,7 @@ def scaled_fp8_quant(
     num_token_padding: Optional[int] = None,
     scale_ub: Optional[torch.Tensor] = None,
     use_per_token_if_dynamic: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP8 and return quantized tensor and scale.
 
@@ -764,12 +764,12 @@ def scaled_fp8_quant(
             in the dynamic quantization case.
 
     Returns:
-        Tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
+        tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
             scaling factor.
     """
     # This code assumes batch_dim and num_tokens are flattened
     assert (input.ndim == 2)
-    shape: Union[Tuple[int, int], torch.Size] = input.shape
+    shape: Union[tuple[int, int], torch.Size] = input.shape
     # For rocm, the output fp8 dtype is torch.float_e3m3fnuz
     out_dtype: torch.dtype = torch.float8_e4m3fnuz \
             if current_platform.is_rocm() else torch.float8_e4m3fn
@@ -801,7 +801,7 @@ def scaled_int8_quant(
     scale: Optional[torch.Tensor] = None,
     azp: Optional[torch.Tensor] = None,
     symmetric: bool = True
-) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """
     Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
 
@@ -814,7 +814,7 @@ def scaled_int8_quant(
         symmetric: Whether to use symmetric quantization (scale only, azp ignored).
 
     Returns:
-      Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : Output int8 tensor, scales, and optionally azp.
+      tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : Output int8 tensor, scales, and optionally azp.
     """
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
@@ -1033,7 +1033,7 @@ def register_buffer(fa: int, ipc_tensors: list[int]) -> None:
     return torch.ops._C_custom_ar.register_buffer(fa, ipc_tensors)
 
 
-def get_graph_buffer_ipc_meta(fa: int) -> Tuple[list[int], list[int]]:
+def get_graph_buffer_ipc_meta(fa: int) -> tuple[list[int], list[int]]:
     return torch.ops._C_custom_ar.get_graph_buffer_ipc_meta(fa)
 
 

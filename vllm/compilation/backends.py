@@ -6,7 +6,7 @@ import pprint
 import time
 from collections import defaultdict
 from contextlib import ExitStack
-from typing import Any, Callable, Dict, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Set
 from unittest.mock import patch
 
 import torch
@@ -83,20 +83,20 @@ class InductorHashCache:
         with open(self.cache_file_path, "w") as f:
             f.write(self.serialize())
 
-    def __contains__(self, key: Tuple[Optional[int], int]) -> bool:
+    def __contains__(self, key: tuple[Optional[int], int]) -> bool:
         if self.disabled:
             return False
         runtime_shape, graph_index = key
         return runtime_shape in self.cache and graph_index in self.cache[
             runtime_shape]
 
-    def __getitem__(self, key: Tuple[Optional[int], int]) -> str:
+    def __getitem__(self, key: tuple[Optional[int], int]) -> str:
         if self.disabled:
             raise KeyError("cannot read from disabled cache")
         runtime_shape, graph_index = key
         return self.cache[runtime_shape][graph_index]
 
-    def __setitem__(self, key: Tuple[Optional[int], int], value: str):
+    def __setitem__(self, key: tuple[Optional[int], int], value: str):
         # setitem for disabled cache is fine, because we
         # don't actually write to the disk
         runtime_shape, graph_index = key
@@ -288,7 +288,7 @@ class SplitItem:
 
 
 def split_graph(graph: fx.GraphModule,
-                ops: list[str]) -> Tuple[fx.GraphModule, list[SplitItem]]:
+                ops: list[str]) -> tuple[fx.GraphModule, list[SplitItem]]:
     # split graph by ops
     subgraph_id = 0
     node_to_subgraph_id = {}
@@ -374,7 +374,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             return super().run(*fake_args)
 
     def call_module(self, target: torch.fx.node.Target,
-                    args: Tuple[torch.fx.node.Argument,
+                    args: tuple[torch.fx.node.Argument,
                                 ...], kwargs: Dict[str, Any]) -> Any:
         assert isinstance(target, str)
         output = super().call_module(target, args, kwargs)

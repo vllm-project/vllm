@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     Dict, Generator, Generic, Iterator, Literal, NamedTuple,
-                    Optional, Tuple, Type, TypeVar, Union, overload)
+                    Optional, Type, TypeVar, Union, overload)
 from uuid import uuid4
 
 import numpy as np
@@ -398,7 +398,7 @@ def _next_task(iterator: AsyncGenerator[T, None],
 
 async def merge_async_iterators(
     *iterators: AsyncGenerator[T,
-                               None], ) -> AsyncGenerator[Tuple[int, T], None]:
+                               None], ) -> AsyncGenerator[tuple[int, T], None]:
     """Merge multiple asynchronous iterators into a single iterator.
 
     This method handle the case where some iterators finish before others.
@@ -613,7 +613,7 @@ def create_kv_caches_with_random_flash(
     model_dtype: Optional[Union[str, torch.dtype]] = None,
     seed: int = 0,
     device: Optional[str] = "cuda",
-) -> Tuple[list[torch.Tensor], list[torch.Tensor]]:
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     from vllm.platforms import current_platform
     current_platform.seed_everything(seed)
 
@@ -650,7 +650,7 @@ def create_kv_caches_with_random(
     model_dtype: Optional[Union[str, torch.dtype]] = None,
     seed: int = 0,
     device: Optional[str] = "cuda",
-) -> Tuple[list[torch.Tensor], list[torch.Tensor]]:
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
 
     if cache_dtype == "fp8" and head_size % 16:
         raise ValueError(
@@ -815,7 +815,7 @@ def is_list_of(
 
 
 JSONTree = Union[Dict[str, "JSONTree[T]"], list["JSONTree[T]"],
-                 Tuple["JSONTree[T]", ...], T]
+                 tuple["JSONTree[T]", ...], T]
 """A nested JSON structure where the leaves need not be JSON-serializable."""
 
 
@@ -838,8 +838,8 @@ def json_map_leaves(
 @overload
 def json_map_leaves(
     func: Callable[[T], U],
-    value: Tuple[JSONTree[T], ...],
-) -> Tuple[JSONTree[U], ...]:
+    value: tuple[JSONTree[T], ...],
+) -> tuple[JSONTree[U], ...]:
     ...
 
 
@@ -1569,8 +1569,8 @@ def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def weak_ref_tensors(
-    tensors: Union[torch.Tensor, list[torch.Tensor], Tuple[torch.Tensor]]
-) -> Union[torch.Tensor, list[torch.Tensor], Tuple[torch.Tensor]]:
+    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
+) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]:
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.

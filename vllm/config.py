@@ -9,8 +9,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
-                    Final, Literal, Mapping, Optional, Protocol, Set, Tuple,
-                    Type, Union)
+                    Final, Literal, Mapping, Optional, Protocol, Set, Type,
+                    Union)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -458,7 +458,7 @@ class ModelConfig:
         if ModelRegistry.is_cross_encoder_model(architectures):
             return "score"
 
-        suffix_to_preferred_task: list[Tuple[str, _ResolvedTask]] = [
+        suffix_to_preferred_task: list[tuple[str, _ResolvedTask]] = [
             # Other models follow this pattern
             ("ForCausalLM", "generate"),
             ("ForConditionalGeneration", "generate"),
@@ -480,7 +480,7 @@ class ModelConfig:
         self,
         task_option: Union[TaskOption, Literal["draft"]],
         hf_config: PretrainedConfig,
-    ) -> Tuple[Set[_ResolvedTask], _ResolvedTask]:
+    ) -> tuple[Set[_ResolvedTask], _ResolvedTask]:
         if task_option == "draft":
             return {"draft"}, "draft"
 
@@ -804,7 +804,7 @@ class ModelConfig:
         return num_heads // parallel_config.tensor_parallel_size
 
     def get_layers_start_end_indices(
-            self, parallel_config: "ParallelConfig") -> Tuple[int, int]:
+            self, parallel_config: "ParallelConfig") -> tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
         total_num_hidden_layers = getattr(self.hf_text_config,
                                           "num_hidden_layers", 0)
@@ -2007,7 +2007,7 @@ class LoRAConfig:
     lora_extra_vocab_size: int = 256
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
-    long_lora_scaling_factors: Optional[Tuple[float]] = None
+    long_lora_scaling_factors: Optional[tuple[float]] = None
     bias_enabled: bool = False
 
     def compute_hash(self) -> str:

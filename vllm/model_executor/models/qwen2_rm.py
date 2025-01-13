@@ -3,7 +3,7 @@
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
 """Inference-only Qwen2-RM model compatible with HuggingFace weights."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Union
 
 import torch
 from torch import nn
@@ -110,7 +110,7 @@ class Qwen2ForRewardModel(nn.Module, SupportsLoRA, SupportsPP):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self,
                                    ignore_unexpected_prefixes=["lm_head."])

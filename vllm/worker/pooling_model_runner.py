@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Any, Dict, Optional, Tuple, Type, Union
+from typing import Any, Dict, Optional, Type, Union
 
 import torch
 
@@ -182,7 +182,7 @@ class PoolingModelRunner(
         prompt_lens: list[int],
     ) -> PoolingMetadata:
         """Prepare PoolingMetadata for the sequence group metadata list."""
-        seq_groups: list[Tuple[list[int], PoolingParams]] = []
+        seq_groups: list[tuple[list[int], PoolingParams]] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             pooling_params = seq_group_metadata.pooling_params

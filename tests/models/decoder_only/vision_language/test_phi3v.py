@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Optional, Tuple, Type
+from typing import Optional, Type
 
 import pytest
 from transformers import AutoTokenizer
@@ -23,7 +23,7 @@ HF_MULTIIMAGE_IMAGE_PROMPT = "<|user|>\n<|image_1|>\n<|image_2|>\nDescribe these
 models = ["microsoft/Phi-3.5-vision-instruct"]
 
 
-def vllm_to_hf_output(vllm_output: Tuple[list[int], str,
+def vllm_to_hf_output(vllm_output: tuple[list[int], str,
                                          Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
@@ -55,7 +55,7 @@ if current_platform.is_rocm():
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    inputs: list[Tuple[list[str], PromptImageInput]],
+    inputs: list[tuple[list[str], PromptImageInput]],
     model: str,
     *,
     dtype: str,

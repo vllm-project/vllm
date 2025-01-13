@@ -1,7 +1,7 @@
 import argparse
 import time
 from datetime import datetime
-from typing import Any, Dict, Tuple, TypedDict
+from typing import Any, Dict, TypedDict
 
 import ray
 import torch
@@ -181,7 +181,7 @@ class BenchmarkWorker:
         dtype: torch.dtype,
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
-    ) -> Tuple[Dict[str, int], float]:
+    ) -> tuple[Dict[str, int], float]:
         current_platform.seed_everything(self.seed)
         dtype_str = get_config_dtype_str(dtype,
                                          use_int8_w8a16=use_int8_w8a16,

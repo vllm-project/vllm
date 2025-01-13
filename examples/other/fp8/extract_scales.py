@@ -2,7 +2,7 @@ import argparse
 import glob
 import json
 import os
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import torch
@@ -19,7 +19,7 @@ def _prepare_hf_weights(
     quantized_model_dir: str,
     load_format: str = "auto",
     fall_back_to_pt: bool = True,
-) -> Tuple[list[str], bool]:
+) -> tuple[list[str], bool]:
     if not os.path.isdir(quantized_model_dir):
         raise FileNotFoundError(
             f"The quantized model directory `{quantized_model_dir}` "

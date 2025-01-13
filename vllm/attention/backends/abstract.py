@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import (TYPE_CHECKING, Any, Dict, Generic, Optional, Set, Tuple,
-                    Type, TypeVar)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Optional, Set, Type,
+                    TypeVar)
 
 import torch
 
@@ -73,7 +73,7 @@ class AttentionBackend(ABC):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         raise NotImplementedError
 
     @staticmethod

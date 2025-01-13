@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Optional, Set, Tuple, Type, Union
+from typing import Optional, Set, Type, Union
 
 import huggingface_hub
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
@@ -95,7 +95,7 @@ def replace_submodule(model: nn.Module, module_name: str,
 def parse_fine_tuned_lora_name(
         name: str,
         weights_mapper: Optional[WeightsMapper] = None
-) -> Tuple[str, bool, bool]:
+) -> tuple[str, bool, bool]:
     """Parse the name of lora weights.
 
     args:
@@ -104,7 +104,7 @@ def parse_fine_tuned_lora_name(
         weights_mapper: maps the name of weight, e.g.
             `model.` -> `language_model.model.`,
     return:
-        Tuple(module_name, is_lora_a):
+        tuple(module_name, is_lora_a):
             module_name: the name of the module, e.g. model.dense1,
             is_lora_a whether the tensor is lora_a or lora_b.
             is_bias whether the tensor is lora bias.

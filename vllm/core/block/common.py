@@ -1,6 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, Optional, Protocol, Tuple
+from typing import Deque, Dict, Iterable, Optional, Protocol
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 
@@ -105,7 +105,7 @@ class CopyOnWriteTracker:
     """
 
     def __init__(self, refcounter: RefCounterProtocol):
-        self._copy_on_writes: list[Tuple[BlockId, BlockId]] = []
+        self._copy_on_writes: list[tuple[BlockId, BlockId]] = []
         self._refcounter = refcounter
 
     def is_appendable(self, block: Block) -> bool:
@@ -132,7 +132,7 @@ class CopyOnWriteTracker:
         assert trg_block_id is not None
         self._copy_on_writes.append((src_block_id, trg_block_id))
 
-    def clear_cows(self) -> list[Tuple[BlockId, BlockId]]:
+    def clear_cows(self) -> list[tuple[BlockId, BlockId]]:
         """Clears the copy-on-write tracking information and returns the current
         state.
 
@@ -141,7 +141,7 @@ class CopyOnWriteTracker:
         It then clears the internal tracking information.
 
         Returns:
-            list[Tuple[BlockId, BlockId]]: A list mapping source
+            list[tuple[BlockId, BlockId]]: A list mapping source
                 block indices to destination block indices for the
                 current copy-on-write operations.
         """
