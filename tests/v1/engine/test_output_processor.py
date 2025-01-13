@@ -11,9 +11,10 @@ from vllm.v1.engine.output_processor import OutputProcessor
 
 TOKENIZER_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
 VLLM_CONFIG = EngineArgs(model=TOKENIZER_NAME).create_engine_config()
-TOKENIZER_GROUP = init_tokenizer_from_configs(
-    VLLM_CONFIG.model_config, VLLM_CONFIG.scheduler_config,
-    VLLM_CONFIG.parallel_config, VLLM_CONFIG.lora_config)
+TOKENIZER_GROUP = init_tokenizer_from_configs(VLLM_CONFIG.model_config,
+                                              VLLM_CONFIG.scheduler_config,
+                                              VLLM_CONFIG.parallel_config,
+                                              VLLM_CONFIG.lora_config)
 tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
 
 FULL_STRINGS = [
@@ -110,7 +111,7 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind):
             break
 
         # Step the Detokenizer.
-        processed_outputs = output_processor.process_outputs(outputs,)
+        processed_outputs = output_processor.process_outputs(outputs, )
         request_outputs = processed_outputs.request_outputs
         requests_to_abort = processed_outputs.reqs_to_abort
         assert len(requests_to_abort) == 0
@@ -147,19 +148,19 @@ def test_stop_string(include_stop_str_in_output: bool):
 
     # Make N requests.
     requests = [
-        EngineCoreRequest(
-            request_id=f"request-{idx}",
-            prompt=prompt,
-            prompt_token_ids=prompt_tokens,
-            arrival_time=0,
-            mm_inputs=None,
-            mm_hashes=None,
-            mm_placeholders=None,
-            eos_token_id=None,
-            lora_request=None,
-            sampling_params=SamplingParams()) for idx, (
-                prompt,
-                prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
+        EngineCoreRequest(request_id=f"request-{idx}",
+                          prompt=prompt,
+                          prompt_token_ids=prompt_tokens,
+                          arrival_time=0,
+                          mm_inputs=None,
+                          mm_hashes=None,
+                          mm_placeholders=None,
+                          eos_token_id=None,
+                          lora_request=None,
+                          sampling_params=SamplingParams())
+        for idx, (
+            prompt,
+            prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
     ]
 
     # Add requests to the detokenizer.
@@ -239,8 +240,9 @@ def test_iteration_stats():
             eos_token_id=None,
             lora_request=None,
             sampling_params=SamplingParams(),
-        ) for idx, (prompt, prompt_tokens) in enumerate(
-            zip(PROMPT_STRINGS, PROMPT_TOKENS))
+        ) for idx, (
+            prompt,
+            prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
     ]
 
     # Add all requests except one to the OutputProcessor.
