@@ -2,8 +2,8 @@ import argparse
 import dataclasses
 import json
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, Literal, Mapping, Optional,
-                    Type, Union, cast, get_args)
+from typing import (TYPE_CHECKING, Any, Dict, Literal, Mapping, Optional, Type,
+                    Union, cast, get_args)
 
 import torch
 

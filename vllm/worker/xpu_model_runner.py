@@ -3,7 +3,8 @@ import time
 import weakref
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Type, TypeVar)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Type,
+                    TypeVar)
 
 import torch
 import torch.nn as nn
