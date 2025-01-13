@@ -1,4 +1,4 @@
-# AI Accelerator
+# Other AI accelerators
 
 vLLM is a Python library that supports the following AI accelerators. Select your AI accelerator type to see vendor specific instructions:
 
