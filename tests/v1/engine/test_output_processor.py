@@ -239,8 +239,8 @@ def test_iteration_stats():
             eos_token_id=None,
             lora_request=None,
             sampling_params=SamplingParams(),
-        ) for idx, (
-            prompt, prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
+        ) for idx, (prompt, prompt_tokens) in enumerate(
+            zip(PROMPT_STRINGS, PROMPT_TOKENS))
     ]
 
     # Add all requests except one to the OutputProcessor.
