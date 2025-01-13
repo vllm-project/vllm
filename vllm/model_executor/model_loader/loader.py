@@ -11,7 +11,7 @@ import os
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import (Any, Callable, Generator, Iterable, Optional, cast)
+from typing import Any, Callable, Generator, Iterable, Optional, cast
 
 import gguf
 import huggingface_hub

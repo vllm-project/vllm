@@ -1,5 +1,5 @@
 import math
-from typing import (Iterable, Mapping, Optional, TypedDict, Union)
+from typing import Iterable, Mapping, Optional, TypedDict, Union
 
 import numpy as np
 import torch

@@ -4,7 +4,7 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from functools import lru_cache, wraps
-from typing import (TYPE_CHECKING, Callable, Optional, TypeVar, Union)
+from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
 
 import pynvml
 import torch

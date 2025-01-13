@@ -1,7 +1,7 @@
 import enum
 import time
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Optional, Type, Union)
+from typing import TYPE_CHECKING, Any, Callable, Optional, Type, Union
 from unittest.mock import patch
 
 import numpy as np

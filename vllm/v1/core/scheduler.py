@@ -1,6 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Deque, Iterable, Optional, Union)
+from typing import TYPE_CHECKING, Deque, Iterable, Optional, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger

@@ -2,7 +2,7 @@
 import sys
 from bisect import bisect_left
 from os.path import commonprefix
-from typing import (Callable, FrozenSet, Iterable, Optional)
+from typing import Callable, FrozenSet, Iterable, Optional
 
 from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
                                     get_all_blocks_recursively)

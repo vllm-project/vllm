@@ -3,7 +3,7 @@ import os
 import tempfile
 from collections import UserList
 from enum import Enum
-from typing import (Any, Callable, Optional, Type, TypedDict, TypeVar, Union)
+from typing import Any, Callable, Optional, Type, TypedDict, TypeVar, Union
 
 import numpy as np
 import pytest

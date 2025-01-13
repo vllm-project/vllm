@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from multiprocessing import Queue
 from multiprocessing.connection import wait
 from multiprocessing.process import BaseProcess
-from typing import (Any, Callable, Generic, Optional, TextIO, TypeVar, Union)
+from typing import Any, Callable, Generic, Optional, TextIO, TypeVar, Union
 
 import torch
 

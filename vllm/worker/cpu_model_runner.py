@@ -2,7 +2,7 @@ import dataclasses
 import weakref
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Optional, Type, TypeVar, Union)
+from typing import TYPE_CHECKING, Any, Optional, Type, TypeVar, Union
 
 import torch
 from torch import nn

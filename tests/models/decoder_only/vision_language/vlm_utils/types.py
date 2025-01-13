@@ -1,7 +1,7 @@
 """Types for writing multimodal model tests."""
 from enum import Enum
 from pathlib import PosixPath
-from typing import (Any, Callable, Iterable, NamedTuple, Optional, Type, Union)
+from typing import Any, Callable, Iterable, NamedTuple, Optional, Type, Union
 
 import torch
 from PIL.Image import Image

@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import (Any, Callable, Generator, Iterable, Optional, Union)
+from typing import Any, Callable, Generator, Iterable, Optional, Union
 
 import filelock
 import gguf

@@ -2,7 +2,7 @@ import multiprocessing
 import os
 import weakref
 from collections.abc import Sequence
-from typing import (Any, Callable, Generic, Optional, TypeVar, Union, overload)
+from typing import Any, Callable, Generic, Optional, TypeVar, Union, overload
 
 from vllm.logger import init_logger
 from vllm.utils import get_mp_context, kill_process_tree

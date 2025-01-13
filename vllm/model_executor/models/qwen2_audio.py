@@ -20,7 +20,7 @@
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
 from functools import cached_property
-from typing import (Any, Iterable, Mapping, Optional, TypedDict, Union)
+from typing import Any, Iterable, Mapping, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn

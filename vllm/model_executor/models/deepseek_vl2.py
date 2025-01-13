@@ -2,7 +2,7 @@
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 import math
 from functools import cached_property, partial
-from typing import (Iterable, Literal, Mapping, Optional, TypedDict, Union)
+from typing import Iterable, Literal, Mapping, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn

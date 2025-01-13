@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import (TYPE_CHECKING, Any, Generic, Optional, Type, TypeVar)
+from typing import TYPE_CHECKING, Any, Generic, Optional, Type, TypeVar
 
 import torch
 

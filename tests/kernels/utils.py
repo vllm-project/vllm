@@ -4,7 +4,7 @@ import itertools
 import random
 import unittest
 from numbers import Number
-from typing import (Any, NamedTuple, Optional, Sequence, Union)
+from typing import Any, NamedTuple, Optional, Sequence, Union
 
 import pytest
 import torch

@@ -3,7 +3,7 @@
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
 from array import array
-from typing import (Iterable, Mapping, Optional, TypedDict)
+from typing import Iterable, Mapping, Optional, TypedDict
 
 import torch
 from PIL import Image

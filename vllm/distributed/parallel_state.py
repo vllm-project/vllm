@@ -27,7 +27,7 @@ from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import (TYPE_CHECKING, Any, Callable, Optional, Union)
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 from unittest.mock import patch
 
 import torch
