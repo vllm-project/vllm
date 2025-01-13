@@ -19,6 +19,8 @@ class HpuPlatform(Platform):
     device_name: str = "hpu"
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
+    ray_device_key: str = "HPU"
+    device_control_env_var: str = "HABANA_VISIBLE_MODULES"
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
@@ -61,3 +63,7 @@ class HpuPlatform(Platform):
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on HPU.")
         return False
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_hpu.PunicaWrapperHPU"

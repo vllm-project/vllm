@@ -724,7 +724,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 
     def apply(
         self,
-        prompt_text: str,
+        prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputsV2:
@@ -737,7 +737,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             image_height=-1,
         )
 
-        result = super().apply(prompt_text, mm_data, hf_processor_mm_kwargs)
+        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
 
         mm_items = self._to_mm_items(mm_data)
         mm_item_counts = mm_items.get_all_counts()
@@ -760,7 +760,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             )
         ])
 
-        prompt_ids, prompt_text, _ = self._apply_prompt_replacements(
+        prompt_ids, prompt, _ = self._apply_prompt_replacements(
             result["prompt_token_ids"],
             mantis_mm_repls,
             mm_item_counts,
@@ -788,7 +788,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 
         return MultiModalInputsV2(
             type="multimodal",
-            prompt=prompt_text,
+            prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_placeholders=mm_placeholder_ranges,

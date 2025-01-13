@@ -16,7 +16,9 @@ class NeuronPlatform(Platform):
     _enum = PlatformEnum.NEURON
     device_name: str = "neuron"
     device_type: str = "neuron"
+    ray_device_key: str = "neuron_cores"
     supported_quantization: list[str] = ["neuron_quant"]
+    device_control_env_var: str = "NEURON_RT_VISIBLE_CORES"
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:

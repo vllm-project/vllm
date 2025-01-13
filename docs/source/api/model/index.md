@@ -9,4 +9,3 @@ interfaces_base
 interfaces
 adapters
 ```
-
