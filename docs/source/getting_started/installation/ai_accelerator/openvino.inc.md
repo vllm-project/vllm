@@ -7,7 +7,7 @@ vLLM powered by OpenVINO supports all LLM models from [vLLM supported models lis
 - OS: Linux
 - Instruction set architecture (ISA) requirement: at least AVX2.
 
-## Python
+## Set up using Python
 
 ### Pre-built wheels
 
@@ -39,7 +39,7 @@ PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" VLLM_TARGET_DEVICE=op
 To use vLLM OpenVINO backend with a GPU device, ensure your system is properly set up. Follow the instructions provided here: [https://docs.openvino.ai/2024/get-started/configurations/configurations-intel-gpu.html](https://docs.openvino.ai/2024/get-started/configurations/configurations-intel-gpu.html).
 :::
 
-## Docker
+## Set up using Docker
 
 ### Pre-built images
 

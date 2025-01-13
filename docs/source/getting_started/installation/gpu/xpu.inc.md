@@ -7,7 +7,7 @@ vLLM initially supports basic model inferencing and serving on Intel GPU platfor
 - Supported Hardware: Intel Data Center GPU, Intel ARC GPU
 - OneAPI requirements: oneAPI 2024.2
 
-## Python
+## Set up using Python
 
 ### Pre-built wheels
 
@@ -35,7 +35,7 @@ VLLM_TARGET_DEVICE=xpu python setup.py install
   type will be supported in the future.
 ```
 
-## Docker
+## Set up using Docker
 
 ### Pre-built images
 

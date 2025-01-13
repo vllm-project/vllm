@@ -109,7 +109,7 @@ Connect to your TPU using SSH:
 gcloud compute tpus tpu-vm ssh TPU_NAME --zone ZONE
 ```
 
-## Python
+## Set up using Python
 
 ### Pre-built wheels
 
@@ -157,7 +157,7 @@ Run the setup script:
 VLLM_TARGET_DEVICE="tpu" python setup.py develop
 ```
 
-## Docker
+## Set up using Docker
 
 ### Pre-built images
 

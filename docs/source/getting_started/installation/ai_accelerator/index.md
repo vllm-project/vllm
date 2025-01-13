@@ -87,7 +87,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ```{include} openvino.inc.md
 :start-after: "## Requirements"
-:end-before: "## Python"
+:end-before: "## Set up using Python"
 ```
 
 :::
@@ -104,7 +104,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ```{include} tpu.inc.md
 :start-after: "## Configure a new environment"
-:end-before: "## Python"
+:end-before: "## Set up using Python"
 ```
 
 :::
@@ -114,7 +114,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ```{include} hpu-gaudi.inc.md
 :start-after: "## Configure a new environment"
-:end-before: "## Python"
+:end-before: "## Set up using Python"
 ```
 
 :::
@@ -124,7 +124,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ```{include} neuron.inc.md
 :start-after: "## Configure a new environment"
-:end-before: "## Python"
+:end-before: "## Set up using Python"
 ```
 
 :::
@@ -139,7 +139,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-## Python
+## Set up using Python
 
 ### Pre-built wheels
 
@@ -198,7 +198,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ```{include} tpu.inc.md
 :start-after: "### Build wheel from source"
-:end-before: "## Docker"
+:end-before: "## Set up using Docker"
 ```
 
 :::
@@ -208,7 +208,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ```{include} hpu-gaudi.inc.md
 :start-after: "### Build wheel from source"
-:end-before: "## Docker"
+:end-before: "## Set up using Docker"
 ```
 
 :::
@@ -218,7 +218,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ```{include} neuron.inc.md
 :start-after: "### Build wheel from source"
-:end-before: "## Docker"
+:end-before: "## Set up using Docker"
 ```
 
 :::
@@ -228,14 +228,14 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ```{include} openvino.inc.md
 :start-after: "### Build wheel from source"
-:end-before: "## Docker"
+:end-before: "## Set up using Docker"
 ```
 
 :::
 
 ::::
 
-## Docker
+## Set up using Docker
 
 ### Pre-built images
 

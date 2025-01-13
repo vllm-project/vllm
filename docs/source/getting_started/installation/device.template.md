@@ -2,13 +2,13 @@
 
 ## Requirements
 
-## Python
+## Set up using Python
 
 ### Pre-built wheels
 
 ### Build wheel from source
 
-## Docker
+## Set up using Docker
 
 ### Pre-built images
 

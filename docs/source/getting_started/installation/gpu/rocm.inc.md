@@ -7,7 +7,7 @@ vLLM supports AMD GPUs with ROCm 6.2.
 - GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100)
 - ROCm 6.2
 
-## Python
+## Set up using Python
 
 ### Pre-built wheels
 
@@ -99,7 +99,7 @@ Currently, there are no pre-built ROCm wheels.
   For vLLM, please refer to [vLLM performance optimization](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/workload.html#vllm-performance-optimization).
 ```
 
-## Docker
+## Set up using Docker
 
 ### Pre-built images
 

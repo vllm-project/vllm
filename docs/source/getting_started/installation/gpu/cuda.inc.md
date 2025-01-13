@@ -6,7 +6,7 @@ vLLM contains pre-compiled C++ and CUDA (12.1) binaries.
 
 - GPU: compute capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
 
-## Python
+## Set up using Python
 
 ### Create a new Python environment
 
@@ -79,7 +79,7 @@ The `uv` approach works for vLLM `v0.6.6` and later and offers an easy-to-rememb
 
 ### Build wheel from source
 
-#### Python-only build (without compilation)
+#### Set up using Python-only build (without compilation)
 
 If you only need to change Python code, you can build and install vLLM without compilation. Using `pip`'s [`--editable` flag](https://pip.pypa.io/en/stable/topics/local-project-installs/#editable-installs), changes you make to the code will be reflected when you run vLLM:
 
@@ -198,7 +198,7 @@ export VLLM_TARGET_DEVICE=empty
 pip install -e .
 ```
 
-## Docker
+## Set up using Docker
 
 ### Pre-built images
 

@@ -59,7 +59,7 @@ sudo apt-get install aws-neuronx-tools=2.* -y
 export PATH=/opt/aws/neuron/bin:$PATH
 ```
 
-## Python
+## Set up using Python
 
 ### Pre-built wheels
 
@@ -118,7 +118,7 @@ VLLM_TARGET_DEVICE="neuron" pip install .
 
 If neuron packages are detected correctly in the installation process, `vllm-0.3.0+neuron212` will be installed.
 
-## Docker
+## Set up using Docker
 
 ### Pre-built images
 

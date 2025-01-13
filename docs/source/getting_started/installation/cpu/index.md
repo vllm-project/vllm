@@ -49,7 +49,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ```{include} x86.inc.md
 :start-after: "## Requirements"
-:end-before: "## Python"
+:end-before: "## Set up using Python"
 ```
 
 :::
@@ -59,7 +59,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ```{include} arm.inc.md
 :start-after: "## Requirements"
-:end-before: "## Python"
+:end-before: "## Set up using Python"
 ```
 
 :::
@@ -69,14 +69,14 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ```{include} apple.inc.md
 :start-after: "## Requirements"
-:end-before: "## Python"
+:end-before: "## Set up using Python"
 ```
 
 :::
 
 ::::
 
-## Python
+## Set up using Python
 
 ### Create a new Python environment
 
@@ -97,7 +97,7 @@ Currently, there are no pre-built CPU wheels.
 
 ```{include} x86.inc.md
 :start-after: "### Build wheel from source"
-:end-before: "## Docker"
+:end-before: "## Set up using Docker"
 ```
 
 :::
@@ -107,7 +107,7 @@ Currently, there are no pre-built CPU wheels.
 
 ```{include} arm.inc.md
 :start-after: "### Build wheel from source"
-:end-before: "## Docker"
+:end-before: "## Set up using Docker"
 ```
 
 :::
@@ -117,14 +117,14 @@ Currently, there are no pre-built CPU wheels.
 
 ```{include} apple.inc.md
 :start-after: "### Build wheel from source"
-:end-before: "## Docker"
+:end-before: "## Set up using Docker"
 ```
 
 :::
 
 ::::
 
-## Docker
+## Set up using Docker
 
 ### Pre-built images
 

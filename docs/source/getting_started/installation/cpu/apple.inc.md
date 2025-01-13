@@ -10,7 +10,7 @@ Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 - SDK: `XCode 15.4` or later with Command Line Tools
 - Compiler: `Apple Clang >= 15.0.0`
 
-## Python
+## Set up using Python
 
 ### Pre-built wheels
 
@@ -47,7 +47,7 @@ If the build has error like the following snippet where standard C++ headers can
       1 error generated.
 ```
 
-## Docker
+## Set up using Docker
 
 ### Pre-built images
 
