@@ -162,7 +162,6 @@ get_torch_gpu_compiler_flags(VLLM_GPU_FLAGS ${VLLM_GPU_LANG})
 if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_GPU_FLAGS "--threads=${NVCC_THREADS}")
 endif()
-list(APPEND VLLM_GPU_FLAGS "-lineinfo")
 
 #
 # Use FetchContent for C++ dependencies that are compiled as part of vLLM's build process.
