@@ -5,7 +5,7 @@
 vLLM initially supports basic model inferencing and serving on x86 CPU platform, with data types FP32, FP16 and BF16. vLLM CPU backend supports the following vLLM features:
 
 - Tensor Parallel
-- Model Quantization (`INT8 W8A8, AWQ`)
+- Model Quantization (`INT8 W8A8, AWQ, GPTQ`)
 - Chunked-prefill
 - Prefix-caching
 - FP8-E5M2 KV-Caching (TODO)
@@ -32,13 +32,13 @@ Table of contents:
 ## Quick start using Dockerfile
 
 ```console
-$ docker build -f Dockerfile.cpu -t vllm-cpu-env --shm-size=4g .
-$ docker run -it \
-             --rm \
-             --network=host \
-             --cpuset-cpus=<cpu-id-list, optional> \
-             --cpuset-mems=<memory-node, optional> \
-             vllm-cpu-env
+docker build -f Dockerfile.cpu -t vllm-cpu-env --shm-size=4g .
+docker run -it \
+           --rm \
+           --network=host \
+           --cpuset-cpus=<cpu-id-list, optional> \
+           --cpuset-mems=<memory-node, optional> \
+           vllm-cpu-env
 ```
 
 (build-cpu-backend-from-source)=
@@ -48,23 +48,23 @@ $ docker run -it \
 - First, install recommended compiler. We recommend to use `gcc/g++ >= 12.3.0` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
 
 ```console
-$ sudo apt-get update  -y
-$ sudo apt-get install -y gcc-12 g++-12 libnuma-dev
-$ sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
+sudo apt-get update  -y
+sudo apt-get install -y gcc-12 g++-12 libnuma-dev
+sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 ```
 
 - Second, install Python packages for vLLM CPU backend building:
 
 ```console
-$ pip install --upgrade pip
-$ pip install cmake>=3.26 wheel packaging ninja "setuptools-scm>=8" numpy
-$ pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+pip install --upgrade pip
+pip install cmake>=3.26 wheel packaging ninja "setuptools-scm>=8" numpy
+pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
 - Finally, build and install vLLM CPU backend:
 
 ```console
-$ VLLM_TARGET_DEVICE=cpu python setup.py install
+VLLM_TARGET_DEVICE=cpu python setup.py install
 ```
 
 ```{note}
@@ -92,18 +92,18 @@ $ VLLM_TARGET_DEVICE=cpu python setup.py install
 - We highly recommend to use TCMalloc for high performance memory allocation and better cache locality. For example, on Ubuntu 22.4, you can run:
 
 ```console
-$ sudo apt-get install libtcmalloc-minimal4 # install TCMalloc library
-$ find / -name *libtcmalloc* # find the dynamic link library path
-$ export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD # prepend the library to LD_PRELOAD
-$ python examples/offline_inference/offline_inference.py # run vLLM
+sudo apt-get install libtcmalloc-minimal4 # install TCMalloc library
+find / -name *libtcmalloc* # find the dynamic link library path
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD # prepend the library to LD_PRELOAD
+python examples/offline_inference/basic.py # run vLLM
 ```
 
 - When using the online serving, it is recommended to reserve 1-2 CPU cores for the serving framework to avoid CPU oversubscription. For example, on a platform with 32 physical CPU cores, reserving CPU 30 and 31 for the framework and using CPU 0-29 for OpenMP:
 
 ```console
-$ export VLLM_CPU_KVCACHE_SPACE=40
-$ export VLLM_CPU_OMP_THREADS_BIND=0-29
-$ vllm serve facebook/opt-125m
+export VLLM_CPU_KVCACHE_SPACE=40
+export VLLM_CPU_OMP_THREADS_BIND=0-29
+vllm serve facebook/opt-125m
 ```
 
 - If using vLLM CPU backend on a machine with hyper-threading, it is recommended to bind only one OpenMP thread on each physical CPU core using `VLLM_CPU_OMP_THREADS_BIND`. On a hyper-threading enabled platform with 16 logical CPU cores / 8 physical CPU cores:
@@ -132,7 +132,7 @@ CPU NODE SOCKET CORE L1d:L1i:L2:L3 ONLINE    MAXMHZ   MINMHZ      MHZ
 
 # On this platform, it is recommend to only bind openMP threads on logical CPU cores 0-7 or 8-15
 $ export VLLM_CPU_OMP_THREADS_BIND=0-7
-$ python examples/offline_inference/offline_inference.py
+$ python examples/offline_inference/basic.py
 ```
 
 - If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores using `VLLM_CPU_OMP_THREADS_BIND` to avoid cross NUMA node memory access.
@@ -148,7 +148,7 @@ $ python examples/offline_inference/offline_inference.py
   - Using Tensor Parallel for a latency constraints deployment: following GPU backend design, a Megatron-LM's parallel algorithm will be used to shard the model, based on the number of NUMA nodes (e.g. TP = 2 for a two NUMA node system). With [TP feature on CPU](gh-pr:6125) merged, Tensor Parallel is supported for serving and offline inferencing. In general each NUMA node is treated as one GPU card. Below is the example script to enable Tensor Parallel = 2 for serving:
 
     ```console
-    $ VLLM_CPU_KVCACHE_SPACE=40 VLLM_CPU_OMP_THREADS_BIND="0-31|32-63" vllm serve meta-llama/Llama-2-7b-chat-hf -tp=2 --distributed-executor-backend mp
+    VLLM_CPU_KVCACHE_SPACE=40 VLLM_CPU_OMP_THREADS_BIND="0-31|32-63" vllm serve meta-llama/Llama-2-7b-chat-hf -tp=2 --distributed-executor-backend mp
     ```
 
   - Using Data Parallel for maximum throughput: to launch an LLM serving endpoint on each NUMA node along with one additional load balancer to dispatch the requests to those endpoints. Common solutions like [Nginx](#nginxloadbalancer) or HAProxy are recommended. Anyscale Ray project provides the feature on LLM [serving](https://docs.ray.io/en/latest/serve/index.html). Here is the example to setup a scalable LLM serving with [Ray Serve](https://github.com/intel/llm-on-ray/blob/main/docs/setup.md).

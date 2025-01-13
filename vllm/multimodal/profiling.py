@@ -19,7 +19,10 @@ logger = init_logger(__name__)
 
 @dataclass
 class ProcessorInputs:
-    """Keyword arguments to :meth:`BaseMultiModalProcessor`."""
+    """
+    Represents the keyword arguments to
+    :meth:`vllm.multimodal.processing.BaseMultiModalProcessor.apply`.
+    """
     prompt_text: str
     mm_data: MultiModalDataDict
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
@@ -47,7 +50,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
     ) -> ProcessorInputs:
         """
         Build the input which, after processing, results in
-        `self.info.get_mm_max_tokens_per_item()` placeholder tokens.
+        :code:`self.info.get_mm_max_tokens_per_item()` placeholder tokens.
         """
         raise NotImplementedError
 
@@ -134,7 +137,7 @@ class MultiModalProfiler(Generic[_I]):
             seq_len, mm_counts)
 
         return self.processor.apply(
-            prompt_text=processor_inputs.prompt_text,
+            prompt=processor_inputs.prompt_text,
             mm_data=processor_inputs.mm_data,
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         )

@@ -1,4 +1,4 @@
-# Welcome to vLLM!
+# Welcome to vLLM
 
 ```{figure} ./assets/logos/vllm-logo-text-light.png
 :align: center
@@ -26,7 +26,7 @@ vLLM is a fast and easy-to-use library for LLM inference and serving.
 vLLM is fast with:
 
 - State-of-the-art serving throughput
-- Efficient management of attention key and value memory with **PagedAttention**
+- Efficient management of attention key and value memory with [**PagedAttention**](https://blog.vllm.ai/2023/06/20/vllm.html)
 - Continuous batching of incoming requests
 - Fast model execution with CUDA/HIP graph
 - Quantization: [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), INT4, INT8, and FP8
@@ -54,6 +54,8 @@ For more information, check out the following:
 
 ## Documentation
 
+% How to start using vLLM?
+
 ```{toctree}
 :caption: Getting Started
 :maxdepth: 1
@@ -65,6 +67,8 @@ getting_started/troubleshooting
 getting_started/faq
 ```
 
+% What does vLLM support?
+
 ```{toctree}
 :caption: Models
 :maxdepth: 1
@@ -74,6 +78,8 @@ models/pooling_models
 models/supported_models
 models/extensions/index
 ```
+
+% Additional capabilities
 
 ```{toctree}
 :caption: Features
@@ -88,6 +94,8 @@ features/disagg_prefill
 features/spec_decode
 features/compatibility_matrix
 ```
+
+% Details about running vLLM
 
 ```{toctree}
 :caption: Inference and Serving
@@ -104,6 +112,8 @@ serving/usage_stats
 serving/integrations/index
 ```
 
+% Scaling up vLLM for production
+
 ```{toctree}
 :caption: Deployment
 :maxdepth: 1
@@ -115,6 +125,8 @@ deployment/frameworks/index
 deployment/integrations/index
 ```
 
+% Making the most out of vLLM
+
 ```{toctree}
 :caption: Performance
 :maxdepth: 1
@@ -123,27 +135,7 @@ performance/optimization
 performance/benchmarks
 ```
 
-% Community: User community resources
-
-```{toctree}
-:caption: Community
-:maxdepth: 1
-
-community/meetups
-community/sponsors
-```
-
-```{toctree}
-:caption: API Reference
-:maxdepth: 2
-
-api/offline_inference/index
-api/engine/index
-api/multimodal/index
-api/params
-```
-
-% Design Documents: Details about vLLM internals
+% Explanation of vLLM internals
 
 ```{toctree}
 :caption: Design Documents
@@ -153,12 +145,12 @@ design/arch_overview
 design/huggingface_integration
 design/plugin_system
 design/kernel/paged_attention
-design/input_processing/model_inputs_index
+design/mm_processing
 design/automatic_prefix_caching
 design/multiprocessing
 ```
 
-% Developer Guide: How to contribute to the vLLM project
+% How to contribute to the vLLM project
 
 ```{toctree}
 :caption: Developer Guide
@@ -171,7 +163,30 @@ contributing/model/index
 contributing/vulnerability_management
 ```
 
-# Indices and tables
+% Technical API specifications
+
+```{toctree}
+:caption: API Reference
+:maxdepth: 2
+
+api/offline_inference/index
+api/engine/index
+api/inference_params
+api/multimodal/index
+api/model/index
+```
+
+% Latest news and acknowledgements
+
+```{toctree}
+:caption: Community
+:maxdepth: 1
+
+community/meetups
+community/sponsors
+```
+
+## Indices and tables
 
 - {ref}`genindex`
 - {ref}`modindex`

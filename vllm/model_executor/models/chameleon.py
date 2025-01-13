@@ -11,6 +11,7 @@ from transformers import (BatchFeature, ChameleonConfig, ChameleonProcessor,
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -35,12 +36,13 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.utils import print_warning_once
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix, merge_multimodal_embeddings)
+
+logger = init_logger(__name__)
 
 
 class ChameleonImagePixelInputs(TypedDict):
@@ -97,6 +99,34 @@ class ChameleonDummyInputsBuilder(
 class ChameleonMultiModalProcessor(
         BaseMultiModalProcessor[ChameleonProcessingInfo]):
 
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if not mm_data:
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        # HF processor adds sep token for chat mode
+        tokenizer = self.info.get_tokenizer()
+        sep_token_id: int = \
+            tokenizer.vocab[tokenizer.sep_token]  # type: ignore
+
+        return prompt_tokens + [sep_token_id]
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -126,11 +156,11 @@ class ChameleonMultiModalProcessor(
 
     def apply(
         self,
-        prompt_text: str,
+        prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputsV2:
-        result = super().apply(prompt_text, mm_data, hf_processor_mm_kwargs)
+        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
 
         # Only <image> tokens should be considered as placeholders,
         # so we ignore the image_start_token and image_end_token
@@ -1111,7 +1141,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                         remapped_kv_scale_name = name.replace(
                             ".kv_scale", ".attn.kv_scale")
                         if remapped_kv_scale_name not in params_dict:
-                            print_warning_once(
+                            logger.warning_once(
                                 "Found kv scale in the checkpoint (e.g. "
                                 f"{name}), but not found the expected name in "
                                 f"the model (e.g. {remapped_kv_scale_name}). "

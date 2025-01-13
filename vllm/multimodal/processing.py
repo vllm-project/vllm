@@ -33,20 +33,24 @@ _PromptSeq = Union[str, list[int]]
 
 @dataclass
 class PromptReplacement:
+    """
+    Defines how to replace portions of an input prompt with placeholder tokens.
+    """
+
     modality: str
     """The modality for which the replacement is made."""
 
     target: _PromptSeq
-    """The text or token sequence to find and replace."""
+    """The token sequence (or text) to find and replace."""
 
     replacement: Union[Callable[[int], _PromptSeq],
                        _PromptSeq] = field(repr=False)
     """
-    Given the index of the processed item within :attr:`modality`, output the
-    replacement text or token sequence.
+    Given the index of the processed item within :attr:`modality`,
+    output the replacement token sequence (or text).
 
-    For convenience, you can pass in the replacement instead of a function
-    if it does not depend on the input.
+    For convenience, you can directly pass in the replacement token sequence
+    (or text) instead of a function if it does not depend on the input.
     """
 
     def bind(self, tokenizer: AnyTokenizer) -> "BoundPromptReplacement":
@@ -132,6 +136,11 @@ class _BoundPromptSequence:
 
 @dataclass
 class BoundPromptReplacement:
+    """
+    A :class:`PromptReplacement` bound to a tokenizer to automatically
+    convert :attr:`target` and the result of :meth:`get_replacement` between
+    token sequence and text representations.
+    """
     tokenizer: AnyTokenizer = field(repr=False)
     modality: str
 
@@ -144,6 +153,7 @@ class BoundPromptReplacement:
 
     @property
     def target(self) -> _BoundPromptSequence:
+        """The token sequence (or text) to find and replace."""
         target = self._target
 
         return _BoundPromptSequence(
@@ -153,6 +163,10 @@ class BoundPromptReplacement:
         )
 
     def get_replacement(self, item_idx: int) -> _BoundPromptSequence:
+        """
+        Given the index of the processed item within :attr:`modality`,
+        output the replacement token sequence (or text).
+        """
         replacement = self._replacement
         if callable(replacement):
             cache_key = item_idx
@@ -528,7 +542,7 @@ class ProcessingCache:
 
 
 class BaseProcessingInfo:
-    """Base class containing information to perform processing."""
+    """Base class to provide the information necessary for data processing."""
 
     def __init__(self, ctx: InputProcessingContext) -> None:
         super().__init__()
@@ -711,15 +725,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_kwargs,
         )
 
-    def _apply_hf_processor(
+    def _apply_hf_processor_text_mm(
         self,
         prompt_text: str,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> tuple[list[int], MultiModalKwargs]:
         """
-        Wrapper of :meth:`_call_hf_processor` that applies
-        additional pre-processing and post-processing.
+        Apply the HF processor on the prompt text and multi-modal data
+        together.
         """
         processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
 
@@ -739,40 +753,93 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return prompt_ids, mm_kwargs
 
-    def _apply_hf_processor_missing(
-        self,
-        prompt_text: str,
-        mm_missing_data_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ):
+    def _apply_hf_processor_text_only(self, prompt_text: str) -> list[int]:
         """
-        Apply the HF processor on the full prompt text, but only on the
-        multi-modal data that are missing from the cache.
+        Apply the HF processor on the prompt text only.
 
-        Note:
-            We pass prompt text and multi-modal data into the HF processor
-            in separate calls to avoid HF prompt replacement being done for
-            cached items; instead, we rely on our own prompt replacement logic
-            (:meth:`_get_prompt_replacements`) for the full text.
+        Since HF processor requires that text and multi-modal items
+        correspond to each other, we create dummy multi-modal items
+        to go along with the text.
         """
-        mm_missing_counts = mm_missing_data_items.get_all_counts()
-
-        prompt_ids, _ = self._apply_hf_processor(
+        prompt_ids, _ = self._apply_hf_processor_text_mm(
             prompt_text=prompt_text,
             mm_items=MultiModalDataItems({}),
             hf_processor_mm_kwargs={},
         )
 
-        # Some HF processors (e.g. Qwen2-VL) expect corresponding
-        # multi-modal tokens to be in the prompt text
+        return prompt_ids
+
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        """
+        Apply the HF processor on the prompt tokens only.
+
+        Most HF processors accept prompt text but not prompt tokens.
+        If the HF processor adds or removes tokens that are not related to
+        multi-modal data, you should override this method so it is consistent
+        with the output of :meth:`_apply_hf_processor_text_only` on the
+        corresponding text.
+        """
+        return prompt_tokens
+
+    def _apply_hf_processor_mm_only(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalKwargs:
+        """
+        Apply the HF processor on the multi-modal data only.
+
+        Since HF processor requires that text and multi-modal items
+        correspond to each other, we generate dummy text using
+        :class:`DummyInputsBuilder` to go along with the multi-modal data.
+        """
+        mm_counts = mm_items.get_all_counts()
+
         dummy_inputs = self.dummy_inputs.get_dummy_processor_inputs(
             self.info.ctx.model_config.max_model_len,
-            mm_missing_counts,
+            mm_counts,
         )
 
-        _, mm_missing_kwargs = self._apply_hf_processor(
+        _, mm_kwargs = self._apply_hf_processor_text_mm(
             prompt_text=dummy_inputs.prompt_text,
-            mm_items=mm_missing_data_items,
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        return mm_kwargs
+
+    def _apply_hf_processor_main(
+        self,
+        prompt: Union[str, list[int]],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        *,
+        enable_hf_prompt_replacement: bool,
+    ) -> tuple[list[int], MultiModalKwargs]:
+        """
+        Apply the HF processor on the prompt text and multi-modal data.
+
+        Note:
+            If :code:`enable_hf_prompt_replacement=False`, the prompt should
+            correspond to the multi-modal items.
+        """
+        if isinstance(prompt, str):
+            if enable_hf_prompt_replacement:
+                return self._apply_hf_processor_text_mm(
+                    prompt_text=prompt,
+                    mm_items=mm_items,
+                    hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                )
+
+            prompt_ids = self._apply_hf_processor_text_only(prompt)
+        else:
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt)
+
+        mm_missing_kwargs = self._apply_hf_processor_mm_only(
+            mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
         )
 
@@ -780,7 +847,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _cached_apply_hf_processor(
         self,
-        prompt_text: str,
+        prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> tuple[list[int], MultiModalKwargs]:
@@ -793,10 +860,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         _, passthrough_data = self._get_hf_mm_data(mm_data_items)
         if cache is None or passthrough_data:
-            return self._apply_hf_processor(
-                prompt_text=prompt_text,
+            return self._apply_hf_processor_main(
+                prompt=prompt,
                 mm_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                enable_hf_prompt_replacement=True,
             )
 
         mm_maybe_cached_kw_items = {
@@ -818,10 +886,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         }
         mm_missing_data_items = self._to_mm_items(mm_missing_data)
 
-        prompt_ids, mm_missing_kwargs = self._apply_hf_processor_missing(
-            prompt_text=prompt_text,
-            mm_missing_data_items=mm_missing_data_items,
+        # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
+        # so we need to pass `enable_hf_prompt_replacement=False`
+        prompt_ids, mm_missing_kwargs = self._apply_hf_processor_main(
+            prompt=prompt,
+            mm_items=mm_missing_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            enable_hf_prompt_replacement=False,
         )
 
         mm_missing_next_idx = {
@@ -1004,7 +1075,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def apply(
         self,
-        prompt_text: str,
+        prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputsV2:
@@ -1042,7 +1113,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_hashes = None
 
         prompt_ids, mm_kwargs = self._cached_apply_hf_processor(
-            prompt_text,
+            prompt,
             mm_items,
             hf_processor_mm_kwargs,
         )
@@ -1087,12 +1158,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # there is no need for us to insert them
         if all(len(repls) == 0 for repls in mm_missing_repls.items()):
             tokenizer = self.info.get_tokenizer()
-            prompt_text = decode_tokens(tokenizer, prompt_ids)
+            prompt = decode_tokens(tokenizer, prompt_ids)
             mm_placeholders = hf_mm_placeholders
         else:
             (
                 prompt_ids,
-                prompt_text,
+                prompt,
                 missing_mm_placeholders,
             ) = self._apply_prompt_replacements(
                 prompt_ids,
@@ -1111,7 +1182,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return MultiModalInputsV2(
             type="multimodal",
-            prompt=prompt_text,
+            prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,

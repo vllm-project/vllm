@@ -10,7 +10,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import MultiModalDataDict, MultiModalInputsV2
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.utils import print_info_once, print_warning_once
 
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
                    PromptType, SingletonInputs, SingletonPrompt, token_inputs)
@@ -68,21 +67,24 @@ class InputPreprocessor:
         '''
 
         if not self.model_config.is_encoder_decoder:
-            print_warning_once("Using None for decoder start token id because "
-                               "this is not an encoder/decoder model.")
+            logger.warning_once(
+                "Using None for decoder start token id because "
+                "this is not an encoder/decoder model.")
             return None
 
         if (self.model_config is None or self.model_config.hf_config is None):
-            print_warning_once("Using None for decoder start token id because "
-                               "model config is not available.")
+            logger.warning_once(
+                "Using None for decoder start token id because "
+                "model config is not available.")
             return None
 
         dec_start_token_id = getattr(self.model_config.hf_config,
                                      'decoder_start_token_id', None)
         if dec_start_token_id is None:
-            print_warning_once("Falling back on <BOS> for decoder start token "
-                               "id because decoder start token id is not "
-                               "available.")
+            logger.warning_once(
+                "Falling back on <BOS> for decoder start token "
+                "id because decoder start token id is not "
+                "available.")
             dec_start_token_id = self.get_bos_token_id()
 
         return dec_start_token_id
@@ -190,6 +192,12 @@ class InputPreprocessor:
             # on the task and language of their request. Also needed to avoid
             # appending an EOS token to the prompt which disrupts generation.
             add_special_tokens = False
+
+        if (self.model_config.encoder_config is not None
+                and self.model_config.encoder_config.get(
+                    "do_lower_case", False)):
+            prompt = prompt.lower()
+
         return tokenizer.encode(request_id=request_id,
                                 prompt=prompt,
                                 lora_request=lora_request,
@@ -225,7 +233,7 @@ class InputPreprocessor:
         # updated to use the new multi-modal processor
         can_process_multimodal = self.mm_registry.has_processor(model_config)
         if not can_process_multimodal:
-            print_info_once(
+            logger.info_once(
                 "Your model uses the legacy input pipeline instead of the new "
                 "multi-modal processor. Please note that the legacy pipeline "
                 "will be removed in a future release. For more details, see: "
@@ -271,10 +279,6 @@ class InputPreprocessor:
 
         mm_processor = self.mm_registry.create_processor(
             self.model_config, tokenizer)
-        if isinstance(prompt, list):
-            logger.warning("Passing `multi_modal_data` in TokensPrompt is"
-                           "deprecated and will be removed in a future update")
-            prompt = tokenizer.decode(prompt)
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
