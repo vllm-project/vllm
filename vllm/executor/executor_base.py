@@ -197,9 +197,6 @@ class DistributedExecutorBase(ExecutorBase):
         # This is non-None when the execute model loop is running
         # in the parallel workers. It's a coroutine in the AsyncLLMEngine case.
         self.parallel_worker_tasks: Optional[Union[Any, Awaitable[Any]]] = None
-        # Updated by implementations that require additional args to be passed
-        # to the _run_workers execute_model call
-        self.extra_execute_model_run_workers_kwargs: Dict[str, Any] = {}
 
         super().__init__(*args, **kwargs)
 
@@ -211,8 +208,7 @@ class DistributedExecutorBase(ExecutorBase):
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
-                async_run_tensor_parallel_workers_only=True,
-                **self.extra_execute_model_run_workers_kwargs)
+                async_run_tensor_parallel_workers_only=True)
 
         # Only the driver worker returns the sampling results.
         driver_outputs = self._driver_execute_model(execute_model_req)
