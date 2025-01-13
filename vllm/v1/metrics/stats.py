@@ -31,4 +31,9 @@ class IterationStats:
 
         self.num_generation_tokens += len(output.new_token_ids)
         if is_prefilling:
+            # This relies on the invariant that EngineCore does
+            # not stream outputs for partially completed prefills
+            # (scheduler.update_from_output makes EngineCoreOutput
+            # iff num_computed_tokens == num_tokens).
+            assert(output.new_token_ids > 1)
             self.num_prompt_tokens += prompt_len
