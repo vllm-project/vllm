@@ -63,7 +63,7 @@ Further update the model as follows:
     ```
 
     ```{important}
-    The returned `multimodal_embeddings` must be either a 3D `torch.Tensor` of shape `[num_images, feature_size, hidden_size]`, or a tuple of 2D `torch.Tensor` of shape `[feature_size, hidden_size]`, so that `multimodal_embeddings[i]` retrieves the embeddings generated from the `i`-th multimodal data item (e.g, image) of the request.
+    The returned `multimodal_embeddings` must be either a 3D {class}`torch.Tensor` of shape `(num_items, feature_size, hidden_size)`, or a tuple of 2D {class}`torch.Tensor`s of shape `(feature_size, hidden_size)`, so that `multimodal_embeddings[i]` retrieves the embeddings generated from the `i`-th multimodal data item (e.g, image) of the request.
     ```
 
   - Implement {meth}`~vllm.model_executor.models.interfaces.SupportsMultiModal.get_input_embeddings` to merge `multimodal_embeddings` with text embeddings from the `input_ids`. If input processing for the model is implemented correctly (see sections below), then you can leverage the utility function we provide to easily merge the embeddings.
