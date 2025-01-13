@@ -1,10 +1,10 @@
 import asyncio
 import os
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import msgspec
-from dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.executor.executor_base import (
@@ -19,8 +19,8 @@ from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
                         get_ip, get_open_port, make_async)
 
 if ray is not None:
-    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
     from ray.actor import ActorHandle
+    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 else:
     ActorHandle = None
 
