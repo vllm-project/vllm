@@ -211,7 +211,7 @@ $ python examples/offline_inference/basic.py
 
 - If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores using `VLLM_CPU_OMP_THREADS_BIND` to avoid cross NUMA node memory access.
 
-## CPU Backend Considerations
+## Other considerations
 
 - The CPU backend significantly differs from the GPU backend since the vLLM architecture was originally optimized for GPU use. A number of optimizations are needed to enhance its performance.
 
