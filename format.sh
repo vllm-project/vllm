@@ -30,10 +30,8 @@ check_command() {
 
 # TODO: run pre-commit here
 check_command mypy
-check_command clang-format
 
 MYPY_VERSION=$(mypy --version | awk '{print $2}')
-CLANGFORMAT_VERSION=$(clang-format --version | awk '{print $3}')
 
 # # params: tool name, tool version, required version
 tool_version_check() {
@@ -45,63 +43,11 @@ tool_version_check() {
 }
 
 tool_version_check "mypy" "$MYPY_VERSION"
-tool_version_check "clang-format" "$CLANGFORMAT_VERSION"
 
 # Run mypy
 echo 'vLLM mypy:'
 tools/mypy.sh
 echo 'vLLM mypy: Done'
-
-# Clang-format section
-# Exclude some files for formatting because they are vendored
-# NOTE: Keep up to date with .github/workflows/clang-format.yml
-CLANG_FORMAT_EXCLUDES=(
-    'csrc/moe/topk_softmax_kernels.cu'
-    'csrc/quantization/gguf/ggml-common.h'
-    'csrc/quantization/gguf/dequantize.cuh'
-    'csrc/quantization/gguf/vecdotq.cuh'
-    'csrc/quantization/gguf/mmq.cuh'
-    'csrc/quantization/gguf/mmvq.cuh'
-)
-
-# Format specified files with clang-format
-clang_format() {
-    clang-format -i "$@"
-}
-
-# Format files that differ from main branch with clang-format.
-clang_format_changed() {
-    # The `if` guard ensures that the list of filenames is not empty, which
-    # could cause clang-format to receive 0 positional arguments, making it hang
-    # waiting for STDIN.
-    #
-    # `diff-filter=ACM` and $MERGEBASE is to ensure we only format files that
-    # exist on both branches.
-    MERGEBASE="$(git merge-base origin/main HEAD)"
-
-    # Get the list of changed files, excluding the specified ones
-    changed_files=$(git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.h' '*.cpp' '*.cu' '*.cuh' | (grep -vFf <(printf "%s\n" "${CLANG_FORMAT_EXCLUDES[@]}") || echo -e))
-    if [ -n "$changed_files" ]; then
-        echo "$changed_files" | xargs -P 5 clang-format -i
-    fi
-}
-
-# Format all files with clang-format
-clang_format_all() {
-    find csrc/ \( -name '*.h' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) -print \
-        | grep -vFf <(printf "%s\n" "${CLANG_FORMAT_EXCLUDES[@]}") \
-        | xargs clang-format -i
-}
-
-# Run clang-format
-if [[ "$1" == '--files' ]]; then
-   clang_format "${@:2}"
-elif [[ "$1" == '--all' ]]; then
-   clang_format_all
-else
-   clang_format_changed
-fi
-echo 'vLLM clang-format: Done'
 
 echo 'vLLM actionlint:'
 tools/actionlint.sh -color

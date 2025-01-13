@@ -17,7 +17,11 @@ repos:
   hooks:
   - id: codespell
     args: [--toml, pyproject.toml]
-# clang-format
+- repo: https://github.com/pre-commit/mirrors-clang-format
+  rev: v19.1.6
+  hooks:
+  - id: clang-format
+    exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))'
 - repo: https://github.com/jackdewinter/pymarkdown
   rev: v0.9.27
   hooks:
