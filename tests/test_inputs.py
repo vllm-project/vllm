@@ -1,4 +1,3 @@
-
 import pytest
 
 from vllm.inputs import zip_enc_dec_prompts

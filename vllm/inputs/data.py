@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from functools import cached_property
-from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, Literal, Optional,
-                    Tuple, Union, cast)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, Literal,
+                    Optional, Tuple, Union, cast)
 
 import torch
 from typing_extensions import NotRequired, TypedDict, TypeVar, assert_never

@@ -1,4 +1,3 @@
-
 import pytest
 
 from vllm import LLM

@@ -345,7 +345,6 @@ class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
     """
 
 
-
 def permute_param_layout_(param: BasevLLMParameter, input_dim: int,
                           output_dim: int, **kwargs) -> BasevLLMParameter:
     """

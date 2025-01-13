@@ -1,5 +1,5 @@
-from typing import (Callable, Iterable, Mapping, Optional, Set, Tuple, TypedDict,
-                    Union)
+from typing import (Callable, Iterable, Mapping, Optional, Set, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn

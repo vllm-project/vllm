@@ -2,7 +2,8 @@ import asyncio
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import (TYPE_CHECKING, Any, Awaitable, Dict, Optional, Tuple, Union)
+from typing import (TYPE_CHECKING, Any, Awaitable, Dict, Optional, Tuple,
+                    Union)
 
 import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorAsyncBase

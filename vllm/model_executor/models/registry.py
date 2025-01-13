@@ -11,8 +11,8 @@ import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import (AbstractSet, Callable, Dict, Optional, Tuple, Type, TypeVar,
-                    Union)
+from typing import (AbstractSet, Callable, Dict, Optional, Tuple, Type,
+                    TypeVar, Union)
 
 import cloudpickle
 import torch.nn as nn

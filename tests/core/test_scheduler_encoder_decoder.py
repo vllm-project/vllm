@@ -1,4 +1,3 @@
-
 import pytest  # noqa
 
 from vllm.config import CacheConfig, SchedulerConfig

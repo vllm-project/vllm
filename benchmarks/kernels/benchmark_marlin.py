@@ -1,4 +1,3 @@
-
 import torch
 import torch.utils.benchmark as benchmark
 from benchmark_shapes import WEIGHT_SHAPES

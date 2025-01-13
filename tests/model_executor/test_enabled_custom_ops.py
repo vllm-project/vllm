@@ -1,4 +1,3 @@
-
 import pytest
 
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config

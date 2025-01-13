@@ -1,7 +1,8 @@
 import asyncio
 import json
 import time
-from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, Final, Optional)
+from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, Final,
+                    Optional)
 from typing import Sequence as GenericSequence
 from typing import Union
 

@@ -1,7 +1,7 @@
 import itertools
 from dataclasses import dataclass, field
-from typing import (Callable, Dict, Iterable, Literal, Mapping, Optional, Protocol,
-                    Set, Tuple, Union, overload)
+from typing import (Callable, Dict, Iterable, Literal, Mapping, Optional,
+                    Protocol, Set, Tuple, Union, overload)
 
 import torch
 import torch.nn as nn

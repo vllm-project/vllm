@@ -1,4 +1,3 @@
-
 import pytest
 
 from vllm.core.block.block_table import BlockTable

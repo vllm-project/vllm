@@ -13,8 +13,8 @@
 # limitations under the License.
 """PyTorch Mllama model."""
 import math
-from typing import (Iterable, Literal, Mapping, Optional, Set, Tuple, TypedDict,
-                    Union)
+from typing import (Iterable, Literal, Mapping, Optional, Set, Tuple,
+                    TypedDict, Union)
 
 import numpy as np
 import torch
