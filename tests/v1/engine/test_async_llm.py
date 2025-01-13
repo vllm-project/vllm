@@ -66,7 +66,6 @@ async def test_load(monkeypatch):
             f"{failed_request_id} generated {tokens} but "
             f"expected {NUM_EXPECTED_TOKENS}")
 
-        # Make sure RequestStates get cleaned up.
         assert not engine.output_processor.has_unfinished_requests()
         engine.shutdown()
 
@@ -120,3 +119,12 @@ async def test_abort(monkeypatch):
             f"expected {NUM_EXPECTED_TOKENS}")
 
         assert not engine.output_processor.has_unfinished_requests()
+
+        # Confirm we can do another generation.
+        task = asyncio.create_task(generate(
+            engine, REQUEST_IDS_TO_ABORT[0], NUM_EXPECTED_TOKENS))
+        num_generated_tokens, request_id = await task
+        assert num_generated_tokens == NUM_EXPECTED_TOKENS
+        assert not engine.output_processor.has_unfinished_requests()
+
+        engine.shutdown()
