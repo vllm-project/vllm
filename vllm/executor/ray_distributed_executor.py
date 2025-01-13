@@ -131,6 +131,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         driver_ip = get_ip()
         rank = 0
         worker_initial_ranks = []
+        workers = []
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get(current_platform.device_name, 0):
                 continue
@@ -146,23 +147,33 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(vllm_config=self.vllm_config, rank=rank)
+            workers.append(worker)
+            worker_initial_ranks.append(rank)
             rank += 1
 
-            if self.use_ray_spmd_worker:
-                self.workers.append(worker)
-                worker_initial_ranks.append(rank)
-            else:
-                worker_ip = ray.get(worker.get_node_ip.remote())
-                if worker_ip == driver_ip and self.driver_dummy_worker is None:
+        worker_ip_refs = [
+            worker.get_node_ip.remote()  # type: ignore[attr-defined]
+            for worker in workers
+        ]
+        worker_ips = ray.get(worker_ip_refs)
+
+        if not self.use_ray_spmd_worker:
+            for i in range(len(workers)):
+                worker = workers[i]
+                worker_ip = worker_ips[i]
+                if self.driver_dummy_worker is None and worker_ip == driver_ip:
                     # If the worker is on the same node as the driver, we use it
                     # as the resource holder for the driver process.
                     self.driver_dummy_worker = worker
                     self.driver_worker = RayWorkerWrapper(
                         vllm_config=self.vllm_config, rank=0)
-                else:
-                    # Else, added to the list of workers.
-                    self.workers.append(worker)
-                    worker_initial_ranks.append(rank)
+                    workers.pop(i)
+                    worker_ips.pop(i)
+                    worker_initial_ranks.pop(i)
+                    self.workers = workers
+                    break
+        else:
+            self.workers = workers
 
         logger.debug("workers: %s", self.workers)
         logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
@@ -172,10 +183,6 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 "adjusting the Ray placement group or running the driver on a "
                 "GPU node.")
 
-        worker_ips = [
-            ray.get(worker.get_node_ip.remote())  # type: ignore[attr-defined]
-            for worker in self.workers
-        ]
         ip_counts: Dict[str, int] = {}
         for ip in worker_ips:
             ip_counts[ip] = ip_counts.get(ip, 0) + 1
@@ -190,22 +197,22 @@ class RayDistributedExecutor(DistributedExecutorBase):
             3. Finally, if the work is on a node with smaller IP address, it
                 should be placed first.
             """
-            worker, initial_rank = data_tuple
-            ip = ray.get(worker.get_node_ip.remote())
+            worker, initial_rank, worker_ip = data_tuple
+            ip = worker_ip
             return (ip != driver_ip, ip_counts[ip], ip)
 
         # After sorting, the workers on the same node will be
         # close to each other, and the workers on the driver
         # node will be placed first.
-        answer = sorted(zip(self.workers, worker_initial_ranks),
+        answer = sorted(zip(self.workers, worker_initial_ranks, worker_ips),
                         key=sort_by_driver_then_worker_ip)
-        self.workers = [worker for worker, _ in answer]
-        worker_ranks = [rank for _, rank in answer]
-        start = 0 if not self.use_ray_spmd_worker else 1
-        adjust_ranks = [i + start for i in range(len(worker_ranks))]
+        self.workers = [worker for worker, _, __ in answer]
+        sorted_worker_initial_ranks = [rank for _, rank, __ in answer]
+        start = 0 if self.use_ray_spmd_worker else 1
+        adjust_ranks = [i + start for i in range(len(sorted_worker_initial_ranks))]
         rerank_mapping = {
             old_rank: new_rank
-            for old_rank, new_rank in zip(worker_ranks, adjust_ranks)
+            for old_rank, new_rank in zip(sorted_worker_initial_ranks, adjust_ranks)
         }
         self._run_workers("adjust_rank", rerank_mapping)
 

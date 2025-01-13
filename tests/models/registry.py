@@ -22,6 +22,11 @@ class _HfExamplesInfo:
     for speculative decoding.
     """
 
+    min_transformers_version: Optional[str] = None
+    """
+    The minimum version of HF Transformers that is required to run this model.
+    """
+
     is_available_online: bool = True
     """
     Set this to ``False`` if the name of this architecture no longer exists on
@@ -60,6 +65,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "DeepseekForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-llm-7b-chat"),
     "DeepseekV2ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V2-Lite-Chat",  # noqa: E501
+                                         trust_remote_code=True),
+    "DeepseekV3ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3",  # noqa: E501
                                          trust_remote_code=True),
     "ExaoneForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct"),  # noqa: E501
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
@@ -138,6 +145,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
+    "InternLM2ForRewardModel": _HfExamplesInfo("internlm/internlm2-1_8b-reward",
+                                               trust_remote_code=True),
+    "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),  # noqa: E501
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),
@@ -169,6 +179,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                     trust_remote_code=True),
     "ChatGLMForConditionalGeneration": _HfExamplesInfo("chatglm2-6b",
                                                        is_available_online=False),
+    # TODO(Isotr0py): Use deepseek-vl2-tiny for test after it's supported
+    "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-small"),   # noqa: E501
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m"),
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
@@ -199,6 +211,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_3"),
     # [Encoder-decoder]
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
+    "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
 }
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
