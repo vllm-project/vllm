@@ -17,8 +17,8 @@ logger = init_logger(__name__)
 class ExecutorBase(ABC):
     """Base class for all executors.
 
-    An executor is responsible for executing the model on a specific device
-    type (e.g., CPU, GPU, Neuron, etc.). Or it can be a distributed executor
+    An executor is responsible for executing the model on one device,
+    or it can be a distributed executor 
     that can execute the model on multiple devices.
     """
 
@@ -51,6 +51,13 @@ class ExecutorBase(ABC):
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
+        """
+        The main interface of the executor to run a method on all workers,
+        with homogeneous arguments.
+        If the args are heterogeneous, then we can pack them into a list,
+        and unpack them in the method of every worker, because every worker
+        knows their own rank.
+        """
         pass
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -74,11 +81,9 @@ class ExecutorBase(ABC):
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
-        # NOTE: This is logged in the executor because there can be >1 worker
-        # with other executors. We could log in the engine level, but work
-        # remains to abstract away the device for non-GPU configurations.
+        # NOTE: This is logged in the executor because there can be >1 workers.
         logger.info("# %s blocks: %d, # CPU blocks: %d",
-                    current_platform.device_name, num_gpu_blocks,
+                    current_platform.dispatch_key, num_gpu_blocks,
                     num_cpu_blocks)
         max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
                            self.model_config.max_model_len)
