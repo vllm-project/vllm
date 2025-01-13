@@ -1,4 +1,3 @@
-from typing import Set
 
 import numpy as np
 import pytest
@@ -85,7 +84,7 @@ def _create_default_sampling_metadata(
 def _generate_min_token_penalties_and_stop_tokens(
     num_output_tokens: int, batch_size: int, vocab_size: int,
     batch_indices_for_min_token_penalty: list[int]
-) -> tuple[list[int], list[Set[int]]]:
+) -> tuple[list[int], list[set[int]]]:
     """
     Generates and returns a list of minimum token penalties (`min_tokens`) 
     and a corresponding list of stop token IDs (`stop_token_ids`) for each 
@@ -96,7 +95,7 @@ def _generate_min_token_penalties_and_stop_tokens(
     and a random set of stop token IDs is created. Otherwise, a lower 
     `min_tokens` value is assigned, and the stop token IDs set is empty.   
     """
-    stop_token_ids: list[Set[int]] = []
+    stop_token_ids: list[set[int]] = []
     min_tokens: list[int] = []
     for index in range(batch_size):
         if index in batch_indices_for_min_token_penalty:

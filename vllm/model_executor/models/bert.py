@@ -1,4 +1,4 @@
-from typing import Iterable, Optional, Set
+from typing import Iterable, Optional
 
 import torch
 from torch import nn
@@ -359,7 +359,7 @@ class BertModel(nn.Module):
         return self.encoder(hidden_states, kv_caches, attn_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "query", "q"),
@@ -368,7 +368,7 @@ class BertModel(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if self.pooler is None and "pooler" in name:
                 continue

@@ -2,8 +2,7 @@ import dataclasses
 import weakref
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, Optional, Set, Type, TypeVar,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Dict, Optional, Type, TypeVar, Union)
 
 import torch
 from torch import nn
@@ -54,7 +53,7 @@ class ModelInputForCPU(ModelRunnerInputBase):
     seq_lens: Optional[list[int]] = None
     query_lens: Optional[list[int]] = None
     lora_mapping: Optional["LoRAMapping"] = None
-    lora_requests: Optional[Set[LoRARequest]] = None
+    lora_requests: Optional[set[LoRARequest]] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -538,7 +537,7 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
             raise RuntimeError("LoRA is not enabled.")
         self.lora_manager.remove_all_adapters()
 
-    def set_active_loras(self, lora_requests: Set[LoRARequest],
+    def set_active_loras(self, lora_requests: set[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
@@ -559,7 +558,7 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.pin_adapter(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_adapters()

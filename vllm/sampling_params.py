@@ -3,7 +3,7 @@ import copy
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Any, Dict, Optional, Set, Union
+from typing import Any, Dict, Optional, Union
 
 import msgspec
 from pydantic import BaseModel
@@ -202,7 +202,7 @@ class SamplingParams(
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
     output_text_buffer_length: int = 0
-    _all_stop_token_ids: Set[int] = msgspec.field(default_factory=set)
+    _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
     # Fields used to construct logits processors
     guided_decoding: Optional[GuidedDecodingParams] = None
@@ -446,7 +446,7 @@ class SamplingParams(
         return SamplingType.RANDOM
 
     @property
-    def all_stop_token_ids(self) -> Set[int]:
+    def all_stop_token_ids(self) -> set[int]:
         return self._all_stop_token_ids
 
     def clone(self) -> "SamplingParams":

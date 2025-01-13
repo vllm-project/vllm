@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, Set
+from typing import Iterable
 
 import torch
 import torch.nn as nn
@@ -189,9 +189,9 @@ class MLPSpeculator(nn.Module):
         return next_tokens
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             name = name.replace("speculator.", "")
             param = params_dict.get(name)

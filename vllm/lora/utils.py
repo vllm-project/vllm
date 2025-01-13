@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Optional, Set, Type, Union
+from typing import Optional, Type, Union
 
 import huggingface_hub
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
@@ -34,7 +34,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
-_all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
+_all_lora_classes: set[Type[BaseLayerWithLoRA]] = {
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,

@@ -1,6 +1,6 @@
 from functools import cached_property
-from typing import (Any, Dict, Iterable, Literal, Mapping, Optional, Set,
-                    TypedDict, Union)
+from typing import (Any, Dict, Iterable, Literal, Mapping, Optional, TypedDict,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -1084,7 +1084,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         return next_tokens
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -1094,7 +1094,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue

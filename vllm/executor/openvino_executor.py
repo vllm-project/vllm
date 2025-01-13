@@ -1,4 +1,3 @@
-from typing import Set
 
 import openvino as ov
 
@@ -85,7 +84,7 @@ class OpenVINOExecutor(ExecutorBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.driver_worker.pin_lora(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         return self.driver_worker.list_loras()
 
     def add_prompt_adapter(self, prompt_adapter_request) -> bool:
@@ -100,7 +99,7 @@ class OpenVINOExecutor(ExecutorBase):
         raise NotImplementedError(
             "Soft prompt is currently not supported by the OPENVINO backend.")
 
-    def list_prompt_adapters(self) -> Set[int]:
+    def list_prompt_adapters(self) -> set[int]:
         raise NotImplementedError(
             "Soft prompt is currently not supported by the OPENVINO backend.")
 

@@ -1,6 +1,5 @@
 import time
 from collections import deque
-from typing import Set
 from unittest.mock import MagicMock
 
 import pytest  # noqa
@@ -55,7 +54,7 @@ def test_scheduler_abort_seq_group():
 
     # Add multiple seq groups to scheduler.
     num_seq_group = 4
-    request_ids: Set[str] = set()
+    request_ids: set[str] = set()
     for i in range(num_seq_group):
         _, seq_group = create_dummy_prompt(str(i), block_size)
         scheduler.add_seq_group(seq_group)
@@ -478,7 +477,7 @@ def test_prefill_schedule_max_lora():
                                      num_cpu_blocks=64,
                                      num_gpu_blocks=64)
     budget = create_token_budget(token_budget=120)
-    curr_loras: Set[int] = set()
+    curr_loras: set[int] = set()
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
@@ -649,7 +648,7 @@ def test_schedule_swapped_max_loras():
                                      block_size=block_size,
                                      num_cpu_blocks=32,
                                      num_gpu_blocks=32)
-    curr_loras: Set[int] = set()
+    curr_loras: set[int] = set()
     blocks_to_swap_out: list[tuple[int, int]] = []
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),

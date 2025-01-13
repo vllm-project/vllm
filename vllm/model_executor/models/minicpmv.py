@@ -23,8 +23,8 @@
 import math
 import re
 from functools import cached_property, partial
-from typing import (Any, Callable, Iterable, Literal, Mapping, Optional, Set,
-                    TypedDict, Union)
+from typing import (Any, Callable, Iterable, Literal, Mapping, Optional, TypedDict,
+                    Union)
 
 import torch
 import torch.types
@@ -591,7 +591,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

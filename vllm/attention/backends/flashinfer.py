@@ -1,7 +1,7 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional, Set, Type
+from typing import TYPE_CHECKING, Any, Dict, Optional, Type
 
 from vllm.multimodal import MultiModalPlaceholderMap
 
@@ -396,7 +396,7 @@ class FlashInferMetadata(AttentionMetadata):
                 q_data_type=self.q_data_type)
 
     def asdict_zerocopy(self,
-                        skip_fields: Optional[Set[str]] = None
+                        skip_fields: Optional[set[str]] = None
                         ) -> Dict[str, Any]:
         if skip_fields is None:
             skip_fields = set()

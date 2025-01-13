@@ -17,7 +17,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Iterable, Set
+from typing import Iterable
 
 import torch
 
@@ -47,13 +47,13 @@ class TeleChat2Model(LlamaModel):
                 layer.mlp.gate_up_proj.skip_bias_add = True
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             ('gate_up_proj', 'gate_proj', 0),
             ('gate_up_proj', 'up_proj', 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         total_num_heads = self.config.n_head
         head_dim = self.config.hidden_size // total_num_heads
         for name, loaded_weight in weights:
@@ -122,7 +122,7 @@ class TeleChat2ForCausalLM(LlamaForCausalLM):
         return TeleChat2Model(vllm_config=vllm_config, prefix=prefix)
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
 
         loader = AutoWeightsLoader(
             self,

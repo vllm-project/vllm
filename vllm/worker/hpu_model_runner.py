@@ -16,7 +16,7 @@ from array import array
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import (TYPE_CHECKING, Any, Callable, Dict, NamedTuple, Optional,
-                    Set, Type, TypeVar, Union)
+                    Type, TypeVar, Union)
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -378,7 +378,7 @@ class PreparePromptMetadata(NamedTuple):
     query_lens: list[int]
     lora_index_mapping: list[list[int]]
     lora_prompt_mapping: list[list[int]]
-    lora_requests: Set[LoRARequest]
+    lora_requests: set[LoRARequest]
     multi_modal_kwargs: Optional[Dict[str, BatchedTensorInputs]]
     slot_mapping: list[list[int]]
     lora_ids: list[int]
@@ -404,7 +404,7 @@ class PrepareDecodeMetadata(NamedTuple):
     attn_metadata: Optional[AttentionMetadata]
     lora_index_mapping: list[list[int]]
     lora_prompt_mapping: list[list[int]]
-    lora_requests: Set[LoRARequest]
+    lora_requests: set[LoRARequest]
     slot_mapping: list[list[int]]
     lora_ids: list[int]
 
@@ -446,7 +446,7 @@ class ModelInputForHPU(ModelRunnerInputBase):
     seq_lens: Optional[list[int]] = None
     query_lens: Optional[list[int]] = None
     lora_mapping: Optional["LoRAMapping"] = None
-    lora_requests: Optional[Set[LoRARequest]] = None
+    lora_requests: Optional[set[LoRARequest]] = None
     attn_metadata: Optional["AttentionMetadata"] = None
     multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
     real_batch_size: Optional[int] = None
@@ -709,7 +709,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             step=self.block_size,
             max=max(self.block_size,
                     self.max_num_seqs * max_decode_seq // self.block_size))
-        self.graphed_buckets: Set[Any] = set()
+        self.graphed_buckets: set[Any] = set()
 
         msg = ("Prompt bucket config (min, step, max_warmup) "
                f"bs:{self.bucketing_global_state.prompt_bs_bucket_cfg}, "
@@ -730,7 +730,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         slot_mapping: list[list[int]] = []
         lora_index_mapping: list[list[int]] = []
         lora_prompt_mapping: list[list[int]] = []
-        lora_requests: Set[LoRARequest] = set()
+        lora_requests: set[LoRARequest] = set()
 
         seq_lens: list[int] = []
         context_lens: list[int] = []
@@ -921,7 +921,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         block_tables: list[list[int]] = []
         lora_index_mapping: list[list[int]] = []
         lora_prompt_mapping: list[list[int]] = []
-        lora_requests: Set[LoRARequest] = set()
+        lora_requests: set[LoRARequest] = set()
 
         if len(seq_group_metadata_list) == 0:
             return PrepareDecodeMetadata.empty()
@@ -1380,7 +1380,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             raise RuntimeError("LoRA is not enabled.")
         self.lora_manager.remove_all_adapters()
 
-    def set_active_loras(self, lora_requests: Set[LoRARequest],
+    def set_active_loras(self, lora_requests: set[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
@@ -1401,7 +1401,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.pin_adapter(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_adapters()

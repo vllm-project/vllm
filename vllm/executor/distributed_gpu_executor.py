@@ -1,6 +1,6 @@
 import asyncio
 from abc import abstractmethod
-from typing import Any, Awaitable, Dict, Optional, Set, Union
+from typing import Any, Awaitable, Dict, Optional, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
@@ -115,7 +115,7 @@ class DistributedGPUExecutor(GPUExecutor):
             lora_id=lora_id,
         )
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         return self._run_workers("list_loras")
 
     def save_sharded_state(

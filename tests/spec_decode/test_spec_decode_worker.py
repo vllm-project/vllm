@@ -1,7 +1,7 @@
 import random
 from collections import defaultdict
 from types import SimpleNamespace
-from typing import Dict, Set
+from typing import Dict
 from unittest.mock import MagicMock
 
 import pytest
@@ -723,7 +723,7 @@ def test_populate_seq_ids_with_bonus_tokens():
                                        size=(batch_size, (k + 1)),
                                        dtype=torch.int64,
                                        device='cuda')
-    expected_request_id_seq_ids_mapping: Dict[str, Set[int]] = defaultdict(set)
+    expected_request_id_seq_ids_mapping: Dict[str, set[int]] = defaultdict(set)
     for seq_group_metadata in seq_group_metadata_list:
         for seq_id in seq_group_metadata.seq_data:
             expected_request_id_seq_ids_mapping[

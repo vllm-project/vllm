@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Optional, Set, Type
+from typing import Any, Optional, Type
 
 import torch
 
@@ -88,7 +88,7 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)
 
-    def set_active_adapters(self, requests: Set[Any],
+    def set_active_adapters(self, requests: set[Any],
                             mapping: Optional[Any]) -> None:
         set_active_adapters_worker(requests, mapping, self._apply_adapters,
                                    self._adapter_manager.set_adapter_mapping)
@@ -99,7 +99,7 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
                                   self._adapter_manager.add_adapter,
                                   self._adapter_manager.activate_adapter)
 
-    def _apply_adapters(self, adapter_requests: Set[Any]) -> None:
+    def _apply_adapters(self, adapter_requests: set[Any]) -> None:
         apply_adapters_worker(adapter_requests, self.list_adapters,
                               self._adapter_manager.adapter_slots,
                               self.remove_adapter, self.add_adapter)
@@ -110,7 +110,7 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
     def remove_all_adapters(self):
         self._adapter_manager.remove_all_adapters()
 
-    def list_adapters(self) -> Set[int]:
+    def list_adapters(self) -> set[int]:
         return list_adapters_worker(self._adapter_manager.list_adapters)
 
 
@@ -141,7 +141,7 @@ class LRUCacheWorkerPromptAdapterManager(WorkerPromptAdapterManager):
         return prompt_adapter_manager.model
 
     def _apply_adapters(
-            self, prompt_adapter_requests: Set[PromptAdapterRequest]) -> None:
+            self, prompt_adapter_requests: set[PromptAdapterRequest]) -> None:
         prompt_adapters_map = {
             prompt_adapter_request.prompt_adapter_id: prompt_adapter_request
             for prompt_adapter_request in prompt_adapter_requests

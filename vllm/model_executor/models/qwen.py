@@ -8,7 +8,7 @@ import math
 import re
 from functools import partial
 from typing import (Any, Callable, Dict, Iterable, Literal, Mapping, Optional,
-                    Set, TypedDict, Union)
+                    TypedDict, Union)
 
 import numpy as np
 import torch
@@ -970,14 +970,14 @@ class QWenBaseModel(nn.Module, SupportsPP, SupportsLoRA):
         return next_tokens
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "w2", 0),
             ("gate_up_proj", "w1", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue

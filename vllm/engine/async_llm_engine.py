@@ -4,7 +4,7 @@ import time
 import weakref
 from functools import partial
 from typing import (Any, AsyncGenerator, Callable, Coroutine, Dict, Iterable,
-                    Mapping, Optional, Set, Type, Union, overload)
+                    Mapping, Optional, Type, Union, overload)
 from weakref import ReferenceType
 
 from typing_extensions import deprecated
@@ -228,11 +228,11 @@ class RequestTracker:
         if stream is not None:
             stream.finish(exception=exception)
 
-    def get_new_and_aborted_requests(self) -> tuple[list[Dict], Set[str]]:
+    def get_new_and_aborted_requests(self) -> tuple[list[Dict], set[str]]:
         """Get the new requests and finished requests to be
         sent to the engine."""
         new_requests: list[Dict] = []
-        finished_requests: Set[str] = set()
+        finished_requests: set[str] = set()
 
         while not self._aborted_requests.empty():
             request_id = self._aborted_requests.get_nowait()

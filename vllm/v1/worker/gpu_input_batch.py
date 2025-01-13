@@ -1,7 +1,7 @@
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Optional, Set
+from typing import TYPE_CHECKING, Dict, Optional
 
 import numpy as np
 import torch
@@ -89,8 +89,8 @@ class InputBatch:
                                                   device="cpu",
                                                   pin_memory=pin_memory)
         self.temperature_cpu = self.temperature_cpu_tensor.numpy()
-        self.greedy_reqs: Set[str] = set()
-        self.random_reqs: Set[str] = set()
+        self.greedy_reqs: set[str] = set()
+        self.random_reqs: set[str] = set()
 
         self.top_p = torch.empty((max_num_reqs, ),
                                  dtype=torch.float32,
@@ -100,7 +100,7 @@ class InputBatch:
                                             device="cpu",
                                             pin_memory=pin_memory)
         self.top_p_cpu = self.top_p_cpu_tensor.numpy()
-        self.top_p_reqs: Set[str] = set()
+        self.top_p_reqs: set[str] = set()
 
         self.top_k = torch.empty((max_num_reqs, ),
                                  dtype=torch.int32,
@@ -110,7 +110,7 @@ class InputBatch:
                                             device="cpu",
                                             pin_memory=pin_memory)
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
-        self.top_k_reqs: Set[str] = set()
+        self.top_k_reqs: set[str] = set()
 
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty((max_num_reqs, ),
@@ -123,7 +123,7 @@ class InputBatch:
             pin_memory=pin_memory)
         self.frequency_penalties_cpu = \
             self.frequency_penalties_cpu_tensor.numpy()
-        self.frequency_penalties_reqs: Set[str] = set()
+        self.frequency_penalties_reqs: set[str] = set()
 
         # Presence penalty related data structures
         self.presence_penalties = torch.empty((max_num_reqs, ),
@@ -135,7 +135,7 @@ class InputBatch:
                                                          pin_memory=pin_memory)
         self.presence_penalties_cpu = \
             self.presence_penalties_cpu_tensor.numpy()
-        self.presence_penalties_reqs: Set[str] = set()
+        self.presence_penalties_reqs: set[str] = set()
 
         # Repetition penalty related data structures
         self.repetition_penalties = torch.empty((max_num_reqs, ),
@@ -148,10 +148,10 @@ class InputBatch:
             pin_memory=pin_memory)
         self.repetition_penalties_cpu = \
             self.repetition_penalties_cpu_tensor.numpy()
-        self.repetition_penalties_reqs: Set[str] = set()
+        self.repetition_penalties_reqs: set[str] = set()
 
         self.min_tokens: list[int] = [0] * max_num_reqs
-        self.stop_token_ids: list[Set[int]] = [
+        self.stop_token_ids: list[set[int]] = [
             set() for _ in range(max_num_reqs)
         ]
         self.prompt_token_ids: Optional[torch.Tensor] = None
@@ -162,7 +162,7 @@ class InputBatch:
         self.generators: Dict[int, torch.Generator] = {}
 
         self.num_logprobs: Dict[str, int] = {}
-        self.prompt_logprob_reqs: Set[str] = set()
+        self.prompt_logprob_reqs: set[str] = set()
 
     def add_request(
         self,

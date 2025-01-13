@@ -14,7 +14,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncIterator, Dict, Optional, Set, Union
+from typing import AsyncIterator, Dict, Optional, Union
 
 import uvloop
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -85,7 +85,7 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
-_running_tasks: Set[asyncio.Task] = set()
+_running_tasks: set[asyncio.Task] = set()
 
 
 @asynccontextmanager

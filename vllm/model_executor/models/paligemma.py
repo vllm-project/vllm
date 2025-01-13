@@ -1,5 +1,4 @@
-from typing import (Iterable, Literal, Mapping, Optional, Set, TypedDict,
-                    Union)
+from typing import (Iterable, Literal, Mapping, Optional, TypedDict, Union)
 
 import torch
 from torch import nn
@@ -316,6 +315,6 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

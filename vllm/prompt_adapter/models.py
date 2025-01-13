@@ -125,7 +125,7 @@ class PromptAdapterModelManager(AdapterModelManager):
             prompt_adapter_config: the PromptAdapter config,
         """
         self.model: nn.Module = model
-        # Dict instead of a Set for compatibility with LRUCache.
+        # Dict instead of a set for compatibility with LRUCache.
         self.prompt_adapter_index_to_id: list[
             Optional[int]] = [None] * self.prompt_adapter_slots
         self.max_num_seqs = max_num_seqs

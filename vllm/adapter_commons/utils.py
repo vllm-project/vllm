@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Optional, Set
+from typing import Any, Callable, Dict, Optional
 
 
 ## model functions
@@ -46,7 +46,7 @@ def get_adapter(adapter_id: int,
 
 
 ## worker functions
-def set_active_adapters_worker(requests: Set[Any], mapping: Optional[Any],
+def set_active_adapters_worker(requests: set[Any], mapping: Optional[Any],
                                apply_adapters_func,
                                set_adapter_mapping_func) -> None:
     apply_adapters_func(requests)
@@ -64,7 +64,7 @@ def add_adapter_worker(adapter_request: Any, list_adapters_func,
     return loaded
 
 
-def apply_adapters_worker(adapter_requests: Set[Any], list_adapters_func,
+def apply_adapters_worker(adapter_requests: set[Any], list_adapters_func,
                           adapter_slots: int, remove_adapter_func,
                           add_adapter_func) -> None:
     models_that_exist = list_adapters_func()
@@ -86,5 +86,5 @@ def apply_adapters_worker(adapter_requests: Set[Any], list_adapters_func,
         add_adapter_func(models_map[adapter_id])
 
 
-def list_adapters_worker(adapter_manager_list_adapters_func) -> Set[int]:
+def list_adapters_worker(adapter_manager_list_adapters_func) -> set[int]:
     return set(adapter_manager_list_adapters_func())

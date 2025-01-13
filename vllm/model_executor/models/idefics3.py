@@ -15,7 +15,7 @@
 
 import math
 from typing import (Dict, Iterable, Literal, Mapping, NamedTuple, Optional,
-                    Set, TypedDict, Union)
+                    TypedDict, Union)
 
 import torch
 import torch.utils.checkpoint
@@ -763,7 +763,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         return next_tokens
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

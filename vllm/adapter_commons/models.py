@@ -48,7 +48,7 @@ class AdapterModelManager(ABC):
         """
         self.model: nn.Module = model
         self._registered_adapters: Dict[int, Any] = {}
-        # Dict instead of a Set for compatibility with LRUCache.
+        # Dict instead of a set for compatibility with LRUCache.
         self._active_adapters: Dict[int, None] = {}
         self.adapter_type = 'Adapter'
         self._last_mapping = None

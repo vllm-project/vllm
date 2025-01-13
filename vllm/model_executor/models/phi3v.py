@@ -14,7 +14,7 @@
 # limitations under the License.
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import Any, Literal, Optional, Set, TypedDict, Union
+from typing import Any, Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -718,7 +718,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
 
         loader = AutoWeightsLoader(self)
         autoloaded_weights = loader.load_weights(weights,

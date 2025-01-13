@@ -1,7 +1,7 @@
 import itertools
 from dataclasses import dataclass, field
 from typing import (Callable, Dict, Iterable, Literal, Mapping, Optional,
-                    Protocol, Set, Union, overload)
+                    Protocol, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -226,7 +226,7 @@ class AutoWeightsLoader:
         weights: Iterable[tuple[str, torch.Tensor]],
         *,
         mapper: Optional[WeightsMapper] = None,
-    ) -> Set[str]:
+    ) -> set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
 

@@ -6,8 +6,8 @@ import time
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Set, Type,
-                    TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Type, TypeVar,
+                    Union)
 
 import numpy as np
 import torch
@@ -88,10 +88,10 @@ class ModelInputForGPU(ModelRunnerInputBase):
     seq_lens: Optional[list[int]] = None
     query_lens: Optional[list[int]] = None
     lora_mapping: Optional["LoRAMapping"] = None
-    lora_requests: Optional[Set[LoRARequest]] = None
+    lora_requests: Optional[set[LoRARequest]] = None
     attn_metadata: Optional["AttentionMetadata"] = None
     prompt_adapter_mapping: Optional[PromptAdapterMapping] = None
-    prompt_adapter_requests: Optional[Set[PromptAdapterRequest]] = None
+    prompt_adapter_requests: Optional[set[PromptAdapterRequest]] = None
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
     request_ids_to_seq_ids: Optional[Dict[str, list[int]]] = None
     finished_requests_ids: Optional[list[str]] = None
@@ -238,7 +238,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # LoRA inputs.
             lora_index_mapping: Optional[list[list[int]]] = None,
             lora_prompt_mapping: Optional[list[list[int]]] = None,
-            lora_requests: Optional[Set[LoRARequest]] = None,
+            lora_requests: Optional[set[LoRARequest]] = None,
 
             # Prompt adapter inputs.
             prompt_adapter_index_mapping: Optional[list[int]] = None,
@@ -941,7 +941,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                        is_prefill=not self.decode_only))
 
         # Prompt adapter data.
-        prompt_adapter_requests: Set[PromptAdapterRequest] = set()
+        prompt_adapter_requests: set[PromptAdapterRequest] = set()
         prompt_adapter_mapping = None
         if self.enable_prompt_adapter:
             prompt_adapter_requests = set(
@@ -1338,7 +1338,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             raise RuntimeError("LoRA is not enabled.")
         self.lora_manager.remove_all_adapters()
 
-    def set_active_loras(self, lora_requests: Set[LoRARequest],
+    def set_active_loras(self, lora_requests: set[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
@@ -1359,7 +1359,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.pin_adapter(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_adapters()
@@ -1370,7 +1370,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.prompt_adapter_manager.remove_all_adapters()
 
     def set_active_prompt_adapters(
-            self, prompt_adapter_requests: Set[PromptAdapterRequest],
+            self, prompt_adapter_requests: set[PromptAdapterRequest],
             prompt_adapter_mapping: PromptAdapterMapping) -> None:
         if not self.prompt_adapter_manager:
             raise RuntimeError("PromptAdapter is not enabled.")
@@ -1393,7 +1393,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             raise RuntimeError("PromptAdapter is not enabled.")
         return self.prompt_adapter_manager.pin_adapter(prompt_adapter_id)
 
-    def list_prompt_adapters(self) -> Set[int]:
+    def list_prompt_adapters(self) -> set[int]:
         if not self.prompt_adapter_manager:
             raise RuntimeError("PromptAdapter is not enabled.")
         return self.prompt_adapter_manager.list_adapters()

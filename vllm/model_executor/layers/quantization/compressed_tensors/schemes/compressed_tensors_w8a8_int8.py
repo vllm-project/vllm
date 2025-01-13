@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Set
+from typing import Callable, Optional
 
 import torch
 from compressed_tensors.quantization import QuantizationStrategy
@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 
 
 class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
-    _kernel_backends_being_used: Set[str] = set()
+    _kernel_backends_being_used: set[str] = set()
 
     def __init__(self, strategy: str, is_static_input_scheme: bool,
                  input_symmetric: bool):

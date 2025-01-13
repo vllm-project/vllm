@@ -4,7 +4,7 @@
 
 import gc
 import os
-from typing import Optional, Set, Type
+from typing import Optional, Type
 
 import habana_frameworks.torch as htorch  # noqa:F401
 import torch
@@ -292,7 +292,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         return self.model_runner.list_loras()
 
     def add_prompt_adapter(
@@ -308,7 +308,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         raise NotImplementedError(
             "Prompt Adapter is not implemented for HPU backend.")
 
-    def list_prompt_adapters(self) -> Set[int]:
+    def list_prompt_adapters(self) -> set[int]:
         raise NotImplementedError(
             "Prompt Adapter is not implemented for HPU backend.")
 

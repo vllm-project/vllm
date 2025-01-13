@@ -3,7 +3,7 @@ import re
 from array import array
 from dataclasses import dataclass
 from functools import lru_cache, partial
-from typing import Iterable, Mapping, Optional, Set, TypedDict
+from typing import Iterable, Mapping, Optional, TypedDict
 
 import torch
 from einops import rearrange
@@ -756,14 +756,14 @@ class MolmoVisionBackbone(nn.Module):
         return image_features
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("merged_linear", "gate_proj", 0),
             ("merged_linear", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
@@ -876,9 +876,9 @@ class MolmoModel(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
             if name.endswith(".bias") and name not in params_dict:

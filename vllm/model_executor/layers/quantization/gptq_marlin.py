@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Optional, Set, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 import torch
 
@@ -160,7 +160,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         quant_config: The GPTQ Marlin quantization config.
     """
 
-    _kernel_backends_being_used: Set[str] = set()
+    _kernel_backends_being_used: set[str] = set()
 
     def __init__(self, quant_config: GPTQMarlinConfig) -> None:
         self.quant_config = quant_config

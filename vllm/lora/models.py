@@ -352,7 +352,7 @@ class LoRAModelManager(AdapterModelManager):
             and hasattr(self.model, "get_mm_mapping"))
         self.packed_modules: Dict[str, list[str]] = {}
         self.modules: Dict[str, BaseLayerWithLoRA] = {}
-        # Dict instead of a Set for compatibility with LRUCache.
+        # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: Optional[LoRAMapping] = None
         self._create_lora_modules()
         self.model.lora_manager = self

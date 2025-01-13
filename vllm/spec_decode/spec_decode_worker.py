@@ -1,7 +1,7 @@
 import copy
 from collections import defaultdict
 from functools import cached_property
-from typing import Any, Dict, Optional, Set, Type
+from typing import Any, Dict, Optional, Type
 
 import torch
 
@@ -293,10 +293,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Tracks the sequence IDs that received a bonus token ID in
         # their last forward pass. Needed only if KV cache is being
         # used for token generation such as in the case of MultiStepWorker.
-        self._seq_with_bonus_token_in_last_step: Set[int] = set()
+        self._seq_with_bonus_token_in_last_step: set[int] = set()
         # Tracks the currently active request ids and the sequence IDs
         # corresponding to them
-        self._request_id_seq_id_mapping: Dict[str, Set[int]] = defaultdict(set)
+        self._request_id_seq_id_mapping: Dict[str, set[int]] = defaultdict(set)
         # Tracks if the proposer worker uses the KV cache or not.
 
         self.probs_dtype = self.spec_decode_sampler.probs_dtype
@@ -1079,7 +1079,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
     def _track_sequences_with_bonus_tokens(
             self, seq_ids: list[int],
-            request_ids_seq_ids_mapping: Dict[str, Set[int]],
+            request_ids_seq_ids_mapping: Dict[str, set[int]],
             accepted_token_ids_by_step: list[list[int]]):
         """
         Updates the internal data structures which keep track of sequences

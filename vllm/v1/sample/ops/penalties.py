@@ -1,4 +1,3 @@
-from typing import Set
 
 import torch
 
@@ -8,7 +7,7 @@ from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 
 def apply_min_token_penalties(logits: torch.Tensor,
                               output_token_ids: list[list[int]],
-                              stop_token_ids: list[Set[int]],
+                              stop_token_ids: list[set[int]],
                               min_tokens: list[int]) -> None:
     """
     Applies minimum token penalty by setting the logits of the stop tokens

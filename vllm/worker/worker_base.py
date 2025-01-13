@@ -2,7 +2,7 @@ import dataclasses
 import os
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Set, Type, Union
+from typing import Any, Dict, Optional, Type, Union
 
 import torch
 
@@ -115,7 +115,7 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         raise NotImplementedError
 
 
@@ -134,7 +134,7 @@ class LoraNotSupportedWorkerBase(WorkerBase):
         return ValueError(
             f"{type(self)} does not support LoRA")  # type: ignore
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         raise ValueError(f"{type(self)} does not support LoRA")
 
 

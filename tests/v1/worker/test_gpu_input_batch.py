@@ -1,4 +1,4 @@
-from typing import Dict, Set
+from typing import Dict
 
 import numpy as np
 import pytest
@@ -20,7 +20,7 @@ MAX_NUM_PROMPT_TOKENS = 64
 
 def _remove_requests(
         input_batch: InputBatch, batch_size: int,
-        reqs: list[CachedRequestState]) -> tuple[Set[str], list[int]]:
+        reqs: list[CachedRequestState]) -> tuple[set[str], list[int]]:
     """
     Remove some requests randomly from the batch and returns a tuple
     of 1) set of request removed 2) indices of the requests removed
@@ -28,14 +28,14 @@ def _remove_requests(
     """
 
     num_reqs_to_remove = np.random.randint(0, batch_size)
-    req_indices_to_remove: Set[int] = set()
+    req_indices_to_remove: set[int] = set()
     for _ in range(num_reqs_to_remove):
         req_index_to_remove = np.random.randint(0, batch_size)
         req_indices_to_remove.add(req_index_to_remove)
 
     req_indices_to_remove_list = list(req_indices_to_remove)
     req_indices_to_remove_list.sort(reverse=True)
-    req_ids_to_remove: Set[str] = set()
+    req_ids_to_remove: set[str] = set()
     for index in req_indices_to_remove:
         input_batch.remove_request(reqs[index].req_id)
         req_ids_to_remove.add(reqs[index].req_id)
@@ -43,7 +43,7 @@ def _remove_requests(
 
 
 def _construct_expected_sampling_metadata(
-        reqs: list[CachedRequestState], req_ids_retained: Set[int],
+        reqs: list[CachedRequestState], req_ids_retained: set[int],
         req_id_index_in_input_batch: Dict[str, int],
         device: torch.device) -> SamplingMetadata:
     """
@@ -59,7 +59,7 @@ def _construct_expected_sampling_metadata(
     top_k = [0 for _ in range(num_reqs)]
     top_p = [0.0 for _ in range(num_reqs)]
     temperature = [0.0 for _ in range(num_reqs)]
-    stop_token_ids: list[Set[int]] = [set() for _ in range(num_reqs)]
+    stop_token_ids: list[set[int]] = [set() for _ in range(num_reqs)]
     min_tokens = [0 for _ in range(num_reqs)]
     for req in reqs:
         if req.req_id not in req_ids_retained:

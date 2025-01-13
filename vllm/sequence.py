@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from functools import reduce
 from typing import Any, Callable, DefaultDict, Dict, Mapping, Optional
 from typing import Sequence as GenericSequence
-from typing import Set, Union
+from typing import Union
 
 import msgspec
 import torch
@@ -1165,12 +1165,12 @@ def get_all_seq_ids(
 
 def get_all_seq_ids_and_request_ids(
     seq_group_metadata_list: list[SequenceGroupMetadata]
-) -> tuple[list[int], Dict[str, Set[int]]]:
+) -> tuple[list[int], Dict[str, set[int]]]:
     """Given a list of SequenceGroupMetadata, create a list of all
     sequence ids.
     """
     seq_ids: list[int] = []
-    request_id_seq_ids_mapping: DefaultDict[str, Set[int]] = defaultdict(set)
+    request_id_seq_ids_mapping: DefaultDict[str, set[int]] = defaultdict(set)
     for sg in seq_group_metadata_list:
         for seq_id in sg.seq_data:
             seq_ids.append(seq_id)

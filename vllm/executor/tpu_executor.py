@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -106,7 +106,7 @@ class TPUExecutor(ExecutorBase):
         raise NotImplementedError(
             "LoRA is currently not supported by the TPU backend.")
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         raise NotImplementedError(
             "LoRA is currently not supported by the TPU backend.")
 
@@ -122,7 +122,7 @@ class TPUExecutor(ExecutorBase):
         raise NotImplementedError(
             "Soft prompt is currently not supported by the TPU backend.")
 
-    def list_prompt_adapters(self) -> Set[int]:
+    def list_prompt_adapters(self) -> set[int]:
         raise NotImplementedError(
             "Soft prompt is currently not supported by the TPU backend.")
 

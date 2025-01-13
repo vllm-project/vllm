@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Optional, Set
+from typing import Dict, Optional
 
 import torch
 
@@ -28,4 +28,4 @@ class SamplingMetadata:
 
     output_token_ids: list[list[int]]
     min_tokens: list[int]
-    stop_token_ids: list[Set[int]]
+    stop_token_ids: list[set[int]]

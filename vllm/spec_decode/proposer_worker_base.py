@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Optional, Set
+from typing import Optional
 
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
@@ -21,7 +21,7 @@ class ProposerWorkerBase(LoraNotSupportedWorkerBase, SpeculativeProposer):
         # This parameter is only used by the MultiStepWorker, which relies on
         # the KV cache for token generation. It is not used by workers that
         # do not utilize the KV cache.
-        seq_ids_with_bonus_token_in_last_step: Set[int]
+        seq_ids_with_bonus_token_in_last_step: set[int]
     ) -> tuple[Optional[list[SamplerOutput]], bool]:
         raise NotImplementedError
 

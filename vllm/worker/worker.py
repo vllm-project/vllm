@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Dict, Optional, Set, Type, Union
+from typing import Dict, Optional, Type, Union
 
 import torch
 import torch.distributed
@@ -414,7 +414,7 @@ class Worker(LocalOrDistributedWorkerBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         return self.model_runner.list_loras()
 
     def add_prompt_adapter(
@@ -427,7 +427,7 @@ class Worker(LocalOrDistributedWorkerBase):
     def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
         return self.model_runner.pin_prompt_adapter(prompt_adapter_id)
 
-    def list_prompt_adapters(self) -> Set[int]:
+    def list_prompt_adapters(self) -> set[int]:
         return self.model_runner.list_prompt_adapters()
 
     @property

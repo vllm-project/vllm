@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, Optional, Set
+from typing import Iterable, Optional
 
 import torch
 import torch.nn as nn
@@ -159,7 +159,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         return next_tokens
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -168,7 +168,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
@@ -255,7 +255,7 @@ class Florence2ForConditionalGeneration(nn.Module):
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         skip_prefixes = [
             'image_projection', "vision_tower", "image_proj_norm",
             "image_pos_embed", "visual_temporal_embed"

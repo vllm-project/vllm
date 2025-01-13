@@ -1,5 +1,5 @@
 """A CPU worker class."""
-from typing import Dict, Optional, Set, Type
+from typing import Dict, Optional, Type
 
 import torch
 import torch.distributed
@@ -275,7 +275,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         return self.model_runner.list_loras()
 
     def _validate_num_cpu_blocks(self, num_cpu_blocks: int) -> None:

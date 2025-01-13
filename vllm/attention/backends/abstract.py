@@ -1,8 +1,7 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import (TYPE_CHECKING, Any, Dict, Generic, Optional, Set, Type,
-                    TypeVar)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Optional, Type, TypeVar)
 
 import torch
 
@@ -137,7 +136,7 @@ class AttentionMetadata:
         attention."""
 
     def asdict_zerocopy(self,
-                        skip_fields: Optional[Set[str]] = None
+                        skip_fields: Optional[set[str]] = None
                         ) -> Dict[str, Any]:
         """Similar to dataclasses.asdict, but avoids deepcopying."""
         if skip_fields is None:

@@ -6,7 +6,7 @@ import pprint
 import time
 from collections import defaultdict
 from contextlib import ExitStack
-from typing import Any, Callable, Dict, Optional, Sequence, Set
+from typing import Any, Callable, Dict, Optional, Sequence
 from unittest.mock import patch
 
 import torch
@@ -655,9 +655,9 @@ class PiecewiseBackend:
         self.is_last_graph = (
             piecewise_compile_index == total_piecewise_compiles - 1)
 
-        self.compile_sizes: Set[int] = set(
+        self.compile_sizes: set[int] = set(
             self.compilation_config.compile_sizes)
-        self.capture_sizes: Set[int] = set(
+        self.capture_sizes: set[int] = set(
             self.compilation_config.capture_sizes
         ) if self.compilation_config.use_cudagraph else set()
 
@@ -675,7 +675,7 @@ class PiecewiseBackend:
 
         # to_be_compiled_sizes tracks the remaining sizes to compile,
         # and updates during the compilation process, so we need to copy it
-        self.to_be_compiled_sizes: Set[int] = self.compile_sizes.copy()
+        self.to_be_compiled_sizes: set[int] = self.compile_sizes.copy()
         for shape in self.compile_sizes.union(self.capture_sizes):
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,

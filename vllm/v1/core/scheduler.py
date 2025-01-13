@@ -1,6 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Deque, Dict, Iterable, Optional, Set, Union)
+from typing import (TYPE_CHECKING, Deque, Dict, Iterable, Optional, Union)
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
@@ -60,7 +60,7 @@ class Scheduler:
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
-        self.finished_req_ids: Set[str] = set()
+        self.finished_req_ids: set[str] = set()
 
         # OPTIMIZATION: Cache the RunningRequestData objects to avoid creating
         # them at each scheduling step.
@@ -612,6 +612,6 @@ class SchedulerOutput:
     scheduled_encoder_inputs: Dict[str, list[int]]
     num_common_prefix_blocks: int
 
-    preempted_req_ids: Set[str]
-    finished_req_ids: Set[str]
+    preempted_req_ids: set[str]
+    finished_req_ids: set[str]
     free_encoder_input_ids: list[tuple[str, int]]

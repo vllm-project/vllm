@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Deque, Dict, Iterable, Optional
 from typing import Sequence as GenericSequence
-from typing import Set, Union
+from typing import Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
@@ -54,8 +54,8 @@ class SchedulingBudget:
     """
     token_budget: int
     max_num_seqs: int
-    _request_ids_num_batched_tokens: Set[str] = field(default_factory=set)
-    _request_ids_num_curr_seqs: Set[str] = field(default_factory=set)
+    _request_ids_num_batched_tokens: set[str] = field(default_factory=set)
+    _request_ids_num_curr_seqs: set[str] = field(default_factory=set)
     # Number of cached tokens in the batch.
     _num_cached_tokens: int = 0
     # Number of actual non-cached tokens in the batch.
@@ -180,7 +180,7 @@ class SchedulerOutputs:
                                            key=key_fn)
 
     @property
-    def lora_requests(self) -> Set[LoRARequest]:
+    def lora_requests(self) -> set[LoRARequest]:
         return {
             g.seq_group.lora_request
             for g in self.scheduled_seq_groups
@@ -188,7 +188,7 @@ class SchedulerOutputs:
         }
 
     @property
-    def prompt_adapter_requests(self) -> Set[PromptAdapterRequest]:
+    def prompt_adapter_requests(self) -> set[PromptAdapterRequest]:
         return {
             g.seq_group.prompt_adapter_request
             for g in self.scheduled_seq_groups
@@ -516,7 +516,7 @@ class Scheduler:
     def _schedule_running(
         self,
         budget: SchedulingBudget,
-        curr_loras: Optional[Set[int]],
+        curr_loras: Optional[set[int]],
         enable_chunking: bool = False,
     ) -> SchedulerRunningOutputs:
         """Schedule sequence groups that are running.
@@ -680,7 +680,7 @@ class Scheduler:
     def _schedule_swapped(
         self,
         budget: SchedulingBudget,
-        curr_loras: Optional[Set[int]],
+        curr_loras: Optional[set[int]],
         enable_chunking: bool = False,
     ) -> SchedulerSwappedInOutputs:
         """Schedule sequence groups that are swapped out.
@@ -890,7 +890,7 @@ class Scheduler:
     def _schedule_prefills(
         self,
         budget: SchedulingBudget,
-        curr_loras: Optional[Set[int]],
+        curr_loras: Optional[set[int]],
         enable_chunking: bool = False,
     ) -> SchedulerPrefillOutputs:
         """Schedule sequence groups that are in prefill stage.
@@ -1166,7 +1166,7 @@ class Scheduler:
             token_budget=self.scheduler_config.max_num_batched_tokens,
             max_num_seqs=self.scheduler_config.max_num_seqs,
         )
-        curr_loras: Set[int] = set()
+        curr_loras: set[int] = set()
 
         prefills = SchedulerPrefillOutputs.create_empty()
         swapped_in = SchedulerSwappedInOutputs.create_empty()

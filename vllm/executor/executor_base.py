@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Optional, Set
+from typing import Optional
 
 from vllm.config import VllmConfig
 from vllm.lora.request import LoRARequest
@@ -86,7 +86,7 @@ class ExecutorBase(ABC):
         raise NotImplementedError  # type: ignore
 
     @abstractmethod
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         raise NotImplementedError
 
     @abstractmethod
@@ -103,7 +103,7 @@ class ExecutorBase(ABC):
         raise NotImplementedError  # type: ignore
 
     @abstractmethod
-    def list_prompt_adapters(self) -> Set[int]:
+    def list_prompt_adapters(self) -> set[int]:
         raise NotImplementedError
 
     @abstractmethod

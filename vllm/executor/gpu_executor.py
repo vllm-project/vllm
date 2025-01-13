@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Set, Union
+from typing import Any, Dict, Optional, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
@@ -100,7 +100,7 @@ class GPUExecutor(ExecutorBase):
         assert lora_id > 0, "lora_id must be greater than 0."
         return self.driver_worker.pin_lora(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         return self.driver_worker.list_loras()
 
     def add_prompt_adapter(
@@ -119,7 +119,7 @@ class GPUExecutor(ExecutorBase):
                 "prompt_adapter_id must be greater than 0."
         return self.driver_worker.pin_prompt_adapter(prompt_adapter_id)
 
-    def list_prompt_adapters(self) -> Set[int]:
+    def list_prompt_adapters(self) -> set[int]:
         return self.driver_worker.list_prompt_adapters()
 
     def check_health(self) -> None:

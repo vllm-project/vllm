@@ -1,4 +1,4 @@
-from typing import Iterable, Optional, Set
+from typing import Iterable, Optional
 
 import torch
 import torch.nn as nn
@@ -168,9 +168,9 @@ class Medusa(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         weights_map = {}
 

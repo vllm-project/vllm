@@ -1,6 +1,6 @@
 import copy
 import weakref
-from typing import Dict, Set
+from typing import Dict
 
 import torch
 
@@ -73,7 +73,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
-        seq_ids_with_bonus_token_in_last_step: Set[int],
+        seq_ids_with_bonus_token_in_last_step: set[int],
     ) -> tuple[list[SamplerOutput], bool]:
         """Run the model forward pass sample_len times. Returns the list of
         sampler output, one per model forward pass, along with indicator of
@@ -304,7 +304,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
     @staticmethod
     def _copy_seq_metadata_excluding_last_token(
         seq_group_metadata: SequenceGroupMetadata,
-        seq_ids_to_copy: Set[int],
+        seq_ids_to_copy: set[int],
     ) -> SequenceGroupMetadata:
         """
         Creates a shallow copy of the given SequenceGroupMetadata, retaining
@@ -315,7 +315,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
         Parameters:
         seq_group_metadata (SequenceGroupMetadata): The original sequence
             group metadata.
-        seq_ids_to_copy (Set[int]): The set of sequence IDs to include in the
+        seq_ids_to_copy (set[int]): The set of sequence IDs to include in the
             copy.
         
         Returns:

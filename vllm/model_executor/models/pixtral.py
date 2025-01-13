@@ -1,7 +1,7 @@
 import math
 from dataclasses import dataclass, fields
 from functools import cached_property
-from typing import Iterable, Mapping, Optional, Set, Union
+from typing import Iterable, Mapping, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -1086,7 +1086,7 @@ class PixtralHFVisionModel(nn.Module):
     # (TODO) Add prefix argument for filtering out weights to be loaded
     #        ref: https://github.com/vllm-project/vllm/pull/7186#discussion_r1734163986
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -1096,7 +1096,7 @@ class PixtralHFVisionModel(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         layer_count = len(self.transformer.layers)
 
         for name, loaded_weight in weights:

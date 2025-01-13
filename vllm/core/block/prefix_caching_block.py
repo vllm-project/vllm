@@ -2,7 +2,7 @@
 import sys
 from bisect import bisect_left
 from os.path import commonprefix
-from typing import (Callable, Dict, FrozenSet, Iterable, Optional, Set)
+from typing import (Callable, Dict, FrozenSet, Iterable, Optional)
 
 from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
                                     get_all_blocks_recursively)
@@ -79,7 +79,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # A list of immutable block IDs that have been touched by scheduler
         # and should be marked as computed after an entire batch of sequences
         # are scheduled.
-        self._touched_blocks: Set[BlockId] = set()
+        self._touched_blocks: set[BlockId] = set()
 
         # Used to track status of each physical block id
         self._block_tracker: Dict[BlockId, BlockTracker] = {}

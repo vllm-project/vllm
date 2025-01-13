@@ -4,7 +4,7 @@
 
 import contextlib
 import os
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
@@ -156,7 +156,7 @@ class HPUExecutor(ExecutorBase):
         assert lora_id > 0, "lora_id must be greater than 0."
         return self.driver_worker.pin_lora(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         return self.driver_worker.list_loras()
 
     def add_prompt_adapter(
@@ -172,7 +172,7 @@ class HPUExecutor(ExecutorBase):
         raise NotImplementedError(
             "Prompt Adapter is not implemented for HPU backend.")
 
-    def list_prompt_adapters(self) -> Set[int]:
+    def list_prompt_adapters(self) -> set[int]:
         raise NotImplementedError(
             "Prompt Adapter is not implemented for HPU backend.")
 

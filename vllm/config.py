@@ -9,8 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
-                    Final, Literal, Mapping, Optional, Protocol, Set, Type,
-                    Union)
+                    Final, Literal, Mapping, Optional, Protocol, Type, Union)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -450,7 +449,7 @@ class ModelConfig:
     def _get_preferred_task(
         self,
         architectures: list[str],
-        supported_tasks: Set[_ResolvedTask],
+        supported_tasks: set[_ResolvedTask],
     ) -> Optional[_ResolvedTask]:
         model_id = self.model
         if get_pooling_config(model_id, self.revision):
@@ -480,7 +479,7 @@ class ModelConfig:
         self,
         task_option: Union[TaskOption, Literal["draft"]],
         hf_config: PretrainedConfig,
-    ) -> tuple[Set[_ResolvedTask], _ResolvedTask]:
+    ) -> tuple[set[_ResolvedTask], _ResolvedTask]:
         if task_option == "draft":
             return {"draft"}, "draft"
 
@@ -930,7 +929,7 @@ class ModelConfig:
         return ModelRegistry.is_cross_encoder_model(architectures)
 
     @property
-    def supported_runner_types(self) -> Set[RunnerType]:
+    def supported_runner_types(self) -> set[RunnerType]:
         return {_TASK_RUNNER[task] for task in self.supported_tasks}
 
     @property
@@ -2773,7 +2772,7 @@ class CompilationConfig(BaseModel):
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
-    traced_files: Set[str] = PrivateAttr
+    traced_files: set[str] = PrivateAttr
     compilation_time: float = PrivateAttr
 
     # Per-model forward context

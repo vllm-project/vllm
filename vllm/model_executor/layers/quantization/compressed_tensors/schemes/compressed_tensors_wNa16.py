@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Set
+from typing import Callable, Optional
 
 import torch
 from compressed_tensors.quantization import ActivationOrdering
@@ -28,7 +28,7 @@ WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
 
 
 class CompressedTensorsWNA16(CompressedTensorsScheme):
-    _kernel_backends_being_used: Set[str] = set()
+    _kernel_backends_being_used: set[str] = set()
 
     def __init__(self,
                  strategy: str,

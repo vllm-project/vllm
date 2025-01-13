@@ -1,6 +1,6 @@
 import os
 from functools import partial
-from typing import Any, Awaitable, Optional, Set, Union
+from typing import Any, Awaitable, Optional, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
@@ -226,7 +226,7 @@ class CPUExecutor(ExecutorBase):
             lora_id=lora_id,
         ))
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         return self.driver_method_invoker(self.driver_worker, "list_loras")
 
     def add_prompt_adapter(
@@ -244,7 +244,7 @@ class CPUExecutor(ExecutorBase):
                 prompt_adapter_id,
             ))
 
-    def list_prompt_adapters(self) -> Set[int]:
+    def list_prompt_adapters(self) -> set[int]:
         return self.driver_method_invoker(self.driver_worker,
                                           "list_prompt_adapters")
 

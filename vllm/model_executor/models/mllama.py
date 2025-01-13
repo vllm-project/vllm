@@ -13,8 +13,7 @@
 # limitations under the License.
 """PyTorch Mllama model."""
 import math
-from typing import (Iterable, Literal, Mapping, Optional, Set, TypedDict,
-                    Union)
+from typing import (Iterable, Literal, Mapping, Optional, TypedDict, Union)
 
 import numpy as np
 import torch
@@ -1418,7 +1417,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         return outputs
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -1428,7 +1427,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        updated_params: Set[str] = set()
+        updated_params: set[str] = set()
         for name, loaded_weight in weights:
             if 'patch_embedding.weight' in name:
                 name = name.replace('patch_embedding.weight',

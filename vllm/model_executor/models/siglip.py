@@ -2,7 +2,7 @@
 within a vision language model."""
 
 import math
-from typing import Iterable, Optional, Set, Union
+from typing import Iterable, Optional, Union
 
 import numpy as np
 import torch
@@ -614,7 +614,7 @@ class SiglipVisionModel(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -622,7 +622,7 @@ class SiglipVisionModel(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         layer_count = len(self.vision_model.encoder.layers)
 
         for name, loaded_weight in weights:

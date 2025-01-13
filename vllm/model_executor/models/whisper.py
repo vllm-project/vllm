@@ -1,5 +1,5 @@
 import math
-from typing import (Iterable, Mapping, Optional, Set, TypedDict, Union)
+from typing import (Iterable, Mapping, Optional, TypedDict, Union)
 
 import numpy as np
 import torch
@@ -531,7 +531,7 @@ class WhisperModel(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
@@ -541,7 +541,7 @@ class WhisperModel(nn.Module):
             (".encoder_attn.kv_proj", ".encoder_attn.v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -726,7 +726,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         return next_tokens
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
         loaded_weights = [(name, loaded_weight)
                           for name, loaded_weight in weights]
