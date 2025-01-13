@@ -4,8 +4,8 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.engine.arg_utils import EngineArgs
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
 
