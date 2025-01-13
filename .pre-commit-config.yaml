@@ -8,7 +8,7 @@ repos:
   rev: v0.9.1
   hooks:
   - id: ruff
-    args: [ --output-format, github ]
+    args: [--output-format, github]
 - repo: https://github.com/pre-commit/mirrors-mypy
   rev: v1.14.1
   hooks:
@@ -18,6 +18,8 @@ repos:
   rev: v2.3.0
   hooks:
   - id: codespell
+    args: [--toml, pyproject.toml]
+    additional_dependencies: [tomli]
 - repo: https://github.com/PyCQA/isort
   rev: 5.13.2
   hooks:
