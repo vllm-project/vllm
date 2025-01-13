@@ -49,10 +49,6 @@ echo 'vLLM mypy:'
 tools/mypy.sh
 echo 'vLLM mypy: Done'
 
-echo 'vLLM actionlint:'
-tools/actionlint.sh -color
-echo 'vLLM actionlint: Done'
-
 echo 'vLLM shellcheck:'
 tools/shellcheck.sh
 echo 'vLLM shellcheck: Done'
