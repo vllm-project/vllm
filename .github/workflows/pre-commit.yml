@@ -16,4 +16,5 @@ jobs:
     - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
       with:
         python-version: ${{ matrix.python-version }}
+    - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
