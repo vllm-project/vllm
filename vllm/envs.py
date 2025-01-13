@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
+    VLLM_API_SERVICE_MAX_CONCURRENT_REQUESTS: int = 0
 
 
 def get_default_cache_root():
@@ -447,6 +448,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # and trust the driver's peer-to-peer capability report.
     "VLLM_SKIP_P2P_CHECK":
     lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "0") == "1",
+
+    # Maximum number of concurrent requests to the API server
+    "VLLM_API_SERVICE_MAX_CONCURRENT_REQUESTS":
+    lambda: int(os.getenv("VLLM_API_SERVICE_MAX_CONCURRENT_REQUESTS", "0")),
 
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
