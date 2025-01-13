@@ -3,7 +3,6 @@ from typing import Tuple, Type
 
 from vllm.config import VllmConfig
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.platforms import current_platform
 
 
 class Executor(ABC):
