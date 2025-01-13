@@ -149,11 +149,9 @@ class IpexAttnMetadataBuilder(
             if prefix_cache_hit:
                 # NOTE(woosuk): For flash-attn, the block table should
                 # include the entries for the incoming prefill tokens.
-                print("!!!!!!!prefix cache hit")
                 block_table = block_tables[seq_id]
             elif ((chunked_prefill_enabled or not is_prompt)
                   and block_tables is not None):
-                print("!!!!! chunked prefill enabled")
                 if curr_sliding_window_block == 0:
                     block_table = block_tables[seq_id]
                 else:
@@ -421,7 +419,6 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     _get_query_key_seq_metadata(prefill_meta, True, attn_type)
                 key = key[:num_prefill_kv_tokens]
                 value = value[:num_prefill_kv_tokens]
-                print("!!!!!!calling prefill")
                 tmp = [0]
                 tmp.extend(attn_metadata.seq_lens)
                 seqlen = torch.tensor(tmp)
@@ -472,7 +469,6 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                 '''
             else:
                 # prefix-enabled attention
-                print("!!!!!!!!calling prefix-enabled attention")
                 assert attn_type == AttentionType.DECODER, (
                     "Only decoder-only models support prefix caching")
                 assert prefill_meta.seq_lens is not None
@@ -503,7 +499,6 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
             # Decoding run.
             # Use flash_attn_varlen_func kernel for speculative decoding
             # because different queries might have different lengths.
-            print("!!!!!!calling decode!!!!")
             assert decode_meta.max_decode_query_len is not None
             # use only for actual varlen decoding
             # if decode_meta.max_decode_query_len > 1:
