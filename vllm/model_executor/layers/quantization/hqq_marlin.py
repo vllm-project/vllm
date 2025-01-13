@@ -15,13 +15,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     MarlinWorkspace)
 from vllm.model_executor.layers.quantization.utils.quant_utils import gptq_pack
-from vllm.model_executor.parameter import (add_param_feature,
-                                           vLLMParameterFeatures,
-                                           wrap_base_vllm_parameter,
-                                           wrap_column_vllm_parameter,
-                                           wrap_group_quant_scale_parameter,
-                                           wrap_packed_vllm_parameter,
-                                           wrap_row_vllm_parameter)
+from vllm.model_executor.parameter import *
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
