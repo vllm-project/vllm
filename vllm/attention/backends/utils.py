@@ -52,7 +52,7 @@ def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,
     avoid uninitialized cache data from being used, give it one block margin.
     """
     start_idx = 0
-    if is_prompt and sliding_window != 0:
+    if is_prompt and sliding_window is not None:
         num_query_blocks = (query_len + block_size - 1) // block_size
         num_sliding_window_blocks = ((sliding_window + block_size - 1) //
                                      block_size)
