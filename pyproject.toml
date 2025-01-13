@@ -53,7 +53,7 @@ ignore = [
     # f-string format
     "UP032",
     # Python 3.8 typing
-    "UP006",
+    "UP006", "UP035",
 ]
 
 [tool.mypy]
