@@ -20,6 +20,7 @@ class TpuPlatform(Platform):
     device_type: str = "tpu"
     dispatch_key: str = "XLA"
     ray_device_key: str = "TPU"
+    device_control_env_var: str = "TPU_VISIBLE_CHIPS"
 
     supported_quantization: list[str] = [
         "tpu_int8", "compressed-tensors", "compressed_tensors"
