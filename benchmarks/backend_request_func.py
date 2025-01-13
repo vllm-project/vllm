@@ -428,12 +428,16 @@ def get_tokenizer(
         pretrained_model_name_or_path = get_model(pretrained_model_name_or_path)
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
-            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
+            raise ValueError(
+                "Cannot use the fast tokenizer in slow tokenizer mode."
+            )
         kwargs["use_fast"] = False
     if tokenizer_mode == "mistral":
         vllm_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         sys.path.append(vllm_dir)
-        from vllm.transformers_utils.tokenizers import MistralTokenizer
+        from vllm.transformers_utils.tokenizers import (
+            MistralTokenizer
+        )
 
         return MistralTokenizer.from_pretrained(str(pretrained_model_name_or_path))
     else:
