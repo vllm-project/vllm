@@ -20,24 +20,24 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
 
   int M = a.size(0), N = b.size(1), K = a.size(1);
 
-  GroupShape scale_group_shape_a = [&, &s = a_scales]() -> GroupShape {
+  GroupShape a_scale_group_shape = [&, &s = a_scales]() -> GroupShape {
     if (s.numel() == 1) return {M, K};  // tensor-wise
     if (s.dim() == 2)
       return {ceil_div(a.size(0), s.size(0)), ceil_div(a.size(1), s.size(1))};
     TORCH_CHECK(false, "Unsupported scale shape for scale_a");
   }();
 
-  GroupShape scale_group_shape_b = [&, &s = b_scales]() -> GroupShape {
+  GroupShape b_scale_group_shape = [&, &s = b_scales]() -> GroupShape {
     if (s.numel() == 1) return {K, N};  // tensor-wise
     if (s.dim() == 2)
       return {ceil_div(b.size(0), s.size(0)), ceil_div(b.size(1), s.size(1))};
     TORCH_CHECK(false, "Unsupported scale shape for scale_b");
   }();
 
-  if ((scale_group_shape_a == GroupShape{M, K} ||
-       scale_group_shape_a == GroupShape{1, K}) &&
-      (scale_group_shape_b == GroupShape{K, N} ||
-       scale_group_shape_b == GroupShape{K, 1})) {
+  if ((a_scale_group_shape == GroupShape{M, K} ||
+       a_scale_group_shape == GroupShape{1, K}) &&
+      (b_scale_group_shape == GroupShape{K, N} ||
+       b_scale_group_shape == GroupShape{K, 1})) {
     // "standard per-tensor/per-token/per-channel" scaling
     TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
     if (a.dtype() == torch::kFloat8_e4m3fn) {
@@ -46,8 +46,8 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
       TORCH_CHECK(a.dtype() == torch::kInt8);
       vllm::cutlass_scaled_mm_sm90_int8(c, a, b, a_scales, b_scales, bias);
     }
-  } else if (scale_group_shape_a == GroupShape{1, 128} &&
-             scale_group_shape_b == GroupShape{128, 128}) {
+  } else if (a_scale_group_shape == GroupShape{1, 128} &&
+             b_scale_group_shape == GroupShape{128, 128}) {
     // 1x128 per-token group scales for activations
     // 128x128 blockwise scales for weights
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn &&
