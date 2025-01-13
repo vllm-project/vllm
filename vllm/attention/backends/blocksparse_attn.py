@@ -87,6 +87,8 @@ class BlocksparseParams:
 
 class BlocksparseFlashAttentionBackend(AttentionBackend):
 
+    use_output: bool = True
+
     @staticmethod
     def get_name() -> str:
         # For attention layer compatibility

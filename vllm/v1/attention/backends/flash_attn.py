@@ -46,6 +46,10 @@ class FlashAttentionBackend(AttentionBackend):
     def use_cascade_attention(*args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)
 
+    @staticmethod
+    def use_output():
+        return True
+
 
 @dataclass
 class FlashAttentionMetadata:

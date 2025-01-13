@@ -22,6 +22,8 @@ logger = init_logger(__name__)
 
 class HPUAttentionBackend(AttentionBackend):
 
+    use_output: bool = False
+
     @staticmethod
     def get_name() -> str:
         return "HPU_ATTN"

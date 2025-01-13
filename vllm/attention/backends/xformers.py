@@ -24,6 +24,8 @@ logger = init_logger(__name__)
 
 class XFormersBackend(AttentionBackend):
 
+    use_output: bool = False
+
     @staticmethod
     def get_name() -> str:
         return "XFORMERS"

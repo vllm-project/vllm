@@ -37,6 +37,8 @@ def copy_cache_block(src_tensor: ov.Tensor, dst_tensor: ov.Tensor,
 
 class OpenVINOAttentionBackend(AttentionBackend):
 
+    use_output: bool = False
+
     @staticmethod
     def get_name() -> str:
         return "OPENVINO"
