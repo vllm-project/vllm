@@ -112,7 +112,7 @@ def _verify_bundles(placement_group: "PlacementGroup",
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
     # bundle_idx -> bundle (e.g., {"GPU": 1})
     bundles = pg_data["bundles"]
-    # node_id -> List of bundle (e.g., {"GPU": 1})
+    # node_id -> list of bundle (e.g., {"GPU": 1})
     node_id_to_bundle: Dict[str, list[Dict[str, float]]] = defaultdict(list)
 
     for bundle_idx, node_id in bundle_to_node_ids.items():

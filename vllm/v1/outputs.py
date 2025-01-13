@@ -21,7 +21,7 @@ class SamplerOutput:
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
-# This is expensive for torch.Tensor so prefer to use List instead.
+# This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
 class ModelRunnerOutput:
 

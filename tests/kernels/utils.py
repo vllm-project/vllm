@@ -680,7 +680,7 @@ def split_slot_mapping(slot_mapping_list: torch.Tensor, seq_lens: list[int],
 
     Arguments:
 
-    * slot_mapping_list: Length-P 1D slot mapping (as List) reflecting all N
+    * slot_mapping_list: Length-P 1D slot mapping (as list) reflecting all N
       post-decode sequences
     * seq_lens: List of N post-decode sequence lengths (K_i + 1 in the 
       description above)
