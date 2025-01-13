@@ -13,6 +13,7 @@ import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import VllmConfig
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
@@ -265,8 +266,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             torch._dynamo.mark_dynamic(t, 0)
             torch._dynamo.mark_dynamic(p, 0)
         # Dummy run.
-        self.model(token_ids, position_ids, attn_metadata, input_lens, t, p,
-                   num_samples, kv_caches)
+        with set_forward_context(attn_metadata, self.vllm_config, 0):
+            self.model(token_ids, position_ids, attn_metadata, input_lens, t,
+                       p, num_samples, kv_caches)
 
     def warmup_model(
         self,
@@ -663,10 +665,13 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 input_lens = model_input.input_lens[i:i + 1].to(self.device)
                 t = model_input.t[i:i + 1].to(self.device)
                 p = model_input.p[i:i + 1].to(self.device)
-                output_token_ids = self.model(token_ids, position_ids,
-                                              attn_metadata, input_lens, t, p,
-                                              model_input.num_samples,
-                                              kv_caches)
+                with set_forward_context(model_input.attn_metadata,
+                                         self.vllm_config,
+                                         model_input.virtual_engine):
+                    output_token_ids = self.model(token_ids, position_ids,
+                                                  attn_metadata, input_lens, t,
+                                                  p, model_input.num_samples,
+                                                  kv_caches)
                 next_token_ids.append(output_token_ids[0])
                 start_idx = end_idx
 
@@ -711,10 +716,13 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             input_lens = model_input.input_lens.to(self.device)
             for i in range(num_steps):
                 slot_mapping = attn_metadata.slot_mapping
-                output_token_ids = self.model(token_ids, position_ids,
-                                              attn_metadata, input_lens, t, p,
-                                              model_input.num_samples,
-                                              kv_caches)
+                with set_forward_context(model_input.attn_metadata,
+                                         self.vllm_config,
+                                         model_input.virtual_engine):
+                    output_token_ids = self.model(token_ids, position_ids,
+                                                  attn_metadata, input_lens, t,
+                                                  p, model_input.num_samples,
+                                                  kv_caches)
                 self.cached_step_outputs.append(output_token_ids)
 
                 if i < num_steps - 1:

@@ -20,6 +20,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
+from vllm.utils import bind_kv_cache
 from vllm.worker.openvino_model_runner import OpenVINOModelRunner
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
@@ -339,6 +340,8 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
             ov_device,
         )
         self.kv_cache = self.cache_engine.kv_cache
+        bind_kv_cache(self.compilation_config.static_forward_context,
+                      [self.kv_cache])
         self.model_runner.block_size = self.cache_engine.block_size
 
         assert self.kv_cache is not None
@@ -507,12 +510,18 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
 
             self.model_runner.block_size = tmp_cache_config.block_size
 
+            bind_kv_cache(self.compilation_config.static_forward_context,
+                          profiling_cache_engine.kv_cache)
             # Run the model with the dummy inputs.
             self.model_runner.execute_model(seqs,
                                             profiling_cache_engine.kv_cache)
 
-            # explicitly delete temporary KV cache manager to free KV cache
-            # when real inputs will be passed to OV
+            # Explicitly revert bind_kv_cache and delete temporary KV cache
+            # manager to free KV cache when real inputs will be passed to OV
+            bind_kv_cache(self.compilation_config.static_forward_context, [[
+                torch.tensor([])
+                for _ in range(len(profiling_cache_engine.kv_cache))
+            ]])
             del profiling_cache_engine
 
             logger.info(
