@@ -1,7 +1,7 @@
 name: Lint shell scripts
 on:
   push:
-    branch:
+    branches:
       - "main"
     paths:
       - '**/*.sh'
