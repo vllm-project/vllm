@@ -10,12 +10,6 @@ repos:
   hooks:
   - id: ruff
     args: [--output-format, github]
-- repo: https://github.com/pre-commit/mirrors-mypy
-  rev: v1.11.1
-  hooks:
-  - id: mypy
-    files: '(tests|vllm/(attention|compilation|distributed|engine|executor|inputs|lora|model_executor|plugins|prompt_adapter|spec_decode|worker|v1))/.*'
-    additional_dependencies: [types-setuptools, types-PyYAML, types-requests]
 - repo: https://github.com/codespell-project/codespell
   rev: v2.3.0
   hooks:
@@ -39,6 +33,12 @@ repos:
     files: docs/.*
 - repo: local
   hooks:
+  - id: mypy # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: run mypy
+    entry: tools/mypy.sh 1
+    language: python
+    additional_dependencies: [mypy==1.11.1, types-setuptools, types-PyYAML, types-requests]
+    pass_filenames: false
   - id: shellcheck
     name: Lint shell scripts
     entry: tools/shellcheck.sh
