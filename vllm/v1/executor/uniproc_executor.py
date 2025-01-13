@@ -4,9 +4,16 @@ from typing import Optional, Tuple
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.platforms import current_platform
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.worker.gpu_worker import Worker
+
+if current_platform.is_tpu():
+    from vllm.v1.worker.tpu_worker import TPUWorker as WorkerClass
+elif current_platform.is_cuda():
+    from vllm.v1.worker.gpu_worker import Worker as WorkerClass
+else:
+    raise NotImplementedError("V1 executor supports CUDA or TPU")
 
 logger = init_logger(__name__)
 
@@ -26,7 +33,8 @@ class UniprocExecutor(Executor):
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
-        self.worker: Worker = self._create_worker()
+        self.worker: WorkerClass = self._create_worker()
+
         self.worker.initialize()
         self.worker.load_model()
 
@@ -34,15 +42,17 @@ class UniprocExecutor(Executor):
             self,
             local_rank: int = 0,
             rank: int = 0,
-            distributed_init_method: Optional[str] = None) -> Worker:
+            distributed_init_method: Optional[str] = None) -> WorkerClass:
         """Return worker init args for a given rank."""
-        # see https://github.com/NVIDIA/nccl/issues/1234
-        os.environ['NCCL_CUMEM_ENABLE'] = '0'
+        if current_platform.is_cuda():
+            # see https://github.com/NVIDIA/nccl/issues/1234
+            os.environ['NCCL_CUMEM_ENABLE'] = '0'
 
         if distributed_init_method is None:
             distributed_init_method = get_distributed_init_method(
                 get_ip(), get_open_port())
-        return Worker(
+
+        return WorkerClass(
             vllm_config=self.vllm_config,
             local_rank=local_rank,
             rank=rank,

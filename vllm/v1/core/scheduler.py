@@ -205,9 +205,9 @@ class Scheduler:
                     num_computed_tokens -= self.block_size
                     num_new_tokens = self.block_size
                     computed_blocks.pop()
-                
-                # If chunked prefill is not enabled, breakout of the loop.
-                # TODO: Verify if needed
+
+                # If chunked prefill is not enabled, then breakout of the loop
+                # when above budget.
                 if (not self.scheduler_config.chunked_prefill_enabled
                         and num_new_tokens > token_budget):
                     break
@@ -247,8 +247,8 @@ class Scheduler:
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                has_partial_request = (num_computed_tokens + num_new_tokens <
-                                       request.num_tokens)
+                has_partial_request = (num_computed_tokens + num_new_tokens
+                                       < request.num_tokens)
 
                 # Encoder-related.
                 if encoder_inputs_to_schedule:

@@ -22,12 +22,8 @@ class Executor(ABC):
             executor_class = MultiprocExecutor
         else:
             assert (distributed_executor_backend is None)
-            if current_platform.is_tpu():
-                from vllm.v1.executor.uniproc_tpu_executor import UniprocTPUExecutor
-                executor_class = UniprocTPUExecutor
-            else:
-                from vllm.v1.executor.uniproc_executor import UniprocExecutor
-                executor_class = UniprocExecutor
+            from vllm.v1.executor.uniproc_executor import UniprocExecutor
+            executor_class = UniprocExecutor
         return executor_class
 
     @abstractmethod
