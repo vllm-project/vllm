@@ -716,6 +716,9 @@ class DeviceMemoryProfiler:
         elif current_platform.is_xpu():
             torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
             mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
+        elif current_platform.is_npu():
+            torch.npu.reset_peak_memory_stats(self.device)  # type: ignore
+            mem = torch.npu.max_memory_allocated(self.device)  # type: ignore
         return mem
 
     def __enter__(self):

@@ -56,6 +56,12 @@ try:
             )[device_key]
             return node_id, gpu_ids
 
+        def get_node_and_accelerator_ids(
+                self) -> Tuple[str, Dict[str, List[int]]]:
+            node_id = ray.get_runtime_context().get_node_id()
+            accelerator_ids = ray.get_runtime_context().get_accelerator_ids()
+            return node_id, accelerator_ids
+
         def execute_model_spmd(
             self, req_or_tuple: Union[bytes,
                                       Tuple[bytes,
@@ -235,6 +241,10 @@ def initialize_ray_cluster(
     """
     assert_ray_available()
     from vllm.platforms import current_platform
+
+    if current_platform.is_npu():
+        # Auto set visible devices in ray will cause torch.npu.set_device fail
+        os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
 
     # Connect to a ray cluster.
     if current_platform.is_rocm() or current_platform.is_xpu():

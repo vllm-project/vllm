@@ -165,6 +165,7 @@ class GroupCoordinator:
         use_tpu_communicator: bool,
         use_hpu_communicator: bool,
         use_xpu_communicator: bool,
+        use_npu_communicator: bool,
         use_message_queue_broadcaster: bool = False,
         group_name: Optional[str] = None,
     ):
@@ -196,6 +197,8 @@ class GroupCoordinator:
         from vllm.platforms import current_platform
         if current_platform.is_cuda_alike():
             self.device = torch.device(f"cuda:{local_rank}")
+        elif current_platform.is_npu():
+            self.device = torch.device(f"npu:{local_rank}")
         else:
             self.device = torch.device("cpu")
 
@@ -243,6 +246,12 @@ class GroupCoordinator:
         self.xpu_communicator: Optional[XpuCommunicator]
         if use_xpu_communicator and self.world_size > 1:
             self.xpu_communicator = XpuCommunicator(group=self.device_group)
+
+        from vllm.distributed.device_communicators.npu_communicator import (
+            NpuCommunicator)
+        self.npu_communicator: Optional[NpuCommunicator]
+        if use_npu_communicator and self.world_size > 1:
+            self.npu_communicator = NpuCommunicator(group=self.device_group)
 
         from vllm.distributed.device_communicators.shm_broadcast import (
             MessageQueue)
@@ -331,6 +340,11 @@ class GroupCoordinator:
             ipex.distributed.all_reduce(input_, group=self.device_group)
             return input_
 
+        if self.npu_communicator is not None and \
+            not self.npu_communicator.disabled:
+            # TPU handles Dynamo with its own logic.
+            return self.npu_communicator.all_reduce(input_)
+
         if self.tpu_communicator is not None and \
             not self.tpu_communicator.disabled:
             # TPU handles Dynamo with its own logic.
@@ -385,6 +399,11 @@ class GroupCoordinator:
         if hpu_comm is not None and not hpu_comm.disabled:
             return hpu_comm.all_gather(input_, dim)
 
+        # For NPUs, use NPU communicator.
+        npu_comm = self.npu_communicator
+        if npu_comm is not None and not npu_comm.disabled:
+            return npu_comm.all_gather(input_, dim)
+
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
@@ -432,6 +451,12 @@ class GroupCoordinator:
                 not self.xpu_communicator.disabled:
             return self.xpu_communicator.gather(input_, self.rank_in_group,
                                                 dst, dim)
+        # For NPUs, use NPU communicator.
+        if self.npu_communicator is not None and \
+                not self.npu_communicator.disabled:
+            return self.npu_communicator.gather(input_, self.rank_in_group,
+                                                dst, dim)
+
         # Allocate output tensor.
         if self.rank_in_group == dst:
             gather_list = [torch.empty_like(input_) for _ in range(world_size)]
@@ -848,6 +873,7 @@ def init_world_group(ranks: List[int], local_rank: int,
         use_tpu_communicator=False,
         use_hpu_communicator=False,
         use_xpu_communicator=False,
+        use_npu_communicator=False,
         group_name="world",
     )
 
@@ -871,6 +897,7 @@ def init_model_parallel_group(
         use_tpu_communicator=True,
         use_hpu_communicator=True,
         use_xpu_communicator=True,
+        use_npu_communicator=True,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
     )
