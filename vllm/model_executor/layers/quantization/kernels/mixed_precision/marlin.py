@@ -8,9 +8,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supports_shape, marlin_is_k_full, marlin_make_empty_g_idx,
     marlin_make_workspace, marlin_permute_scales, marlin_sort_g_idx,
     query_marlin_supported_quant_types)
-from vllm.model_executor.parameter import (vLLMParameterFeatures, 
-                                           has_any_param_feature,
-                                           permute_param_layout_)
+from vllm.model_executor.parameter import (
+    vLLMParameterFeatures, has_any_param_feature, permute_param_layout_)
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
