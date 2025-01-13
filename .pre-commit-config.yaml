@@ -34,7 +34,7 @@ repos:
 - repo: local
   hooks:
   - id: mypy # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: run mypy
+    name: Run mypy
     entry: tools/mypy.sh 1
     language: python
     additional_dependencies: [mypy==1.11.1, types-setuptools, types-PyYAML, types-requests]
