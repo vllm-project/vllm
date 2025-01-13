@@ -13,6 +13,7 @@ class HpuPlatform(Platform):
     device_name: str = "hpu"
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
+    supported_quantization: list[str] = ["inc"]
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:

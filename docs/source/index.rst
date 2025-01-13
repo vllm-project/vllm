@@ -121,6 +121,7 @@ Documentation
    quantization/auto_awq
    quantization/bnb
    quantization/gguf
+   quantization/inc
    quantization/int8
    quantization/fp8
    quantization/fp8_e5m2_kvcache

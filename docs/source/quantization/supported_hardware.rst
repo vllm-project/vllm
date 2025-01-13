@@ -7,7 +7,7 @@ The table below shows the compatibility of various quantization implementations 
 
 .. list-table::
    :header-rows: 1
-   :widths: 20 8 8 8 8 8 8 8 8 8 8
+   :widths: 20 8 8 8 8 8 8 8 8 8 8 8
 
    * - Implementation
      - Volta
@@ -17,6 +17,7 @@ The table below shows the compatibility of various quantization implementations 
      - Hopper
      - AMD GPU
      - Intel GPU
+     - Intel Gaudi
      - x86 CPU
      - AWS Inferentia
      - Google TPU
@@ -28,6 +29,7 @@ The table below shows the compatibility of various quantization implementations 
      - ✅︎
      - ✗
      - ✅︎
+     - ✗
      - ✅︎
      - ✗
      - ✗
@@ -39,6 +41,7 @@ The table below shows the compatibility of various quantization implementations 
      - ✅︎
      - ✗
      - ✅︎
+     - ✗
      - ✅︎
      - ✗
      - ✗
@@ -53,12 +56,14 @@ The table below shows the compatibility of various quantization implementations 
      - ✗
      - ✗
      - ✗
+     - ✗
    * - INT8 (W8A8)
      - ✗
      - ✅︎
      - ✅︎
      - ✅︎
      - ✅︎
+     - ✗
      - ✗
      - ✗
      - ✅︎
@@ -75,12 +80,14 @@ The table below shows the compatibility of various quantization implementations 
      - ✗
      - ✗
      - ✗
+     - ✗
    * - AQLM
      - ✅︎
      - ✅︎
      - ✅︎
      - ✅︎
      - ✅︎
+     - ✗
      - ✗
      - ✗
      - ✗
@@ -97,12 +104,14 @@ The table below shows the compatibility of various quantization implementations 
      - ✗
      - ✗
      - ✗
+     - ✗
    * - DeepSpeedFP
      - ✅︎
      - ✅︎
      - ✅︎
      - ✅︎
      - ✅︎
+     - ✗
      - ✗
      - ✗
      - ✗
@@ -116,6 +125,19 @@ The table below shows the compatibility of various quantization implementations 
      - ✅︎
      - ✗
      - ✗
+     - ✗
+     - ✗
+     - ✗
+     - ✗
+   * - INC (W8A8)
+     - ✗
+     - ✗
+     - ✗
+     - ✗
+     - ✗
+     - ✗
+     - ✗
+     - ✅︎
      - ✗
      - ✗
      - ✗
