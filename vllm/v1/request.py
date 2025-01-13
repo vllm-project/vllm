@@ -97,7 +97,6 @@ class Request:
     ) -> None:
         if isinstance(token_ids, int):
             token_ids = [token_ids]
-        
         self._output_token_ids.extend(token_ids)
         self._all_token_ids.extend(token_ids)
 
