@@ -1457,11 +1457,9 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
         # in the non-streaming mode, we will return the assembled sequence
         # when the last sequences finishes, and then return None for the
         # rest of the time
-        if (
-            len(self.to_be_finished) == 1
-            and seq_group.request_id in self.to_be_finished
-            and seq_group.is_finished()
-        ):
+        if (len(self.to_be_finished) == 1
+                and seq_group.request_id in self.to_be_finished
+                and seq_group.is_finished()):
             assert self.assembled_seq_group is not None
             params = self.assembled_seq_group.sampling_params
             assert isinstance(params, SamplingParams)
