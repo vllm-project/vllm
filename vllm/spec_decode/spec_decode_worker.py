@@ -1295,14 +1295,18 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # to the vocabulary size for kernel compatibility.
         lora_vocab_padding_sizes = [
             worker.lora_config.lora_vocab_padding_size
-            for worker in [self.proposer_worker, self.scorer_worker]
-            if worker.lora_config is not None
+            for worker in [self.proposer_worker, self.scorer_worker] if
+            hasattr(worker, 'lora_config') and worker.lora_config is not None
             and worker.lora_config.lora_vocab_padding_size is not None
         ]
         assert all(lora_vocab_padding_sizes[0] == vocab_size
                    for vocab_size in lora_vocab_padding_sizes)
 
-        return orig_vocab_sizes[0] + lora_vocab_padding_sizes[0]
+        vocab_size = orig_vocab_sizes[0]
+        if lora_vocab_padding_sizes:
+            vocab_size = orig_vocab_sizes[0] + lora_vocab_padding_sizes[0]
+
+        return vocab_size
 
     @property
     def rank(self):
