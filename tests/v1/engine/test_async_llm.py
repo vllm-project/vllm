@@ -66,4 +66,57 @@ async def test_load(monkeypatch):
             f"{failed_request_id} generated {tokens} but "
             f"expected {NUM_EXPECTED_TOKENS}")
 
+        # Make sure RequestStates get cleaned up.
+        assert not engine.output_processor.has_unfinished_requests()
         engine.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_abort(monkeypatch):
+    # TODO(rickyx): Remove monkeypatch once we have a better way to test V1
+    # so that in the future when we switch, we don't have to change all the
+    # tests.
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+
+        engine = AsyncLLM.from_engine_args(ENGINE_ARGS)
+
+        NUM_REQUESTS = 100
+        NUM_EXPECTED_TOKENS = 100
+        REQUEST_IDS_TO_ABORT = [1 + idx * 10 for idx in range(10)]
+
+        request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
+
+        # Create concurrent requests.
+        tasks = []
+        for request_id in request_ids:
+            tasks.append(
+                asyncio.create_task(
+                    generate(engine, request_id, NUM_EXPECTED_TOKENS)))
+        
+        # API server cancels requests when they are aborted.
+        for idx in REQUEST_IDS_TO_ABORT:
+            tasks[idx].cancel()
+
+        # Confirm the other requests are okay.
+        failed_request_id = None
+        tokens = None
+        for idx, task in enumerate(tasks):
+            
+            # Confirm that it was actually canceled.
+            if idx in REQUEST_IDS_TO_ABORT:
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+            # Otherwise, make sure the request was not impacted.
+            num_generated_tokens, request_id = await task
+            if (num_generated_tokens != NUM_EXPECTED_TOKENS
+                    and failed_request_id is None):
+                failed_request_id = request_id
+                tokens = num_generated_tokens
+        
+        assert failed_request_id is None, (
+            f"{failed_request_id} generated {tokens} but "
+            f"expected {NUM_EXPECTED_TOKENS}")
+
+        assert not engine.output_processor.has_unfinished_requests()
