@@ -752,24 +752,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
         return prompt_ids, mm_kwargs
-    
-        try:
-            hf_inputs = hf_processor(
-                text=prompt,  # type: ignore
-                **processor_data,
-                **mm_processor_kwargs,
-                return_tensors="pt",
-            )
-        except Exception as exc:
-            data = dict(text=prompt, **processor_data)
-
-            raise RuntimeError(
-                f"Failed to apply {type(hf_processor).__name__} "
-                f"on data={data} with kwargs={mm_processor_kwargs}") from exc
-
-        hf_inputs.update(passthrough_data)
-
-        return hf_inputs
 
     def _apply_hf_processor_text_only(self, prompt_text: str) -> list[int]:
         """
