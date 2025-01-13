@@ -2,7 +2,7 @@
 
 # Installation for ARM CPUs
 
-vLLM has been adapted to work on ARM64 CPUs with NEON support, leveraging the CPU backend initially developed for the x86 platform. This guide provides installation instructions specific to ARM. For additional details on supported features, refer to the x86 platform documentation covering:
+vLLM has been adapted to work on ARM64 CPUs with NEON support, leveraging the CPU backend initially developed for the x86 platform. This guide provides installation instructions specific to ARM. For additional details on supported features, refer to the [x86 CPU documentation](#installation-x86) covering:
 
 - CPU backend inference capabilities
 - Relevant runtime environment variables
@@ -20,7 +20,7 @@ Contents:
 ## Requirements
 
 - **Operating System**: Linux or macOS
-- **Compiler**: gcc/g++ >= 12.3.0 (optional, but recommended)
+- **Compiler**: `gcc/g++ >= 12.3.0` (optional, but recommended)
 - **Instruction Set Architecture (ISA)**: NEON support is required
 
 (arm-backend-quick-start-dockerfile)=

@@ -1,5 +1,6 @@
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
 from vllm.transformers_utils.configs.telechat2 import Telechat2Config
+from vllm.transformers_utils.configs.cohere2 import Cohere2Config
 from vllm.transformers_utils.configs.dbrx import DbrxConfig
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.transformers_utils.configs.exaone import ExaoneConfig
@@ -24,6 +25,7 @@ from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 __all__ = [
     "Telechat2Config",
     "ChatGLMConfig",
+    "Cohere2Config",
     "DbrxConfig",
     "MPTConfig",
     "RWConfig",

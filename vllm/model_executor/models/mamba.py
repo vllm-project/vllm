@@ -38,10 +38,12 @@ class MambaDecoderLayer(nn.Module):
     def __init__(self,
                  config: MambaConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 is_lora_enabled: Optional[bool] = False) -> None:
         super().__init__()
         self.config = config
         self.is_falcon_mamba = config.model_type == "falcon_mamba"
+        self.is_lora_enabled = is_lora_enabled
         mixer_rms_eps = config.mixer_rms_eps if self.is_falcon_mamba else None
         self.mixer = MambaMixer(hidden_size=config.hidden_size,
                                 ssm_state_size=config.state_size,
@@ -53,7 +55,8 @@ class MambaDecoderLayer(nn.Module):
                                 use_rms_norm=self.is_falcon_mamba,
                                 rms_norm_has_weight=not self.is_falcon_mamba,
                                 rms_norm_eps=mixer_rms_eps,
-                                activation=config.hidden_act)
+                                activation=config.hidden_act,
+                                is_lora_enabled=self.is_lora_enabled)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
@@ -85,6 +88,7 @@ class MambaModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
+        is_lora_enabled = bool(lora_config)
 
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -101,8 +105,10 @@ class MambaModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: MambaDecoderLayer(
-                config, cache_config=cache_config, quant_config=quant_config),
+            lambda prefix: MambaDecoderLayer(config,
+                                             cache_config=cache_config,
+                                             quant_config=quant_config,
+                                             is_lora_enabled=is_lora_enabled),
             prefix=f"{prefix}.layers")
 
         self.norm_f = RMSNorm(config.hidden_size,

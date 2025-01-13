@@ -2,7 +2,7 @@
 
 # Structured Outputs
 
-vLLM supports the generation of structured outputs using [outlines](https://github.com/dottxt-ai/outlines) or [lm-format-enforcer](https://github.com/noamgat/lm-format-enforcer) as backends for the guided decoding.
+vLLM supports the generation of structured outputs using [outlines](https://github.com/dottxt-ai/outlines), [lm-format-enforcer](https://github.com/noamgat/lm-format-enforcer), or [xgrammar](https://github.com/mlc-ai/xgrammar) as backends for the guided decoding.
 This document shows you some examples of the different options that are available to generate structured outputs.
 
 ## Online Inference (OpenAI API)
@@ -18,7 +18,7 @@ The following parameters are supported, which must be added as extra parameters:
 - `guided_whitespace_pattern`: used to override the default whitespace pattern for guided json decoding.
 - `guided_decoding_backend`: used to select the guided decoding backend to use.
 
-You can see the complete list of supported parameters on the [OpenAI Compatible Server](../serving/openai_compatible_server.md) page.
+You can see the complete list of supported parameters on the [OpenAI-Compatible Server](#openai-compatible-server)page.
 
 Now let´s see an example for each of the cases, starting with the `guided_choice`, as it´s the easiest one:
 

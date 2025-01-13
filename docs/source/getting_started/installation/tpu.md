@@ -1,6 +1,6 @@
 (installation-tpu)=
 
-# Installation with TPU
+# Installation for TPUs
 
 Tensor Processing Units (TPUs) are Google's custom-developed application-specific
 integrated circuits (ASICs) used to accelerate machine learning workloads. TPUs
@@ -68,33 +68,32 @@ gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
 --service-account SERVICE_ACCOUNT
 ```
 
-```{eval-rst}
-.. list-table:: Parameter descriptions
-    :header-rows: 1
+```{list-table} Parameter descriptions
+:header-rows: 1
 
-    * - Parameter name
-      - Description
-    * - QUEUED_RESOURCE_ID
-      - The user-assigned ID of the queued resource request.
-    * - TPU_NAME
-      - The user-assigned name of the TPU which is created when the queued
-        resource request is allocated.
-    * - PROJECT_ID
-      - Your Google Cloud project
-    * - ZONE
-      - The GCP zone where you want to create your Cloud TPU. The value you use
-        depends on the version of TPUs you are using. For more information, see
-        `TPU regions and zones <https://cloud.google.com/tpu/docs/regions-zones>`_
-    * - ACCELERATOR_TYPE
-      - The TPU version you want to use. Specify the TPU version, for example
-        `v5litepod-4` specifies a v5e TPU with 4 cores. For more information,
-        see `TPU versions <https://cloud.devsite.corp.google.com/tpu/docs/system-architecture-tpu-vm#versions>`_.
-    * - RUNTIME_VERSION
-      - The TPU VM runtime version to use. For more information see `TPU VM images <https://cloud.google.com/tpu/docs/runtimes>`_.
-    * - SERVICE_ACCOUNT
-      - The email address for your service account. You can find it in the IAM
-        Cloud Console under *Service Accounts*. For example:
-        `tpu-service-account@<your_project_ID>.iam.gserviceaccount.com`
+* - Parameter name
+  - Description
+* - QUEUED_RESOURCE_ID
+  - The user-assigned ID of the queued resource request.
+* - TPU_NAME
+  - The user-assigned name of the TPU which is created when the queued
+    resource request is allocated.
+* - PROJECT_ID
+  - Your Google Cloud project
+* - ZONE
+  - The GCP zone where you want to create your Cloud TPU. The value you use
+    depends on the version of TPUs you are using. For more information, see
+    `TPU regions and zones <https://cloud.google.com/tpu/docs/regions-zones>`_
+* - ACCELERATOR_TYPE
+  - The TPU version you want to use. Specify the TPU version, for example
+    `v5litepod-4` specifies a v5e TPU with 4 cores. For more information,
+    see `TPU versions <https://cloud.devsite.corp.google.com/tpu/docs/system-architecture-tpu-vm#versions>`_.
+* - RUNTIME_VERSION
+  - The TPU VM runtime version to use. For more information see `TPU VM images <https://cloud.google.com/tpu/docs/runtimes>`_.
+* - SERVICE_ACCOUNT
+  - The email address for your service account. You can find it in the IAM
+    Cloud Console under *Service Accounts*. For example:
+    `tpu-service-account@<your_project_ID>.iam.gserviceaccount.com`
 ```
 
 Connect to your TPU using SSH:
@@ -103,7 +102,7 @@ Connect to your TPU using SSH:
 gcloud compute tpus tpu-vm ssh TPU_NAME --zone ZONE
 ```
 
-Install Miniconda
+Install Miniconda:
 
 ```bash
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh

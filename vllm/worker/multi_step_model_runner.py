@@ -544,6 +544,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         model_input.record_step_event(current_stream)
 
         if get_pp_group().is_last_rank and self.is_driver_worker:
+            assert isinstance(output, list)
             assert len(
                 output
             ) == 1, "MultiStepModelRunner requires single-step base_models"

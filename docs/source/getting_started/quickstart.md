@@ -23,7 +23,7 @@ $ conda activate myenv
 $ pip install vllm
 ```
 
-Please refer to the {ref}`installation documentation <installation>` for more details on installing vLLM.
+Please refer to the [installation documentation](#installation-index) for more details on installing vLLM.
 
 (offline-batched-inference)=
 
@@ -114,7 +114,7 @@ $         "temperature": 0
 $     }'
 ```
 
-Since this server is compatible with OpenAI API, you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the `openai` python package:
+Since this server is compatible with OpenAI API, you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the `openai` Python package:
 
 ```python
 from openai import OpenAI
@@ -151,7 +151,7 @@ $         ]
 $     }'
 ```
 
-Alternatively, you can use the `openai` python package:
+Alternatively, you can use the `openai` Python package:
 
 ```python
 from openai import OpenAI

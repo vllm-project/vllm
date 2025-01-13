@@ -2,11 +2,18 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
+import numpy as np
 import torch
+import triton
+import triton.language as tl
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.vllm_flash_attn import flash_attn_varlen_func
+from vllm.platforms import current_platform
+from vllm.utils import cdiv
+
+if current_platform.is_cuda():
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -38,6 +45,10 @@ class FlashAttentionBackend(AttentionBackend):
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
+    @staticmethod
+    def use_cascade_attention(*args, **kwargs) -> bool:
+        return use_cascade_attention(*args, **kwargs)
+
 
 @dataclass
 class FlashAttentionMetadata:
@@ -56,6 +67,15 @@ class FlashAttentionMetadata:
     seq_start_loc: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
+
+    # For cascade attention.
+    use_cascade: bool
+    common_prefix_len: int
+    cu_prefix_query_lens: Optional[torch.Tensor]
+    cu_prefix_kv_lens: Optional[torch.Tensor]
+    cu_suffix_kv_lens: Optional[torch.Tensor]
+
+    # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
 
@@ -169,21 +189,246 @@ class FlashAttentionImpl(AttentionImpl):
         )
 
         # Compute attention and update output up to `num_actual_tokens`.
-        flash_attn_varlen_func(
-            q=query[:num_actual_tokens],
-            k=key_cache,
-            v=value_cache,
-            out=output[:num_actual_tokens],
-            cu_seqlens_q=attn_metadata.query_start_loc,
-            max_seqlen_q=attn_metadata.max_query_len,
-            cu_seqlens_k=attn_metadata.seq_start_loc,
-            max_seqlen_k=attn_metadata.max_seq_len,
-            softmax_scale=self.scale,
-            causal=True,
-            alibi_slopes=self.alibi_slopes,
-            window_size=self.sliding_window,
-            block_table=attn_metadata.block_table,
-            softcap=self.logits_soft_cap,
-        )
+        if not attn_metadata.use_cascade:
+            # Regular attention (common case).
+            flash_attn_varlen_func(
+                q=query[:num_actual_tokens],
+                k=key_cache,
+                v=value_cache,
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=attn_metadata.query_start_loc,
+                max_seqlen_q=attn_metadata.max_query_len,
+                cu_seqlens_k=attn_metadata.seq_start_loc,
+                max_seqlen_k=attn_metadata.max_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                block_table=attn_metadata.block_table,
+                softcap=self.logits_soft_cap,
+            )
+            return output
 
+        # Cascade attention (rare case).
+        cascade_attention(
+            output[:num_actual_tokens],
+            query[:num_actual_tokens],
+            key_cache,
+            value_cache,
+            cu_query_lens=attn_metadata.query_start_loc,
+            max_query_len=attn_metadata.max_query_len,
+            cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens,
+            cu_prefix_kv_lens=attn_metadata.cu_prefix_kv_lens,
+            cu_suffix_kv_lens=attn_metadata.cu_suffix_kv_lens,
+            max_kv_len=attn_metadata.max_seq_len,
+            softmax_scale=self.scale,
+            alibi_slopes=self.alibi_slopes,
+            sliding_window=self.sliding_window,
+            logits_soft_cap=self.logits_soft_cap,
+            block_table=attn_metadata.block_table,
+            common_prefix_len=attn_metadata.common_prefix_len,
+        )
         return output
+
+
+def use_cascade_attention(
+    common_prefix_len: int,
+    query_lens: np.ndarray,
+    num_query_heads: int,
+    num_kv_heads: int,
+    use_alibi: bool,
+    use_sliding_window: bool,
+    num_sms: int,
+) -> bool:
+    """Decide whether to use cascade attention.
+
+    This function 1) checks whether cascade attention is supported with the
+    given configuration, and 2) heuristically decides whether using cascade
+    attention can improve performance.
+    """
+    # Too short common prefix. Probably not worth using cascade attention.
+    # We use an arbitrary threshold of 256 tokens. TODO: Tune this threshold.
+    # NOTE(woosuk): This is the common case. We should return False as soon as
+    # possible to avoid any unnecessary computation.
+    if common_prefix_len < 256:
+        return False
+    # Cascade attention is currently not supported with these variants.
+    if use_alibi or use_sliding_window:
+        return False
+    # Too few queries. Probably not worth using cascade attention.
+    # We use an arbitrary threshold of 8 queries. TODO: Tune this threshold.
+    num_reqs = len(query_lens)
+    if num_reqs < 8:
+        return False
+
+    # Heuristics to decide whether using cascade attention is beneficial.
+    # 1. When FlashDecoding is not used for normal attention, cascade attention
+    #    is likely to be faster since it saves memory bandwidth.
+    num_queries_per_kv = num_query_heads // num_kv_heads
+    # The criteria for using FlashDecoding can be found in the following link:
+    # https://github.com/vllm-project/flash-attention/blob/96266b1111111f3d11aabefaf3bacbab6a89d03c/csrc/flash_attn/flash_api.cpp#L535
+    use_flash_decoding = (num_queries_per_kv > 1 and not use_sliding_window
+                          and not use_alibi and np.all(query_lens == 1))
+    if not use_flash_decoding:
+        # Use cascade attention.
+        return True
+
+    # 2. When FlashDecoding is used for normal attention, it is not clear
+    #    whether cascade attention is beneficial, because FlashDecoding can
+    #    launch more CTAs than cascade attention.
+    #    We use a simple performance model to compare the two methods.
+    #    NOTE(woosuk): The performance model is very rough and may not be
+    #    accurate.
+    num_tokens = num_reqs
+    # NOTE(woosuk): These are default tile sizes. flash-attn might use
+    # different tile sizes (e.g., 64 or 256) depending on the configuration.
+    q_tile_size = 128
+    kv_tile_size = 128
+    num_prefix_tiles = cdiv(common_prefix_len, kv_tile_size)
+
+    cascade_ctas = num_query_heads * cdiv(num_tokens, q_tile_size)
+    cascade_waves = cdiv(cascade_ctas, num_sms)
+    cascade_time = cascade_waves * num_prefix_tiles
+
+    flash_decoding_ctas = (num_reqs * num_kv_heads *
+                           cdiv(num_queries_per_kv, q_tile_size))
+    flash_decoding_ctas *= num_prefix_tiles
+    flash_decoding_time = cdiv(flash_decoding_ctas, num_sms)
+
+    # Use cascade attention if it is faster than FlashDecoding.
+    return cascade_time < flash_decoding_time
+
+
+def cascade_attention(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    cu_query_lens: torch.Tensor,
+    max_query_len: int,
+    cu_prefix_query_lens: torch.Tensor,
+    cu_prefix_kv_lens: torch.Tensor,
+    cu_suffix_kv_lens: torch.Tensor,
+    max_kv_len: int,
+    softmax_scale: float,
+    alibi_slopes: Optional[torch.Tensor],
+    sliding_window: Tuple[int, int],
+    logits_soft_cap: float,
+    block_table: torch.Tensor,
+    common_prefix_len: int,
+) -> torch.Tensor:
+
+    assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
+    # TODO: Support sliding window.
+    assert sliding_window == (-1, -1), (
+        "Cascade attention does not support sliding window.")
+
+    num_tokens = query.shape[0]
+    block_size = key_cache.shape[-3]
+    assert common_prefix_len % block_size == 0
+    num_common_kv_blocks = common_prefix_len // block_size
+    assert num_common_kv_blocks > 0
+
+    # Process shared prefix.
+    prefix_output, prefix_lse = flash_attn_varlen_func(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        cu_seqlens_q=cu_prefix_query_lens,
+        cu_seqlens_k=cu_prefix_kv_lens,
+        max_seqlen_q=num_tokens,
+        max_seqlen_k=common_prefix_len,
+        softmax_scale=softmax_scale,
+        causal=False,
+        window_size=sliding_window,
+        block_table=block_table[:1],
+        softcap=logits_soft_cap,
+        return_softmax_lse=True,
+    )
+
+    # Process suffix per query.
+    suffix_output, suffix_lse = flash_attn_varlen_func(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        cu_seqlens_q=cu_query_lens,
+        cu_seqlens_k=cu_suffix_kv_lens,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len - common_prefix_len,
+        softmax_scale=softmax_scale,
+        causal=True,
+        window_size=sliding_window,
+        block_table=block_table[:, num_common_kv_blocks:],
+        softcap=logits_soft_cap,
+        return_softmax_lse=True,
+    )
+
+    # Merge prefix and suffix outputs, and store the result in output.
+    merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
+                      suffix_lse)
+
+
+def merge_attn_states(
+    output: torch.Tensor,
+    prefix_output: torch.Tensor,
+    prefix_lse: torch.Tensor,
+    suffix_output: torch.Tensor,
+    suffix_lse: torch.Tensor,
+) -> None:
+    num_tokens = output.shape[0]
+    num_query_heads = output.shape[1]
+    head_size = output.shape[2]
+    padded_head_size = triton.next_power_of_2(head_size)
+
+    # TODO(woosuk): Use CUDA kernel instead of Triton to minimize CPU overhead.
+    merge_attn_states_kernel[(num_tokens, num_query_heads)](
+        output,
+        prefix_output,
+        prefix_lse,
+        suffix_output,
+        suffix_lse,
+        head_size,
+        padded_head_size,
+    )
+
+
+@triton.jit
+def merge_attn_states_kernel(
+    output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
+    prefix_output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
+    prefix_lse,  # [NUM_HEADS, NUM_TOKENS]
+    suffix_output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
+    suffix_lse,  # [NUM_HEADS, NUM_TOKENS]
+    HEAD_SIZE: tl.constexpr,
+    PADDED_HEAD_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    num_tokens = tl.num_programs(0)
+    head_idx = tl.program_id(1)
+    num_heads = tl.num_programs(1)
+
+    p_lse = tl.load(prefix_lse + head_idx * num_tokens + token_idx)
+    s_lse = tl.load(suffix_lse + head_idx * num_tokens + token_idx)
+    max_lse = tl.maximum(p_lse, s_lse)
+    p_lse = p_lse - max_lse
+    s_lse = s_lse - max_lse
+
+    head_arange = tl.arange(0, PADDED_HEAD_SIZE)
+    head_mask = head_arange < HEAD_SIZE
+    p_out = tl.load(prefix_output + token_idx * num_heads * HEAD_SIZE +
+                    head_idx * HEAD_SIZE + head_arange,
+                    mask=head_mask)
+    s_out = tl.load(suffix_output + token_idx * num_heads * HEAD_SIZE +
+                    head_idx * HEAD_SIZE + head_arange,
+                    mask=head_mask)
+
+    # NOTE(woosuk): Be careful with the numerical stability.
+    # We should compute the scale first, and then multiply it with the output.
+    # Do not multiply the output with tl.exp(p_lse) or tl.exp(s_lse) directly.
+    p_scale = tl.exp(p_lse) / (tl.exp(p_lse) + tl.exp(s_lse))
+    s_scale = tl.exp(s_lse) / (tl.exp(p_lse) + tl.exp(s_lse))
+    out = p_out * p_scale + s_out * s_scale
+    tl.store(output + token_idx * num_heads * HEAD_SIZE +
+             head_idx * HEAD_SIZE + head_arange,
+             out,
+             mask=head_mask)

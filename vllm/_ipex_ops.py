@@ -267,6 +267,61 @@ class ipex_ops:
         vllm._C.cache_ops.reshape_and_cache_ipexllm(key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype, k_scale)
 
     @staticmethod
+    def reshape_and_cache_flash(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: float,
+        v_scale: float,
+    ) -> None:
+        assert kv_cache_dtype == "auto"
+        ipex.llm.modules.PagedAttention.reshape_and_cache_flash(
+            key, value, key_cache, value_cache, slot_mapping)
+
+    @staticmethod
+    def chunked_prefill(
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        seq_used_k: Optional[torch.Tensor],
+        block_table: torch.Tensor,
+        alibi_slopes: Optional[torch.Tensor],
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        p_dropout: float,
+        softmax_scale: float,
+        zero_tensors: bool,
+        is_caual: bool,
+        return_softmax: bool,
+        gen_: Optional[torch.Generator],
+    ):
+        return torch.ops.torch_ipex.chunked_prefill(
+            query.contiguous(),
+            key_cache,
+            value_cache,
+            output,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            seq_used_k,
+            block_table,
+            alibi_slopes,
+            max_seqlen_q,
+            max_seqlen_k,
+            p_dropout,
+            softmax_scale,
+            zero_tensors,
+            is_caual,
+            return_softmax,
+            gen_,
+        )
+
+    @staticmethod
     def copy_blocks(key_caches: List[torch.Tensor],
                     value_caches: List[torch.Tensor],
                     block_mapping) -> None:
@@ -279,6 +334,93 @@ class ipex_ops:
 
     @staticmethod
     def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
-                    block_mapping) -> None:
-        # torch.xpu.swap_blocks(src, dst, block_mapping)  # type: ignore
+                    block_mapping: torch.Tensor) -> None:
         vllm._C.cache_ops.swap_blocks(key_caches, value_caches, block_mapping)
+        # torch.xpu.swap_blocks(src, dst, block_mapping)  # type: ignore
+
+    @staticmethod
+    def bgmv_shrink(inputs: torch.Tensor,
+                    lora_a_weights: torch.Tensor,
+                    output_tensor: torch.Tensor,
+                    lora_indices_tensor: torch.Tensor,
+                    scaling: float = 1.0) -> None:
+        ipex.llm.functional.bgmv_shrink(inputs, lora_a_weights, output_tensor,
+                                        lora_indices_tensor, scaling)
+
+    @staticmethod
+    def bgmv_expand(inputs: torch.Tensor,
+                    lora_b_weights: torch.Tensor,
+                    output_tensor: torch.Tensor,
+                    lora_indices_tensor: torch.Tensor,
+                    add_inputs: bool = True) -> None:
+        ipex.llm.functional.bgmv_expand(inputs, lora_b_weights, output_tensor,
+                                        lora_indices_tensor, add_inputs)
+
+    @staticmethod
+    def bgmv_expand_slice(inputs: torch.Tensor,
+                          lora_b_weights: torch.Tensor,
+                          output_tensor: torch.Tensor,
+                          lora_indices_tensor: torch.Tensor,
+                          slice_offset: int,
+                          slice_size: int,
+                          add_inputs: bool = True) -> None:
+        ipex.llm.functional.bgmv_expand_slice(inputs, lora_b_weights,
+                                              output_tensor,
+                                              lora_indices_tensor,
+                                              slice_offset, slice_size,
+                                              add_inputs)
+
+    @staticmethod
+    def sgmv_shrink(inputs: torch.Tensor,
+                    lora_a_weights: torch.Tensor,
+                    output_tensor: torch.Tensor,
+                    b_seq_start_loc: torch.Tensor,
+                    seq_len_tensor: torch.Tensor,
+                    lora_indices_tensor: torch.Tensor,
+                    batches: int,
+                    max_seq_length: int,
+                    token_nums: int,
+                    scaling: float = 1.0) -> None:
+        assert inputs.size(0) == token_nums
+        ipex.llm.functional.sgmv_shrink(inputs, lora_a_weights, output_tensor,
+                                        b_seq_start_loc, seq_len_tensor,
+                                        lora_indices_tensor, batches,
+                                        max_seq_length, scaling)
+
+    @staticmethod
+    def sgmv_expand(inputs: torch.Tensor,
+                    lora_b_weights: torch.Tensor,
+                    output_tensor: torch.Tensor,
+                    b_seq_start_loc: torch.Tensor,
+                    seq_len_tensor: torch.Tensor,
+                    lora_indices_tensor: torch.Tensor,
+                    batches: int,
+                    max_seq_length: int,
+                    token_nums: int,
+                    add_inputs: bool = False) -> None:
+        assert inputs.size(0) == token_nums
+        ipex.llm.functional.sgmv_expand(inputs, lora_b_weights, output_tensor,
+                                        b_seq_start_loc, seq_len_tensor,
+                                        lora_indices_tensor, batches,
+                                        max_seq_length, add_inputs)
+
+    @staticmethod
+    def sgmv_expand_slice(inputs: torch.Tensor,
+                          lora_b_weights: torch.Tensor,
+                          output_tensor: torch.Tensor,
+                          b_seq_start_loc: torch.Tensor,
+                          seq_len_tensor: torch.Tensor,
+                          lora_indices_tensor: torch.Tensor,
+                          batches: int,
+                          max_seq_length: int,
+                          token_nums: int,
+                          slice_offset: int,
+                          slice_size: int,
+                          add_inputs: bool = False) -> None:
+        assert inputs.size(0) == token_nums
+        ipex.llm.functional.sgmv_expand_slice(inputs, lora_b_weights,
+                                              output_tensor, b_seq_start_loc,
+                                              seq_len_tensor,
+                                              lora_indices_tensor, batches,
+                                              max_seq_length, slice_offset,
+                                              slice_size, add_inputs)

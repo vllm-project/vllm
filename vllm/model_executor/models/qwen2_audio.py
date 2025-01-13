@@ -23,10 +23,9 @@ from functools import cached_property
 from typing import (Any, Iterable, List, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
-import numpy as np
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, ProcessorMixin
+from transformers import BatchFeature
 from transformers.models.qwen2_audio import (Qwen2AudioConfig,
                                              Qwen2AudioEncoder,
                                              Qwen2AudioProcessor)
@@ -34,14 +33,16 @@ from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.inputs import InputContext
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
+from vllm.multimodal.parse import AudioProcessorItems, MultiModalDataParser
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataItems, ProcessorInputs,
+                                        MultiModalDataItems, ProcessingMixin,
                                         PromptReplacement)
+from vllm.multimodal.profiling import BaseProfilingInfo, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsMultiModal, SupportsPP
@@ -73,84 +74,149 @@ class Qwen2AudioMultiModalProjector(nn.Module):
 
 
 # From Qwen2AudioEncoder._get_feat_extract_output_lengths
-def _get_feat_extract_output_lengths(input_lengths: torch.LongTensor):
+def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
     feat_lengths = (input_lengths - 1) // 2 + 1
     output_lengths = (feat_lengths - 2) // 2 + 1
     return feat_lengths, output_lengths
 
 
-def get_max_qwen2_audio_audio_tokens(ctx: InputContext) -> int:
-    hf_config = ctx.get_hf_config(Qwen2AudioConfig)
-    max_source_position = hf_config.audio_config.max_source_positions
-    output_lengths = (max_source_position - 2) // 2 + 1
-    return output_lengths
+class Qwen2AudioProcessingMixin(ProcessingMixin):
 
+    def _get_hf_config(self):
+        return self.ctx.get_hf_config(Qwen2AudioConfig)
 
-class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
-
-    def _get_hf_processor(self) -> Qwen2AudioProcessor:
+    def _get_hf_processor(
+        self,
+        *,
+        # Ignored in initialization
+        sampling_rate: Optional[int] = None,
+    ) -> Qwen2AudioProcessor:
         return self.ctx.get_hf_processor(Qwen2AudioProcessor)
 
-    def _get_feature_extractor(self) -> WhisperFeatureExtractor:
-        return self._get_hf_processor().feature_extractor  # type: ignore
-
-    def _get_processor_data(
+    def _get_feature_extractor(
         self,
-        mm_items: MultiModalDataItems,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        # resample audio to the model's sampling rate
-        feature_extractor = self._get_feature_extractor()
-        mm_items.resample_audios(feature_extractor.sampling_rate)
+        *,
+        # Ignored in initialization
+        sampling_rate: Optional[int] = None,
+    ) -> WhisperFeatureExtractor:
+        hf_processor = self._get_hf_processor(sampling_rate=sampling_rate)
+        feature_extractor = hf_processor.feature_extractor  # type: ignore
+        assert isinstance(feature_extractor, WhisperFeatureExtractor)
+        return feature_extractor
 
-        return super()._get_processor_data(mm_items)
+
+class Qwen2AudioProfilingInfo(Qwen2AudioProcessingMixin, BaseProfilingInfo):
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"audio": None}
+
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        hf_config = self._get_hf_config()
+        max_source_positions = hf_config.audio_config.max_source_positions
+        max_output_lengths = (max_source_positions - 2) // 2 + 1
+
+        return {"audio": max_output_lengths}
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        feature_extractor = self._get_feature_extractor()
+
+        sampling_rate = feature_extractor.sampling_rate
+        audio_len = feature_extractor.chunk_length * sampling_rate
+        num_audios = mm_counts.get("audio", 0)
+
+        mm_data = {
+            "audio":
+            self._get_dummy_audios(length=audio_len, num_audios=num_audios)
+        }
+
+        return ProcessorInputs(
+            prompt_text="<|AUDIO|>" * num_audios,
+            mm_data=mm_data,
+        )
+
+
+class Qwen2AudioMultiModalProcessor(Qwen2AudioProcessingMixin,
+                                    BaseMultiModalProcessor):
+
+    def _get_profiling_info(self) -> BaseProfilingInfo:
+        return Qwen2AudioProfilingInfo(self.ctx)
+
+    def _get_data_parser(self) -> MultiModalDataParser:
+        feature_extractor = self._get_feature_extractor()
+        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
 
     def _call_hf_processor(
         self,
-        hf_processor: ProcessorMixin,
         prompt: str,
-        processor_data: Mapping[str, object],
-        mm_processor_kwargs: Mapping[str, object],
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, Any],
     ) -> BatchFeature:
-        processor_data = dict(processor_data)
-        audios = processor_data.pop("audios", [])
+        mm_data = dict(mm_data)
+        audios = mm_data.pop("audios", [])
 
         if audios:
-            processor_data["audios"] = audios
+            mm_data["audios"] = audios
 
-            feature_extractor = self._get_feature_extractor()
-            mm_processor_kwargs = dict(
-                **mm_processor_kwargs,
+            feature_extractor = self._get_feature_extractor(**mm_kwargs)
+            mm_kwargs = dict(
+                **mm_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
             )
         else:
             # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
             pass
 
-        return super()._call_hf_processor(
-            hf_processor,
+        processed_outputs = super()._call_hf_processor(
             prompt=prompt,
-            processor_data=processor_data,
-            mm_processor_kwargs=mm_processor_kwargs,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
+
+        return processed_outputs
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            input_features=MultiModalFieldConfig.batched("audio"),
+            feature_attention_mask=MultiModalFieldConfig.batched("audio"),
         )
 
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
-        hf_inputs: BatchFeature,
-        mm_processor_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_config = self.ctx.get_hf_config(Qwen2AudioConfig)
+        hf_config = self._get_hf_config()
         placeholder = hf_config.audio_token_index
 
-        feature_attention_mask = hf_inputs.get("feature_attention_mask")
+        feature_attention_mask = out_mm_kwargs.get("feature_attention_mask")
         if feature_attention_mask is None:
             audio_output_lengths = []
         else:
-            _, audio_output_lengths = _get_feat_extract_output_lengths(
+            assert isinstance(feature_attention_mask, torch.Tensor)
+            _, audio_output_lens = _get_feat_extract_output_lengths(
                 feature_attention_mask.sum(-1))
 
+            audio_output_lengths = audio_output_lens.tolist()
+
         def get_replacement_qwen2_audio(item_idx: int):
-            return [placeholder] * audio_output_lengths[item_idx]
+            num_placeholders = audio_output_lengths[item_idx]
+            if num_placeholders == 0:
+                audios = mm_items.get_items("audio", AudioProcessorItems)
+                audio = audios.get(item_idx)
+                raise ValueError(
+                    f"The audio {audio} (len={len(audio)}) is too short "
+                    "to be represented inside the model")
+
+            return [placeholder] * num_placeholders
 
         return [
             PromptReplacement(
@@ -160,27 +226,15 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor):
             )
         ]
 
-    def _get_dummy_mm_inputs(
-        self,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        feature_extractor = self._get_feature_extractor()
-        sampling_rate = feature_extractor.sampling_rate
-        audio_len = feature_extractor.chunk_length * sampling_rate
-
-        audio_count = mm_counts["audio"]
-        audio = np.zeros(audio_len)
-        data = {"audio": [audio] * audio_count}
-
-        return ProcessorInputs(
-            prompt_text="<|AUDIO|>" * audio_count,
-            mm_data=data,
-            mm_processor_kwargs={},
-        )
+    def _always_apply_prompt_replacements(self) -> bool:
+        # HF never applies prompt replacements, so we have to do it ourselves.
+        # NOTE: `_find_placeholders_by_modality` may incorrectly think that HF
+        # has already performed processing for multi-audio input when the input
+        # audios are short (the corresponding placeholders may take up fewer
+        # tokens than the number of audio items)
+        return True
 
 
-@MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
-    "audio", get_max_qwen2_audio_audio_tokens)
 @MULTIMODAL_REGISTRY.register_processor(Qwen2AudioMultiModalProcessor)
 class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsPP):

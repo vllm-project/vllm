@@ -33,7 +33,7 @@ docker_base_image_url = "nvidia/cuda:12.1.1-runtime-ubuntu22.04"
 vllm = "latest"
 ```
 
-Next, let us add our code to handle inference for the LLM of your choice(`mistralai/Mistral-7B-Instruct-v0.1` for this example), add the following code to your main.py\`:
+Next, let us add our code to handle inference for the LLM of your choice (`mistralai/Mistral-7B-Instruct-v0.1` for this example), add the following code to your `main.py`:
 
 ```python
 from vllm import LLM, SamplingParams
@@ -55,13 +55,13 @@ def run(prompts: list[str], temperature: float = 0.8, top_p: float = 0.95):
     return {"results": results}
 ```
 
-Then, run the following code to deploy it to the cloud
+Then, run the following code to deploy it to the cloud:
 
 ```console
 $ cerebrium deploy
 ```
 
-If successful, you should be returned a CURL command that you can call inference against. Just remember to end the url with the function name you are calling (in our case /run)
+If successful, you should be returned a CURL command that you can call inference against. Just remember to end the url with the function name you are calling (in our case` /run`)
 
 ```python
 curl -X POST https://api.cortex.cerebrium.ai/v4/p-xxxxxx/vllm/run \

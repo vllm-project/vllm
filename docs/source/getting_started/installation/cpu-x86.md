@@ -1,6 +1,6 @@
-(installation-cpu)=
+(installation-x86)=
 
-# Installation with CPU
+# Installation for x86 CPUs
 
 vLLM initially supports basic model inferencing and serving on x86 CPU platform, with data types FP32, FP16 and BF16. vLLM CPU backend supports the following vLLM features:
 
@@ -24,7 +24,7 @@ Table of contents:
 ## Requirements
 
 - OS: Linux
-- Compiler: gcc/g++>=12.3.0 (optional, recommended)
+- Compiler: `gcc/g++>=12.3.0` (optional, recommended)
 - Instruction set architecture (ISA) requirement: AVX512 (optional, recommended)
 
 (cpu-backend-quick-start-dockerfile)=
@@ -69,7 +69,7 @@ $ VLLM_TARGET_DEVICE=cpu python setup.py install
 
 ```{note}
 - AVX512_BF16 is an extension ISA provides native BF16 data type conversion and vector product instructions, will brings some performance improvement compared with pure AVX512. The CPU backend build script will check the host CPU flags to determine whether to enable AVX512_BF16.
-- If you want to force enable AVX512_BF16 for the cross-compilation, please set environment variable VLLM_CPU_AVX512BF16=1 before the building.
+- If you want to force enable AVX512_BF16 for the cross-compilation, please set environment variable `VLLM_CPU_AVX512BF16=1` before the building.
 ```
 
 (env-intro)=
@@ -151,4 +151,4 @@ $ python examples/offline_inference.py
     $ VLLM_CPU_KVCACHE_SPACE=40 VLLM_CPU_OMP_THREADS_BIND="0-31|32-63" vllm serve meta-llama/Llama-2-7b-chat-hf -tp=2 --distributed-executor-backend mp
     ```
 
-  - Using Data Parallel for maximum throughput: to launch an LLM serving endpoint on each NUMA node along with one additional load balancer to dispatch the requests to those endpoints. Common solutions like [Nginx](../serving/deploying_with_nginx.md) or HAProxy are recommended. Anyscale Ray project provides the feature on LLM [serving](https://docs.ray.io/en/latest/serve/index.html). Here is the example to setup a scalable LLM serving with [Ray Serve](https://github.com/intel/llm-on-ray/blob/main/docs/setup.md).
+  - Using Data Parallel for maximum throughput: to launch an LLM serving endpoint on each NUMA node along with one additional load balancer to dispatch the requests to those endpoints. Common solutions like [Nginx](#nginxloadbalancer) or HAProxy are recommended. Anyscale Ray project provides the feature on LLM [serving](https://docs.ray.io/en/latest/serve/index.html). Here is the example to setup a scalable LLM serving with [Ray Serve](https://github.com/intel/llm-on-ray/blob/main/docs/setup.md).

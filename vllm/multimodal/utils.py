@@ -1,8 +1,7 @@
-import base64
-import os
 from functools import lru_cache
-from io import BytesIO
-from typing import List, Optional, Tuple, TypeVar, Union
+from pathlib import Path
+from typing import Optional, TypeVar, Union
+from urllib.parse import ParseResult, urlparse
 
 import numpy as np
 import numpy.typing as npt
@@ -10,291 +9,246 @@ import torch
 from PIL import Image
 
 import vllm.envs as envs
-from vllm.connections import global_http_connection
-from vllm.envs import VLLM_AUDIO_FETCH_TIMEOUT, VLLM_IMAGE_FETCH_TIMEOUT
+from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
-from vllm.utils import PlaceholderModule
 
-from .inputs import MultiModalDataDict, PlaceholderRange
-
-try:
-    import decord
-except ImportError:
-    decord = PlaceholderModule("decord")  # type: ignore[assignment]
-
-try:
-    import librosa
-except ImportError:
-    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
-
-try:
-    import soundfile
-except ImportError:
-    soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
+from .audio import AudioMediaIO
+from .base import MediaIO
+from .image import ImageMediaIO
+from .inputs import PlaceholderRange
+from .video import VideoMediaIO
 
 logger = init_logger(__name__)
 
 cached_get_tokenizer = lru_cache(get_tokenizer)
 
-
-def _load_image_from_bytes(b: bytes) -> Image.Image:
-    image = Image.open(BytesIO(b))
-    image.load()
-    return image
+_M = TypeVar("_M")
 
 
-def _is_subpath(image_path: str, allowed_local_media_path: str) -> bool:
-    # Get the common path
-    common_path = os.path.commonpath([
-        os.path.abspath(image_path),
-        os.path.abspath(allowed_local_media_path)
-    ])
-    # Check if the common path is the same as allowed_local_media_path
-    return common_path == os.path.abspath(allowed_local_media_path)
+class MediaConnector:
 
+    def __init__(
+        self,
+        connection: HTTPConnection = global_http_connection,
+        *,
+        allowed_local_media_path: str = "",
+    ) -> None:
+        super().__init__()
 
-def _load_image_from_file(image_url: str,
-                          allowed_local_media_path: str) -> Image.Image:
-    if not allowed_local_media_path:
-        raise ValueError("Invalid 'image_url': Cannot load local files without"
-                         "'--allowed-local-media-path'.")
-    if allowed_local_media_path:
-        if not os.path.exists(allowed_local_media_path):
+        self.connection = connection
+
+        if allowed_local_media_path:
+            allowed_local_media_path_ = Path(allowed_local_media_path)
+
+            if not allowed_local_media_path_.exists():
+                raise ValueError(
+                    "Invalid `--allowed-local-media-path`: The path "
+                    f"{allowed_local_media_path_} does not exist.")
+            if not allowed_local_media_path_.is_dir():
+                raise ValueError(
+                    "Invalid `--allowed-local-media-path`: The path "
+                    f"{allowed_local_media_path_} must be a directory.")
+        else:
+            allowed_local_media_path_ = None
+
+        self.allowed_local_media_path = allowed_local_media_path_
+
+    def _load_data_url(
+        self,
+        url_spec: ParseResult,
+        media_io: MediaIO[_M],
+    ) -> _M:
+        data_spec, data = url_spec.path.split(",", 1)
+        media_type, data_type = data_spec.split(";", 1)
+
+        if data_type != "base64":
+            msg = "Only base64 data URLs are supported for now."
+            raise NotImplementedError(msg)
+
+        return media_io.load_base64(media_type, data)
+
+    def _load_file_url(
+        self,
+        url_spec: ParseResult,
+        media_io: MediaIO[_M],
+    ) -> _M:
+        allowed_local_media_path = self.allowed_local_media_path
+        if allowed_local_media_path is None:
+            raise RuntimeError("Cannot load local files without "
+                               "`--allowed-local-media-path`.")
+
+        filepath = Path(url_spec.path)
+        if allowed_local_media_path not in filepath.resolve().parents:
             raise ValueError(
-                "Invalid '--allowed-local-media-path': "
-                f"The path {allowed_local_media_path} does not exist.")
-        if not os.path.isdir(allowed_local_media_path):
-            raise ValueError(
-                "Invalid '--allowed-local-media-path': "
-                f"The path {allowed_local_media_path} must be a directory.")
+                f"The file path {filepath} must be a subpath "
+                f"of `--allowed-local-media-path` {allowed_local_media_path}.")
 
-    # Only split once and assume the second part is the image path
-    _, image_path = image_url.split("file://", 1)
-    if not _is_subpath(image_path, allowed_local_media_path):
-        raise ValueError(
-            f"Invalid 'image_url': The file path {image_path} must"
-            " be a subpath of '--allowed-local-media-path'"
-            f" '{allowed_local_media_path}'.")
+        return media_io.load_file(filepath)
 
-    image = Image.open(image_path)
-    image.load()
-    return image
+    def load_from_url(
+        self,
+        url: str,
+        media_io: MediaIO[_M],
+        *,
+        fetch_timeout: Optional[int] = None,
+    ) -> _M:
+        url_spec = urlparse(url)
 
+        if url_spec.scheme.startswith("http"):
+            connection = self.connection
+            data = connection.get_bytes(url, timeout=fetch_timeout)
 
-def _load_image_from_data_url(image_url: str) -> Image.Image:
-    # Only split once and assume the second part is the base64 encoded image
-    _, image_base64 = image_url.split(",", 1)
-    return load_image_from_base64(image_base64)
+            return media_io.load_bytes(data)
 
+        if url_spec.scheme == "data":
+            return self._load_data_url(url_spec, media_io)
 
-def fetch_image(image_url: str,
-                *,
-                image_mode: str = "RGB",
-                allowed_local_media_path: str = "") -> Image.Image:
-    """
-    Load a PIL image from a HTTP or base64 data URL.
+        if url_spec.scheme == "file":
+            return self._load_file_url(url_spec, media_io)
 
-    By default, the image is converted into RGB format.
-    """
-    if image_url.startswith('http'):
-        image_raw = global_http_connection.get_bytes(
+        msg = "The URL must be either a HTTP, data or file URL."
+        raise ValueError(msg)
+
+    async def load_from_url_async(
+        self,
+        url: str,
+        media_io: MediaIO[_M],
+        *,
+        fetch_timeout: Optional[int] = None,
+    ) -> _M:
+        url_spec = urlparse(url)
+
+        if url_spec.scheme.startswith("http"):
+            connection = self.connection
+            data = await connection.async_get_bytes(url, timeout=fetch_timeout)
+
+            return media_io.load_bytes(data)
+
+        if url_spec.scheme == "data":
+            return self._load_data_url(url_spec, media_io)
+
+        if url_spec.scheme == "file":
+            return self._load_file_url(url_spec, media_io)
+
+        msg = "The URL must be either a HTTP, data or file URL."
+        raise ValueError(msg)
+
+    def fetch_audio(
+        self,
+        audio_url: str,
+    ) -> tuple[np.ndarray, Union[int, float]]:
+        """
+        Load audio from a URL.
+        """
+        audio_io = AudioMediaIO()
+
+        return self.load_from_url(
+            audio_url,
+            audio_io,
+            fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+        )
+
+    async def fetch_audio_async(
+        self,
+        audio_url: str,
+    ) -> tuple[np.ndarray, Union[int, float]]:
+        """
+        Asynchronously fetch audio from a URL.
+        """
+        audio_io = AudioMediaIO()
+
+        return await self.load_from_url_async(
+            audio_url,
+            audio_io,
+            fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+        )
+
+    def fetch_image(
+        self,
+        image_url: str,
+        *,
+        image_mode: str = "RGB",
+    ) -> Image.Image:
+        """
+        Load a PIL image from a HTTP or base64 data URL.
+
+        By default, the image is converted into RGB format.
+        """
+        image_io = ImageMediaIO(image_mode=image_mode)
+
+        return self.load_from_url(
             image_url,
-            timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+            image_io,
+            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
         )
-        image = _load_image_from_bytes(image_raw)
 
-    elif image_url.startswith('data:image'):
-        image = _load_image_from_data_url(image_url)
-    elif image_url.startswith('file://'):
-        image = _load_image_from_file(image_url, allowed_local_media_path)
-    else:
-        raise ValueError("Invalid 'image_url': A valid 'image_url' must start "
-                         "with either 'data:image', 'file://' or 'http'.")
-
-    return image.convert(image_mode)
-
-
-async def async_fetch_image(image_url: str,
-                            *,
-                            image_mode: str = "RGB",
-                            allowed_local_media_path: str = "") -> Image.Image:
-    """
-    Asynchronously load a PIL image from a HTTP or base64 data URL.
-
-    By default, the image is converted into RGB format.
-    """
-    import os
-    if os.path.exists(image_url):
-       image = Image.open(image_url).convert('RGB')
-    elif image_url.startswith('http'):
-        try:
-            import requests
-            image = Image.open(requests.get(image_url, stream=True).raw)
-        except:
-            image_raw = await global_http_connection.async_get_bytes(
-                image_url,
-            timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-        )
-            image = _load_image_from_bytes(image_raw)
-
-    elif image_url.startswith('data:image'):
-        image = _load_image_from_data_url(image_url)
-    elif image_url.startswith('file://'):
-        image = _load_image_from_file(image_url, allowed_local_media_path)
-    else:
-        raise ValueError("Invalid 'image_url': A valid 'image_url' must start "
-                         "with either 'data:image', 'file://' or 'http'.")
-
-    return image.convert(image_mode)
-
-
-def _load_video_from_bytes(b: bytes, num_frames: int = 32) -> npt.NDArray:
-    video_path = BytesIO(b)
-    vr = decord.VideoReader(video_path, num_threads=1)
-    total_frame_num = len(vr)
-
-    if total_frame_num > num_frames:
-        uniform_sampled_frames = np.linspace(0,
-                                             total_frame_num - 1,
-                                             num_frames,
-                                             dtype=int)
-        frame_idx = uniform_sampled_frames.tolist()
-    else:
-        frame_idx = [i for i in range(0, total_frame_num)]
-    frames = vr.get_batch(frame_idx).asnumpy()
-
-    return frames
-
-
-def _load_video_from_data_url(video_url: str) -> npt.NDArray:
-    # Only split once and assume the second part is the base64 encoded video
-    _, video_base64 = video_url.split(",", 1)
-
-    if video_url.startswith("data:video/jpeg;"):
-        return np.stack([
-            np.array(load_image_from_base64(frame_base64))
-            for frame_base64 in video_base64.split(",")
-        ])
-
-    return load_video_from_base64(video_base64)
-
-
-def fetch_video(video_url: str, *, num_frames: int = 32) -> npt.NDArray:
-    """
-    Load video from a HTTP or base64 data URL.
-    """
-    if video_url.startswith('http') or video_url.startswith('https'):
-        video_raw = global_http_connection.get_bytes(
-            video_url,
-            timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
-        )
-        video = _load_video_from_bytes(video_raw, num_frames)
-    elif video_url.startswith('data:video'):
-        video = _load_video_from_data_url(video_url)
-    else:
-        raise ValueError("Invalid 'video_url': A valid 'video_url' must start "
-                         "with either 'data:video' or 'http'.")
-    return video
-
-
-async def async_fetch_video(video_url: str,
-                            *,
-                            num_frames: int = 32) -> npt.NDArray:
-    """
-    Asynchronously load video from a HTTP or base64 data URL.
-
-    By default, the image is converted into RGB format.
-    """
-    if video_url.startswith('http') or video_url.startswith('https'):
-        video_raw = await global_http_connection.async_get_bytes(
-            video_url,
-            timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
-        )
-        video = _load_video_from_bytes(video_raw, num_frames)
-    elif video_url.startswith('data:video'):
-        video = _load_video_from_data_url(video_url)
-    else:
-        raise ValueError("Invalid 'video_url': A valid 'video_url' must start "
-                         "with either 'data:video' or 'http'.")
-    return video
-
-
-def fetch_audio(audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
-    """
-    Load audio from a URL.
-    """
-    if audio_url.startswith("http"):
-        audio_bytes = global_http_connection.get_bytes(
-            audio_url,
-            timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
-        )
-    elif audio_url.startswith("data:audio"):
-        _, audio_base64 = audio_url.split(",", 1)
-        audio_bytes = base64.b64decode(audio_base64)
-    else:
-        raise ValueError("Invalid 'audio_url': A valid 'audio_url' must start "
-                         "with either 'data:audio' or 'http'.")
-
-    return librosa.load(BytesIO(audio_bytes), sr=None)
-
-
-async def async_fetch_audio(
-        audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
-    """
-    Asynchronously fetch audio from a URL.
-    """
-    if audio_url.startswith("http"):
-        audio_bytes = await global_http_connection.async_get_bytes(
-            audio_url,
-            timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
-        )
-    elif audio_url.startswith("data:audio"):
-        _, audio_base64 = audio_url.split(",", 1)
-        audio_bytes = base64.b64decode(audio_base64)
-    else:
-        raise ValueError("Invalid 'audio_url': A valid 'audio_url' must start "
-                         "with either 'data:audio' or 'http'.")
-
-    return librosa.load(BytesIO(audio_bytes), sr=None)
-
-
-def get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
-    audio, sr = fetch_audio(audio_url)
-    return {"audio": (audio, sr)}
-
-
-def get_and_parse_image(
+    async def fetch_image_async(
+        self,
         image_url: str,
         *,
-        allowed_local_media_path: str = "") -> MultiModalDataDict:
-    image = fetch_image(image_url,
-                        allowed_local_media_path=allowed_local_media_path)
-    return {"image": image}
+        image_mode: str = "RGB",
+    ) -> Image.Image:
+        """
+        Asynchronously load a PIL image from a HTTP or base64 data URL.
 
+        By default, the image is converted into RGB format.
+        """
+        image_io = ImageMediaIO(image_mode=image_mode)
 
-def get_and_parse_video(video_url: str) -> MultiModalDataDict:
-    video = fetch_video(video_url)
-    return {"video": video}
+        return await self.load_from_url_async(
+            image_url,
+            image_io,
+            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        )
 
-
-async def async_get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
-    audio, sr = await async_fetch_audio(audio_url)
-    return {"audio": (audio, sr)}
-
-
-async def async_get_and_parse_image(
-        image_url: str,
+    def fetch_video(
+        self,
+        video_url: str,
         *,
-        allowed_local_media_path: str = "") -> MultiModalDataDict:
-    image = await async_fetch_image(
-        image_url, allowed_local_media_path=allowed_local_media_path)
-    return {"image": image}
+        image_mode: str = "RGB",
+        num_frames: int = 32,
+    ) -> npt.NDArray:
+        """
+        Load video from a HTTP or base64 data URL.
+        """
+        image_io = ImageMediaIO(image_mode=image_mode)
+        video_io = VideoMediaIO(image_io, num_frames=num_frames)
+
+        return self.load_from_url(
+            video_url,
+            video_io,
+            fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+        )
+
+    async def fetch_video_async(
+        self,
+        video_url: str,
+        *,
+        image_mode: str = "RGB",
+        num_frames: int = 32,
+    ) -> npt.NDArray:
+        """
+        Asynchronously load video from a HTTP or base64 data URL.
+
+        By default, the image is converted into RGB format.
+        """
+        image_io = ImageMediaIO(image_mode=image_mode)
+        video_io = VideoMediaIO(image_io, num_frames=num_frames)
+
+        return await self.load_from_url_async(
+            video_url,
+            video_io,
+            fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+        )
 
 
-async def async_get_and_parse_video(video_url: str) -> MultiModalDataDict:
-    video = await async_fetch_video(video_url)
-    return {"video": video}
+global_media_connector = MediaConnector()
+"""The global :class:`MediaConnector` instance used by vLLM."""
+
+fetch_audio = global_media_connector.fetch_audio
+fetch_image = global_media_connector.fetch_image
+fetch_video = global_media_connector.fetch_video
 
 
 def encode_audio_base64(
@@ -302,10 +256,8 @@ def encode_audio_base64(
     sampling_rate: int,
 ) -> str:
     """Encode audio as base64."""
-    buffered = BytesIO()
-    soundfile.write(buffered, audio, sampling_rate, format="WAV")
-
-    return base64.b64encode(buffered.getvalue()).decode('utf-8')
+    audio_io = AudioMediaIO()
+    return audio_io.encode_base64((audio, sampling_rate))
 
 
 def encode_image_base64(
@@ -319,29 +271,14 @@ def encode_image_base64(
 
     By default, the image is converted into RGB format before being encoded.
     """
-    buffered = BytesIO()
-    image = image.convert(image_mode)
-    image.save(buffered, format)
-    return base64.b64encode(buffered.getvalue()).decode('utf-8')
-
-
-def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
-    """Load image from base64 format."""
-    return _load_image_from_bytes(base64.b64decode(image))
+    image_io = ImageMediaIO(image_mode=image_mode)
+    return image_io.encode_base64(image, image_format=format)
 
 
 def encode_video_base64(frames: npt.NDArray) -> str:
-    base64_frames = []
-    frames_list = [frames[i] for i in range(frames.shape[0])]
-    for frame in frames_list:
-        img_base64 = encode_image_base64(Image.fromarray(frame))
-        base64_frames.append(img_base64)
-    return ",".join(base64_frames)
-
-
-def load_video_from_base64(video: Union[bytes, str]) -> npt.NDArray:
-    """Load video from base64 format."""
-    return _load_video_from_bytes(base64.b64decode(video))
+    image_io = ImageMediaIO()
+    video_io = VideoMediaIO(image_io)
+    return video_io.encode_base64(frames)
 
 
 def resolve_visual_encoder_outputs(
@@ -397,7 +334,7 @@ def repeat_and_pad_token(
     repeat_count: int = 1,
     pad_token_left: Optional[_T] = None,
     pad_token_right: Optional[_T] = None,
-) -> List[_T]:
+) -> list[_T]:
     replacement = [token] * repeat_count
     if pad_token_left is not None:
         replacement = [pad_token_left] + replacement
@@ -410,13 +347,13 @@ def repeat_and_pad_token(
 def repeat_and_pad_placeholder_tokens(
     tokenizer: AnyTokenizer,
     prompt: Optional[str],
-    prompt_token_ids: List[int],
+    prompt_token_ids: list[int],
     *,
     placeholder_token_id: int,
-    repeat_count: Union[int, List[int]],
+    repeat_count: Union[int, list[int]],
     pad_token_left: Optional[int] = None,
     pad_token_right: Optional[int] = None,
-) -> Tuple[Optional[str], List[int], List[PlaceholderRange]]:
+) -> tuple[Optional[str], list[int], list[PlaceholderRange]]:
     if isinstance(repeat_count, int):
         repeat_count = [repeat_count]
 
@@ -458,20 +395,24 @@ def repeat_and_pad_placeholder_tokens(
             new_prompt += prompt_parts[i] + replacement_str
         new_prompt += prompt_parts[-1]
 
-    new_token_ids: List[int] = []
-    placeholder_ranges: List[PlaceholderRange] = []
+    new_token_ids = list[int]()
+    placeholder_ranges = list[PlaceholderRange]()
     placeholder_token_idx = 0
     for i, token in enumerate(prompt_token_ids):
         if token == placeholder_token_id:
+            curr_repeat_count = repeat_count[placeholder_token_idx]
             replacement_ids = repeat_and_pad_token(
                 placeholder_token_id,
-                repeat_count=repeat_count[placeholder_token_idx],
+                repeat_count=curr_repeat_count,
                 pad_token_left=pad_token_left,
                 pad_token_right=pad_token_right,
             )
+            offset = len(new_token_ids)
+            if pad_token_left is not None:
+                offset += 1
             placeholder_ranges.append({
-                "offset": len(new_token_ids),
-                "length": len(replacement_ids)
+                "offset": offset,
+                "length": curr_repeat_count,
             })
             new_token_ids.extend(replacement_ids)
             placeholder_token_idx += 1
@@ -489,7 +430,7 @@ def repeat_and_pad_placeholder_tokens(
 def consecutive_placeholder_ranges(
         num_items: int,
         item_size: int,
-        initial_offset: int = 0) -> List[PlaceholderRange]:
+        initial_offset: int = 0) -> list[PlaceholderRange]:
     """Returns a list of consecutive PlaceholderRanges of a fixed size"""
 
     return [

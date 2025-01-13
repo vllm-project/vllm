@@ -25,7 +25,7 @@ $ cd vllm-dstack
 $ dstack init
 ```
 
-Next, to provision a VM instance with LLM of your choice(`NousResearch/Llama-2-7b-chat-hf` for this example), create the following `serve.dstack.yml` file for the dstack `Service`:
+Next, to provision a VM instance with LLM of your choice (`NousResearch/Llama-2-7b-chat-hf` for this example), create the following `serve.dstack.yml` file for the dstack `Service`:
 
 ```yaml
 type: service

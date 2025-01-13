@@ -33,6 +33,7 @@ class _Backend(enum.Enum):
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
+    IPEX_V1 = enum.auto()
     NO_ATTENTION = enum.auto()
 
 
@@ -199,6 +200,18 @@ class Platform:
         compatible with the current platform.
 
         The config is passed by reference, so it can be modified in place.
+        """
+        pass
+
+    @classmethod
+    def verify_model_arch(cls, model_arch: str) -> None:
+        """
+        Verify whether the current platform supports the specified model
+        architecture.
+
+        - This will raise an Error or Warning based on the model support on
+        the current platform.
+        - By default all models are considered supported.
         """
         pass
 

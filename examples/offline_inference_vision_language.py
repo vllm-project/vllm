@@ -24,10 +24,13 @@ def run_aria(question: str, modality: str):
     assert modality == "image"
     model_name = "rhymes-ai/Aria"
 
+    # NOTE: Need L40 (or equivalent) to avoid OOM
     llm = LLM(model=model_name,
               tokenizer_mode="slow",
-              trust_remote_code=True,
               dtype="bfloat16",
+              max_model_len=4096,
+              max_num_seqs=2,
+              trust_remote_code=True,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
 
     prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>\n{question}"
@@ -57,6 +60,7 @@ def run_chameleon(question: str, modality: str):
     prompt = f"{question}<image>"
     llm = LLM(model="facebook/chameleon-7b",
               max_model_len=4096,
+              max_num_seqs=2,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
@@ -257,7 +261,7 @@ def run_minicpmv(question: str, modality: str):
     # 2.5
     # model_name = "openbmb/MiniCPM-Llama3-V-2_5"
 
-    #2.6
+    # 2.6
     model_name = "openbmb/MiniCPM-V-2_6"
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
@@ -308,7 +312,20 @@ def run_mllama(question: str, modality: str):
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
-    prompt = f"<|image|><|begin_of_text|>{question}"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    messages = [{
+        "role":
+        "user",
+        "content": [{
+            "type": "image"
+        }, {
+            "type": "text",
+            "text": f"{question}"
+        }]
+    }]
+    prompt = tokenizer.apply_chat_template(messages,
+                                           add_generation_prompt=True,
+                                           tokenize=False)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -417,9 +434,11 @@ def run_pixtral_hf(question: str, modality: str):
 
     model_name = "mistral-community/pixtral-12b"
 
+    # NOTE: Need L40 (or equivalent) to avoid OOM
     llm = LLM(
         model=model_name,
         max_model_len=8192,
+        max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 

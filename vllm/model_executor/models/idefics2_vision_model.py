@@ -69,7 +69,8 @@ class Idefics2VisionEmbeddings(nn.Module):
                 patch_attention_mask: torch.BoolTensor,
                 tgt_sizes: Optional[torch.IntTensor] = None) -> torch.Tensor:
         batch_size, _, max_im_h, max_im_w = pixel_values.shape
-        patch_embeds = self.patch_embedding(pixel_values)
+        target_dtype = self.patch_embedding.weight.dtype
+        patch_embeds = self.patch_embedding(pixel_values.to(target_dtype))
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
         max_nb_patches_h, max_nb_patches_w = (
             max_im_h // self.patch_size,
@@ -348,7 +349,8 @@ class Idefics2VisionTransformer(nn.Module):
         hidden_states = self.embeddings(
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
-            tgt_sizes=tgt_sizes)
+            tgt_sizes=tgt_sizes,
+        )
         encoder_outputs = self.encoder(hidden_states)
         last_hidden_state = self.post_layernorm(encoder_outputs)
         return last_hidden_state

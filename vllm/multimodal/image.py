@@ -1,4 +1,7 @@
+import base64
 from functools import lru_cache
+from io import BytesIO
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
@@ -9,8 +12,8 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.processor import get_image_processor
 from vllm.utils import is_list_of
 
-from .base import MultiModalPlugin
-from .inputs import ImageItem, MultiModalData, MultiModalKwargs
+from .base import MediaIO, MultiModalPlugin
+from .inputs import ImageItem, ModalityData, MultiModalKwargs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -41,7 +44,7 @@ class ImagePlugin(MultiModalPlugin):
     def _default_input_mapper(
         self,
         ctx: InputContext,
-        data: MultiModalData[ImageItem],
+        data: ModalityData[ImageItem],
         **mm_processor_kwargs,
     ) -> MultiModalKwargs:
         model_config = ctx.model_config
@@ -96,3 +99,39 @@ def rescale_image_size(image: Image.Image,
     if transpose >= 0:
         image = image.transpose(Image.Transpose(transpose))
     return image
+
+
+class ImageMediaIO(MediaIO[Image.Image]):
+
+    def __init__(self, *, image_mode: str = "RGB") -> None:
+        super().__init__()
+
+        self.image_mode = image_mode
+
+    def load_bytes(self, data: bytes) -> Image.Image:
+        image = Image.open(BytesIO(data))
+        image.load()
+        return image.convert(self.image_mode)
+
+    def load_base64(self, media_type: str, data: str) -> Image.Image:
+        return self.load_bytes(base64.b64decode(data))
+
+    def load_file(self, filepath: Path) -> Image.Image:
+        image = Image.open(filepath)
+        image.load()
+        return image.convert(self.image_mode)
+
+    def encode_base64(
+        self,
+        media: Image.Image,
+        *,
+        image_format: str = "JPEG",
+    ) -> str:
+        image = media
+
+        with BytesIO() as buffer:
+            image = image.convert(self.image_mode)
+            image.save(buffer, image_format)
+            data = buffer.getvalue()
+
+        return base64.b64encode(data).decode('utf-8')

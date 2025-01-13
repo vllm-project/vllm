@@ -51,7 +51,8 @@ try:
             # We can remove this API after it is fixed in compiled graph.
             import torch
             assert self.worker is not None, "Worker is not initialized"
-            if not self.compiled_dag_cuda_device_set:
+            if not self.compiled_dag_cuda_device_set \
+                and current_platform.is_cuda():
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 

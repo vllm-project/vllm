@@ -16,7 +16,7 @@ from http import HTTPStatus
 from typing import AsyncIterator, Optional, Set, Tuple
 
 import uvloop
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -44,11 +44,15 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionResponse,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
+                                              EmbeddingChatRequest,
+                                              EmbeddingCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse,
                                               LoadLoraAdapterRequest,
+                                              PoolingChatRequest,
+                                              PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
                                               ScoreRequest, ScoreResponse,
                                               TokenizeRequest,
@@ -58,7 +62,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
-from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_models import (BaseModelPath,
+                                                    OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
 from vllm.entrypoints.openai.serving_score import OpenAIServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
@@ -133,32 +139,21 @@ async def build_async_engine_client_from_engine_args(
     Returns the Client or None if the creation failed.
     """
 
-    # Fall back
-    # TODO: fill out feature matrix.
+    # AsyncLLMEngine.
     if (MQLLMEngineClient.is_unsupported_config(engine_args)
             or envs.VLLM_USE_V1 or disable_frontend_multiprocessing):
-        engine_config = engine_args.create_engine_config(
-            UsageContext.OPENAI_API_SERVER)
-        uses_ray = getattr(AsyncLLMEngine._get_executor_cls(engine_config),
-                           "uses_ray", False)
 
-        build_engine = partial(AsyncLLMEngine.from_engine_args,
-                               engine_args=engine_args,
-                               engine_config=engine_config,
-                               usage_context=UsageContext.OPENAI_API_SERVER)
-        if uses_ray:
-            # Must run in main thread with ray for its signal handlers to work
-            engine_client = build_engine()
-        else:
-            engine_client = await asyncio.get_running_loop().run_in_executor(
-                None, build_engine)
+        engine_client: Optional[EngineClient] = None
+        try:
+            engine_client = AsyncLLMEngine.from_engine_args(
+                engine_args=engine_args,
+                usage_context=UsageContext.OPENAI_API_SERVER)
+            yield engine_client
+        finally:
+            if engine_client and hasattr(engine_client, "shutdown"):
+                engine_client.shutdown()
 
-        yield engine_client
-        if hasattr(engine_client, "shutdown"):
-            engine_client.shutdown()
-        return
-
-    # Otherwise, use the multiprocessing AsyncLLMEngine.
+    # MQLLMEngine.
     else:
         if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
             # Make TemporaryDirectory for prometheus multiprocessing
@@ -280,6 +275,10 @@ def base(request: Request) -> OpenAIServing:
     return tokenization(request)
 
 
+def models(request: Request) -> OpenAIServingModels:
+    return request.app.state.openai_serving_models
+
+
 def chat(request: Request) -> Optional[OpenAIServingChat]:
     return request.app.state.openai_serving_chat
 
@@ -315,6 +314,12 @@ async def health(raw_request: Request) -> Response:
     return Response(status_code=200)
 
 
+@router.api_route("/ping", methods=["GET", "POST"])
+async def ping(raw_request: Request) -> Response:
+    """Ping check. Endpoint required for SageMaker"""
+    return await health(raw_request)
+
+
 @router.post("/tokenize")
 @with_cancellation
 async def tokenize(request: TokenizeRequest, raw_request: Request):
@@ -347,10 +352,10 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
 
 @router.get("/v1/models")
 async def show_available_models(raw_request: Request):
-    handler = base(raw_request)
+    handler = models(raw_request)
 
-    models = await handler.show_available_models()
-    return JSONResponse(content=models.model_dump())
+    models_ = await handler.show_available_models()
+    return JSONResponse(content=models_.model_dump())
 
 
 @router.get("/version")
@@ -488,6 +493,54 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
     return await create_score(request, raw_request)
 
 
+TASK_HANDLERS = {
+    "generate": {
+        "messages": (ChatCompletionRequest, create_chat_completion),
+        "default": (CompletionRequest, create_completion),
+    },
+    "embed": {
+        "messages": (EmbeddingChatRequest, create_embedding),
+        "default": (EmbeddingCompletionRequest, create_embedding),
+    },
+    "score": {
+        "default": (ScoreRequest, create_score),
+    },
+    "reward": {
+        "messages": (PoolingChatRequest, create_pooling),
+        "default": (PoolingCompletionRequest, create_pooling),
+    },
+    "classify": {
+        "messages": (PoolingChatRequest, create_pooling),
+        "default": (PoolingCompletionRequest, create_pooling),
+    },
+}
+
+
+@router.post("/invocations")
+async def invocations(raw_request: Request):
+    """
+    For SageMaker, routes requests to other handlers based on model `task`.
+    """
+    body = await raw_request.json()
+    task = raw_request.app.state.task
+
+    if task not in TASK_HANDLERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported task: '{task}' for '/invocations'. "
+            f"Expected one of {set(TASK_HANDLERS.keys())}")
+
+    handler_config = TASK_HANDLERS[task]
+    if "messages" in body:
+        request_model, handler = handler_config["messages"]
+    else:
+        request_model, handler = handler_config["default"]
+
+    # this is required since we lose the FastAPI automatic casting
+    request = request_model.model_validate(body)
+    return await handler(request, raw_request)
+
+
 if envs.VLLM_TORCH_PROFILER_DIR:
     logger.warning(
         "Torch Profiler is enabled in the API server. This should ONLY be "
@@ -516,26 +569,22 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
     @router.post("/v1/load_lora_adapter")
     async def load_lora_adapter(request: LoadLoraAdapterRequest,
                                 raw_request: Request):
-        for route in [chat, completion, embedding]:
-            handler = route(raw_request)
-            if handler is not None:
-                response = await handler.load_lora_adapter(request)
-                if isinstance(response, ErrorResponse):
-                    return JSONResponse(content=response.model_dump(),
-                                        status_code=response.code)
+        handler = models(raw_request)
+        response = await handler.load_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(content=response.model_dump(),
+                                status_code=response.code)
 
         return Response(status_code=200, content=response)
 
     @router.post("/v1/unload_lora_adapter")
     async def unload_lora_adapter(request: UnloadLoraAdapterRequest,
                                   raw_request: Request):
-        for route in [chat, completion, embedding]:
-            handler = route(raw_request)
-            if handler is not None:
-                response = await handler.unload_lora_adapter(request)
-                if isinstance(response, ErrorResponse):
-                    return JSONResponse(content=response.model_dump(),
-                                        status_code=response.code)
+        handler = models(raw_request)
+        response = await handler.unload_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(content=response.model_dump(),
+                                status_code=response.code)
 
         return Response(status_code=200, content=response)
 
@@ -639,13 +688,18 @@ def init_app_state(
     resolved_chat_template = load_chat_template(args.chat_template)
     logger.info("Using supplied chat template:\n%s", resolved_chat_template)
 
+    state.openai_serving_models = OpenAIServingModels(
+        model_config=model_config,
+        base_model_paths=base_model_paths,
+        lora_modules=args.lora_modules,
+        prompt_adapters=args.prompt_adapters,
+    )
+    # TODO: The chat template is now broken for lora adapters :(
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
-        base_model_paths,
+        state.openai_serving_models,
         args.response_role,
-        lora_modules=args.lora_modules,
-        prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -657,16 +711,14 @@ def init_app_state(
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
-        base_model_paths,
-        lora_modules=args.lora_modules,
-        prompt_adapters=args.prompt_adapters,
+        state.openai_serving_models,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     ) if model_config.runner_type == "generate" else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
         model_config,
-        base_model_paths,
+        state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -674,7 +726,7 @@ def init_app_state(
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
-        base_model_paths,
+        state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -682,18 +734,18 @@ def init_app_state(
     state.openai_serving_scores = OpenAIServingScores(
         engine_client,
         model_config,
-        base_model_paths,
+        state.openai_serving_models,
         request_logger=request_logger
     ) if model_config.task == "score" else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
-        base_model_paths,
-        lora_modules=args.lora_modules,
+        state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
     )
+    state.task = model_config.task
 
 
 def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
@@ -715,11 +767,11 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
-    valide_tool_parses = ToolParserManager.tool_parsers.keys()
+    valid_tool_parses = ToolParserManager.tool_parsers.keys()
     if args.enable_auto_tool_choice \
-        and args.tool_call_parser not in valide_tool_parses:
+        and args.tool_call_parser not in valid_tool_parses:
         raise KeyError(f"invalid tool call parser: {args.tool_call_parser} "
-                       f"(chose from {{ {','.join(valide_tool_parses)} }})")
+                       f"(chose from {{ {','.join(valid_tool_parses)} }})")
 
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.

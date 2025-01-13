@@ -1,8 +1,8 @@
-(debugging)=
+(troubleshooting)=
 
-# Debugging Tips
+# Troubleshooting
 
-This document outlines some debugging strategies you can consider. If you think you've discovered a bug, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
+This document outlines some troubleshooting strategies you can consider. If you think you've discovered a bug, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
 ```{note}
 Once you've debugged a problem, remember to turn off any debugging environment variables defined, or simply start a new shell to avoid being affected by lingering debugging settings. Otherwise, the system might be slow with debugging functionalities left activated.
@@ -47,6 +47,7 @@ You might also need to set `export NCCL_SOCKET_IFNAME=<your_network_interface>` 
 If vLLM crashes and the error trace captures it somewhere around `self.graph.replay()` in `vllm/worker/model_runner.py`, it is a CUDA error inside CUDAGraph.
 To identify the particular CUDA operation that causes the error, you can add `--enforce-eager` to the command line, or `enforce_eager=True` to the {class}`~vllm.LLM` class to disable the CUDAGraph optimization and isolate the exact CUDA operation that causes the error.
 
+(troubleshooting-incorrect-hardware-driver)=
 ## Incorrect hardware/driver
 
 If GPU/CPU communication cannot be established, you can use the following Python script and follow the instructions below to confirm whether the GPU/CPU communication is working correctly.
@@ -139,7 +140,7 @@ A multi-node environment is more complicated than a single-node one. If you see 
 Adjust `--nproc-per-node`, `--nnodes`, and `--node-rank` according to your setup, being sure to execute different commands (with different `--node-rank`) on different nodes.
 ```
 
-(debugging-python-multiprocessing)=
+(troubleshooting-python-multiprocessing)=
 ## Python multiprocessing
 
 ### `RuntimeError` Exception
@@ -150,7 +151,7 @@ If you have seen a warning in your logs like this:
 WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
     initialized. We must use the `spawn` multiprocessing start method. Setting
     VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See
-    https://docs.vllm.ai/en/latest/getting_started/debugging.html#python-multiprocessing
+    https://docs.vllm.ai/en/latest/getting_started/troubleshooting.html#python-multiprocessing
     for more information.
 ```
 
@@ -197,4 +198,4 @@ if __name__ == '__main__':
 ## Known Issues
 
 - In `v0.5.2`, `v0.5.3`, and `v0.5.3.post1`, there is a bug caused by [zmq](https://github.com/zeromq/pyzmq/issues/2000) , which can occasionally cause vLLM to hang depending on the machine configuration. The solution is to upgrade to the latest version of `vllm` to include the [fix](gh-pr:6759).
-- To circumvent a NCCL [bug](https://github.com/NVIDIA/nccl/issues/1234) , all vLLM processes will set an environment variable ``NCCL_CUMEM_ENABLE=0`` to disable NCCL's ``cuMem`` allocator. It does not affect performance but only gives memory benefits. When external processes want to set up a NCCL connection with vLLM's processes, they should also set this environment variable, otherwise, inconsistent environment setup will cause NCCL to hang or crash, as observed in the [RLHF integration](https://github.com/OpenRLHF/OpenRLHF/pull/604) and the [discussion](gh-issue:5723#issuecomment-2554389656) .
+- To circumvent a NCCL [bug](https://github.com/NVIDIA/nccl/issues/1234) , all vLLM processes will set an environment variable `NCCL_CUMEM_ENABLE=0` to disable NCCL's `cuMem` allocator. It does not affect performance but only gives memory benefits. When external processes want to set up a NCCL connection with vLLM's processes, they should also set this environment variable, otherwise, inconsistent environment setup will cause NCCL to hang or crash, as observed in the [RLHF integration](https://github.com/OpenRLHF/OpenRLHF/pull/604) and the [discussion](gh-issue:5723#issuecomment-2554389656) .
