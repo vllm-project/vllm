@@ -3,27 +3,20 @@ from huggingface_hub import hf_hub_download
 from vllm import LLM, SamplingParams
 
 
-def run_gguf_inference(model_path):
-    PROMPT_TEMPLATE = "<|system|>\n{system_message}</s>\n<|user|>\n{prompt}</s>\n<|assistant|>\n"  # noqa: E501
-    system_message = "You are a friendly chatbot who always responds in the style of a pirate."  # noqa: E501
+def run_gguf_inference(model_path, tokenizer):
     # Sample prompts.
     prompts = [
         "How many helicopters can a human eat in one sitting?",
         "What's the future of AI?",
     ]
-    prompts = [
-        PROMPT_TEMPLATE.format(system_message=system_message, prompt=prompt)
-        for prompt in prompts
-    ]
+    prompts = [[{"role": "user", "content": prompt}] for prompt in prompts]
     # Create a sampling params object.
     sampling_params = SamplingParams(temperature=0, max_tokens=128)
 
     # Create an LLM.
-    llm = LLM(model=model_path,
-              tokenizer="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-              gpu_memory_utilization=0.95)
+    llm = LLM(model=model_path, tokenizer=tokenizer)
 
-    outputs = llm.generate(prompts, sampling_params)
+    outputs = llm.chat(prompts, sampling_params)
     # Print the outputs.
     for output in outputs:
         prompt = output.prompt
@@ -32,7 +25,8 @@ def run_gguf_inference(model_path):
 
 
 if __name__ == "__main__":
-    repo_id = "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF"
-    filename = "tinyllama-1.1b-chat-v1.0.Q4_0.gguf"
+    repo_id = "bartowski/Phi-3-medium-4k-instruct-GGUF"
+    filename = "Phi-3-medium-4k-instruct-IQ2_M.gguf"
+    tokenizer = "microsoft/Phi-3-medium-4k-instruct"
     model = hf_hub_download(repo_id, filename=filename)
-    run_gguf_inference(model)
+    run_gguf_inference(model, tokenizer)
