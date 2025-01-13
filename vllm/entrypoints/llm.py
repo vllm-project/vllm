@@ -997,26 +997,17 @@ class LLM:
                     "`--task classify`, `--task score` etc.")
 
             raise ValueError(" ".join(messages))
-
-        if not self.llm_engine.model_config.is_cross_encoder:
-            raise ValueError("Your model does not support cross encoding")
-        if self.llm_engine.model_config.task != "score":
-            raise ValueError("Score API is only enabled for `--task score`")
-
-        tokenizer = self.llm_engine.get_tokenizer()
-
-        if isinstance(tokenizer, MistralTokenizer):
-            raise ValueError(
-                "MistralTokenizer not supported for cross-encoding")
-
+            
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
         # lists of tokens to the `text` and `text_pair` kwargs
+        tokenizer = self.llm_engine.get_tokenizer()
+
         def ensure_str(prompt: SingletonPrompt):
             if isinstance(prompt, dict):
                 if "multi_modal_data" in prompt:
                     raise ValueError("Multi-modal prompt is not "
-                                     "supported for cross encoding")
+                                    "supported for scoring")
                 elif "prompt_token_ids" in prompt:
                     prompt = tokenizer.decode(
                         cast(TokensPrompt, prompt)["prompt_token_ids"])
@@ -1045,37 +1036,84 @@ class LLM:
         if len(text_1) == 1:
             text_1 = text_1 * len(text_2)
 
-        input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
-        pooling_params = PoolingParams()
+        if self.llm_engine.model_config.task != "score":
+            raise ValueError("Score API is only enabled for `--task score`")
+        
+        if self.llm_engine.model_config.is_cross_encoder:            
+            input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
 
-        tokenization_kwargs: Dict[str, Any] = {}
-        if truncate_prompt_tokens is not None:
-            tokenization_kwargs["truncation"] = True
-            tokenization_kwargs["max_length"] = truncate_prompt_tokens
+            if isinstance(tokenizer, MistralTokenizer):
+                raise ValueError(
+                    "MistralTokenizer not supported for cross-encoding")
 
-        parsed_prompts = []
+            pooling_params = PoolingParams()
 
-        for q, t in input_pairs:
-            prompt_inputs = tokenizer(text=q,
-                                      text_pair=t,
-                                      **tokenization_kwargs)
-            engine_prompt = TokensPrompt(
-                prompt_token_ids=prompt_inputs["input_ids"],
-                token_type_ids=prompt_inputs.get("token_type_ids"))
-            parsed_prompts.append(engine_prompt)
+            tokenization_kwargs: Dict[str, Any] = {}
+            if truncate_prompt_tokens is not None:
+                tokenization_kwargs["truncation"] = True
+                tokenization_kwargs["max_length"] = truncate_prompt_tokens
 
-        self._validate_and_add_requests(
-            prompts=parsed_prompts,
-            params=pooling_params,
-            lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
-        )
+            parsed_prompts = []
 
-        outputs = self._run_engine(use_tqdm=use_tqdm)
-        items = self.engine_class.validate_outputs(outputs,
+            for q, t in input_pairs:
+                prompt_inputs = tokenizer(text=q,
+                                        text_pair=t,
+                                        **tokenization_kwargs)
+                engine_prompt = TokensPrompt(
+                    prompt_token_ids=prompt_inputs["input_ids"],
+                    token_type_ids=prompt_inputs.get("token_type_ids"))
+                parsed_prompts.append(engine_prompt)
+
+            self._validate_and_add_requests(
+                prompts=parsed_prompts,
+                params=pooling_params,
+                lora_request=lora_request,
+                prompt_adapter_request=prompt_adapter_request,
+            )
+
+            outputs = self._run_engine(use_tqdm=use_tqdm)
+            items = self.engine_class.validate_outputs(outputs,
+                                                    PoolingRequestOutput)
+
+            return [ScoringRequestOutput.from_base(item) for item in items]
+
+        elif self.llm_engine.model_config.has_pooling: 
+            text = text_1 + text_2
+            text = self.encode(text)
+
+            text_1 = text[0:len(text_1)]
+            text_2 = text[len(text_1):]
+
+            input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
+
+            scores = []
+            cosSim = torch.nn.CosineSimilarity(0)
+
+            if tokenizer.pad_token is None:
+                for text_1, text_2 in input_pairs:
+                    pairs_score = cosSim(text_1.outputs.data, text_2.outputs.data)
+                    tokens = text_1.prompt_token_ids + text_2.prompt_token_ids
+
+                    scores.append(PoolingRequestOutput(request_id="unk", 
+                                                        outputs=pairs_score,
+                                                        prompt_token_ids=tokens, 
+                                                        finished=True))
+            else:
+                for text_1, text_2 in input_pairs:
+                    pairs_score = cosSim(text_1.outputs.data, text_2.outputs.data)
+                    tokens = text_1.prompt_token_ids + [tokenizer.pad_token_type_id] + text_2.prompt_token_ids
+
+                    scores.append(PoolingRequestOutput(request_id="unk", 
+                                                        outputs=pairs_score,
+                                                        prompt_token_ids=tokens, 
+                                                        finished=True))
+
+            items = self.engine_class.validate_outputs(scores,
                                                    PoolingRequestOutput)
+            
+            return [ScoringRequestOutput.from_base(item) for item in items]
 
-        return [ScoringRequestOutput.from_base(item) for item in items]
+        raise ValueError("Your model does not support cross encoding and is not an embedding model.")
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()
