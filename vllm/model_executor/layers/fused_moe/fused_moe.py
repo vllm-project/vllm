@@ -496,8 +496,9 @@ def grouped_topk(hidden_states: torch.Tensor,
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
+    original_scores = scores
     if e_score_correction_bias is not None:
-        scores.add_(e_score_correction_bias.unsqueeze(0))
+        scores = scores + e_score_correction_bias.unsqueeze(0)
 
     num_token = scores.shape[0]
     group_scores = scores.view(num_token, num_expert_group,
@@ -510,10 +511,12 @@ def grouped_topk(hidden_states: torch.Tensor,
         num_token, num_expert_group,
         scores.shape[-1] // num_expert_group).reshape(num_token, -1)  # [n, e]
     tmp_scores = scores.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
-    topk_weights, topk_ids = torch.topk(tmp_scores,
-                                        k=topk,
-                                        dim=-1,
-                                        sorted=False)
+    topk_ids = torch.topk(tmp_scores,
+                            k=topk,
+                            dim=-1,
+                            sorted=False)[1]
+
+    topk_weights = original_scores.gather(1, topk_ids)
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
