@@ -3,6 +3,7 @@ repos:
   rev: v0.43.0
   hooks:
   - id: yapf
+    args: [--in-place, --verbose]
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.9.1
   hooks:
