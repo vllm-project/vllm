@@ -25,7 +25,7 @@ repos:
   hooks:
   - id: isort
 - repo: https://github.com/pre-commit/mirrors-clang-format
-  rev: v19.1.6
+  rev: v18.1.5
   hooks:
   - id: clang-format
     exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))'
