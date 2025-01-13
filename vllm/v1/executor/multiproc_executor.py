@@ -163,7 +163,7 @@ class MultiprocExecutor(Executor):
     def execute_model(
         self,
         scheduler_output,
-    ) -> ModelRunnerOutput:
+    ) -> Optional[ModelRunnerOutput]:
         model_output = self.collective_rpc("execute_model",
                                            args=(scheduler_output, ))[0]
         return model_output

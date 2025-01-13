@@ -122,6 +122,7 @@ class EngineCore:
 
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
+        assert output is not None  # TODO: Move into update_from_output below
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)
         return engine_core_outputs

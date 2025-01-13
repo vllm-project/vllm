@@ -73,6 +73,8 @@ class TPUWorker(WorkerBase):
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
+        assert self.model_runner is not None
+
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         head_size = self.model_config.get_head_size()
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
@@ -86,11 +88,11 @@ class TPUWorker(WorkerBase):
                       torch.tensor([], dtype=torch.float32,
                                    device=self.device))
                      for _ in range(num_layers)]
-        self.model_runner._dummy_run(
+        self.model_runner.dummy_run(
             batch_size=1,
             seq_len=self.scheduler_config.max_num_batched_tokens,
-            kv_caches=kv_caches,
             exec_mode=ExecutionMode.PREFILL,
+            kv_caches=kv_caches,
         )
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
@@ -120,7 +122,8 @@ class TPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput:
+    ) -> Optional[ModelRunnerOutput]:
+        assert self.model_runner is not None
         output = self.model_runner.execute_model(scheduler_output)
         return output if self.rank == 0 else None
 

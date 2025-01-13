@@ -45,9 +45,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        if envs.VLLM_USE_V1:
-            return False
-        return True
+        return not envs.VLLM_USE_V1
 
     @classmethod
     def inference_mode(cls):
@@ -71,7 +69,9 @@ class TpuPlatform(Platform):
 
         assert compilation_config.level < CompilationLevel.PIECEWISE,\
             ("Current compilation level = {} but needs to be less"
-             " than  ".format(compilation_config.level, CompilationLevel.PIECEWISE))
+             " than {}".format(
+                 compilation_config.level,
+                 CompilationLevel.PIECEWISE))
 
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"

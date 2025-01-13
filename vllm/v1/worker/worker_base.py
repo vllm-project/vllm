@@ -1,5 +1,5 @@
 """A GPU worker class."""
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple, Any
 
 import torch
 import torch.distributed
@@ -15,6 +15,7 @@ from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, get_dtype_size
 from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.worker.model_runner_base import ModelRunnerBase
 
 logger = init_logger(__name__)
 
@@ -76,10 +77,14 @@ class WorkerBase:
         else:
             self.profiler = None
 
+        # Initialized by the specific platform
+        self.model_runner: Optional[ModelRunnerBase] = None
+
     def initialize(self):
         raise NotImplementedError()
 
     def load_model(self) -> None:
+        assert self.model_runner is not None
         self.model_runner.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -87,6 +92,8 @@ class WorkerBase:
 
     def initialize_cache(self, num_gpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks."""
+        assert self.model_runner is not None
+
         if num_gpu_blocks <= 0:
             raise ValueError("No available memory for the cache blocks. "
                              "Try increasing `gpu_memory_utilization` when "
@@ -105,6 +112,8 @@ class WorkerBase:
         self.model_runner.initialize_kv_cache(num_gpu_blocks)
 
     def compile_or_warm_up_model(self) -> None:
+        assert self.model_runner is not None
+
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
@@ -114,7 +123,7 @@ class WorkerBase:
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput:
+    ) -> Optional[ModelRunnerOutput]:
         raise NotImplementedError()
 
     def profile(self, is_start: bool = True):

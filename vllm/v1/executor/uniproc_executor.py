@@ -9,9 +9,9 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 
 if current_platform.is_tpu():
-    from vllm.v1.worker.tpu_worker import TPUWorker as WorkerClass
+    from vllm.v1.worker.tpu_worker import TPUWorker as WorkerClass  # type: ignore
 elif current_platform.is_cuda():
-    from vllm.v1.worker.gpu_worker import Worker as WorkerClass
+    from vllm.v1.worker.gpu_worker import GPUWorker as WorkerClass  # type: ignore
 else:
     raise NotImplementedError("V1 executor supports CUDA or TPU")
 
@@ -78,7 +78,7 @@ class UniprocExecutor(Executor):
     def execute_model(
         self,
         scheduler_output,
-    ) -> ModelRunnerOutput:
+    ) -> Optional[ModelRunnerOutput]:
         output = self.worker.execute_model(scheduler_output)
         return output
 

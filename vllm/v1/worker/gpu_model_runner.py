@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Tuple, cast
+from typing import TYPE_CHECKING, Dict, List, Tuple, cast, Optional
 
 import numpy as np
 import torch
@@ -23,60 +23,38 @@ from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-
+from vllm.v1.worker.model_runner_base import ModelRunnerBase, ExecutionMode
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
 
 logger = init_logger(__name__)
 
 
-class GPUModelRunner:
+class GPUModelRunner(ModelRunnerBase):
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config
-        self.lora_config = vllm_config.lora_config
-        self.load_config = vllm_config.load_config
-        self.parallel_config = vllm_config.parallel_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
-        self.observability_config = vllm_config.observability_config
+        super().__init__(vllm_config, device)
 
-        model_config = self.model_config
-        cache_config = self.cache_config
-        scheduler_config = self.scheduler_config
-        parallel_config = self.parallel_config
-        self.device = device
-        self.pin_memory = is_pin_memory_available()
-        self.dtype = self.model_config.dtype
-        if cache_config.cache_dtype == "auto":
-            self.kv_cache_dtype = self.dtype
-        else:
-            self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
-                cache_config.cache_dtype]
+        # Persistent batch.
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.model_config.get_vocab_size(),
+        )
 
-        self.is_multimodal_model = model_config.is_multimodal_model
-        self.sliding_window = model_config.get_sliding_window()
-        self.block_size = cache_config.block_size
-        self.max_model_len = model_config.max_model_len
-        self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
-        self.max_num_tokens = scheduler_config.max_num_batched_tokens
-        self.max_num_reqs = scheduler_config.max_num_seqs
+        # Request states.
+        self.requests: Dict[str, CachedRequestState] = {}
 
-        # Model-related.
-        self.num_attn_layers = model_config.get_num_layers_by_block_type(
-            parallel_config, LayerBlockType.attention)
-        self.num_query_heads = model_config.get_num_attention_heads(
-            parallel_config)
-        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        self.head_size = model_config.get_head_size()
-        self.hidden_size = model_config.get_hidden_size()
+        # Lazy initialization
+        # self.model: nn.Module  # Set after load_model
+        self.kv_caches: List[torch.Tensor] = []
 
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
@@ -90,23 +68,8 @@ class GPUModelRunner:
         self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  # noqa: E501
         self.encoder_cache_size = self.scheduler_config.encoder_cache_size
 
-        # Lazy initialization
-        # self.model: nn.Module  # Set after load_model
-        self.kv_caches: List[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
-
-        # Request states.
-        self.requests: Dict[str, CachedRequestState] = {}
-        # Persistent batch.
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
-            device=self.device,
-            pin_memory=self.pin_memory,
-            vocab_size=model_config.get_vocab_size(),
-        )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
@@ -684,22 +647,23 @@ class GPUModelRunner:
                     self.model_memory_usage / float(2**30))
 
     @torch.inference_mode()
-    def _dummy_run(
+    def dummy_run(
         self,
-        model: nn.Module,
-        num_tokens: int,
-        kv_caches: List[torch.Tensor],
+        kv_caches,
+        batch_size: int,
+        seq_len: Optional[int] = None,
+        exec_mode: Optional[ExecutionMode] = None,
     ) -> torch.Tensor:
         if self.is_multimodal_model:
             input_ids = None
-            inputs_embeds = self.inputs_embeds[:num_tokens]
+            inputs_embeds = self.inputs_embeds[:batch_size]
         else:
-            input_ids = self.input_ids[:num_tokens]
+            input_ids = self.input_ids[:batch_size]
             inputs_embeds = None
         with set_forward_context(None, self.vllm_config):
-            hidden_states = model(
+            hidden_states = self.model(
                 input_ids=input_ids,
-                positions=self.positions[:num_tokens],
+                positions=self.positions[:batch_size],
                 kv_caches=kv_caches,
                 attn_metadata=None,
                 inputs_embeds=inputs_embeds,
@@ -813,8 +777,7 @@ class GPUModelRunner:
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.model, self.max_num_tokens,
-                                        dummy_kv_caches)
+        hidden_states = self.dummy_run(dummy_kv_caches, self.max_num_tokens)
         logits = self.model.compute_logits(hidden_states, None)
         logits = logits[:self.max_num_tokens]
         # TODO(woosuk): Consider the memory usage of the sampler.
@@ -840,8 +803,8 @@ class GPUModelRunner:
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(self.model, num_tokens, self.kv_caches)
-                self._dummy_run(self.model, num_tokens, self.kv_caches)
+                    self.dummy_run(self.kv_caches, num_tokens)
+                self.dummy_run(self.kv_caches, num_tokens)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]

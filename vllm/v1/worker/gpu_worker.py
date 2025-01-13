@@ -78,6 +78,8 @@ class GPUWorker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        assert self.model_runner is not None
+
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
@@ -129,7 +131,8 @@ class GPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput:
+    ) -> Optional[ModelRunnerOutput]:
+        assert self.model_runner is not None
         output = self.model_runner.execute_model(scheduler_output)
         return output if self.rank == 0 else None
 

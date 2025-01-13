@@ -303,7 +303,7 @@ class ModelConfig:
         # Set enforce_eager to False if the value is unset.
         if self.enforce_eager is None:
             self.enforce_eager = False
-        
+
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
         has_interleaved_attention = (sliding_window is not None) and (
             isinstance(sliding_window, list) or

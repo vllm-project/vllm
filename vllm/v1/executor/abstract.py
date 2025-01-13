@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Tuple, Type
+from typing import Tuple, Type, Optional
 
 from vllm.config import VllmConfig
 from vllm.v1.outputs import ModelRunnerOutput
@@ -41,7 +41,7 @@ class Executor(ABC):
     def execute_model(
         self,
         scheduler_output,
-    ) -> ModelRunnerOutput:
+    ) -> Optional[ModelRunnerOutput]:
         raise NotImplementedError
 
     @abstractmethod
