@@ -2,7 +2,7 @@
 import sys
 from bisect import bisect_left
 from os.path import commonprefix
-from typing import (Callable, Dict, FrozenSet, Iterable, Optional)
+from typing import (Callable, FrozenSet, Iterable, Optional)
 
 from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
                                     get_all_blocks_recursively)
@@ -74,7 +74,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # A mapping of prefix hash to block index. All blocks which have a
         # prefix hash will be in this dict, even if they have refcount 0.
-        self._cached_blocks: Dict[PrefixHash, BlockId] = {}
+        self._cached_blocks: dict[PrefixHash, BlockId] = {}
 
         # A list of immutable block IDs that have been touched by scheduler
         # and should be marked as computed after an entire batch of sequences
@@ -82,7 +82,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._touched_blocks: set[BlockId] = set()
 
         # Used to track status of each physical block id
-        self._block_tracker: Dict[BlockId, BlockTracker] = {}
+        self._block_tracker: dict[BlockId, BlockTracker] = {}
         for block_id in block_ids:
             self._block_tracker[block_id] = BlockTracker()
 
@@ -920,14 +920,14 @@ class ComputedBlocksTracker:
         # for the sequence when we need to check if the sequence is cached.
         # Note a block that's not full will not have its hash calculated and
         # recorded.
-        self._seq_id_to_blocks_hashes: Dict[int, list[int]] = {}
+        self._seq_id_to_blocks_hashes: dict[int, list[int]] = {}
 
         # A map from seq_id to the number of tokens that are cached for the
         # sequence.
         # We need this so that a sequence in continuous prefill doesn't
         # accidentally see its cached token count change. See comments in
         # `get_num_cached_tokens` for more details.
-        self._seq_id_to_num_tokens_computed: Dict[int, int] = {}
+        self._seq_id_to_num_tokens_computed: dict[int, int] = {}
 
     def _update_seq_hashes(self, seq: Sequence) -> None:
         """Incrementally update the sequence's block hashes and record them."""
@@ -1026,7 +1026,7 @@ class LastAccessBlocksTracker:
 
     def __init__(self, allocator):
         self._allocator = allocator
-        self._seq_last_access: Dict[int, Optional[float]] = {}
+        self._seq_last_access: dict[int, Optional[float]] = {}
 
     def add_seq(self, seq_id: int) -> None:
         """Start tracking seq_id

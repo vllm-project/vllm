@@ -4,7 +4,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Sequence, Type, Union
+from typing import Any, Callable, Optional, Sequence, Type, Union
 
 import safetensors.torch
 import torch
@@ -45,7 +45,7 @@ class LongContextLoRAContext:
     rot_dim: int
     # offsets to the sin_cos_cache for each lora_id loaded.
     # This value is dynamically modified.
-    offsets_by_lora_id: Dict[int, int] = field(default_factory=dict)
+    offsets_by_lora_id: dict[int, int] = field(default_factory=dict)
 
 
 def get_lora_id():
@@ -61,7 +61,7 @@ class LoRAModel(AdapterModel):
         self,
         lora_model_id: int,
         rank: int,
-        loras: Dict[str, LoRALayerWeights],
+        loras: dict[str, LoRALayerWeights],
         scaling_factor: Optional[float] = None,
     ) -> None:
         """
@@ -79,7 +79,7 @@ class LoRAModel(AdapterModel):
         assert (lora_model_id >
                 0), f"a valid lora id should be greater than 0, got {self.id}"
         self.rank = rank
-        self.loras: Dict[str, LoRALayerWeights] = loras
+        self.loras: dict[str, LoRALayerWeights] = loras
 
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.
@@ -105,19 +105,19 @@ class LoRAModel(AdapterModel):
     def from_lora_tensors(
         cls,
         lora_model_id: int,
-        tensors: Dict[str, torch.Tensor],
+        tensors: dict[str, torch.Tensor],
         peft_helper: PEFTHelper,
         device: str = "cuda",
         dtype: Optional[torch.dtype] = None,
-        embeddings: Optional[Dict[str, torch.Tensor]] = None,
+        embeddings: Optional[dict[str, torch.Tensor]] = None,
         target_embedding_padding: Optional[int] = None,
-        embedding_modules: Optional[Dict[str, str]] = None,
+        embedding_modules: Optional[dict[str, str]] = None,
         embedding_padding_modules: Optional[list[str]] = None,
         weights_mapper: Optional[WeightsMapper] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
-        loras: Dict[str, LoRALayerWeights] = {}
+        loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
             module_name, is_lora_a, is_bias = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper)
@@ -186,7 +186,7 @@ class LoRAModel(AdapterModel):
         device: str = "cuda",
         dtype: Optional[torch.dtype] = None,
         target_embedding_padding: Optional[int] = None,
-        embedding_modules: Optional[Dict[str, str]] = None,
+        embedding_modules: Optional[dict[str, str]] = None,
         embedding_padding_modules: Optional[list[str]] = None,
         weights_mapper: Optional[WeightsMapper] = None,
     ) -> "LoRAModel":
@@ -221,7 +221,7 @@ class LoRAModel(AdapterModel):
         peft_helper = PEFTHelper.from_dict(config)
         unexpected_modules: list[Union[list[str], str]]
         if os.path.isfile(lora_tensor_path):
-            tensors: Dict[str, torch.Tensor] = {}
+            tensors: dict[str, torch.Tensor] = {}
             # Find unexpected modules.
             # Use safetensor key as a source of truth to find expected modules.
             # in peft if you have target_modules A, B, C and C does not exist
@@ -333,7 +333,7 @@ class LoRAModelManager(AdapterModelManager):
                                                  device=self.device)
         # Scaling factor -> offset to the sin_cos_cache to it.
         # Used for long context lora.
-        self.scaling_factor_to_offset: Dict[float, int] = {}
+        self.scaling_factor_to_offset: dict[float, int] = {}
         super().__init__(model)
         if hasattr(self.model, "supported_lora_modules"):
             self.supported_lora_modules = copy.deepcopy(
@@ -350,8 +350,8 @@ class LoRAModelManager(AdapterModelManager):
             # In case the model only supports LoRA for
             # text modules (e.g. ChatGLM)
             and hasattr(self.model, "get_mm_mapping"))
-        self.packed_modules: Dict[str, list[str]] = {}
-        self.modules: Dict[str, BaseLayerWithLoRA] = {}
+        self.packed_modules: dict[str, list[str]] = {}
+        self.modules: dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: Optional[LoRAMapping] = None
         self._create_lora_modules()
@@ -522,7 +522,7 @@ class LoRAModelManager(AdapterModelManager):
             lora_id: int,
             rank: int,
             scaling_factor: Optional[float],
-            embedding_modules: Optional[Dict[str, str]] = None) -> LoRAModel:
+            embedding_modules: Optional[dict[str, str]] = None) -> LoRAModel:
         """Create zero-initialized LoRAModel for warmup."""
         model = LoRAModel(lora_id, rank, {}, scaling_factor)
         for module_name, module in self.model.named_modules():
@@ -659,7 +659,7 @@ class LoRAModelManager(AdapterModelManager):
         return remove_adapter(adapter_id, self._registered_adapters,
                               self.deactivate_adapter)
 
-    def list_adapters(self) -> Dict[int, Any]:
+    def list_adapters(self) -> dict[int, Any]:
         return list_adapters(self._registered_adapters)
 
     def get_adapter(self, adapter_id: int) -> Optional[Any]:
@@ -686,7 +686,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         self._active_adapters: LoRALRUCache = LoRALRUCache(
             self.lora_slots, self._deactivate_adapter)
 
-    def list_adapters(self) -> Dict[int, LoRAModel]:
+    def list_adapters(self) -> dict[int, LoRAModel]:
         """List all registered LoRAModels."""
         return dict(self._registered_adapters.cache)
 

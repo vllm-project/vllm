@@ -8,8 +8,8 @@ import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
-                    Final, Literal, Mapping, Optional, Protocol, Type, Union)
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Final,
+                    Literal, Mapping, Optional, Protocol, Type, Union)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -58,18 +58,18 @@ _ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
 
 RunnerType = Literal["generate", "pooling", "draft"]
 
-_RUNNER_TASKS: Dict[RunnerType, list[_ResolvedTask]] = {
+_RUNNER_TASKS: dict[RunnerType, list[_ResolvedTask]] = {
     "generate": ["generate"],
     "pooling": ["embed", "classify", "score", "reward"],
     "draft": ["draft"],
 }
 
-_TASK_RUNNER: Dict[_ResolvedTask, RunnerType] = {
+_TASK_RUNNER: dict[_ResolvedTask, RunnerType] = {
     task: runner
     for runner, tasks in _RUNNER_TASKS.items() for task in tasks
 }
 
-HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
+HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
                                              PretrainedConfig]]
 
 
@@ -205,7 +205,7 @@ class ModelConfig:
                  allowed_local_media_path: str = "",
                  revision: Optional[str] = None,
                  code_revision: Optional[str] = None,
-                 rope_scaling: Optional[Dict[str, Any]] = None,
+                 rope_scaling: Optional[dict[str, Any]] = None,
                  rope_theta: Optional[float] = None,
                  tokenizer_revision: Optional[str] = None,
                  max_model_len: Optional[int] = None,
@@ -222,9 +222,9 @@ class ModelConfig:
                  use_async_output_proc: bool = True,
                  config_format: ConfigFormat = ConfigFormat.AUTO,
                  hf_overrides: Optional[HfOverrides] = None,
-                 mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+                 mm_processor_kwargs: Optional[dict[str, Any]] = None,
                  disable_mm_preprocessor_cache: bool = False,
-                 override_neuron_config: Optional[Dict[str, Any]] = None,
+                 override_neuron_config: Optional[dict[str, Any]] = None,
                  override_pooler_config: Optional["PoolerConfig"] = None,
                  logits_processor_pattern: Optional[str] = None,
                  generation_config: Optional[str] = None) -> None:
@@ -250,7 +250,7 @@ class ModelConfig:
             hf_overrides_fn = None
 
         if rope_scaling is not None:
-            hf_override: Dict[str, Any] = {"rope_scaling": rope_scaling}
+            hf_override: dict[str, Any] = {"rope_scaling": rope_scaling}
             hf_overrides_kw.update(hf_override)
             msg = ("`--rope-scaling` will be removed in a future release. "
                    f"'Please instead use `--hf-overrides '{hf_override!r}'`")
@@ -485,7 +485,7 @@ class ModelConfig:
 
         architectures = getattr(hf_config, "architectures", [])
 
-        runner_support: Dict[RunnerType, bool] = {
+        runner_support: dict[RunnerType, bool] = {
             # NOTE: Listed from highest to lowest priority,
             # in case the model supports multiple of them
             "generate": ModelRegistry.is_text_generation_model(architectures),
@@ -860,7 +860,7 @@ class ModelConfig:
 
         return self.multimodal_config
 
-    def try_get_generation_config(self) -> Dict[str, Any]:
+    def try_get_generation_config(self) -> dict[str, Any]:
         if self.generation_config is None or self.generation_config == "auto":
             config = try_get_generation_config(
                 self.model,
@@ -878,7 +878,7 @@ class ModelConfig:
 
         return config.to_diff_dict()
 
-    def get_diff_sampling_param(self) -> Dict[str, Any]:
+    def get_diff_sampling_param(self) -> dict[str, Any]:
         """
         This method returns a dictionary containing the parameters
         that differ from the default sampling parameters, but only
@@ -886,7 +886,7 @@ class ModelConfig:
         set, an empty dictionary is returned.
 
         Returns:
-            Dict[str, Any]: A dictionary with the differing sampling
+            dict[str, Any]: A dictionary with the differing sampling
             parameters if `generation_config` is set, otherwise an
             empty dictionary.
         """
@@ -2713,8 +2713,8 @@ class CompilationConfig(BaseModel):
 
     use_inductor: bool = True
     candidate_compile_sizes: Optional[list[int]] = Field(default=None)
-    inductor_compile_config: Dict = Field(default_factory=dict)
-    inductor_passes: Dict[str, str] = Field(default_factory=dict)
+    inductor_compile_config: dict = Field(default_factory=dict)
+    inductor_passes: dict[str, str] = Field(default_factory=dict)
 
     use_cudagraph: bool = False
     cudagraph_num_of_warmups: int = 0
@@ -2764,7 +2764,7 @@ class CompilationConfig(BaseModel):
     capture_sizes: list[int] = PrivateAttr
     max_capture_size: int = PrivateAttr
     # optimization:
-    # Intuitively, bs_to_padded_graph_size should be Dict[int, int].
+    # Intuitively, bs_to_padded_graph_size should be dict[int, int].
     # since we know all keys are in a range [0, max_capture_size],
     # we can optimize it to list[int] for better lookup performance.
     bs_to_padded_graph_size: list[int] = PrivateAttr
@@ -2777,7 +2777,7 @@ class CompilationConfig(BaseModel):
 
     # Per-model forward context
     # Map from layer name to the attention cls
-    static_forward_context: Dict[str, Any] = PrivateAttr
+    static_forward_context: dict[str, Any] = PrivateAttr
 
     def compute_hash(self) -> str:
         """

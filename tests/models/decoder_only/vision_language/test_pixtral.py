@@ -5,7 +5,7 @@ Run `pytest tests/models/test_mistral.py`.
 import json
 import uuid
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import pytest
 from mistral_common.multimodal import download_image
@@ -37,7 +37,7 @@ IMG_URLS = [
 PROMPT = "Describe each image in one short sentence."
 
 
-def _create_msg_format(urls: list[str]) -> list[Dict[str, Any]]:
+def _create_msg_format(urls: list[str]) -> list[dict[str, Any]]:
     return [{
         "role":
         "user",
@@ -53,7 +53,7 @@ def _create_msg_format(urls: list[str]) -> list[Dict[str, Any]]:
     }]
 
 
-def _create_msg_format_hf(urls: list[str]) -> list[Dict[str, Any]]:
+def _create_msg_format_hf(urls: list[str]) -> list[dict[str, Any]]:
     return [{
         "role":
         "user",

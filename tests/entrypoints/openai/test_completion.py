@@ -3,7 +3,7 @@ import json
 import re
 import shutil
 from tempfile import TemporaryDirectory
-from typing import Dict, Optional
+from typing import Optional
 
 import jsonschema
 import openai  # use the official client for correctness check
@@ -285,7 +285,7 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
 async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
                                           model_name: str,
                                           prompt_logprobs: Optional[int]):
-    params: Dict = {
+    params: dict = {
         "prompt": ["A robot may not injure another robot", "My name is"],
         "model": model_name,
     }

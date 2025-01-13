@@ -2,7 +2,7 @@
 import functools
 import json
 import os
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 import torch
 import triton
@@ -273,7 +273,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                             num_tokens_post_padded: torch.Tensor,
                             mul_routed_weight: bool,
                             top_k: int,
-                            config: Dict[str, Any],
+                            config: dict[str, Any],
                             compute_type: tl.dtype,
                             use_fp8_w8a8: bool,
                             use_int8_w8a16: bool,
@@ -346,7 +346,7 @@ def get_config_file_name(E: int, N: int, dtype: Optional[str]) -> str:
 
 @functools.lru_cache
 def get_moe_configs(E: int, N: int,
-                    dtype: Optional[str]) -> Optional[Dict[int, Any]]:
+                    dtype: Optional[str]) -> Optional[dict[int, Any]]:
     """
     Return optimized configurations for the fused MoE kernel.
 
@@ -385,7 +385,7 @@ def get_default_config(
     topk: int,
     dtype: Optional[str],
     is_marlin: bool,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     config = {
         'BLOCK_SIZE_M': 64,
         'BLOCK_SIZE_N': 64,

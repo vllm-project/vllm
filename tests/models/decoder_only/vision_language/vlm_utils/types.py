@@ -1,8 +1,7 @@
 """Types for writing multimodal model tests."""
 from enum import Enum
 from pathlib import PosixPath
-from typing import (Any, Callable, Dict, Iterable, NamedTuple, Optional, Type,
-                    Union)
+from typing import (Any, Callable, Iterable, NamedTuple, Optional, Type, Union)
 
 import torch
 from PIL.Image import Image
@@ -53,7 +52,7 @@ class SizeType(Enum):
 
 class CustomTestOptions(NamedTuple):
     inputs: list[tuple[list[str], list[Union[list[Image], Image]]]]
-    limit_mm_per_prompt: Dict[str, int]
+    limit_mm_per_prompt: dict[str, int]
     # kwarg to pass multimodal data in as to vllm/hf runner instances.
     runner_mm_key: str = "images"
 
@@ -96,7 +95,7 @@ class VLMTestInfo(NamedTuple):
     max_num_seqs: int = 256
     task: TaskOption = "auto"
     tensor_parallel_size: int = 1
-    vllm_runner_kwargs: Optional[Dict[str, Any]] = None
+    vllm_runner_kwargs: Optional[dict[str, Any]] = None
 
     # Optional callable which gets a list of token IDs from the model tokenizer
     get_stop_token_ids: Optional[Callable[[PreTrainedTokenizerBase],
@@ -106,7 +105,7 @@ class VLMTestInfo(NamedTuple):
     stop_str: Optional[list[str]] = None
 
     # Exposed options for HF runner
-    hf_model_kwargs: Optional[Dict[str, Any]] = None
+    hf_model_kwargs: Optional[dict[str, Any]] = None
     # Indicates we should explicitly pass the EOS from the tokenizer
     use_tokenizer_eos: bool = False
     auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM

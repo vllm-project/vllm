@@ -3,8 +3,8 @@ import pickle
 from abc import ABC, abstractmethod
 from datetime import datetime
 from functools import wraps
-from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, Optional,
-                    Type, TypeVar)
+from typing import (TYPE_CHECKING, Any, Generic, Iterable, Optional, Type,
+                    TypeVar)
 
 import torch
 from torch import is_tensor
@@ -25,7 +25,7 @@ T = TypeVar('T', bound="BroadcastableModelInput")
 
 
 def _add_attn_metadata_broadcastable_dict(
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_metadata: Optional["AttentionMetadata"]) -> None:
     """
     Helper method to update tensor_dict with broadcastable
@@ -37,8 +37,8 @@ def _add_attn_metadata_broadcastable_dict(
 
 def _init_attn_metadata_from_tensor_dict(
     attn_backend: "AttentionBackend",
-    tensor_dict: Dict[str, Any],
-) -> Dict[str, Any]:
+    tensor_dict: dict[str, Any],
+) -> dict[str, Any]:
     """
     Helper method to initialize AttentionMetadata based on an
     AttentionBackend and broadcastable AttentionMetadata fields.
@@ -55,7 +55,7 @@ def _init_attn_metadata_from_tensor_dict(
 
 
 def _init_sampling_metadata_from_tensor_dict(  # type: ignore
-        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
+        tensor_dict: dict[str, Any]) -> dict[str, Any]:
     """
     Helper method to initialize SamplingMetadata based on broadcastable
     SamplingMetadata fields.
@@ -76,7 +76,7 @@ def _init_sampling_metadata_from_tensor_dict(  # type: ignore
 
 
 def _add_sampling_metadata_broadcastable_dict(
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         sampling_metadata: Optional["SamplingMetadata"]) -> None:
     """
     Helper method to update tensor_dict with broadcastable
@@ -89,7 +89,7 @@ def _add_sampling_metadata_broadcastable_dict(
 
 def _init_frozen_model_input_from_tensor_dict(
         frozen_model_input_cls: Type["ModelRunnerInputBase"],
-        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
+        tensor_dict: dict[str, Any]) -> dict[str, Any]:
     """
     Helper method to initialize a frozen ModelInput based on broadcastable
     """
@@ -160,7 +160,7 @@ def dump_input_when_exception(exclude_args: Optional[list[int]] = None,
 class BroadcastableModelInput(ABC):
 
     @abstractmethod
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         """
         Extract broadcastable fields. Override for fields that require some
         custom deserialization.
@@ -171,7 +171,7 @@ class BroadcastableModelInput(ABC):
     @abstractmethod
     def from_broadcasted_tensor_dict(
         cls: Type[T],
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> T:
         """
@@ -236,12 +236,12 @@ class ModelRunnerBase(ABC, Generic[T]):
         self.observability_config = vllm_config.observability_config
 
     # Map of request_id -> generator used for seeded random sampling
-    generators: Dict[str, torch.Generator] = {}
+    generators: dict[str, torch.Generator] = {}
 
     @abstractmethod
     def make_model_input_from_broadcasted_tensor_dict(
         self,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
     ) -> T:
         """
         Make an instance of a ModelRunnerInputBase from the broadcasted tensor

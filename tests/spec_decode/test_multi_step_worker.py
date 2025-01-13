@@ -1,5 +1,4 @@
 import random
-from typing import Dict
 from unittest.mock import MagicMock
 
 import pytest
@@ -241,10 +240,10 @@ def test_same_output_for_multi_step():
             continuations[i].append(seq_group_output.samples[0].output_token)
 
     # Get token ids and logprobs for comparison.
-    multi_step_output_logprobs: list[list[Dict[int,
+    multi_step_output_logprobs: list[list[dict[int,
                                                Logprob]]] = [[]
                                                              for _ in prompts]
-    single_step_output_logprobs: list[list[Dict[int,
+    single_step_output_logprobs: list[list[dict[int,
                                                 Logprob]]] = [[]
                                                               for _ in prompts]
 

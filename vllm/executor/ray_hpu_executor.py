@@ -2,7 +2,7 @@ import asyncio
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 
@@ -141,7 +141,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
             ray.get(worker.get_node_ip.remote())  # type: ignore[attr-defined]
             for worker in self.workers
         ]
-        ip_counts: Dict[str, int] = {}
+        ip_counts: dict[str, int] = {}
         for ip in worker_ips:
             ip_counts[ip] = ip_counts.get(ip, 0) + 1
 
@@ -300,7 +300,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
         all_args: Optional[list[tuple[Any, ...]]] = None,
-        all_kwargs: Optional[list[Dict[str, Any]]] = None,
+        all_kwargs: Optional[list[dict[str, Any]]] = None,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:

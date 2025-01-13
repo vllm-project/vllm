@@ -14,7 +14,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Dict, Optional
+from typing import Callable, Optional
 
 import torch
 
@@ -34,7 +34,7 @@ class BrokenPipeException(Exception):
         super().__init__(self.message)
 
 
-Metadata = Dict[str, Optional[torch.Tensor]]
+Metadata = dict[str, Optional[torch.Tensor]]
 
 
 class PyNcclPipe(KVPipeBase):

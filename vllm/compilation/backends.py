@@ -6,7 +6,7 @@ import pprint
 import time
 from collections import defaultdict
 from contextlib import ExitStack
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 from unittest.mock import patch
 
 import torch
@@ -34,7 +34,7 @@ class InductorHashCache:
     In-memory format: a defaultdict of dict, where the key is
     runtime_shape, and the value is a dict of graph_index to hash_str.
 
-    The data is essentially `Dict[Optional[int], Dict[int, str]]`,
+    The data is essentially `dict[Optional[int], dict[int, str]]`,
     we don't use json here because json doesn't support int as key.
 
     TODO: better off-the-shelf solution to serialize the data?
@@ -375,7 +375,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
 
     def call_module(self, target: torch.fx.node.Target,
                     args: tuple[torch.fx.node.Argument,
-                                ...], kwargs: Dict[str, Any]) -> Any:
+                                ...], kwargs: dict[str, Any]) -> Any:
         assert isinstance(target, str)
         output = super().call_module(target, args, kwargs)
 
@@ -671,7 +671,7 @@ class PiecewiseBackend:
 
         # the entries for different shapes that we need to either
         # compile or capture cudagraph
-        self.concrete_size_entries: Dict[int, ConcreteSizeEntry] = {}
+        self.concrete_size_entries: dict[int, ConcreteSizeEntry] = {}
 
         # to_be_compiled_sizes tracks the remaining sizes to compile,
         # and updates during the compilation process, so we need to copy it

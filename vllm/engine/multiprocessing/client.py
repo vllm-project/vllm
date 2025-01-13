@@ -2,8 +2,8 @@ import asyncio
 import copy
 import pickle
 from contextlib import contextmanager, suppress
-from typing import (Any, AsyncGenerator, Dict, Iterator, Mapping, Optional,
-                    Union, cast, overload)
+from typing import (Any, AsyncGenerator, Iterator, Mapping, Optional, Union,
+                    cast, overload)
 
 import cloudpickle
 import psutil
@@ -116,7 +116,7 @@ class MQLLMEngineClient(EngineClient):
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
 
         # Stream for each individual request.
-        self.output_queues: Dict[str, asyncio.Queue] = {}
+        self.output_queues: dict[str, asyncio.Queue] = {}
 
         # Loop to handle output of the LLMEngine periodically.
         # Started after the MQLLMEngine is ready so that we can

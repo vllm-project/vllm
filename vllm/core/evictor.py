@@ -1,7 +1,6 @@
 import enum
 import heapq
 from abc import ABC, abstractmethod
-from typing import Dict
 
 
 class EvictionPolicy(enum.Enum):
@@ -78,7 +77,7 @@ class LRUEvictor(Evictor):
     CLEANUP_THRESHOLD = 50
 
     def __init__(self):
-        self.free_table: Dict[int, BlockMetaData] = {}
+        self.free_table: dict[int, BlockMetaData] = {}
         self.priority_queue = []
 
     def __contains__(self, block_id: int) -> bool:

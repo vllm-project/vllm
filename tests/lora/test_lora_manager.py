@@ -1,7 +1,6 @@
 import json
 import math
 import os
-from typing import Dict
 
 import pytest
 import torch
@@ -128,7 +127,7 @@ def test_from_lora_tensors(sql_lora_files, device):
 
 def create_lora(lora_id: int, model: nn.Module, sub_modules: list[str],
                 device: torch.device) -> LoRAModel:
-    loras: Dict[str, LoRALayerWeights] = {}
+    loras: dict[str, LoRALayerWeights] = {}
     for name in sub_modules:
         w = model.get_submodule(name).weight
         loras[name] = LoRALayerWeights(
@@ -150,7 +149,7 @@ def create_packed_lora(
     empty_replaced_module_name=None,
 ) -> LoRAModel:
     w = model.get_submodule(module_name).weight
-    loras: Dict[str, LoRALayerWeights] = {}
+    loras: dict[str, LoRALayerWeights] = {}
     for replaced_module_name in replaced_module_names:
         if replaced_module_name == empty_replaced_module_name:
             continue

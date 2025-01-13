@@ -1,5 +1,5 @@
 """A block manager that manages token blocks."""
-from typing import Dict, Optional
+from typing import Optional
 from typing import Sequence as GenericSequence
 
 from vllm.core.block.block_table import BlockTable
@@ -96,8 +96,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             block_size=block_size,
         )
 
-        self.block_tables: Dict[SeqId, BlockTable] = {}
-        self.cross_block_tables: Dict[EncoderSeqId, BlockTable] = {}
+        self.block_tables: dict[SeqId, BlockTable] = {}
+        self.cross_block_tables: dict[EncoderSeqId, BlockTable] = {}
 
         self._computed_blocks_tracker = ComputedBlocksTracker(
             self.block_allocator, self.block_size, self.enable_caching)

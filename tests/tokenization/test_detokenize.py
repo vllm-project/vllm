@@ -1,4 +1,4 @@
-from typing import Any, Dict, Generator, Optional
+from typing import Any, Generator, Optional
 
 import pytest
 from transformers import AutoTokenizer
@@ -176,7 +176,7 @@ def create_sequence(prompt_token_ids=None):
 
 
 def create_dummy_logprobs(
-        complete_sequence_token_ids: list[int]) -> list[Dict[int, Logprob]]:
+        complete_sequence_token_ids: list[int]) -> list[dict[int, Logprob]]:
     return [{
         token_id: Logprob(logprob=0.0),
         token_id + 1: Logprob(logprob=0.1)
@@ -185,9 +185,9 @@ def create_dummy_logprobs(
 
 def create_dummy_prompt_logprobs(
         complete_sequence_token_ids: list[int]
-) -> list[Optional[Dict[int, Any]]]:
+) -> list[Optional[dict[int, Any]]]:
     # logprob for the first prompt token is None.
-    logprobs: list[Optional[Dict[int, Any]]] = [None]
+    logprobs: list[Optional[dict[int, Any]]] = [None]
     logprobs.extend(create_dummy_logprobs(complete_sequence_token_ids)[1:])
     return logprobs
 
@@ -247,7 +247,7 @@ def test_decode_prompt_logprobs(complete_sequence_token_ids: list[int],
                                                dummy_logprobs,
                                                position_offset=0)
     # First logprob is None.
-    decoded_prompt_logprobs: list[Dict[int, Any]] = dummy_logprobs[
+    decoded_prompt_logprobs: list[dict[int, Any]] = dummy_logprobs[
         1:]  # type: ignore
 
     # decoded_prompt_logprobs doesn't contain the first token.

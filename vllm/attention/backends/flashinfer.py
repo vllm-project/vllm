@@ -1,7 +1,7 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional, Type
+from typing import TYPE_CHECKING, Any, Optional, Type
 
 from vllm.multimodal import MultiModalPlaceholderMap
 
@@ -397,7 +397,7 @@ class FlashInferMetadata(AttentionMetadata):
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[set[str]] = None
-                        ) -> Dict[str, Any]:
+                        ) -> dict[str, Any]:
         if skip_fields is None:
             skip_fields = set()
         # We need to skip the prefill/decode_wrapper field since it cannot be
@@ -473,7 +473,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.context_lens: list[int] = []
         self.block_tables: list[list[int]] = []
         self.curr_seq_lens: list[int] = []
-        self.multimodal_placeholder_maps: Dict[
+        self.multimodal_placeholder_maps: dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
         self.num_prefills = 0
@@ -746,7 +746,7 @@ class FlashInferImpl(AttentionImpl):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
     ) -> None:

@@ -1,6 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, Optional, Protocol
+from typing import Deque, Iterable, Optional, Protocol
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 
@@ -34,7 +34,7 @@ class RefCounter(RefCounterProtocol):
 
     def __init__(self, all_block_indices: Iterable[BlockId]):
         deduped = set(all_block_indices)
-        self._refcounts: Dict[BlockId,
+        self._refcounts: dict[BlockId,
                               RefCount] = {index: 0
                                            for index in deduped}
 

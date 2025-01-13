@@ -21,7 +21,7 @@
 # limitations under the License.
 """Rotary Positional Embeddings."""
 import math
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -301,7 +301,7 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
         # Lazy initialized.
-        self._scaling_factor_to_offset: Dict[float, int]
+        self._scaling_factor_to_offset: dict[float, int]
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.base)
@@ -338,7 +338,7 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
         return torch.cat(cache_list, dim=0)
 
     @property
-    def scaling_factor_to_offset(self) -> Dict[float, int]:
+    def scaling_factor_to_offset(self) -> dict[float, int]:
         return self._scaling_factor_to_offset
 
 
@@ -931,7 +931,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         ]
 
 
-_ROPE_DICT: Dict[tuple, RotaryEmbedding] = {}
+_ROPE_DICT: dict[tuple, RotaryEmbedding] = {}
 
 
 def get_rope(
@@ -940,7 +940,7 @@ def get_rope(
     max_position: int,
     base: int,
     is_neox_style: bool = True,
-    rope_scaling: Optional[Dict[str, Any]] = None,
+    rope_scaling: Optional[dict[str, Any]] = None,
     dtype: Optional[torch.dtype] = None,
     partial_rotary_factor: float = 1.0,
 ) -> RotaryEmbedding:

@@ -4,7 +4,7 @@ import itertools
 import random
 import unittest
 from numbers import Number
-from typing import (Any, Dict, NamedTuple, Optional, Sequence, Union)
+from typing import (Any, NamedTuple, Optional, Sequence, Union)
 
 import pytest
 import torch
@@ -1085,11 +1085,11 @@ def torch_moe_single(a, w, score, topk):
 def opcheck(op: Union[torch._ops.OpOverload, torch._ops.OpOverloadPacket,
                       torch._library.custom_ops.CustomOpDef],
             args: tuple[Any, ...],
-            kwargs: Optional[Dict[str, Any]] = None,
+            kwargs: Optional[dict[str, Any]] = None,
             *,
             test_utils: Union[str, Sequence[str]] = ALL_OPCHECK_TEST_UTILS,
             raise_exception: bool = True,
-            cond: bool = True) -> Dict[str, str]:
+            cond: bool = True) -> dict[str, str]:
     with unittest.mock.patch('torch.allclose', new=fp8_allclose):
         return torch.library.opcheck(
             op,

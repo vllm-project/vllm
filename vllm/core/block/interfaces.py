@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, FrozenSet, Optional, Protocol
+from typing import FrozenSet, Optional, Protocol
 
 from vllm.utils import Device
 
@@ -272,7 +272,7 @@ class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
     def swap(self, blocks: list[Block], src_device: Device,
-             dst_device: Device) -> Dict[int, int]:
+             dst_device: Device) -> dict[int, int]:
         pass
 
     @abstractmethod

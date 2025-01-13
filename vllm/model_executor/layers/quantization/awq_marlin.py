@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 import torch
 from torch.nn import Parameter
@@ -85,7 +85,7 @@ class AWQMarlinConfig(QuantizationConfig):
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "AWQMarlinConfig":
+    def from_config(cls, config: dict[str, Any]) -> "AWQMarlinConfig":
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
@@ -128,7 +128,7 @@ class AWQMarlinConfig(QuantizationConfig):
         return None
 
     @classmethod
-    def is_awq_marlin_compatible(cls, quant_config: Dict[str, Any]):
+    def is_awq_marlin_compatible(cls, quant_config: dict[str, Any]):
         # Extract data from quant config.
         quant_method = quant_config.get("quant_method", "").lower()
         num_bits = quant_config.get("bits")

@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 
@@ -9,7 +9,7 @@ class DummyLoRAManager:
 
     def __init__(self, device: torch.device = "cuda:0"):
         super().__init__()
-        self._loras: Dict[str, LoRALayerWeights] = {}
+        self._loras: dict[str, LoRALayerWeights] = {}
         self._device = device
 
     def set_module_lora(self, module_name: str, lora: LoRALayerWeights):

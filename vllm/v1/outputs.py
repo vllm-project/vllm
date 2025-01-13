@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 
@@ -28,7 +28,7 @@ class ModelRunnerOutput:
     # [num_reqs]
     req_ids: list[str]
     # req_id -> index
-    req_id_to_index: Dict[str, int]
+    req_id_to_index: dict[str, int]
 
     # [num_reqs]
     sampled_token_ids: list[int]

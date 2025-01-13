@@ -14,7 +14,7 @@ do this in Python code and lazily import prometheus_client.
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, Optional, Protocol
+from typing import Optional, Protocol
 
 from vllm.config import VllmConfig
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
@@ -71,7 +71,7 @@ class Stats:
 
 class SupportsMetricsInfo(Protocol):
 
-    def metrics_info(self) -> Dict[str, str]:
+    def metrics_info(self) -> dict[str, str]:
         ...
 
 

@@ -1,5 +1,5 @@
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_config.py
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import transformers
 
@@ -42,8 +42,8 @@ class UltravoxConfig(transformers.PretrainedConfig):
 
     def __init__(
         self,
-        audio_config: Optional[Dict[str, Any]] = None,
-        text_config: Optional[Dict[str, Any]] = None,
+        audio_config: Optional[dict[str, Any]] = None,
+        text_config: Optional[dict[str, Any]] = None,
         audio_model_id: Optional[str] = None,
         text_model_id: Optional[str] = None,
         ignore_index: int = -100,
@@ -52,8 +52,8 @@ class UltravoxConfig(transformers.PretrainedConfig):
         stack_factor: int = 8,
         norm_init: float = 0.4,
         projector_act: str = "swiglu",
-        text_model_lora_config: Optional[Dict[str, Any]] = None,
-        audio_model_lora_config: Optional[Dict[str, Any]] = None,
+        text_model_lora_config: Optional[dict[str, Any]] = None,
+        audio_model_lora_config: Optional[dict[str, Any]] = None,
         **kwargs,
     ):
         self.ignore_index = ignore_index

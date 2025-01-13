@@ -11,8 +11,7 @@ import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import (AbstractSet, Callable, Dict, Optional, Type, TypeVar,
-                    Union)
+from typing import (AbstractSet, Callable, Optional, Type, TypeVar, Union)
 
 import cloudpickle
 import torch.nn as nn
@@ -300,7 +299,7 @@ def _try_inspect_model_cls(
 @dataclass
 class _ModelRegistry:
     # Keyed by model_arch
-    models: Dict[str, _BaseRegisteredModel] = field(default_factory=dict)
+    models: dict[str, _BaseRegisteredModel] = field(default_factory=dict)
 
     def get_supported_archs(self) -> AbstractSet[str]:
         return self.models.keys()

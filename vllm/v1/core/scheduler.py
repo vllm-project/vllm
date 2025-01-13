@@ -1,6 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Deque, Dict, Iterable, Optional, Union)
+from typing import (TYPE_CHECKING, Deque, Iterable, Optional, Union)
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
@@ -51,7 +51,7 @@ class Scheduler:
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request
-        self.requests: Dict[str, Request] = {}
+        self.requests: dict[str, Request] = {}
         # Priority queues for requests.
         self.waiting: Deque[Request] = deque()
         self.running: list[Request] = []
@@ -65,7 +65,7 @@ class Scheduler:
         # OPTIMIZATION: Cache the RunningRequestData objects to avoid creating
         # them at each scheduling step.
         # Request id -> RunningRequestData
-        self.running_reqs_data: Dict[str, RunningRequestData] = {}
+        self.running_reqs_data: dict[str, RunningRequestData] = {}
 
         # Encoder-related.
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
@@ -94,11 +94,11 @@ class Scheduler:
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
-        req_to_new_block_ids: Dict[str, list[int]] = {}
-        num_scheduled_tokens: Dict[str, int] = {}
+        req_to_new_block_ids: dict[str, list[int]] = {}
+        num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
-        scheduled_encoder_inputs: Dict[str, list[int]] = {}
+        scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
 
         # First, schedule the RUNNING requests.
@@ -607,9 +607,9 @@ class SchedulerOutput:
     scheduled_resumed_reqs: list[ResumedRequestData]
     scheduled_running_reqs: list[RunningRequestData]
 
-    num_scheduled_tokens: Dict[str, int]
+    num_scheduled_tokens: dict[str, int]
     total_num_scheduled_tokens: int
-    scheduled_encoder_inputs: Dict[str, list[int]]
+    scheduled_encoder_inputs: dict[str, list[int]]
     num_common_prefix_blocks: int
 
     preempted_req_ids: set[str]

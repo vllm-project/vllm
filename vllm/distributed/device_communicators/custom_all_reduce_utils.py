@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 from itertools import product
-from typing import Dict, Optional, Sequence
+from typing import Optional, Sequence
 
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -173,7 +173,7 @@ def can_actually_p2p(
 #  e.g. used by different vllm engines. The device id in the cache file is a
 #  **local** device id, i.e. from 0 to num_dev-1, where num_dev is the number
 #  of visible devices in the vllm engine.
-_gpu_p2p_access_cache: Optional[Dict[str, bool]] = None
+_gpu_p2p_access_cache: Optional[dict[str, bool]] = None
 
 
 def gpu_p2p_access_check(src: int, tgt: int) -> bool:
@@ -202,7 +202,7 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         # only the local master process (with local_rank == 0) can
         #  enter this block to calculate the cache
         logger.info("generating GPU P2P access cache in %s", path)
-        cache: Dict[str, bool] = {}
+        cache: dict[str, bool] = {}
         ids = list(range(num_dev))
         # batch of all pairs of GPUs
         batch_src, batch_tgt = zip(*list(product(ids, ids)))

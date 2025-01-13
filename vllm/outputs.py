@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, Generic, Optional
+from typing import Generic, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
@@ -165,7 +165,7 @@ class RequestOutput:
     @classmethod
     def from_seq_group(
         cls, seq_group: SequenceGroup, use_cache: bool,
-        seq_id_to_seq_group: Dict[str, SequenceGroupBase]
+        seq_id_to_seq_group: dict[str, SequenceGroupBase]
     ) -> Optional["RequestOutput"]:
         finished = seq_group.is_finished()
 
@@ -383,7 +383,7 @@ class RequestOutputFactory:
 
     @staticmethod
     def create(seq_group: SequenceGroup,
-               seq_id_to_seq_group: Dict[str, SequenceGroupBase],
+               seq_id_to_seq_group: dict[str, SequenceGroupBase],
                use_cache: bool = False):
         if seq_group.pooled_data is not None:
             return PoolingRequestOutput.from_seq_group(seq_group)

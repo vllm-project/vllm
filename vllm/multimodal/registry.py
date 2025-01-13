@@ -1,8 +1,8 @@
 import functools
 from collections import UserDict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, Generic, Mapping, Optional,
-                    Protocol, Sequence, Type, TypeVar)
+from typing import (TYPE_CHECKING, Any, Generic, Mapping, Optional, Protocol,
+                    Sequence, Type, TypeVar)
 
 import torch.nn as nn
 
@@ -83,13 +83,13 @@ class _ProcessorFactories(Generic[_I]):
         return self.processor(info, dummy_inputs_builder, cache=cache)
 
 
-class _MultiModalLimits(UserDict["ModelConfig", Dict[str, int]]):
+class _MultiModalLimits(UserDict["ModelConfig", dict[str, int]]):
     """
     Wraps `_limits_by_model` for a more informative error message
     when attempting to access a model that does not exist.
     """
 
-    def __getitem__(self, key: "ModelConfig") -> Dict[str, int]:
+    def __getitem__(self, key: "ModelConfig") -> dict[str, int]:
         try:
             return super().__getitem__(key)
         except KeyError as exc:
@@ -170,7 +170,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         data: MultiModalDataDict,
-        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> MultiModalKwargs:
         """
         Apply an input mapper to the data passed to the model.
@@ -184,7 +184,7 @@ class MultiModalRegistry:
         Note:
             This should be called after :meth:`init_mm_limits_per_prompt`.
         """
-        merged_dict: Dict[str, NestedTensors] = {}
+        merged_dict: dict[str, NestedTensors] = {}
 
         for data_key, data_value in data.items():
             plugin = self._get_plugin(data_key)

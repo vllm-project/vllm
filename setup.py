@@ -7,7 +7,6 @@ import subprocess
 import sys
 from pathlib import Path
 from shutil import which
-from typing import Dict
 
 import torch
 from packaging.version import Version, parse
@@ -70,7 +69,7 @@ class CMakeExtension(Extension):
 
 class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
-    did_config: Dict[str, bool] = {}
+    did_config: dict[str, bool] = {}
 
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.

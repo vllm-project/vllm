@@ -2,8 +2,8 @@ import argparse
 import dataclasses
 import json
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, Literal, Mapping, Optional, Type,
-                    Union, cast, get_args)
+from typing import (TYPE_CHECKING, Any, Literal, Mapping, Optional, Type, Union,
+                    cast, get_args)
 
 import torch
 
@@ -60,7 +60,7 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
     if len(val) == 0:
         return None
 
-    out_dict: Dict[str, int] = {}
+    out_dict: dict[str, int] = {}
     for item in val.split(","):
         kv_parts = [part.lower().strip() for part in item.split("=")]
         if len(kv_parts) != 2:
@@ -124,7 +124,7 @@ class EngineArgs:
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
-    rope_scaling: Optional[Dict[str, Any]] = None
+    rope_scaling: Optional[dict[str, Any]] = None
     rope_theta: Optional[float] = None
     hf_overrides: Optional[HfOverrides] = None
     tokenizer_revision: Optional[str] = None
@@ -137,9 +137,9 @@ class EngineArgs:
     # is intended for expert use only. The API may change without
     # notice.
     tokenizer_pool_type: Union[str, Type["BaseTokenizerGroup"]] = "ray"
-    tokenizer_pool_extra_config: Optional[Dict[str, Any]] = None
+    tokenizer_pool_extra_config: Optional[dict[str, Any]] = None
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
-    mm_processor_kwargs: Optional[Dict[str, Any]] = None
+    mm_processor_kwargs: Optional[dict[str, Any]] = None
     disable_mm_preprocessor_cache: bool = False
     enable_lora: bool = False
     enable_lora_bias: bool = False
@@ -189,7 +189,7 @@ class EngineArgs:
     disable_async_output_proc: bool = False
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
 
-    override_neuron_config: Optional[Dict[str, Any]] = None
+    override_neuron_config: Optional[dict[str, Any]] = None
     override_pooler_config: Optional[PoolerConfig] = None
     compilation_config: Optional[CompilationConfig] = None
     worker_cls: str = "auto"

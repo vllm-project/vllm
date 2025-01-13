@@ -2,7 +2,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
@@ -121,7 +121,7 @@ class MistralTokenizer:
             raise TypeError(f"Unsupported tokenizer: {type(tokenizer_)}")
 
         self._vocab = tokenizer_.vocab()
-        # Convert to a Dict[str, int] to match protocol, but this is a lossy
+        # Convert to a dict[str, int] to match protocol, but this is a lossy
         # conversion. There may be multiple token ids that decode to the same
         # string due to partial UTF-8 byte sequences being converted to �
         self._vocab_dict = {
@@ -236,12 +236,12 @@ class MistralTokenizer:
 
         return Encoding(input_ids=input_ids)
 
-    def get_vocab(self) -> Dict[str, int]:
+    def get_vocab(self) -> dict[str, int]:
         # NB: the dictionary form of the vocabulary collapses token ids that map
         # to the same string but have different bytes
         return self._vocab_dict
 
-    def get_added_vocab(self) -> Dict[str, int]:
+    def get_added_vocab(self) -> dict[str, int]:
         # Mistral tokenizers have no added vocabulary
         return {}
 
@@ -253,10 +253,10 @@ class MistralTokenizer:
 
     def apply_chat_template(self,
                             messages: list["ChatCompletionMessageParam"],
-                            tools: Optional[Dict[str, Any]] = None,
+                            tools: Optional[dict[str, Any]] = None,
                             **kwargs) -> list[int]:
 
-        last_message = cast(Dict[str, Any], messages[-1])
+        last_message = cast(dict[str, Any], messages[-1])
         if last_message["role"] == "assistant":
             last_message["prefix"] = True
 

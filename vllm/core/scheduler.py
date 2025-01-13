@@ -4,7 +4,7 @@ import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable, Deque, Dict, Iterable, Optional
+from typing import Callable, Deque, Iterable, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
@@ -1311,9 +1311,9 @@ class Scheduler:
             seq_group_metadata.block_tables.clear()
 
             # seq_id -> SequenceData
-            seq_data: Dict[int, SequenceData] = {}
+            seq_data: dict[int, SequenceData] = {}
             # seq_id -> physical block numbers
-            block_tables: Dict[int, list[int]] = {}
+            block_tables: dict[int, list[int]] = {}
 
             if seq_group.is_encoder_decoder():
                 # Encoder associated with SequenceGroup

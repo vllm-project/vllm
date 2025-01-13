@@ -11,7 +11,7 @@ import os
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import (Any, Callable, Dict, Generator, Iterable, Optional, cast)
+from typing import (Any, Callable, Generator, Iterable, Optional, cast)
 
 import gguf
 import huggingface_hub
@@ -61,7 +61,7 @@ def device_loading_context(module: torch.nn.Module,
         yield module
         return
 
-    original_device_states: Dict[str, torch.device] = {}
+    original_device_states: dict[str, torch.device] = {}
 
     # Store original device states and move parameters to GPU if they're on CPU
     for name, p in module.named_parameters():
@@ -546,12 +546,12 @@ class ShardedStateLoader(BaseModelLoader):
 
     @staticmethod
     def _filter_subtensors(
-        tensors: Dict[str, torch.Tensor], ) -> Dict[str, torch.Tensor]:
+        tensors: dict[str, torch.Tensor], ) -> dict[str, torch.Tensor]:
         """
         Filter out all tensors that share the same memory or a subset of the
         memory of another tensor.
         """
-        same_storage_groups: Dict[Any, list[tuple[str, torch.Tensor]]] = (
+        same_storage_groups: dict[Any, list[tuple[str, torch.Tensor]]] = (
             collections.defaultdict(list))
         for key, tensor in tensors.items():
             if tensor.numel():
@@ -561,7 +561,7 @@ class ShardedStateLoader(BaseModelLoader):
         def get_end_ptr(tensor: torch.Tensor) -> int:
             return tensor.view(-1)[-1].data_ptr() + tensor.element_size()
 
-        result: Dict[str, torch.Tensor] = {}
+        result: dict[str, torch.Tensor] = {}
         for group in same_storage_groups.values():
             for k, t in group:
                 a, b = t.data_ptr(), get_end_ptr(t)
@@ -670,7 +670,7 @@ class ShardedStateLoader(BaseModelLoader):
         part_idx = 0
         total_size = 0
         state_dict = ShardedStateLoader._filter_subtensors(model.state_dict())
-        state_dict_part: Dict[str, torch.Tensor] = {}
+        state_dict_part: dict[str, torch.Tensor] = {}
         for key, tensor in state_dict.items():
             param_size = tensor.nelement() * tensor.element_size()
             if max_size is not None and total_size + param_size > max_size:
@@ -779,7 +779,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         revision: Optional[str],
         pre_quant: bool,
         load_8bit: bool,
-    ) -> tuple[Generator[tuple[str, torch.Tensor], None, None], Dict[str,
+    ) -> tuple[Generator[tuple[str, torch.Tensor], None, None], dict[str,
                                                                      Any]]:
         """Get an iterator to the model weights with bitsandbytes quantization,
         as well as the quantization state dictionary."""
@@ -799,7 +799,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         hf_weights_files, use_safetensors = self._prepare_weights(
             model_name_or_path, revision)
 
-        quant_state_dict: Dict[str, Any] = {}
+        quant_state_dict: dict[str, Any] = {}
 
         if pre_quant:
             if load_8bit:
@@ -871,7 +871,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         # Closure to parse quant_state for each prequant weight
         def _parse_quant_state(param_name: str,
-                               temp_state_dict: Dict) -> QuantState:
+                               temp_state_dict: dict) -> QuantState:
             quant_state = {}
             for k in temp_state_dict:
                 if param_name + "." in k:
@@ -984,7 +984,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         # TODO: Maybe we can replace bitsandbytes_stacked_params_mapping with
         # packed_modules_mapping.
-        inverse_stacked_mapping: Dict[str, list[str]] = {}
+        inverse_stacked_mapping: dict[str, list[str]] = {}
         for orig, (
                 packed,
                 idx,
@@ -1028,7 +1028,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             self.weight_mapper = lambda name: hf_to_vllm_mapper._map_name(name)
         # Modules whose weights might have fused on disk
         # we need their output_sizes to make shard in flight correctly with TP
-        self.maybe_fused_weights_modules: Dict[str, list[int]] = {}
+        self.maybe_fused_weights_modules: dict[str, list[int]] = {}
         self._get_bnb_target_modules(model)
         for name, module in model.named_modules():
             # Some modules like `ReplicatedLinear` should not have their weights
@@ -1093,7 +1093,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         torch.cuda.empty_cache()
 
         param_dict = dict(model.named_parameters())
-        stacked_quant_state_dict: Dict[str, Dict[int, Any]] = {}
+        stacked_quant_state_dict: dict[str, dict[int, Any]] = {}
         # TODO: Change this lazy import to normal import
         # after the checks are updated to run on a new version
         from vllm.model_executor.models.utils import is_pp_missing_parameter
@@ -1223,7 +1223,7 @@ class GGUFModelLoader(BaseModelLoader):
         return gguf_to_hf_name_map
 
     def _get_weights_iterator(
-        self, model_name_or_path: str, gguf_to_hf_name_map: Dict[str, str]
+        self, model_name_or_path: str, gguf_to_hf_name_map: dict[str, str]
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         return gguf_quant_weights_iterator(model_name_or_path,
                                            gguf_to_hf_name_map)

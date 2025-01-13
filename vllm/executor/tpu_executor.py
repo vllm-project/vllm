@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import torch
 
@@ -38,7 +38,7 @@ class TPUExecutor(ExecutorBase):
         local_rank: int = 0,
         rank: int = 0,
         distributed_init_method: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Return worker init args for a given rank."""
         if distributed_init_method is None:
             distributed_init_method = get_distributed_init_method(

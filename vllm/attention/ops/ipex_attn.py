@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Optional
 
 try:
     import intel_extension_for_pytorch.llm.modules as ipex_modules
@@ -116,7 +116,7 @@ class _PagedAttention:
     @staticmethod
     def copy_blocks(
         kv_caches: list[torch.Tensor],
-        src_to_dists: Dict[int, list[int]],
+        src_to_dists: dict[int, list[int]],
         *args,
     ) -> None:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]

@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Dict
 
 import torch
 
@@ -37,7 +36,7 @@ class MambaCacheManager:
 
         # Maps between the request id and a dict that maps between the seq_id
         # and its index inside the self.mamba_cache
-        self.mamba_cache_indices_mapping: Dict[str, Dict[int, int]] = {}
+        self.mamba_cache_indices_mapping: dict[str, dict[int, int]] = {}
         self.free_cache_indices = list(range(max_batch_size))
 
     def current_run_tensors(self, input_ids: torch.Tensor,
@@ -139,7 +138,7 @@ class MambaCacheManager:
             return self.mamba_cache_indices_mapping[cur_rid][seq_id]
 
     def _prepare_current_run_mamba_cache(
-            self, request_ids_to_seq_ids: Dict[str, list[int]],
+            self, request_ids_to_seq_ids: dict[str, list[int]],
             finished_requests_ids: list[str]) -> list[int]:
         return [
             self._assign_seq_id_to_cache_index(req_id, seq_id,

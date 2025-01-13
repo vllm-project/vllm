@@ -1,7 +1,7 @@
 import dataclasses
 import functools
 from dataclasses import dataclass, field
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Optional, Union)
 
 import torch
 
@@ -161,7 +161,7 @@ class StatefulModelInput(BroadcastableModelInput):
     num_queries: int = -1
     num_single_step_prefills: int = 0
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         assert self.frozen_model_input is not None
         tensor_dict = self.frozen_model_input.as_broadcastable_tensor_dict()
         new_tensor_dict = {
@@ -180,7 +180,7 @@ class StatefulModelInput(BroadcastableModelInput):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "StatefulModelInput":
         tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
@@ -343,7 +343,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         return torch.cuda.Stream()
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: Dict[str, Any]) -> StatefulModelInput:
+            self, tensor_dict: dict[str, Any]) -> StatefulModelInput:
         model_input = (StatefulModelInput.from_broadcasted_tensor_dict(
             tensor_dict,
             attn_backend=self.attn_backend,

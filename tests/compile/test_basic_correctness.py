@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Dict, Optional
+from typing import Optional
 
 import pytest
 
@@ -107,7 +107,7 @@ def test_compile_correctness(test_setting: TestSetting):
                 ["-tp", str(tp_size)]
 
     all_args: list[list[str]] = []
-    all_envs: list[Optional[Dict[str, str]]] = []
+    all_envs: list[Optional[dict[str, str]]] = []
 
     for level in [
             CompilationLevel.NO_COMPILATION,

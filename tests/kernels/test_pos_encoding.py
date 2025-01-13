@@ -1,5 +1,5 @@
 from itertools import accumulate, product
-from typing import Dict, Optional
+from typing import Optional
 
 import pytest
 import torch
@@ -219,7 +219,7 @@ def test_rope_module_cache():
     })
     settings = (HEAD_SIZES, ROTARY_DIMS, MAX_POSITIONS, BASES, IS_NEOX_STYLE,
                 ROPE_SCALINGS, DTYPES)
-    rope_setting_id_map: Dict[str, int] = {}
+    rope_setting_id_map: dict[str, int] = {}
     for setting in product(*settings):
         head_size, rotary_dim, max_position, base, \
             is_neox_stype, rope_scaling, dtype = setting

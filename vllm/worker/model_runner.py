@@ -6,8 +6,7 @@ import time
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Type, TypeVar,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Callable, Optional, Type, TypeVar, Union)
 
 import numpy as np
 import torch
@@ -93,14 +92,14 @@ class ModelInputForGPU(ModelRunnerInputBase):
     prompt_adapter_mapping: Optional[PromptAdapterMapping] = None
     prompt_adapter_requests: Optional[set[PromptAdapterRequest]] = None
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
-    request_ids_to_seq_ids: Optional[Dict[str, list[int]]] = None
+    request_ids_to_seq_ids: Optional[dict[str, list[int]]] = None
     finished_requests_ids: Optional[list[str]] = None
     virtual_engine: int = 0
     async_callback: Optional[Callable] = None
     seq_group_metadata_list: Optional[list[SequenceGroupMetadata]] = None
     scheduler_outputs: Optional[SchedulerOutputs] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -119,7 +118,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls: Type[TModelInputForGPU],
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> TModelInputForGPU:
         if attn_backend is not None:
@@ -150,7 +149,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     # used by the driver worker.
     is_prompt: Optional[bool] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -171,7 +170,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForGPUWithSamplingMetadata":
         tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
@@ -213,7 +212,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             request_id: str,
             seq_ids: list[int],
             is_prompt: bool,
-            block_tables: Optional[Dict[int, list[int]]],
+            block_tables: Optional[dict[int, list[int]]],
             computed_block_nums: list[int],
             n_seqs: int = 0,
 
@@ -247,7 +246,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             # Multi-modal inputs.
             multi_modal_kwargs: Optional[MultiModalKwargs] = None,
-            multi_modal_placeholder_maps: Optional[Dict[
+            multi_modal_placeholder_maps: Optional[dict[
                 str, MultiModalPlaceholderMap]] = None,
 
             # Whether the prefix cache is hit (prefill only).
@@ -1020,7 +1019,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.max_batchsize_to_capture = \
             self.vllm_config.compilation_config.max_capture_size
 
-        self.graph_runners: list[Dict[int, CUDAGraphRunner]] = [
+        self.graph_runners: list[dict[int, CUDAGraphRunner]] = [
             {} for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.graph_memory_pool: Optional[tuple[
@@ -1078,7 +1077,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             int(self.cache_config.cpu_offload_gb * 1024**3))
 
         # Used to cache python objects
-        self.inter_data_cache: Dict[int, PyObjectCache] = {}
+        self.inter_data_cache: dict[int, PyObjectCache] = {}
 
         # Using the PythonizationCache in Pipeline-Parallel clobbers the
         # SequenceGroupToSample object. In Pipeline-Parallel, we have
@@ -1543,7 +1542,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     elapsed_time, cuda_graph_size / GiB_bytes)
 
     def _update_inputs_to_capture_for_enc_dec_model(self,
-                                                    capture_inputs: Dict[str,
+                                                    capture_inputs: dict[str,
                                                                          Any]):
         """
         Updates the set of input tensors needed for CUDA graph capture in an
@@ -1577,7 +1576,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
     ) -> ModelInputForGPUWithSamplingMetadata:
         model_input = \
             ModelInputForGPUWithSamplingMetadata.from_broadcasted_tensor_dict(
@@ -1853,8 +1852,8 @@ class CUDAGraphRunner(nn.Module):
         self.backend_name = backend_name
         self.attn_state = attn_state
 
-        self.input_buffers: Dict[str, torch.Tensor] = {}
-        self.output_buffers: Dict[str, torch.Tensor] = {}
+        self.input_buffers: dict[str, torch.Tensor] = {}
+        self.output_buffers: dict[str, torch.Tensor] = {}
 
         self._graph: Optional[torch.cuda.CUDAGraph] = None
         self._is_encoder_decoder_model = is_encoder_decoder_model

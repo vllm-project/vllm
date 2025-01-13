@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Optional
+from typing import Optional
 
 import openai
 import pytest
@@ -42,7 +42,7 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
 
     # make sure the arguments parse properly
     parsed_arguments = json.loads(tool_calls[0].function.arguments)
-    assert isinstance(parsed_arguments, Dict)
+    assert isinstance(parsed_arguments, dict)
     assert isinstance(parsed_arguments.get("city"), str)
     assert isinstance(parsed_arguments.get("state"), str)
     assert parsed_arguments.get("city") == "Dallas"
@@ -115,7 +115,7 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
 
     # validate arguments
     streamed_args = json.loads(function_args_str)
-    assert isinstance(streamed_args, Dict)
+    assert isinstance(streamed_args, dict)
     assert isinstance(streamed_args.get("city"), str)
     assert isinstance(streamed_args.get("state"), str)
     assert streamed_args.get("city") == "Dallas"
@@ -126,7 +126,7 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
     assert choice.message.role == role_name
     assert choice.message.tool_calls[0].function.name == function_name
 
-    # compare streamed with non-streamed args Dict-wise, not string-wise
+    # compare streamed with non-streamed args dict-wise, not string-wise
     # because character-to-character comparison might not work e.g. the tool
     # call parser adding extra spaces or something like that. we care about the
     # dicts matching not byte-wise match

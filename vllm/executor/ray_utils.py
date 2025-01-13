@@ -1,7 +1,7 @@
 import os
 import time
 from collections import defaultdict
-from typing import Dict, Optional, Union
+from typing import Optional, Union
 
 import msgspec
 
@@ -95,7 +95,7 @@ try:
 
             return output
 
-        def override_env_vars(self, vars: Dict[str, str]):
+        def override_env_vars(self, vars: dict[str, str]):
             os.environ.update(vars)
 
     ray_import_err = None
@@ -134,7 +134,7 @@ def _verify_bundles(placement_group: "PlacementGroup",
     # bundle_idx -> bundle (e.g., {"GPU": 1})
     bundles = pg_data["bundles"]
     # node_id -> list of bundle (e.g., {"GPU": 1})
-    node_id_to_bundle: Dict[str, list[Dict[str, float]]] = defaultdict(list)
+    node_id_to_bundle: dict[str, list[dict[str, float]]] = defaultdict(list)
 
     for bundle_idx, node_id in bundle_to_node_ids.items():
         node_id_to_bundle[node_id].append(bundles[bundle_idx])
@@ -293,7 +293,7 @@ def initialize_ray_cluster(
                 "number of available %ss in the placement group.", device_str,
                 device_str)
         # Create a new placement group
-        placement_group_specs: list[Dict[str, float]] = ([{
+        placement_group_specs: list[dict[str, float]] = ([{
             device_str: 1.0
         } for _ in range(parallel_config.world_size)])
 

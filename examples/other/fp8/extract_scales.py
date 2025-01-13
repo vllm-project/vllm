@@ -2,7 +2,7 @@ import argparse
 import glob
 import json
 import os
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
@@ -97,7 +97,7 @@ def _kv_scales_extractor(
         hf_tensor_files: list[str],
         use_safetensors: bool,
         rank_keyword: str = "rank",
-        expected_tp_size: Optional[int] = None) -> Dict[int, Dict[int, float]]:
+        expected_tp_size: Optional[int] = None) -> dict[int, dict[int, float]]:
     """
     Given a list of files containing tensor data, attempt to extract KV cache
     scales from these files. Intended as a helper function taking in the output
@@ -115,7 +115,7 @@ def _kv_scales_extractor(
     for char in rank_keyword:
         assert not char.isdecimal(
         ), f"Rank keyword {rank_keyword} contains a numeric character!"
-    rank_scales_map: Dict[int, Dict[int, float]] = {}
+    rank_scales_map: dict[int, dict[int, float]] = {}
     for tensor_file in hf_tensor_files:
         try:
             rank_idx = tensor_file.find(rank_keyword)
@@ -141,7 +141,7 @@ def _kv_scales_extractor(
             raise
 
         if rank not in rank_scales_map:
-            layer_scales_map: Dict[int, float] = {}
+            layer_scales_map: dict[int, float] = {}
             rank_scales_map[rank] = layer_scales_map
         else:
             raise RuntimeError(
@@ -194,8 +194,8 @@ def _kv_scales_extractor(
 
 def _metadata_extractor(quantized_model_dir: str,
                         metadata_extract_fns: \
-                        Dict[str, Callable[[Dict[str, Any]], Any]]) \
-                        -> Dict[str, Any]:
+                        dict[str, Callable[[dict[str, Any]], Any]]) \
+                        -> dict[str, Any]:
     """
     Given a directory containing quantized model files, this function
     aims to extract metadata from the JSON files within this directory.
@@ -222,7 +222,7 @@ def _metadata_extractor(quantized_model_dir: str,
             "does not exist.")
     metadata_files = glob.glob(os.path.join(quantized_model_dir, "*.json"))
 
-    result: Dict[str, Any] = {}
+    result: dict[str, Any] = {}
     for file in metadata_files:
         with open(file) as f:
             try:

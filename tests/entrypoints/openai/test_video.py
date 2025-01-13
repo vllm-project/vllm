@@ -1,4 +1,3 @@
-from typing import Dict
 
 import openai
 import pytest
@@ -47,7 +46,7 @@ async def client(server):
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_video() -> Dict[str, str]:
+def base64_encoded_video() -> dict[str, str]:
     return {
         video_url: encode_video_base64(fetch_video(video_url))
         for video_url in TEST_VIDEO_URLS
@@ -149,7 +148,7 @@ async def test_single_chat_session_video_beamsearch(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 async def test_single_chat_session_video_base64encoded(
         client: openai.AsyncOpenAI, model_name: str, video_url: str,
-        base64_encoded_video: Dict[str, str]):
+        base64_encoded_video: dict[str, str]):
 
     messages = [{
         "role":
@@ -207,7 +206,7 @@ async def test_single_chat_session_video_base64encoded(
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 async def test_single_chat_session_video_base64encoded_beamsearch(
         client: openai.AsyncOpenAI, model_name: str, video_url: str,
-        base64_encoded_video: Dict[str, str]):
+        base64_encoded_video: dict[str, str]):
 
     messages = [{
         "role":

@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import torch
 
@@ -63,7 +63,7 @@ class HQQMarlinConfig(QuantizationConfig):
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "HQQMarlinConfig":
+    def from_config(cls, config: dict[str, Any]) -> "HQQMarlinConfig":
         wq_params = (config["quant_config"]["weight_quant_params"])
         weight_bits = cls.get_from_keys(wq_params, ["nbits"])
         group_size = cls.get_from_keys(wq_params, ["group_size"])

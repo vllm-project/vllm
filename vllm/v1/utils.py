@@ -2,8 +2,7 @@ import multiprocessing
 import os
 import weakref
 from collections.abc import Sequence
-from typing import (Any, Callable, Dict, Generic, Optional, TypeVar, Union,
-                    overload)
+from typing import (Any, Callable, Generic, Optional, TypeVar, Union, overload)
 
 from vllm.logger import init_logger
 from vllm.utils import get_mp_context, kill_process_tree
@@ -90,7 +89,7 @@ class BackgroundProcHandle:
         output_path: str,
         process_name: str,
         target_fn: Callable,
-        process_kwargs: Dict[Any, Any],
+        process_kwargs: dict[Any, Any],
     ):
         context = get_mp_context()
         reader, writer = context.Pipe(duplex=False)

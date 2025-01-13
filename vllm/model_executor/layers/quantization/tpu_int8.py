@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import torch
 from torch.nn import Module
@@ -40,7 +40,7 @@ class Int8TpuConfig(QuantizationConfig):
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "Int8TpuConfig":
+    def from_config(cls, config: dict[str, Any]) -> "Int8TpuConfig":
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         return cls(activation_scheme=activation_scheme)
 

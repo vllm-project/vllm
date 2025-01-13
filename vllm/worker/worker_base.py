@@ -2,7 +2,7 @@ import dataclasses
 import os
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Type, Union
+from typing import Any, Optional, Type, Union
 
 import torch
 
@@ -154,7 +154,7 @@ class WorkerInput:
     @classmethod
     def from_broadcasted_tensor_dict(
         cls: Type["WorkerInput"],
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
     ) -> "WorkerInput":
         """
         Pop fields from the given tensor_dict and populate a new instance of
@@ -170,7 +170,7 @@ class WorkerInput:
         )
 
     def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
+            self) -> dict[str, Union[int, torch.Tensor]]:
         """
         Extract broadcastable fields.
         """
@@ -241,7 +241,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def _get_worker_input_from_broadcast(
         self
-    ) -> Optional[tuple[BroadcastableModelInput, WorkerInput, Dict[
+    ) -> Optional[tuple[BroadcastableModelInput, WorkerInput, dict[
             str, torch.Tensor]]]:
         """ Get the worker input from the broadcasted tensor dict. """
         assert self.do_metadata_broadcast
@@ -261,7 +261,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
-    ) -> tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
+    ) -> tuple[BroadcastableModelInput, WorkerInput, dict[str, torch.Tensor]]:
         """ Get the driver input and broadcast it to other workers.  """
         assert self.is_driver_worker
 
@@ -291,7 +291,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[tuple[BroadcastableModelInput, WorkerInput, Dict[
+    ) -> Optional[tuple[BroadcastableModelInput, WorkerInput, dict[
             str, torch.Tensor]]]:
         """
         Prepare the inputs to ModelRunner and workers.
@@ -429,7 +429,7 @@ class WorkerWrapperBase:
             init_cached_hf_modules()
 
     @staticmethod
-    def update_environment_variables(envs: Dict[str, str]) -> None:
+    def update_environment_variables(envs: dict[str, str]) -> None:
         key = 'CUDA_VISIBLE_DEVICES'
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
@@ -475,8 +475,8 @@ class WorkerWrapperBase:
 
 
 def extract_previous_hidden_states(
-        data: Union[ExecuteModelRequest, Dict[str, torch.Tensor]]) -> \
-            Dict[str, torch.Tensor]:
+        data: Union[ExecuteModelRequest, dict[str, torch.Tensor]]) -> \
+            dict[str, torch.Tensor]:
     """If data contains previous_hidden_states, extract it. This returns a dict
     which can be used directly as additional kwargs in any following 
     execute_model calls. This is used in draft models like EAGLE."""

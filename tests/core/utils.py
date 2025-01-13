@@ -1,6 +1,6 @@
 import time
 from collections import defaultdict
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 from typing import Sequence as GenericSequence
 
 from vllm import SamplingParams
@@ -238,7 +238,7 @@ class SchedulerProxy:
 
     def __init__(self, scheduler: Scheduler):
         self.scheduler_ = scheduler
-        self.call_history: Dict[str, list[Any]] = defaultdict(list)
+        self.call_history: dict[str, list[Any]] = defaultdict(list)
 
     def __getattr__(self, name: str) -> Any:
 

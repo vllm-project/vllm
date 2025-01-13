@@ -1,5 +1,5 @@
 from array import array
-from typing import Callable, Dict, Mapping, Optional
+from typing import Callable, Mapping, Optional
 from unittest.mock import patch
 
 import pytest
@@ -112,7 +112,7 @@ def _get_max_dynamic_patch_info(init_max_dynamic_patch: int,
 
 def _get_processed_max_dynamic_patch(
     processor: Callable[[ProcessorInputs], ProcessorInputs],
-    inference_kwargs: Optional[Dict[str, int]],
+    inference_kwargs: Optional[dict[str, int]],
 ) -> int:
     processed_inputs = processor(
         token_inputs(prompt_token_ids=[],

@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Optional
 
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID, Logprob, SamplingParams,
                            Sequence, SequenceGroup)
@@ -20,7 +20,7 @@ class Detokenizer:
         return self.tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
     def decode_prompt_logprobs_inplace(self, seq_group: SequenceGroup,
-                                       prompt_logprobs: list[Optional[Dict[
+                                       prompt_logprobs: list[Optional[dict[
                                            int, Logprob]]],
                                        position_offset: int) -> None:
         """Decodes the logprobs for the prompt of a sequence group.

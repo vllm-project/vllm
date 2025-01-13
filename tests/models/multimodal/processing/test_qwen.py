@@ -1,5 +1,5 @@
 """Tests for Qwen's multimodal preprocessing kwargs."""
-from typing import Dict, Union
+from typing import Union
 
 import pytest
 import torch
@@ -112,7 +112,7 @@ def test_input_mapper_valid_mm_data(input_mapper_for_qwen,
 ])
 def test_input_processor_invalid_mm_data(input_processor_for_qwen,
                                          qwen_vl_context: InputContext,
-                                         mm_data: Dict[str, torch.Tensor]):
+                                         mm_data: dict[str, torch.Tensor]):
     """Test sad cases validated in Qwen's multimodal input processor."""
     tokenizer = cached_get_tokenizer(qwen_vl_context.model_config.tokenizer,
                                      trust_remote_code=True)

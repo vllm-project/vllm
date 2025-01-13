@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Dict, Optional, Type, Union
+from typing import Optional, Type, Union
 
 import torch
 import torch.distributed
@@ -93,7 +93,7 @@ class Worker(LocalOrDistributedWorkerBase):
         self.cache_engine: list[CacheEngine]
         # Initialize gpu_cache as pooling models don't initialize kv_caches
         self.gpu_cache: Optional[list[list[torch.Tensor]]] = None
-        self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
+        self._seq_group_metadata_cache: dict[str, SequenceGroupMetadata] = {}
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace

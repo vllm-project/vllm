@@ -1,6 +1,5 @@
 import copy
 import weakref
-from typing import Dict
 
 import torch
 
@@ -292,7 +291,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
         new_seq_group_metadata = copy.copy(seq_group_metadata)
 
         # We must shallow-copy seq_data as we will append token ids
-        new_seq_data: Dict[int, SequenceData] = {}
+        new_seq_data: dict[int, SequenceData] = {}
         for seq_id, old_seq_data in seq_group_metadata.seq_data.items():
             new_seq_data[seq_id] = copy.copy(old_seq_data)
             new_seq_data[seq_id].output_token_ids =\
@@ -325,7 +324,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
         # Shallow-copy the SequenceGroupMetadata.
         new_seq_group_metadata = copy.copy(seq_group_metadata)
         # Shallow-copy seq_data and modify the output_token_ids.
-        new_seq_data: Dict[int, SequenceData] = {}
+        new_seq_data: dict[int, SequenceData] = {}
         for seq_id, old_seq_data in seq_group_metadata.seq_data.items():
             if (seq_id in seq_ids_to_copy):
                 new_seq_data[seq_id] = copy.copy(old_seq_data)

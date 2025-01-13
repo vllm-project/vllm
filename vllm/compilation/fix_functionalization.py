@@ -1,5 +1,5 @@
 import operator
-from typing import Dict, Iterable, Optional, Union
+from typing import Iterable, Optional, Union
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -108,7 +108,7 @@ class FixFunctionalizationPass(VllmInductorPass):
     def defunctionalize(self,
                         graph: torch.fx.Graph,
                         node: torch.fx.Node,
-                        mutated_args: Dict[int, Union[torch.fx.Node, str]],
+                        mutated_args: dict[int, Union[torch.fx.Node, str]],
                         args: Optional[tuple[Union[torch.fx.Node, str],
                                              ...]] = None):
         """
@@ -121,7 +121,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         self._remove(node)
 
     def replace_users_with_mutated_args(self, node: torch.fx.Node,
-                                        mutated_args: Dict[int,
+                                        mutated_args: dict[int,
                                                            Union[torch.fx.Node,
                                                                  str]]):
         """
@@ -137,7 +137,7 @@ class FixFunctionalizationPass(VllmInductorPass):
             user.replace_all_uses_with(arg)
             self._remove(user)
 
-    def getitem_users(self, node: torch.fx.Node) -> Dict[int, torch.fx.Node]:
+    def getitem_users(self, node: torch.fx.Node) -> dict[int, torch.fx.Node]:
         """
         Returns the operator.getitem users of the auto-functionalized node,
         indexed by the index they are getting.

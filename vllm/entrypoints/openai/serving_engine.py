@@ -1,8 +1,8 @@
 import json
 from concurrent.futures.thread import ThreadPoolExecutor
 from http import HTTPStatus
-from typing import (Any, Callable, Dict, Iterable, Iterator, Mapping, Optional,
-                    Sequence, TypedDict, Union)
+from typing import (Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence,
+                    TypedDict, Union)
 
 from fastapi import Request
 from pydantic import Field
@@ -363,9 +363,9 @@ class OpenAIServing:
         chat_template_content_format: ChatTemplateContentFormatOption,
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
-        tool_dicts: Optional[list[Dict[str, Any]]] = None,
-        documents: Optional[list[Dict[str, str]]] = None,
-        chat_template_kwargs: Optional[Dict[str, Any]] = None,
+        tool_dicts: Optional[list[dict[str, Any]]] = None,
+        documents: Optional[list[dict[str, str]]] = None,
+        chat_template_kwargs: Optional[dict[str, Any]] = None,
         tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = False,
@@ -383,7 +383,7 @@ class OpenAIServing:
             content_format=resolved_content_format,
         )
 
-        _chat_template_kwargs: Dict[str, Any] = dict(
+        _chat_template_kwargs: dict[str, Any] = dict(
             chat_template=chat_template,
             add_generation_prompt=add_generation_prompt,
             continue_final_message=continue_final_message,

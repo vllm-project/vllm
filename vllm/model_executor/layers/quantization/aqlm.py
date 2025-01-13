@@ -2,7 +2,7 @@
 # and https://arxiv.org/pdf/2401.06118.pdf
 
 import math
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
@@ -199,7 +199,7 @@ class AQLMConfig(QuantizationConfig):
         return []  # no extra configs.
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "AQLMConfig":
+    def from_config(cls, config: dict[str, Any]) -> "AQLMConfig":
         in_group_size = cls.get_from_keys(config, ["in_group_size"])
         nbits_per_codebook = cls.get_from_keys(config, ["nbits_per_codebook"])
         num_code_books = cls.get_from_keys(config, ["num_codebooks"])

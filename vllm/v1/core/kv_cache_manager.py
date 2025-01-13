@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, Iterable, Optional
+from typing import Iterable, Optional
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
@@ -61,13 +61,13 @@ class KVCacheManager:
         # if there is already an identical block in the cache. This is because
         # we want to make sure the allocated block IDs won't change so that
         # block tables are append-only.
-        self.cached_block_hash_to_block: Dict[BlockHashType, Dict[
+        self.cached_block_hash_to_block: dict[BlockHashType, dict[
             int, KVCacheBlock]] = defaultdict(dict)
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
-        self.req_to_blocks: Dict[str, list[KVCacheBlock]] = {}
+        self.req_to_blocks: dict[str, list[KVCacheBlock]] = {}
 
     def get_computed_blocks(self, request: Request) -> list[KVCacheBlock]:
         """Get the computed (cached) blocks for the request.

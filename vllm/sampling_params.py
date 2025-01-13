@@ -3,7 +3,7 @@ import copy
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
 
 import msgspec
 from pydantic import BaseModel
@@ -28,7 +28,7 @@ class SamplingType(IntEnum):
 @dataclass
 class GuidedDecodingParams:
     """One of these fields will be used to build a logit processor."""
-    json: Optional[Union[str, Dict]] = None
+    json: Optional[Union[str, dict]] = None
     regex: Optional[str] = None
     choice: Optional[list[str]] = None
     grammar: Optional[str] = None
@@ -39,7 +39,7 @@ class GuidedDecodingParams:
 
     @staticmethod
     def from_optional(
-        json: Optional[Union[Dict, BaseModel, str]] = None,
+        json: Optional[Union[dict, BaseModel, str]] = None,
         regex: Optional[str] = None,
         choice: Optional[list[str]] = None,
         grammar: Optional[str] = None,
@@ -206,7 +206,7 @@ class SamplingParams(
 
     # Fields used to construct logits processors
     guided_decoding: Optional[GuidedDecodingParams] = None
-    logit_bias: Optional[Dict[int, float]] = None
+    logit_bias: Optional[dict[int, float]] = None
     allowed_token_ids: Optional[list[int]] = None
 
     @staticmethod
@@ -238,7 +238,7 @@ class SamplingParams(
                                                    msgspec.Meta(ge=1)]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         guided_decoding: Optional[GuidedDecodingParams] = None,
-        logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]] = None,
+        logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
@@ -413,7 +413,7 @@ class SamplingParams(
 
     def update_from_generation_config(
             self,
-            generation_config: Dict[str, Any],
+            generation_config: dict[str, Any],
             model_eos_token_id: Optional[int] = None) -> None:
         """Update if there are non-default values from generation_config"""
 

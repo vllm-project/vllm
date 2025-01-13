@@ -1,5 +1,5 @@
 from itertools import count
-from typing import Callable, Dict, Optional
+from typing import Callable, Optional
 from typing import Sequence as GenericSequence
 from typing import TypeVar, Union
 from unittest.mock import MagicMock
@@ -182,8 +182,8 @@ def create_chunked_seq_group_metadata_from_prompt(
 
 
 def assert_logprobs_dict_allclose(
-        actual_logprobs: list[Dict[int, Logprob]],
-        expected_logprobs: list[Dict[int, Logprob]]) -> None:
+        actual_logprobs: list[dict[int, Logprob]],
+        expected_logprobs: list[dict[int, Logprob]]) -> None:
     for single_step_actual_logprobs, single_step_expected_logprobs in zip(
             actual_logprobs, expected_logprobs):
         assert set(single_step_actual_logprobs.keys()) == set(

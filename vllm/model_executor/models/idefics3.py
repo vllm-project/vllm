@@ -14,8 +14,8 @@
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
 import math
-from typing import (Dict, Iterable, Literal, Mapping, NamedTuple, Optional,
-                    TypedDict, Union)
+from typing import (Iterable, Literal, Mapping, NamedTuple, Optional, TypedDict,
+                    Union)
 
 import torch
 import torch.utils.checkpoint
@@ -91,7 +91,7 @@ class Idefics3ProcessorSize(NamedTuple):
 ImageInputs = Union[Idefics3ImagePixelInputs, Idefics3ImageEmbeddingInputs]
 
 
-def get_mm_processor_kwargs(size: Optional[Dict[str, int]] = None) -> Dict:
+def get_mm_processor_kwargs(size: Optional[dict[str, int]] = None) -> dict:
     mm_processor_kwargs = {}
     if size:
         mm_processor_kwargs["size"] = Idefics3ProcessorSize(**size)
@@ -102,7 +102,7 @@ def input_mapper_for_idefics3(
     ctx: InputContext,
     data: object,
     *,
-    size: Optional[Dict[str, int]] = None,
+    size: Optional[dict[str, int]] = None,
 ):
     model_config = ctx.model_config
     mm_processor_kwargs = get_mm_processor_kwargs(size)
@@ -232,7 +232,7 @@ def _get_image_prompt_string(image_rows: int, image_cols: int,
 def input_processor_for_idefics3(ctx: InputContext,
                                  inputs: DecoderOnlyInputs,
                                  *,
-                                 size: Optional[Dict[str, int]] = None):
+                                 size: Optional[dict[str, int]] = None):
     multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return inputs
@@ -332,7 +332,7 @@ def _get_max_num_image_patch(image_processor: Idefics3ImageProcessor) -> int:
 
 def get_max_idefics3_image_tokens(ctx: InputContext,
                                   *,
-                                  size: Optional[Dict[str,
+                                  size: Optional[dict[str,
                                                       int]] = None) -> int:
     model_config = ctx.model_config
     mm_processor_kwargs = get_mm_processor_kwargs(size)
@@ -350,7 +350,7 @@ def dummy_data_for_idefics3(
         seq_len: int,
         mm_counts: Mapping[str, int],
         *,
-        size: Optional[Dict[str, int]] = None) -> DummyData:
+        size: Optional[dict[str, int]] = None) -> DummyData:
     hf_config = ctx.get_hf_config()
     num_images = mm_counts["image"]
 

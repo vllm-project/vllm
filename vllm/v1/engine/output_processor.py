@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Optional
 
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.detokenizer_utils import AnyTokenizer
@@ -66,7 +66,7 @@ class OutputProcessor:
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
-        self.request_states: Dict[str, RequestState] = {}
+        self.request_states: dict[str, RequestState] = {}
 
     def is_request_active(self, request_id: str) -> bool:
         return request_id in self.request_states

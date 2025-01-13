@@ -1,6 +1,6 @@
 import dataclasses
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 
@@ -39,7 +39,7 @@ class MultiStepWorker(Worker):
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
-    ) -> tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
+    ) -> tuple[BroadcastableModelInput, WorkerInput, dict[str, torch.Tensor]]:
         """
         Get the driver input and broadcast it to other workers.
         """
@@ -134,7 +134,7 @@ class MultiStepWorker(Worker):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> Optional[tuple[StatefulModelInput, WorkerInput, Dict[str,
+    ) -> Optional[tuple[StatefulModelInput, WorkerInput, dict[str,
                                                               torch.Tensor]]]:
         """
         Depending on the current state of the request and multi step worker,

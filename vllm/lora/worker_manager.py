@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from typing import Any, Dict, Literal, Optional, Type, Union
+from typing import Any, Literal, Optional, Type, Union
 
 import torch
 
@@ -33,7 +33,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
         vocab_size: int,
         lora_config: LoRAConfig,
         device: torch.device,
-        embedding_modules: Dict[str, str],
+        embedding_modules: dict[str, str],
         embedding_padding_modules: list[str],
         lora_model_cls: Type[LoRAModel] = LoRAModel,
         max_position_embeddings: Optional[int] = None,

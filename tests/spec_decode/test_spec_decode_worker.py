@@ -1,7 +1,6 @@
 import random
 from collections import defaultdict
 from types import SimpleNamespace
-from typing import Dict
 from unittest.mock import MagicMock
 
 import pytest
@@ -333,11 +332,11 @@ def test_correctly_formats_output(k: int, batch_size: int,
         next(iter(seq_group_metadata.seq_data.keys()))
         for seq_group_metadata in seq_group_metadata_list
     ]
-    actual_output_by_seq: Dict[int, list[SequenceOutput]] = {
+    actual_output_by_seq: dict[int, list[SequenceOutput]] = {
         seq_id: []
         for seq_id in seq_ids
     }
-    expected_output_by_seq: Dict[int, list[SequenceOutput]] = {
+    expected_output_by_seq: dict[int, list[SequenceOutput]] = {
         seq_id: []
         for seq_id in seq_ids
     }
@@ -723,7 +722,7 @@ def test_populate_seq_ids_with_bonus_tokens():
                                        size=(batch_size, (k + 1)),
                                        dtype=torch.int64,
                                        device='cuda')
-    expected_request_id_seq_ids_mapping: Dict[str, set[int]] = defaultdict(set)
+    expected_request_id_seq_ids_mapping: dict[str, set[int]] = defaultdict(set)
     for seq_group_metadata in seq_group_metadata_list:
         for seq_id in seq_group_metadata.seq_data:
             expected_request_id_seq_ids_mapping[

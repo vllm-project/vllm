@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, cast
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import torch
@@ -95,10 +95,10 @@ class GPUModelRunner:
         # self.model: nn.Module  # Set after load_model
         self.kv_caches: list[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
-        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
+        self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
         # Request states.
-        self.requests: Dict[str, CachedRequestState] = {}
+        self.requests: dict[str, CachedRequestState] = {}
         # Persistent batch.
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
@@ -475,7 +475,7 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
-        req_id_output_token_ids: Dict[str, list[int]] = \
+        req_id_output_token_ids: dict[str, list[int]] = \
             {req_id: req.output_token_ids \
                 for req_id, req in self.requests.items()}
 

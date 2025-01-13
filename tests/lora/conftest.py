@@ -1,6 +1,6 @@
 import tempfile
 from collections import OrderedDict
-from typing import Dict, TypedDict
+from typing import TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -265,7 +265,7 @@ def long_context_infos(long_context_lora_files_16k_1,
                        long_context_lora_files_16k_2,
                        long_context_lora_files_32k):
     cleanup_dist_env_and_memory(shutdown_ray=True)
-    infos: Dict[int, ContextInfo] = {}
+    infos: dict[int, ContextInfo] = {}
     for lora_checkpoint_info in LONG_LORA_INFOS:
         lora_id = lora_checkpoint_info["lora_id"]
         if lora_id == 1:

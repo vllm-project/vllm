@@ -1,4 +1,4 @@
-from typing import Any, Dict, Literal, Optional, cast
+from typing import Any, Literal, Optional, cast
 
 import torch
 from compressed_tensors.config import (CompressionFormat,
@@ -30,19 +30,19 @@ from vllm.platforms import current_platform
 __all__ = ["CompressedTensorsLinearMethod"]
 
 SPARSITY_CONFIG_NAME: Literal["sparsity_config"] = "sparsity_config"
-QUANTIZATION_SCHEME_MAP_TYPE = Dict[str, Optional[Dict[str, QuantizationArgs]]]
+QUANTIZATION_SCHEME_MAP_TYPE = dict[str, Optional[dict[str, QuantizationArgs]]]
 
 
 class CompressedTensorsConfig(QuantizationConfig):
 
     def __init__(
         self,
-        target_scheme_map: Dict[str, Any],
+        target_scheme_map: dict[str, Any],
         ignore: list[str],
         quant_format: str,
-        sparsity_scheme_map: Dict[str, SparsityCompressionConfig],
-        kv_cache_scheme: Optional[Dict[str, Any]] = None,
-        config: Optional[Dict[str, Any]] = None,
+        sparsity_scheme_map: dict[str, SparsityCompressionConfig],
+        kv_cache_scheme: Optional[dict[str, Any]] = None,
+        config: Optional[dict[str, Any]] = None,
     ):
 
         self.ignore = ignore
@@ -88,7 +88,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         return None
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "CompressedTensorsConfig":
+    def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
         target_scheme_map = cls._quantization_scheme_map_from_config(
@@ -106,8 +106,8 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def _sparsity_scheme_map_from_config(
-            cls, config: Dict[str,
-                              Any]) -> Dict[str, SparsityCompressionConfig]:
+            cls, config: dict[str,
+                              Any]) -> dict[str, SparsityCompressionConfig]:
         """
         :param config: The `quantization_config` dictionary from config.json
         :return: A dictionary mapping target layer names to their corresponding
@@ -118,7 +118,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         sparsity_config = SparsityCompressionConfig.model_validate(
             sparsity_config)
-        sparse_scheme_map: Dict[str, SparsityCompressionConfig] = {
+        sparse_scheme_map: dict[str, SparsityCompressionConfig] = {
             target: sparsity_config
             for target in sparsity_config.targets or list()
         }
@@ -126,13 +126,13 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def _quantization_scheme_map_from_config(
-            cls, config: Dict[str, Any]) -> QUANTIZATION_SCHEME_MAP_TYPE:
+            cls, config: dict[str, Any]) -> QUANTIZATION_SCHEME_MAP_TYPE:
         """
         :param config: The `quantization_config` dictionary from config.json
         :return: A dictionary mapping target layer names to their corresponding
             quantization_args for weights and input activations
         """
-        target_scheme_map: Dict[str, Any] = dict()
+        target_scheme_map: dict[str, Any] = dict()
         quant_format = cast(str, config.get("format"))
 
         # The quant_config has multiple config_groups, each containing
@@ -522,7 +522,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         super().__init__(quant_config)
 
     @staticmethod
-    def validate_kv_cache_scheme(kv_cache_scheme: Optional[Dict[str, Any]]):
+    def validate_kv_cache_scheme(kv_cache_scheme: Optional[dict[str, Any]]):
         """
         Validator for the kv cache scheme. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM

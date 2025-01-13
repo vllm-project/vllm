@@ -2,7 +2,7 @@
 import copy
 import importlib
 import os
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -29,7 +29,7 @@ TORCH_DTYPE_TO_NEURON_AMP = {
 }
 
 # Models supported by Neuron.
-_NEURON_SUPPORTED_MODELS: Dict[str, tuple[str, str, str]] = {
+_NEURON_SUPPORTED_MODELS: dict[str, tuple[str, str, str]] = {
     "LlamaForCausalLM": ("transformers_neuronx.llama.model",
                          "LlamaForSampling", "LlamaForCausalLM"),
     "MistralForCausalLM": ("transformers_neuronx.mistral.model",

@@ -1,4 +1,4 @@
-from typing import Dict, FrozenSet, Optional
+from typing import FrozenSet, Optional
 
 from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
@@ -107,10 +107,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             Device.GPU: gpu_block_allocator,
         }
 
-        self._swap_mapping: Dict[int, int] = {}
+        self._swap_mapping: dict[int, int] = {}
         self._null_block: Optional[Block] = None
 
-        self._block_ids_to_allocator: Dict[int, BlockAllocator] = {}
+        self._block_ids_to_allocator: dict[int, BlockAllocator] = {}
         for _, allocator in self._allocators.items():
             for block_id in allocator.all_block_ids:
                 self._block_ids_to_allocator[block_id] = allocator
@@ -254,7 +254,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].get_physical_block_id(absolute_id)
 
     def swap(self, blocks: list[Block], src_device: Device,
-             dst_device: Device) -> Dict[int, int]:
+             dst_device: Device) -> dict[int, int]:
         """Execute the swap for the given blocks from source_device
         on to dest_device, save the current swap mapping and append 
         them to the accumulated `self._swap_mapping` for each 
@@ -266,7 +266,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             dst_device (Device): Device to swap the 'blocks' to.
         
         Returns:
-            Dict[int, int]: Swap mapping from source_device
+            dict[int, int]: Swap mapping from source_device
                 on to dest_device.
         """
         src_block_ids = [block.block_id for block in blocks]
@@ -274,7 +274,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         self._allocators[dst_device].swap_in(blocks)
         dst_block_ids = [block.block_id for block in blocks]
 
-        current_swap_mapping: Dict[int, int] = {}
+        current_swap_mapping: dict[int, int] = {}
         for src_block_id, dst_block_id in zip(src_block_ids, dst_block_ids):
             if src_block_id is not None and dst_block_id is not None:
                 self._swap_mapping[src_block_id] = dst_block_id

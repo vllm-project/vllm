@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 import openvino as ov
 import torch
@@ -105,7 +105,7 @@ class OpenVINOModelRunner(ModelRunnerBase):
         past_lens: list[int] = []
         query_lens: list[int] = []
         multi_modal_kwargs_list: list[MultiModalKwargs] = []
-        multi_modal_placeholder_maps: Dict[
+        multi_modal_placeholder_maps: dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
 

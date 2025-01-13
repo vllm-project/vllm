@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from vllm.sequence import Logprob
 
@@ -16,13 +16,13 @@ class BeamSearchSequence:
     """
     # The tokens includes the prompt.
     tokens: list[int]
-    logprobs: list[Dict[int, Logprob]]
+    logprobs: list[dict[int, Logprob]]
     cum_logprob: float = 0.0
     text: Optional[str] = None
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     multi_modal_data: Optional["MultiModalDataDict"] = None
-    mm_processor_kwargs: Optional[Dict[str, Any]] = None
+    mm_processor_kwargs: Optional[dict[str, Any]] = None
 
 
 @dataclass

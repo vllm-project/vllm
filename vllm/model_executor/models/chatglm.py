@@ -3,7 +3,7 @@
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
 from array import array
-from typing import (Dict, Iterable, Mapping, Optional, TypedDict)
+from typing import (Iterable, Mapping, Optional, TypedDict)
 
 import torch
 from PIL import Image
@@ -54,7 +54,7 @@ def calculate_image_placeholder(vision_config):
 def mm_input_mapper_for_glmv(
     ctx: InputContext,
     data: ModalityData[object],
-) -> Dict:
+) -> dict:
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(
         model_config.tokenizer,
@@ -662,7 +662,7 @@ class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP):
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         # Merge two ColumnParallelLinear into one MergedColumnParallelLinear
-        merged_weights_dict: Dict[str, Dict[str, Optional[torch.Tensor]]] = {
+        merged_weights_dict: dict[str, dict[str, Optional[torch.Tensor]]] = {
             "transformer.vision.linear_proj.merged_proj.weight": {
                 "transformer.vision.linear_proj.gate_proj.weight": None,
                 "transformer.vision.linear_proj.dense_h_to_4h.weight": None,

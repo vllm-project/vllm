@@ -7,8 +7,8 @@
 import math
 import re
 from functools import partial
-from typing import (Any, Callable, Dict, Iterable, Literal, Mapping, Optional,
-                    TypedDict, Union)
+from typing import (Any, Callable, Iterable, Literal, Mapping, Optional, TypedDict,
+                    Union)
 
 import numpy as np
 import torch
@@ -439,7 +439,7 @@ class QWenAttention(nn.Module):
         num_heads: int,
         max_position_embeddings: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",

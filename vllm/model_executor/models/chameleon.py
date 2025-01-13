@@ -1,6 +1,5 @@
 from functools import cached_property
-from typing import (Any, Dict, Iterable, Literal, Mapping, Optional, TypedDict,
-                    Union)
+from typing import (Any, Iterable, Literal, Mapping, Optional, TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -238,7 +237,7 @@ class ChameleonAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 4096,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
@@ -805,7 +804,7 @@ class ChameleonImageVocabularyMapping:
     A class for mapping discrete image tokens from VQGAN to BPE tokens.
     """
 
-    def __init__(self, vocab_map: Dict[str, int]):
+    def __init__(self, vocab_map: dict[str, int]):
         self.vocab_map = vocab_map
         self.image_token_id = vocab_map.get("<image>")
 

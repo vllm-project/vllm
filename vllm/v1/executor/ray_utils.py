@@ -1,6 +1,6 @@
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Optional
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
@@ -113,7 +113,7 @@ def _verify_bundles(placement_group: "PlacementGroup",
     # bundle_idx -> bundle (e.g., {"GPU": 1})
     bundles = pg_data["bundles"]
     # node_id -> list of bundle (e.g., {"GPU": 1})
-    node_id_to_bundle: Dict[str, list[Dict[str, float]]] = defaultdict(list)
+    node_id_to_bundle: dict[str, list[dict[str, float]]] = defaultdict(list)
 
     for bundle_idx, node_id in bundle_to_node_ids.items():
         node_id_to_bundle[node_id].append(bundles[bundle_idx])
@@ -249,7 +249,7 @@ def initialize_ray_cluster(
                 f"The number of required {device_str}s exceeds the total "
                 f"number of available {device_str}s in the placement group.")
         # Create a new placement group
-        placement_group_specs: list[Dict[str, float]] = ([{
+        placement_group_specs: list[dict[str, float]] = ([{
             device_str: 1.0
         } for _ in range(parallel_config.world_size)])
 

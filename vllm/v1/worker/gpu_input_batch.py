@@ -1,7 +1,7 @@
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import torch
@@ -54,7 +54,7 @@ class InputBatch:
         self.vocab_size = vocab_size
 
         self.req_ids: list[Optional[str]] = [None] * max_num_reqs
-        self.req_id_to_index: Dict[str, int] = {}
+        self.req_id_to_index: dict[str, int] = {}
 
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
         # Find a way to reduce the CPU memory usage.
@@ -159,9 +159,9 @@ class InputBatch:
         # req_index -> generator
         # NOTE(woosuk): The indices of the requests that do not have their own
         # generator should not be included in the dictionary.
-        self.generators: Dict[int, torch.Generator] = {}
+        self.generators: dict[int, torch.Generator] = {}
 
-        self.num_logprobs: Dict[str, int] = {}
+        self.num_logprobs: dict[str, int] = {}
         self.prompt_logprob_reqs: set[str] = set()
 
     def add_request(
@@ -318,7 +318,7 @@ class InputBatch:
 
     def make_sampling_metadata(
         self,
-        req_id_output_token_ids: Dict[str, list[int]],
+        req_id_output_token_ids: dict[str, list[int]],
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         if not skip_copy:

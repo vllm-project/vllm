@@ -1,7 +1,7 @@
 import itertools
 from dataclasses import dataclass, field
-from typing import (Callable, Dict, Iterable, Literal, Mapping, Optional,
-                    Protocol, Union, overload)
+from typing import (Callable, Iterable, Literal, Mapping, Optional, Protocol,
+                    Union, overload)
 
 import torch
 import torch.nn as nn
@@ -560,7 +560,7 @@ def make_layers(
 
 
 # NOTE: don't use lru_cache here because it can prevent garbage collection
-_model_to_pp_missing_layer_names: Dict[int, list[str]] = {}
+_model_to_pp_missing_layer_names: dict[int, list[str]] = {}
 
 
 def get_pp_missing_layer_names(model: torch.nn.Module) -> list[str]:

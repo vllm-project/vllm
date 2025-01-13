@@ -1,8 +1,7 @@
 import asyncio
 import json
 import time
-from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, Final,
-                    Optional)
+from typing import (AsyncGenerator, AsyncIterator, Callable, Final, Optional)
 from typing import Sequence as GenericSequence
 from typing import Union
 
@@ -363,7 +362,7 @@ class OpenAIServingChat(OpenAIServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo:
-                        last_msg_content: Union[str, list[Dict[str, str]]] = ""
+                        last_msg_content: Union[str, list[dict[str, str]]] = ""
                         if conversation and "content" in conversation[
                                 -1] and conversation[-1].get("role") == role:
                             last_msg_content = conversation[-1]["content"] or ""
@@ -720,7 +719,7 @@ class OpenAIServingChat(OpenAIServing):
             choices.append(choice_data)
 
         if request.echo:
-            last_msg_content: Union[str, list[Dict[str, str]]] = ""
+            last_msg_content: Union[str, list[dict[str, str]]] = ""
             if conversation and "content" in conversation[-1] and conversation[
                     -1].get("role") == role:
                 last_msg_content = conversation[-1]["content"] or ""
@@ -761,7 +760,7 @@ class OpenAIServingChat(OpenAIServing):
         return response
 
     def _get_top_logprobs(
-            self, logprobs: Dict[int, Logprob], top_logprobs: Optional[int],
+            self, logprobs: dict[int, Logprob], top_logprobs: Optional[int],
             tokenizer: AnyTokenizer) -> list[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(token=(token := self._get_decoded_token(
@@ -779,7 +778,7 @@ class OpenAIServingChat(OpenAIServing):
     def _create_chat_logprobs(
         self,
         token_ids: GenericSequence[int],
-        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
+        top_logprobs: GenericSequence[Optional[dict[int, Logprob]]],
         tokenizer: AnyTokenizer,
         num_output_top_logprobs: Optional[int] = None,
     ) -> ChatCompletionLogProbs:

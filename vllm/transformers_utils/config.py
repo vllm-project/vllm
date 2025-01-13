@@ -2,7 +2,7 @@ import enum
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Type, Union
+from typing import Any, Optional, Type, Union
 
 import huggingface_hub
 from huggingface_hub import (file_exists, hf_hub_download,
@@ -47,11 +47,11 @@ HF_TOKEN = os.getenv('HF_TOKEN', None)
 
 logger = init_logger(__name__)
 
-_CONFIG_REGISTRY_OVERRIDE_HF: Dict[str, Type[PretrainedConfig]] = {
+_CONFIG_REGISTRY_OVERRIDE_HF: dict[str, Type[PretrainedConfig]] = {
     "mllama": MllamaConfig
 }
 
-_CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
+_CONFIG_REGISTRY: dict[str, Type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
     "cohere2": Cohere2Config,
     "dbrx": DbrxConfig,
@@ -119,7 +119,7 @@ def patch_rope_scaling(config: PretrainedConfig) -> None:
         patch_rope_scaling_dict(rope_scaling)
 
 
-def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
+def patch_rope_scaling_dict(rope_scaling: dict[str, Any]) -> None:
     if "rope_type" in rope_scaling and "type" in rope_scaling:
         rope_type = rope_scaling["rope_type"]
         rope_type_legacy = rope_scaling["type"]
@@ -536,7 +536,7 @@ def get_hf_image_processor_config(
     model: Union[str, Path],
     revision: Optional[str] = None,
     **kwargs,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     # ModelScope does not provide an interface for image_processor
     if VLLM_USE_MODELSCOPE:
         return dict()

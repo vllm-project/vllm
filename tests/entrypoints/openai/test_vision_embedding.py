@@ -1,4 +1,3 @@
-from typing import Dict
 
 import pytest
 import requests
@@ -47,7 +46,7 @@ def server():
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image() -> Dict[str, str]:
+def base64_encoded_image() -> dict[str, str]:
     return {
         image_url: encode_image_base64(fetch_image(image_url))
         for image_url in TEST_IMAGE_URLS

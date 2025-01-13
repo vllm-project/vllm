@@ -7,7 +7,7 @@ import weakref
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing.process import BaseProcess
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import psutil
 import zmq
@@ -118,7 +118,7 @@ class MultiprocExecutor(Executor):
                        method: str,
                        timeout: Optional[float] = None,
                        args: tuple = (),
-                       kwargs: Optional[Dict] = None) -> list[Any]:
+                       kwargs: Optional[dict] = None) -> list[Any]:
         """
         Execute an RPC call on workers.
         

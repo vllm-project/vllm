@@ -2,7 +2,7 @@ import dataclasses
 import weakref
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, Optional, Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Optional, Type, TypeVar, Union)
 
 import torch
 from torch import nn
@@ -56,7 +56,7 @@ class ModelInputForCPU(ModelRunnerInputBase):
     lora_requests: Optional[set[LoRARequest]] = None
 
     def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
+            self) -> dict[str, Union[int, torch.Tensor]]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -72,7 +72,7 @@ class ModelInputForCPU(ModelRunnerInputBase):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls: Type[TModelInputForCPU],
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None
     ) -> TModelInputForCPU:
         if attn_backend is not None:
@@ -89,7 +89,7 @@ class ModelInputForCPUWithSamplingMetadata(ModelInputForCPU):
     sampling_metadata: Optional["SamplingMetadata"] = None
     is_prompt: Optional[bool] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -104,7 +104,7 @@ class ModelInputForCPUWithSamplingMetadata(ModelInputForCPU):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForCPUWithSamplingMetadata":
         tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
@@ -133,7 +133,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             self.num_decode_tokens: int = 0
             self.slot_mapping: list[int] = []
             self.multi_modal_inputs_list: list[MultiModalKwargs] = []
-            self.multi_modal_placeholder_maps: Dict[
+            self.multi_modal_placeholder_maps: dict[
                 str, MultiModalPlaceholderMap] = defaultdict(
                     MultiModalPlaceholderMap)
             self.input_mrope_positions: list[list[int]] = [[]
@@ -571,7 +571,7 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
     ) -> ModelInputForCPUWithSamplingMetadata:
         return ModelInputForCPUWithSamplingMetadata.from_broadcasted_tensor_dict(  # noqa: E501
             tensor_dict,

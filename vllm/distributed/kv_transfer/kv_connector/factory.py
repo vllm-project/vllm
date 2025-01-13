@@ -1,5 +1,5 @@
 import importlib
-from typing import TYPE_CHECKING, Callable, Dict, Type
+from typing import TYPE_CHECKING, Callable, Type
 
 from .base import KVConnectorBase
 
@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 
 
 class KVConnectorFactory:
-    _registry: Dict[str, Callable[[], Type[KVConnectorBase]]] = {}
+    _registry: dict[str, Callable[[], Type[KVConnectorBase]]] = {}
 
     @classmethod
     def register_connector(cls, name: str, module_path: str,

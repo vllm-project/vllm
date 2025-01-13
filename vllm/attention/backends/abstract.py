@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import (TYPE_CHECKING, Any, Dict, Generic, Optional, Type, TypeVar)
+from typing import (TYPE_CHECKING, Any, Generic, Optional, Type, TypeVar)
 
 import torch
 
@@ -120,7 +120,7 @@ class AttentionMetadata:
     # N.B. These aren't really related to attention and don't belong on this
     # type -- this is just a temporary solution to make them available to
     # `model_executable`.
-    multi_modal_placeholder_index_maps: Optional[Dict[
+    multi_modal_placeholder_index_maps: Optional[dict[
         str, MultiModalPlaceholderMap.IndexMap]]
 
     @property
@@ -137,7 +137,7 @@ class AttentionMetadata:
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[set[str]] = None
-                        ) -> Dict[str, Any]:
+                        ) -> dict[str, Any]:
         """Similar to dataclasses.asdict, but avoids deepcopying."""
         if skip_fields is None:
             skip_fields = set()
@@ -183,14 +183,14 @@ class AttentionState(ABC, Generic[T]):
     def get_graph_input_buffers(
             self,
             attn_metadata: T,
-            is_encoder_decoder_model: bool = False) -> Dict[str, Any]:
+            is_encoder_decoder_model: bool = False) -> dict[str, Any]:
         """Get attention-specific input buffers for CUDA graph capture."""
         ...
 
     @abstractmethod
     def prepare_graph_input_buffers(
             self,
-            input_buffers: Dict[str, Any],
+            input_buffers: dict[str, Any],
             attn_metadata: T,
             is_encoder_decoder_model: bool = False) -> None:
         """In-place modify input buffers dict for CUDA graph replay."""
@@ -228,7 +228,7 @@ class AttentionImpl(ABC, Generic[T]):
         alibi_slopes: Optional[list[float]] = None,
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
     ) -> None:

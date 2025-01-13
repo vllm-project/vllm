@@ -1,8 +1,7 @@
 import itertools
 import warnings
 from contextlib import contextmanager
-from typing import (Any, ClassVar, Dict, Optional, Sequence, Type, Union, cast,
-                    overload)
+from typing import (Any, ClassVar, Optional, Sequence, Type, Union, cast, overload)
 
 from tqdm import tqdm
 from typing_extensions import deprecated
@@ -169,11 +168,11 @@ class LLM:
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
         hf_overrides: Optional[HfOverrides] = None,
-        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
         # After positional args are removed, move this right below `model`
         task: TaskOption = "auto",
         override_pooler_config: Optional[PoolerConfig] = None,
-        compilation_config: Optional[Union[int, Dict[str, Any]]] = None,
+        compilation_config: Optional[Union[int, dict[str, Any]]] = None,
         **kwargs,
     ) -> None:
         '''
@@ -577,8 +576,8 @@ class LLM:
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
-        tools: Optional[list[Dict[str, Any]]] = None,
-        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        tools: Optional[list[dict[str, Any]]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[RequestOutput]:
         """
         Generate responses for a chat conversation.
@@ -1048,7 +1047,7 @@ class LLM:
         input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
         pooling_params = PoolingParams()
 
-        tokenization_kwargs: Dict[str, Any] = {}
+        tokenization_kwargs: dict[str, Any] = {}
         if truncate_prompt_tokens is not None:
             tokenization_kwargs["truncation"] = True
             tokenization_kwargs["max_length"] = truncate_prompt_tokens

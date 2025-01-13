@@ -1,7 +1,7 @@
 import enum
 import time
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Type, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Optional, Type, Union)
 from unittest.mock import patch
 
 import numpy as np
@@ -65,7 +65,7 @@ class ModelInputForTPU(ModelRunnerInputBase):
     async_callback: Optional[Callable] = None
 
     def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
+            self) -> dict[str, Union[int, torch.Tensor]]:
         tensor_dict = {
             "token_ids": self.token_ids,
             "position_ids": self.position_ids,
@@ -85,7 +85,7 @@ class ModelInputForTPU(ModelRunnerInputBase):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls: Type["ModelInputForTPU"],
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForTPU":
         if attn_backend is not None:
@@ -575,7 +575,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                 input_lens, t, p, num_samples, n, seq_groups)
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: Dict[str, Any]) -> ModelInputForTPU:
+            self, tensor_dict: dict[str, Any]) -> ModelInputForTPU:
         model_input = ModelInputForTPU.from_broadcasted_tensor_dict(
             tensor_dict, attn_backend=self.attn_backend)
         return model_input

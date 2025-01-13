@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Any, Dict, Iterable, Optional, Type, Union
+from typing import Any, Iterable, Optional, Type, Union
 
 import torch
 from torch import nn
@@ -80,7 +80,7 @@ class InternLM2Attention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,

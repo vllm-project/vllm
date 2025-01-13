@@ -1,4 +1,3 @@
-from typing import Dict
 
 from vllm.v1.request import Request
 
@@ -9,7 +8,7 @@ class EncoderCacheManager:
         self.cache_size = cache_size
         self.num_free_slots = cache_size
         # req_id -> cached input ids
-        self.cached: Dict[str, set[int]] = {}
+        self.cached: dict[str, set[int]] = {}
         # List of [req_id, input_id]
         self.freed: list[tuple[str, int]] = []
 

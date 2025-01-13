@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Sequence, Union
+from typing import Sequence, Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -134,7 +134,7 @@ class GraniteToolParser(ToolParser):
                 return None
 
             # select as the current tool call the one we're on the state at
-            current_tool_call: Dict = tool_call_arr[self.current_tool_id]
+            current_tool_call: dict = tool_call_arr[self.current_tool_id]
 
             delta = None
             # case: we are starting a new tool in the array

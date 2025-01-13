@@ -2,7 +2,7 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from itertools import accumulate
-from typing import TYPE_CHECKING, Any, Dict, Type, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Type, TypeVar, Union
 
 import numpy as np
 import torch
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
-def is_block_tables_empty(block_tables: Union[None, Dict]):
+def is_block_tables_empty(block_tables: Union[None, dict]):
     """
     Check if block_tables is None or a dictionary with all None values.
     """
@@ -78,7 +78,7 @@ def _compute_slot_mapping_numpy(slot_mapping: list[int],
 def compute_slot_mapping(is_profile_run: bool, slot_mapping: list[int],
                          seq_id: int, seq_len: int, context_len: int,
                          start_idx: int, block_size: int,
-                         block_tables: Dict[int, list[int]]):
+                         block_tables: dict[int, list[int]]):
     """
     Compute slot mapping.
     """
@@ -127,7 +127,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         self.context_lens: list[int] = []
         self.block_tables: list[list[int]] = []
         self.curr_seq_lens: list[int] = []
-        self.multimodal_placeholder_maps: Dict[
+        self.multimodal_placeholder_maps: dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
         self.num_prefills = 0
@@ -344,7 +344,7 @@ class CommonAttentionState(AttentionState):
     def get_graph_input_buffers(
             self,
             attn_metadata,
-            is_encoder_decoder_model: bool = False) -> Dict[str, Any]:
+            is_encoder_decoder_model: bool = False) -> dict[str, Any]:
         input_buffers = {
             "slot_mapping": attn_metadata.slot_mapping,
             "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
@@ -413,7 +413,7 @@ class CommonAttentionState(AttentionState):
         attn_metadata.num_encoder_tokens = 0
 
     def _add_additonal_input_buffers_for_enc_dec_model(
-            self, attn_metadata, input_buffers: Dict[str, Any]):
+            self, attn_metadata, input_buffers: dict[str, Any]):
         """
         Saves additional input buffers specific to the encoder-decoder model
         from the attention metadata.
@@ -432,7 +432,7 @@ class CommonAttentionState(AttentionState):
             attn_metadata.decode_metadata.cross_block_tables)
 
     def _prepare_input_buffers_for_enc_dec_model(self, attn_metadata,
-                                                 input_buffers: Dict[str,
+                                                 input_buffers: dict[str,
                                                                      Any]):
         """
         Populates input buffers with data from the encoder-decoder model's

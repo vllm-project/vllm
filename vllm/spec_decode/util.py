@@ -1,6 +1,6 @@
 import time
 from contextlib import contextmanager
-from typing import Dict, Optional, Sequence
+from typing import Optional, Sequence
 
 import torch
 
@@ -57,8 +57,8 @@ def create_logprobs_output(
     token_id_logprob: float,
     topk_token_ids: list[Optional[int]],
     topk_logprobs: list[Optional[float]],
-) -> Dict[int, Logprob]:
-    """Create a Logprob Dict for a token given the sampling results.
+) -> dict[int, Logprob]:
+    """Create a Logprob dict for a token given the sampling results.
 
     Args:
         token_id (int): The sampled token for the sequence.
@@ -69,7 +69,7 @@ def create_logprobs_output(
     """
     # vLLM logprobs always include the sampled token. In addition, the user may
     # request topk-logprobs (where top-k varies per user up to max_logprobs).
-    logprobs: Dict[int, Logprob] = {
+    logprobs: dict[int, Logprob] = {
         token_id: Logprob(
             logprob=token_id_logprob,
             rank=token_id_logprob_rank,

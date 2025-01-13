@@ -1,6 +1,6 @@
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Type
+from typing import Any, Optional, Type
 
 import numpy as np
 import torch
@@ -87,7 +87,7 @@ class FlashAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> None:

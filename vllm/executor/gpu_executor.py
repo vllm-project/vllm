@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
@@ -38,7 +38,7 @@ class GPUExecutor(ExecutorBase):
             self,
             local_rank: int = 0,
             rank: int = 0,
-            distributed_init_method: Optional[str] = None) -> Dict[str, Any]:
+            distributed_init_method: Optional[str] = None) -> dict[str, Any]:
         """Return worker init args for a given rank."""
         if distributed_init_method is None:
             distributed_init_method = get_distributed_init_method(

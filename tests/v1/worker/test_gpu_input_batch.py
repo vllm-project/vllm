@@ -1,4 +1,3 @@
-from typing import Dict
 
 import numpy as np
 import pytest
@@ -44,7 +43,7 @@ def _remove_requests(
 
 def _construct_expected_sampling_metadata(
         reqs: list[CachedRequestState], req_ids_retained: set[int],
-        req_id_index_in_input_batch: Dict[str, int],
+        req_id_index_in_input_batch: dict[str, int],
         device: torch.device) -> SamplingMetadata:
     """
     Constructs and returns the expected SamplingMetadata for this

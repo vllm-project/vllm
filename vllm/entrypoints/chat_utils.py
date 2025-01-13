@@ -5,8 +5,8 @@ from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import (Any, Awaitable, Callable, Dict, Generic, Iterable, Literal,
-                    Optional, TypeVar, Union, cast)
+from typing import (Any, Awaitable, Callable, Generic, Iterable, Literal, Optional,
+                    TypeVar, Union, cast)
 
 import jinja2.nodes
 import transformers.utils.chat_template_utils as hf_chat_utils
@@ -141,7 +141,7 @@ class ConversationMessage(TypedDict, total=False):
     role: Required[str]
     """The role of the message's author."""
 
-    content: Union[Optional[str], list[Dict[str, str]]]
+    content: Union[Optional[str], list[dict[str, str]]]
     """The contents of the message"""
 
     tool_call_id: Optional[str]
@@ -489,13 +489,13 @@ class BaseMultiModalContentParser(ABC):
         super().__init__()
 
         # multimodal placeholder_string : count
-        self._placeholder_counts: Dict[str, int] = defaultdict(lambda: 0)
+        self._placeholder_counts: dict[str, int] = defaultdict(lambda: 0)
 
     def _add_placeholder(self, placeholder: Optional[str]):
         if placeholder:
             self._placeholder_counts[placeholder] += 1
 
-    def mm_placeholder_counts(self) -> Dict[str, int]:
+    def mm_placeholder_counts(self) -> dict[str, int]:
         return dict(self._placeholder_counts)
 
     @abstractmethod
@@ -646,7 +646,7 @@ def load_chat_template(
 
 # TODO: Let user specify how to insert multimodal tokens into prompt
 # (similar to chat template)
-def _get_full_multimodal_text_prompt(placeholder_counts: Dict[str, int],
+def _get_full_multimodal_text_prompt(placeholder_counts: dict[str, int],
                                      text_prompt: str) -> str:
     """Combine multimodal prompts for a multimodal language model."""
 
@@ -678,10 +678,10 @@ _InputAudioParser = partial(cast, ChatCompletionContentPartInputAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
 _VideoParser = partial(cast, ChatCompletionContentPartVideoParam)
 
-_ContentPart: TypeAlias = Union[str, Dict[str, str], InputAudio]
+_ContentPart: TypeAlias = Union[str, dict[str, str], InputAudio]
 
 # Define a mapping from part types to their corresponding parsing functions.
-MM_PARSER_MAP: Dict[
+MM_PARSER_MAP: dict[
     str,
     Callable[[ChatCompletionContentPartParam], _ContentPart],
 ] = {
@@ -743,7 +743,7 @@ def _parse_chat_message_content_mm_part(
                                 part)
             return "audio_url", audio_params.get("audio_url", "")
         if part.get("input_audio") is not None:
-            input_audio_params = cast(Dict[str, str], part)
+            input_audio_params = cast(dict[str, str], part)
             return "input_audio", input_audio_params
         if part.get("video_url") is not None:
             video_params = cast(CustomChatCompletionContentSimpleVideoParam,

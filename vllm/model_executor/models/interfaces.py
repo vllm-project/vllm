@@ -1,5 +1,5 @@
-from typing import (TYPE_CHECKING, ClassVar, Dict, Literal, Optional, Protocol,
-                    Type, Union, overload, runtime_checkable)
+from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol, Type,
+                    Union, overload, runtime_checkable)
 
 import torch
 from typing_extensions import TypeIs, TypeVar
@@ -115,9 +115,9 @@ class SupportsLoRA(Protocol):
         MRO of your model class.
     """
 
-    packed_modules_mapping: ClassVar[Dict[str, list[str]]]
+    packed_modules_mapping: ClassVar[dict[str, list[str]]]
     supported_lora_modules: ClassVar[list[str]]
-    embedding_modules: ClassVar[Dict[str, str]]
+    embedding_modules: ClassVar[dict[str, str]]
     embedding_padding_modules: ClassVar[list[str]]
 
 
@@ -127,9 +127,9 @@ class SupportsLoRA(Protocol):
 class _SupportsLoRAType(Protocol):
     supports_lora: Literal[True]
 
-    packed_modules_mapping: Dict[str, list[str]]
+    packed_modules_mapping: dict[str, list[str]]
     supported_lora_modules: list[str]
-    embedding_modules: Dict[str, str]
+    embedding_modules: dict[str, str]
     embedding_padding_modules: list[str]
 
 

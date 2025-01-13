@@ -5,7 +5,7 @@ typically specific to a small subset of models.
 import re
 import types
 from pathlib import PosixPath
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 from PIL.Image import Image
@@ -543,7 +543,7 @@ def _generate_greedy_logprobs_limit(
             return_dict_in_generate=True,
         )
 
-    all_logprobs: list[list[Dict[int, float]]] = []
+    all_logprobs: list[list[dict[int, float]]] = []
     all_output_ids: list[list[int]] = []
     all_output_strs: list[str] = []
 

@@ -15,8 +15,8 @@ import time
 from array import array
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import (TYPE_CHECKING, Any, Callable, Dict, NamedTuple, Optional,
-                    Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional, Type,
+                    TypeVar, Union)
 
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
@@ -65,7 +65,7 @@ LORA_WARMUP_RANK = 8
 
 
 class Singleton(type):
-    _instances: Dict[type, object] = {}
+    _instances: dict[type, object] = {}
 
     def __call__(cls, *args, **kwargs):
         if cls not in cls._instances:
@@ -86,7 +86,7 @@ class HPUBucketingGlobalState(metaclass=Singleton):
 def subtuple(obj: object,
              typename: str,
              to_copy: list[str],
-             to_override: Optional[Dict[str, object]] = None):
+             to_override: Optional[dict[str, object]] = None):
     if obj is None:
         return None
     if to_override is None:
@@ -379,7 +379,7 @@ class PreparePromptMetadata(NamedTuple):
     lora_index_mapping: list[list[int]]
     lora_prompt_mapping: list[list[int]]
     lora_requests: set[LoRARequest]
-    multi_modal_kwargs: Optional[Dict[str, BatchedTensorInputs]]
+    multi_modal_kwargs: Optional[dict[str, BatchedTensorInputs]]
     slot_mapping: list[list[int]]
     lora_ids: list[int]
 
@@ -448,14 +448,14 @@ class ModelInputForHPU(ModelRunnerInputBase):
     lora_mapping: Optional["LoRAMapping"] = None
     lora_requests: Optional[set[LoRARequest]] = None
     attn_metadata: Optional["AttentionMetadata"] = None
-    multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None
+    multi_modal_kwargs: Optional[dict[str, torch.Tensor]] = None
     real_batch_size: Optional[int] = None
     batch_size_padded: Optional[int] = None
     virtual_engine: int = 0
     lora_ids: Optional[list[int]] = None
     async_callback: Optional[Callable] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -473,7 +473,7 @@ class ModelInputForHPU(ModelRunnerInputBase):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls: Type[TModelInputForHPU],
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> TModelInputForHPU:
         if attn_backend is not None:
@@ -492,7 +492,7 @@ class ModelInputForHPUWithSamplingMetadata(ModelInputForHPU):
     # used by the driver worker.
     is_prompt: Optional[bool] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -509,7 +509,7 @@ class ModelInputForHPUWithSamplingMetadata(ModelInputForHPU):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForHPUWithSamplingMetadata":
         tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
@@ -1763,7 +1763,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
     ) -> ModelInputForHPUWithSamplingMetadata:
         return (
             ModelInputForHPUWithSamplingMetadata.from_broadcasted_tensor_dict(

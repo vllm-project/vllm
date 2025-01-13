@@ -1,6 +1,6 @@
 import os
 from functools import lru_cache
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -42,7 +42,7 @@ _ROCM_SWA_REASON = ("Sliding window attention (SWA) is not yet supported in "
                     "Triton flash attention. For half-precision SWA support, "
                     "please use CK flash attention by setting "
                     "`VLLM_USE_TRITON_FLASH_ATTN=0`")
-_ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
+_ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {
     "Qwen2ForCausalLM":
     _ROCM_SWA_REASON,
     "MistralForCausalLM":

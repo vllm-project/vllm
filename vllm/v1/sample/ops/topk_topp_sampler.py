@@ -1,4 +1,3 @@
-from typing import Dict
 
 import torch
 import torch.nn as nn
@@ -52,7 +51,7 @@ class TopKTopPSampler(nn.Module):
     def forward_native(
         self,
         logits: torch.Tensor,
-        generators: Dict[int, torch.Generator],
+        generators: dict[int, torch.Generator],
         no_top_k: bool,
         k: torch.Tensor,
         no_top_p: bool,
@@ -66,7 +65,7 @@ class TopKTopPSampler(nn.Module):
     def forward_cuda(
         self,
         logits: torch.Tensor,
-        generators: Dict[int, torch.Generator],
+        generators: dict[int, torch.Generator],
         no_top_k: bool,
         k: torch.Tensor,
         no_top_p: bool,
@@ -121,7 +120,7 @@ def apply_top_k_top_p(
 
 def random_sample(
     probs: torch.Tensor,
-    generators: Dict[int, torch.Generator],
+    generators: dict[int, torch.Generator],
 ) -> torch.Tensor:
     """Randomly sample from the probabilities.
 
@@ -149,7 +148,7 @@ def flashinfer_sample(
     k: torch.Tensor,
     no_top_p: bool,
     p: torch.Tensor,
-    generators: Dict[int, torch.Generator],
+    generators: dict[int, torch.Generator],
 ) -> torch.Tensor:
     """Sample from the probabilities using FlashInfer.
 

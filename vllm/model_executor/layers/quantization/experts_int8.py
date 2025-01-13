@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -34,7 +34,7 @@ class ExpertsInt8Config(QuantizationConfig):
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ExpertsInt8Config":
+    def from_config(cls, config: dict[str, Any]) -> "ExpertsInt8Config":
         return cls()
 
     def get_quant_method(self, layer: torch.nn.Module,

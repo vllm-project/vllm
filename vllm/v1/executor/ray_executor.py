@@ -1,7 +1,7 @@
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -74,7 +74,7 @@ class RayExecutor(Executor):
             ray.get(worker.get_node_ip.remote())  # type: ignore[attr-defined]
             for worker in self.workers
         ]
-        ip_counts: Dict[str, int] = {}
+        ip_counts: dict[str, int] = {}
         for ip in worker_ips:
             ip_counts[ip] = ip_counts.get(ip, 0) + 1
 
@@ -176,7 +176,7 @@ class RayExecutor(Executor):
         self._run_workers("load_model")
 
     def _configure_ray_workers_use_nsight(self,
-                                          ray_remote_kwargs) -> Dict[str, Any]:
+                                          ray_remote_kwargs) -> dict[str, Any]:
         # If nsight profiling is enabled, we need to set the profiling
         # configuration for the ray workers as runtime env.
         runtime_env = ray_remote_kwargs.setdefault("runtime_env", {})
@@ -197,7 +197,7 @@ class RayExecutor(Executor):
             self,
             local_rank: int = 0,
             rank: int = 0,
-            distributed_init_method: Optional[str] = None) -> Dict[str, Any]:
+            distributed_init_method: Optional[str] = None) -> dict[str, Any]:
         """
         Return worker init args for a given rank.
         """
@@ -249,7 +249,7 @@ class RayExecutor(Executor):
         method: str,
         *args,
         all_args: Optional[list[tuple[Any, ...]]] = None,
-        all_kwargs: Optional[list[Dict[str, Any]]] = None,
+        all_kwargs: Optional[list[dict[str, Any]]] = None,
         **kwargs,
     ) -> Any:
         """

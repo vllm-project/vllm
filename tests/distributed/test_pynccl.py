@@ -1,6 +1,5 @@
 import multiprocessing
 import os
-from typing import Dict
 
 import pytest
 import torch
@@ -20,7 +19,7 @@ def distributed_run(fn, world_size):
     number_of_processes = world_size
     processes: list[multiprocessing.Process] = []
     for i in range(number_of_processes):
-        env: Dict[str, str] = {}
+        env: dict[str, str] = {}
         env['RANK'] = str(i)
         env['LOCAL_RANK'] = str(i)
         env['WORLD_SIZE'] = str(number_of_processes)

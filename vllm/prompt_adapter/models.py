@@ -1,6 +1,6 @@
 import logging
 import math
-from typing import Any, Callable, Dict, Optional, Type
+from typing import Any, Callable, Optional, Type
 
 import torch
 from torch import nn
@@ -137,7 +137,7 @@ class PromptAdapterModelManager(AdapterModelManager):
         self.base_indices = torch.tensor([-1])
         self.base_embedding_indices = torch.tensor([])
 
-        self.modules: Dict[str, nn.Module] = {}
+        self.modules: dict[str, nn.Module] = {}
         self._create_prompt_adapter_modules()
         self._last_mapping: Optional[PromptAdapterMapping] = None
 
@@ -250,7 +250,7 @@ class PromptAdapterModelManager(AdapterModelManager):
         return remove_adapter(adapter_id, self._registered_adapters,
                               self.deactivate_adapter)
 
-    def list_adapters(self) -> Dict[int, Any]:
+    def list_adapters(self) -> dict[int, Any]:
         return list_adapters(self._registered_adapters)
 
     def get_adapter(self, adapter_id: int) -> Optional[Any]:
@@ -282,7 +282,7 @@ class LRUCachePromptAdapterModelManager(PromptAdapterModelManager):
         self._active_adapters = PromptAdapterLRUCache(
             self.prompt_adapter_slots, self._deactivate_adapter)
 
-    def list_adapters(self) -> Dict[int, PromptAdapterModel]:
+    def list_adapters(self) -> dict[int, PromptAdapterModel]:
         """List all registered PromptAdapterModel."""
         return dict(self._registered_adapters.cache)
 

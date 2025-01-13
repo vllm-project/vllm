@@ -3,7 +3,7 @@
 import re
 import time
 from argparse import Namespace
-from typing import Any, Dict, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -122,7 +122,7 @@ class JsonSchemaResponseFormat(OpenAIBaseModel):
     description: Optional[str] = None
     # schema is the field in openai but that causes conflicts with pydantic so
     # instead use json_schema with an alias
-    json_schema: Optional[Dict[str, Any]] = Field(default=None, alias='schema')
+    json_schema: Optional[dict[str, Any]] = Field(default=None, alias='schema')
     strict: Optional[bool] = None
 
 
@@ -140,7 +140,7 @@ class StreamOptions(OpenAIBaseModel):
 class FunctionDefinition(OpenAIBaseModel):
     name: str
     description: Optional[str] = None
-    parameters: Optional[Dict[str, Any]] = None
+    parameters: Optional[dict[str, Any]] = None
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
@@ -160,7 +160,7 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
 class LogitsProcessorConstructor(BaseModel):
     qualname: str
     args: Optional[list[Any]] = None
-    kwargs: Optional[Dict[str, Any]] = None
+    kwargs: Optional[dict[str, Any]] = None
 
 
 LogitsProcessors = list[Union[str, LogitsProcessorConstructor]]
@@ -203,7 +203,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     messages: list[ChatCompletionMessageParam]
     model: str
     frequency_penalty: Optional[float] = 0.0
-    logit_bias: Optional[Dict[str, float]] = None
+    logit_bias: Optional[dict[str, float]] = None
     logprobs: Optional[bool] = False
     top_logprobs: Optional[int] = 0
     # TODO(#9845): remove max_tokens when field is removed from OpenAI API
@@ -278,7 +278,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "special tokens so this should be set to false (as is the "
             "default)."),
     )
-    documents: Optional[list[Dict[str, str]]] = Field(
+    documents: Optional[list[dict[str, str]]] = Field(
         default=None,
         description=
         ("A list of dicts representing documents that will be accessible to "
@@ -295,7 +295,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one."),
     )
-    chat_template_kwargs: Optional[Dict[str, Any]] = Field(
+    chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
         description=("Additional kwargs to pass to the template renderer. "
                      "Will be accessible by the chat template."),
@@ -622,7 +622,7 @@ class CompletionRequest(OpenAIBaseModel):
     best_of: Optional[int] = None
     echo: Optional[bool] = False
     frequency_penalty: Optional[float] = 0.0
-    logit_bias: Optional[Dict[str, float]] = None
+    logit_bias: Optional[dict[str, float]] = None
     logprobs: Optional[int] = None
     max_tokens: Optional[int] = 16
     n: int = 1
@@ -935,7 +935,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one."),
     )
-    chat_template_kwargs: Optional[Dict[str, Any]] = Field(
+    chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
         description=("Additional kwargs to pass to the template renderer. "
                      "Will be accessible by the chat template."),
@@ -996,7 +996,7 @@ class CompletionLogProbs(OpenAIBaseModel):
     text_offset: list[int] = Field(default_factory=list)
     token_logprobs: list[Optional[float]] = Field(default_factory=list)
     tokens: list[str] = Field(default_factory=list)
-    top_logprobs: list[Optional[Dict[str,
+    top_logprobs: list[Optional[dict[str,
                                      float]]] = Field(default_factory=list)
 
 
@@ -1012,7 +1012,7 @@ class CompletionResponseChoice(OpenAIBaseModel):
             "to stop, None if the completion finished for some other reason "
             "including encountering the EOS token"),
     )
-    prompt_logprobs: Optional[list[Optional[Dict[int, Logprob]]]] = None
+    prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -1165,7 +1165,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     model: str
     choices: list[ChatCompletionResponseChoice]
     usage: UsageInfo
-    prompt_logprobs: Optional[list[Optional[Dict[int, Logprob]]]] = None
+    prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
 
 
 class DeltaMessage(OpenAIBaseModel):
@@ -1292,7 +1292,7 @@ class TokenizeChatRequest(OpenAIBaseModel):
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one."),
     )
-    chat_template_kwargs: Optional[Dict[str, Any]] = Field(
+    chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
         description=("Additional kwargs to pass to the template renderer. "
                      "Will be accessible by the chat template."),

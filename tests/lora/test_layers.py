@@ -1,7 +1,7 @@
 import random
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -96,7 +96,7 @@ def populate_loras(
     layer_weights: torch.Tensor,
     generate_embeddings_tensor: int = 0,
     repeats: int = 1,
-) -> tuple[Dict[int, LoRALayerWeights], Dict[int, list[LoRALayerWeights]]]:
+) -> tuple[dict[int, LoRALayerWeights], dict[int, list[LoRALayerWeights]]]:
     """This method populates the lora layers with lora weights.
 
     Args:
@@ -115,11 +115,11 @@ def populate_loras(
 
     # Dictionary that maps the lora ID to the
     # corresponding lora weights.
-    lora_dict: Dict[int, LoRALayerWeights] = dict()
+    lora_dict: dict[int, LoRALayerWeights] = dict()
 
     # Dictionary that maps the lora ID to the
     # corresponding subloras.
-    sublora_dict: Dict[int, list[LoRALayerWeights]] = dict()
+    sublora_dict: dict[int, list[LoRALayerWeights]] = dict()
 
     for slot_idx, lora_id in enumerate(id_to_index):
         if lora_id is not None:

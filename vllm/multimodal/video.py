@@ -2,7 +2,7 @@ import base64
 from functools import lru_cache, partial
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import cv2
 import numpy as np
@@ -42,7 +42,7 @@ class VideoPlugin(ImagePlugin):
     def _get_hf_video_processor(
         self,
         model_config: "ModelConfig",
-        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ):
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}

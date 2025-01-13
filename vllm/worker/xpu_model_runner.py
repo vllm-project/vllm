@@ -3,8 +3,7 @@ import time
 import weakref
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Type,
-                    TypeVar)
+from typing import (TYPE_CHECKING, Any, Callable, Optional, Type, TypeVar)
 
 import torch
 import torch.nn as nn
@@ -56,7 +55,7 @@ class ModelInputForXPU(ModelRunnerInputBase):
     query_lens: Optional[list[int]] = None
     async_callback: Optional[Callable] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -68,7 +67,7 @@ class ModelInputForXPU(ModelRunnerInputBase):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls: Type[TModelInputForXPU],
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> TModelInputForXPU:
         if attn_backend is not None:
@@ -84,7 +83,7 @@ class ModelInputForXPUWithSamplingMetadata(ModelInputForXPU):
     """
     sampling_metadata: Optional["SamplingMetadata"] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -97,7 +96,7 @@ class ModelInputForXPUWithSamplingMetadata(ModelInputForXPU):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForXPUWithSamplingMetadata":
         tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
@@ -158,7 +157,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         slot_mapping: list[int] = []
         seq_lens: list[int] = []
         multi_modal_kwargs_list: list[MultiModalKwargs] = []
-        multi_modal_placeholder_maps: Dict[
+        multi_modal_placeholder_maps: dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
 
@@ -496,7 +495,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
 
     def make_model_input_from_broadcasted_tensor_dict(
             self,
-            tensor_dict: Dict[str,
+            tensor_dict: dict[str,
                               Any]) -> ModelInputForXPUWithSamplingMetadata:
         return (
             ModelInputForXPUWithSamplingMetadata.from_broadcasted_tensor_dict(

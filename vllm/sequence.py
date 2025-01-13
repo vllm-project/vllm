@@ -6,7 +6,7 @@ from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import reduce
-from typing import Any, Callable, DefaultDict, Dict, Mapping, Optional
+from typing import Any, Callable, DefaultDict, Mapping, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
@@ -49,9 +49,9 @@ class Logprob:
 
 # {token_id -> logprob} per each sequence group. None if the corresponding
 # sequence group doesn't require prompt logprob.
-PromptLogprobs = list[Optional[Dict[int, Logprob]]]
+PromptLogprobs = list[Optional[dict[int, Logprob]]]
 # {token_id -> logprob} for each sequence group.
-SampleLogprobs = list[Dict[int, Logprob]]
+SampleLogprobs = list[dict[int, Logprob]]
 
 
 class SequenceStatus(enum.IntEnum):
@@ -462,7 +462,7 @@ class Sequence:
         return self.inputs.multi_modal_placeholders
 
     @property
-    def mm_processor_kwargs(self) -> Dict[str, Any]:
+    def mm_processor_kwargs(self) -> dict[str, Any]:
         return self.inputs.mm_processor_kwargs
 
     @property
@@ -547,7 +547,7 @@ class Sequence:
         """Reset the sequence states for recomputation."""
         self.data.reset_state_for_recompute()
 
-    def append_token_id(self, token_id: int, logprobs: Dict[int,
+    def append_token_id(self, token_id: int, logprobs: dict[int,
                                                             Logprob]) -> None:
         assert token_id in logprobs
         self.output_logprobs.append(logprobs)
@@ -725,7 +725,7 @@ class SequenceGroup:
         return {}
 
     @property
-    def mm_processor_kwargs(self) -> Dict[str, Any]:
+    def mm_processor_kwargs(self) -> dict[str, Any]:
         if self.first_seq.multi_modal_data:
             return self.first_seq.mm_processor_kwargs
         elif self.encoder_seq is not None:
@@ -884,9 +884,9 @@ class SequenceGroupMetadataDelta(
     After sending the first SequenceGroupMetadata, vLLM scheduler
     only sends delta to reduce the data payload size.
     """
-    seq_data_delta: Dict[int, SequenceDataDelta]
+    seq_data_delta: dict[int, SequenceDataDelta]
     request_id: str
-    block_tables: Dict[int, list[int]]
+    block_tables: dict[int, list[int]]
     is_prompt: bool
     do_sample: bool = True
     token_chunk_size: Optional[int] = None
@@ -934,9 +934,9 @@ class SequenceGroupMetadata(
 
     request_id: str
     is_prompt: bool
-    seq_data: Dict[int, SequenceData]
+    seq_data: dict[int, SequenceData]
     sampling_params: Optional[SamplingParams]
-    block_tables: Dict[int, list[int]]
+    block_tables: dict[int, list[int]]
     do_sample: bool = True
     pooling_params: Optional[PoolingParams] = None
     lora_request: Optional[LoRARequest] = None
@@ -948,7 +948,7 @@ class SequenceGroupMetadata(
     token_type_ids: Optional[list[int]] = None
     multi_modal_data: Optional[Any] = None
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
-    mm_processor_kwargs: Optional[Dict[str, Any]] = None
+    mm_processor_kwargs: Optional[dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[list[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
@@ -1029,7 +1029,7 @@ class SequenceOutput(
     """
     parent_seq_id: int
     output_token: int
-    logprobs: Dict[int, Logprob]
+    logprobs: dict[int, Logprob]
 
     def __repr__(self) -> str:
         return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "
@@ -1106,7 +1106,7 @@ class IntermediateTensors:
     contains the hidden states and residuals for a request.
     """
 
-    tensors: Dict[str, torch.Tensor]
+    tensors: dict[str, torch.Tensor]
 
     def __init__(self, tensors):
         # manually define this function, so that
@@ -1165,7 +1165,7 @@ def get_all_seq_ids(
 
 def get_all_seq_ids_and_request_ids(
     seq_group_metadata_list: list[SequenceGroupMetadata]
-) -> tuple[list[int], Dict[str, set[int]]]:
+) -> tuple[list[int], dict[str, set[int]]]:
     """Given a list of SequenceGroupMetadata, create a list of all
     sequence ids.
     """
@@ -1353,13 +1353,13 @@ class SequenceGroupBase:
     assembled_seq_group: Optional[SequenceGroup] = None
 
     # seq id to a unique index inside this group
-    seq_id_to_index: Dict[str, int] = field(default_factory=dict)
+    seq_id_to_index: dict[str, int] = field(default_factory=dict)
 
     # seq ids to be finished
-    to_be_finished: Dict[str, SequenceGroup] = field(default_factory=dict)
+    to_be_finished: dict[str, SequenceGroup] = field(default_factory=dict)
 
     # seq id to finished sequences
-    finished_reqs: Dict[str, SequenceGroup] = field(default_factory=dict)
+    finished_reqs: dict[str, SequenceGroup] = field(default_factory=dict)
 
     streaming: bool = False
 

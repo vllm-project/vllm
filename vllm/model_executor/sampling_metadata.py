@@ -1,6 +1,6 @@
 from array import array
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 
@@ -26,7 +26,7 @@ class SequenceGroupToSample:
     seq_ids: list[int]
     sampling_params: SamplingParams
     # seq_id -> sequence data.
-    seq_data: Dict[int, SequenceData]
+    seq_data: dict[int, SequenceData]
     # The length of the sequence (all tokens seen in the past + new token to
     # compute attention) of the sequence group. None if it is in a decode
     # stage.
@@ -76,7 +76,7 @@ class SamplingMetadataCache:
     """Used to cache SamplingMetadata objects between scheduler iterations"""
 
     def __init__(self):
-        self._seq_group_to_sample_cache: Dict[int, PyObjectCache] = {}
+        self._seq_group_to_sample_cache: dict[int, PyObjectCache] = {}
 
     def get_cached_seq_group_to_sample(self, num_seqs):
         if num_seqs not in self._seq_group_to_sample_cache:
@@ -130,7 +130,7 @@ class SamplingMetadata:
         self,
         seq_groups: list[SequenceGroupToSample],
         selected_token_indices: torch.Tensor,
-        categorized_sample_indices: Dict[SamplingType, torch.Tensor],
+        categorized_sample_indices: dict[SamplingType, torch.Tensor],
         num_prompts: int,
         skip_sampler_cpu_output: bool = False,
         reuse_sampling_tensors: bool = False,
@@ -149,7 +149,7 @@ class SamplingMetadata:
         query_lens: list[int],
         device: str,
         pin_memory: bool,
-        generators: Optional[Dict[str, torch.Generator]] = None,
+        generators: Optional[dict[str, torch.Generator]] = None,
         cache: Optional[SamplingMetadataCache] = None,
     ) -> "SamplingMetadata":
         (
@@ -196,9 +196,9 @@ def _prepare_seq_groups(
     seq_lens: list[int],
     query_lens: list[int],
     device: str,
-    generators: Optional[Dict[str, torch.Generator]] = None,
+    generators: Optional[dict[str, torch.Generator]] = None,
     cache: Optional[SamplingMetadataCache] = None,
-) -> tuple[list[SequenceGroupToSample], list[int], Dict[SamplingType,
+) -> tuple[list[SequenceGroupToSample], list[int], dict[SamplingType,
                                                         list[int]], int, ]:
     """Prepare sequence groups and indices for sampling.
 
@@ -230,7 +230,7 @@ def _prepare_seq_groups(
     # Sampling type -> (
     # indices to sample/prompt logprob within pruned output logits,
     # indices to sample within pruned logits)
-    categorized_sample_indices: Dict[SamplingType, list[int]] = {
+    categorized_sample_indices: dict[SamplingType, list[int]] = {
         t: []
         for t in SamplingType
     }

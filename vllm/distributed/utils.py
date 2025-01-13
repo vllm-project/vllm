@@ -6,7 +6,7 @@ import dataclasses
 import pickle
 import time
 from collections import deque
-from typing import Any, Deque, Dict, Optional, Sequence
+from typing import Any, Deque, Optional, Sequence
 
 import torch
 from torch.distributed import TCPStore
@@ -103,11 +103,11 @@ class StatelessProcessGroup:
     data_expiration_seconds: int = 3600  # 1 hour
 
     # dst rank -> counter
-    send_dst_counter: Dict[int, int] = dataclasses.field(default_factory=dict)
+    send_dst_counter: dict[int, int] = dataclasses.field(default_factory=dict)
     # src rank -> counter
-    recv_src_counter: Dict[int, int] = dataclasses.field(default_factory=dict)
+    recv_src_counter: dict[int, int] = dataclasses.field(default_factory=dict)
     broadcast_send_counter: int = 0
-    broadcast_recv_src_counter: Dict[int, int] = dataclasses.field(
+    broadcast_recv_src_counter: dict[int, int] = dataclasses.field(
         default_factory=dict)
 
     # A deque to store the data entries, with key and timestamp.

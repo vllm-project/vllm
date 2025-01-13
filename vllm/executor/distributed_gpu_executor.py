@@ -1,6 +1,6 @@
 import asyncio
 from abc import abstractmethod
-from typing import Any, Awaitable, Dict, Optional, Union
+from typing import Any, Awaitable, Optional, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
@@ -21,7 +21,7 @@ class DistributedGPUExecutor(GPUExecutor):
         self.parallel_worker_tasks: Optional[Union[Any, Awaitable[Any]]] = None
         # Updated by implementations that require additional args to be passed
         # to the _run_workers execute_model call
-        self.extra_execute_model_run_workers_kwargs: Dict[str, Any] = {}
+        self.extra_execute_model_run_workers_kwargs: dict[str, Any] = {}
 
         super().__init__(*args, **kwargs)
 

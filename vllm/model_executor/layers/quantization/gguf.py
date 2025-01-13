@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import gguf
 import torch
@@ -38,7 +38,7 @@ class GGUFConfig(QuantizationConfig):
         return []  # no extra configs.
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "GGUFConfig":
+    def from_config(cls, config: dict[str, Any]) -> "GGUFConfig":
         return cls()
 
     def get_quant_method(self, layer: torch.nn.Module,

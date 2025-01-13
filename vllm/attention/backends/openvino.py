@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Optional, Type
+from typing import Optional, Type
 
 import openvino as ov
 import torch
@@ -136,5 +136,5 @@ class OpenVINOAttentionMetadata:
     # N.B. These aren't really related to attention and don't belong on this
     # type -- this is just a temporary solution to make them available to
     # `model_executable`.
-    multi_modal_placeholder_index_maps: Optional[Dict[
+    multi_modal_placeholder_index_maps: Optional[dict[
         str, MultiModalPlaceholderMap.IndexMap]]

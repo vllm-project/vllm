@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any
 
 import torch
 
@@ -22,7 +22,7 @@ class PoolingMetadata:
     def __init__(
         self,
         seq_groups: list[tuple[list[int], PoolingParams]],
-        seq_data: Dict[int, Any],  # Specific data related to sequences
+        seq_data: dict[int, Any],  # Specific data related to sequences
         prompt_lens: list[int],
     ) -> None:
         self.seq_groups = seq_groups

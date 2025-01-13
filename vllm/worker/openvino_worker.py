@@ -1,5 +1,5 @@
 """An OpenVINO worker class."""
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import openvino as ov
 import torch
@@ -381,7 +381,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
             blocks_to_copy = execute_model_req.blocks_to_copy
             blocks_to_swap_in = execute_model_req.blocks_to_swap_in
             blocks_to_swap_out = execute_model_req.blocks_to_swap_out
-            data: Dict[str, Any] = {
+            data: dict[str, Any] = {
                 "num_seq_groups": num_seq_groups,
                 "blocks_to_copy": execute_model_req.blocks_to_copy,
                 "blocks_to_swap_in": execute_model_req.blocks_to_swap_in,

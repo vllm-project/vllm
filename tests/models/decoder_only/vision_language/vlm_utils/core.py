@@ -1,5 +1,5 @@
 """Core test implementation to be shared across modalities."""
-from typing import Any, Callable, Dict, Optional, Type, Union
+from typing import Any, Callable, Optional, Type, Union
 
 import torch
 from PIL.Image import Image
@@ -34,9 +34,9 @@ def run_test(
                                           list[int]]],
     stop_str: Optional[list[str]],
     tokenizer_mode: str,
-    limit_mm_per_prompt: Dict[str, int],
-    vllm_runner_kwargs: Optional[Dict[str, Any]],
-    hf_model_kwargs: Optional[Dict[str, Any]],
+    limit_mm_per_prompt: dict[str, int],
+    vllm_runner_kwargs: Optional[dict[str, Any]],
+    hf_model_kwargs: Optional[dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
     task: TaskOption = "auto",
     runner_mm_key: str = "images",
@@ -56,7 +56,7 @@ def run_test(
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    vllm_kwargs: Dict[str, Any] = {}
+    vllm_kwargs: dict[str, Any] = {}
     if get_stop_token_ids is not None:
         vllm_kwargs["stop_token_ids"] = get_stop_token_ids(tokenizer)
     if stop_str:

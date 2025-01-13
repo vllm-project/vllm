@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -57,7 +57,7 @@ class MMInputMapperClient:
         self,
         mm_data: MultiModalDataDict,
         mm_hashes: Optional[list[str]],
-        mm_processor_kwargs: Optional[Dict[str, Any]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
         precomputed_mm_inputs: Optional[list[MultiModalKwargs]],
     ) -> list[MultiModalKwargs]:
         if precomputed_mm_inputs is None:

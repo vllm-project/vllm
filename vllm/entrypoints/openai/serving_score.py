@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
+from typing import Any, AsyncGenerator, Optional, Union, cast
 
 from fastapi import Request
 
@@ -113,7 +113,7 @@ class OpenAIServingScores(OpenAIServing):
         for q, t in input_pairs:
             request_prompt = f"{q}{tokenizer.sep_token}{t}"
 
-            tokenization_kwargs: Dict[str, Any] = {}
+            tokenization_kwargs: dict[str, Any] = {}
             if truncate_prompt_tokens is not None:
                 tokenization_kwargs["truncation"] = True
                 tokenization_kwargs["max_length"] = truncate_prompt_tokens

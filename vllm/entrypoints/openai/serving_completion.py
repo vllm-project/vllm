@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import AsyncGenerator, AsyncIterator, Dict, Optional
+from typing import AsyncGenerator, AsyncIterator, Optional
 from typing import Sequence as GenericSequence
 from typing import Union, cast
 
@@ -268,7 +268,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     num_prompt_tokens[prompt_idx] = len(res.prompt_token_ids)
 
                 delta_token_ids: GenericSequence[int]
-                out_logprobs: Optional[GenericSequence[Optional[Dict[
+                out_logprobs: Optional[GenericSequence[Optional[dict[
                     int, Logprob]]]]
 
                 for output in res.outputs:
@@ -404,7 +404,7 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_text = final_res.prompt
 
             token_ids: GenericSequence[int]
-            out_logprobs: Optional[GenericSequence[Optional[Dict[int,
+            out_logprobs: Optional[GenericSequence[Optional[dict[int,
                                                                  Logprob]]]]
 
             for output in final_res.outputs:
@@ -478,7 +478,7 @@ class OpenAIServingCompletion(OpenAIServing):
     def _create_completion_logprobs(
         self,
         token_ids: GenericSequence[int],
-        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
+        top_logprobs: GenericSequence[Optional[dict[int, Logprob]]],
         num_output_top_logprobs: int,
         tokenizer: AnyTokenizer,
         initial_text_offset: int = 0,
@@ -487,7 +487,7 @@ class OpenAIServingCompletion(OpenAIServing):
         out_text_offset: list[int] = []
         out_token_logprobs: list[Optional[float]] = []
         out_tokens: list[str] = []
-        out_top_logprobs: list[Optional[Dict[str, float]]] = []
+        out_top_logprobs: list[Optional[dict[str, float]]] = []
 
         last_token_len = 0
 

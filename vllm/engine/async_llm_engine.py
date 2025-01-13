@@ -3,8 +3,8 @@ import copy
 import time
 import weakref
 from functools import partial
-from typing import (Any, AsyncGenerator, Callable, Coroutine, Dict, Iterable,
-                    Mapping, Optional, Type, Union, overload)
+from typing import (Any, AsyncGenerator, Callable, Coroutine, Iterable, Mapping,
+                    Optional, Type, Union, overload)
 from weakref import ReferenceType
 
 from typing_extensions import deprecated
@@ -130,7 +130,7 @@ class RequestTracker:
     """Synchronous abstraction for tracking requests."""
 
     def __init__(self) -> None:
-        self._request_streams: Dict[str, AsyncStream] = {}
+        self._request_streams: dict[str, AsyncStream] = {}
         self._aborted_requests: asyncio.Queue[str] = asyncio.Queue()
         self._new_requests: asyncio.Queue[tuple[AsyncStream,
                                                 dict]] = asyncio.Queue()
@@ -228,10 +228,10 @@ class RequestTracker:
         if stream is not None:
             stream.finish(exception=exception)
 
-    def get_new_and_aborted_requests(self) -> tuple[list[Dict], set[str]]:
+    def get_new_and_aborted_requests(self) -> tuple[list[dict], set[str]]:
         """Get the new requests and finished requests to be
         sent to the engine."""
-        new_requests: list[Dict] = []
+        new_requests: list[dict] = []
         finished_requests: set[str] = set()
 
         while not self._aborted_requests.empty():
@@ -691,7 +691,7 @@ class AsyncLLMEngine(EngineClient):
         engine_config: Optional[VllmConfig] = None,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
     ) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.

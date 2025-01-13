@@ -1,7 +1,7 @@
 import copy
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Dict, Optional, TypeAlias, Union
+from typing import Callable, Optional, TypeAlias, Union
 
 import pandas as pd
 from torch._C._autograd import DeviceType, _KinetoEvent, _ProfilerResult
@@ -65,9 +65,9 @@ class _StatsTreeNode:
 @dataclass
 class LayerwiseProfileResults(profile):
     _kineto_results: _ProfilerResult
-    _kineto_event_correlation_map: Dict[int,
+    _kineto_event_correlation_map: dict[int,
                                         list[_KinetoEvent]] = field(init=False)
-    _event_correlation_map: Dict[int, list[FunctionEvent]] = field(init=False)
+    _event_correlation_map: dict[int, list[FunctionEvent]] = field(init=False)
     _module_tree: list[_ModuleTreeNode] = field(init=False)
     _model_stats_tree: list[_StatsTreeNode] = field(init=False)
     _summary_stats_tree: list[_StatsTreeNode] = field(init=False)
@@ -80,7 +80,7 @@ class LayerwiseProfileResults(profile):
         self._build_module_tree()
         self._build_stats_trees()
 
-    def print_model_table(self, column_widths: Dict[str, int] = None):
+    def print_model_table(self, column_widths: dict[str, int] = None):
         _column_widths = dict(name=60,
                               cpu_time_us=12,
                               cuda_time_us=12,
@@ -98,7 +98,7 @@ class LayerwiseProfileResults(profile):
                 filtered_model_table,
                 indent_style=lambda indent: "|" + "-" * indent + " "))
 
-    def print_summary_table(self, column_widths: Dict[str, int] = None):
+    def print_summary_table(self, column_widths: dict[str, int] = None):
         _column_widths = dict(name=80,
                               cuda_time_us=12,
                               pct_cuda_time=12,
@@ -227,7 +227,7 @@ class LayerwiseProfileResults(profile):
             [self._cumulative_cuda_time(root) for root in self._module_tree])
 
     def _build_stats_trees(self):
-        summary_dict: Dict[str, self.StatsTreeNode] = {}
+        summary_dict: dict[str, self.StatsTreeNode] = {}
         total_cuda_time = self._total_cuda_time()
 
         def pct_cuda_time(cuda_time_us):
@@ -325,10 +325,10 @@ class LayerwiseProfileResults(profile):
         return entries
 
     def _convert_stats_tree_to_dict(self,
-                                    tree: list[_StatsTreeNode]) -> list[Dict]:
-        root_dicts: list[Dict] = []
+                                    tree: list[_StatsTreeNode]) -> list[dict]:
+        root_dicts: list[dict] = []
 
-        def df_traversal(node: _StatsTreeNode, curr_json_list: list[Dict]):
+        def df_traversal(node: _StatsTreeNode, curr_json_list: list[dict]):
             curr_json_list.append({
                 "entry": asdict(node.entry),
                 "children": []

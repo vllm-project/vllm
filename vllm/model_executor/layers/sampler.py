@@ -4,7 +4,7 @@ import warnings
 from dataclasses import dataclass
 from importlib.util import find_spec
 from math import inf
-from typing import Dict, Iterator, Optional, Union
+from typing import Iterator, Optional, Union
 
 import msgspec
 import torch
@@ -45,10 +45,10 @@ SampleResultType = list[tuple[list[int], list[int]]]
 
 # Types of temporary data structures used for
 # computing sample_result
-SampleMetadataType = Dict[SamplingType, tuple[list[int],
+SampleMetadataType = dict[SamplingType, tuple[list[int],
                                               list[SequenceGroupToSample]]]
-MultinomialSamplesType = Dict[SamplingType, torch.Tensor]
-SampleResultsDictType = Dict[int, tuple[list[int], list[int]]]
+MultinomialSamplesType = dict[SamplingType, torch.Tensor]
+SampleResultsDictType = dict[int, tuple[list[int], list[int]]]
 
 
 # Encapsulates temporary data structures for computing
@@ -716,7 +716,7 @@ def _sample_with_torch(
       tensors required for Pythonization
     '''
 
-    categorized_seq_group_ids: Dict[SamplingType,
+    categorized_seq_group_ids: dict[SamplingType,
                                     list[int]] = {t: []
                                                   for t in SamplingType}
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
@@ -1046,7 +1046,7 @@ def _get_prompt_logprob_if_needed(
         for idx, token_id in enumerate(next_prompt_tokens):
             # Calculate the prompt logprob of the real prompt tokens.
             # {token_id: (logprob, rank_from_vocab)}
-            prompt_logprobs_dict: Dict[int, tuple[float, int]] = {
+            prompt_logprobs_dict: dict[int, tuple[float, int]] = {
                 token_id: (selected_logprob_items[idx], rank_items[idx])
             }
 

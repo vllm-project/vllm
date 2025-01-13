@@ -17,7 +17,7 @@ import copy
 import json
 from collections import defaultdict
 from functools import lru_cache
-from typing import Callable, DefaultDict, Dict, Union
+from typing import Callable, DefaultDict, Union
 
 import numpy as np
 import torch
@@ -119,7 +119,7 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
 
-    def __init__(self, schema: Union[str, Dict, BaseModel],
+    def __init__(self, schema: Union[str, dict, BaseModel],
                  tokenizer: PreTrainedTokenizerBase,
                  whitespace_pattern: Union[str, None]):
         """Compile the FSM that drives the JSON-guided generation.
@@ -139,7 +139,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
         """
         if isinstance(schema, type(BaseModel)):
             schema_str = json.dumps(schema.model_json_schema())
-        elif isinstance(schema, Dict):
+        elif isinstance(schema, dict):
             schema_str = json.dumps(schema)
         elif isinstance(schema, str):
             schema_str = schema

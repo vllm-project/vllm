@@ -1,5 +1,5 @@
 import warnings
-from typing import Dict, Optional, Sequence, Union
+from typing import Optional, Sequence, Union
 
 import torch
 
@@ -44,7 +44,7 @@ def check_outputs_equal(
 # * List of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TokensTextLogprobs = tuple[list[int], str, Optional[Union[list[Dict[int,
+TokensTextLogprobs = tuple[list[int], str, Optional[Union[list[dict[int,
                                                                     float]],
                                                           SampleLogprobs]]]
 
@@ -55,8 +55,8 @@ TokensTextLogprobs = tuple[list[int], str, Optional[Union[list[Dict[int,
 # * Optional list of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TextTextLogprobs = tuple[list[str], str, Optional[Union[list[Dict[str, float]],
-                                                        list[Dict[str,
+TextTextLogprobs = tuple[list[str], str, Optional[Union[list[dict[str, float]],
+                                                        list[dict[str,
                                                                   Logprob]]]]]
 
 # Representation of generated sequence as a tuple of
@@ -67,8 +67,8 @@ TextTextLogprobs = tuple[list[str], str, Optional[Union[list[Dict[str, float]],
 #
 # Allows prompt logprobs to be requested.
 TokensTextLogprobsPromptLogprobs = tuple[
-    list[int], str, Optional[Union[list[Dict[int, float]], SampleLogprobs]],
-    Optional[Union[list[Optional[Dict[int, float]]], PromptLogprobs]]]
+    list[int], str, Optional[Union[list[dict[int, float]], SampleLogprobs]],
+    Optional[Union[list[Optional[dict[int, float]]], PromptLogprobs]]]
 
 
 def check_logprobs_close(
@@ -251,8 +251,8 @@ def build_model_context(model_name: str,
                         tokenizer_name: Optional[str] = None,
                         trust_remote_code: bool = False,
                         dtype: Optional[Union[str, torch.dtype]] = None,
-                        mm_processor_kwargs: Optional[Dict] = None,
-                        limit_mm_per_prompt: Optional[Dict] = None):
+                        mm_processor_kwargs: Optional[dict] = None,
+                        limit_mm_per_prompt: Optional[dict] = None):
     """Creates an InputContext for a given model.
 
     Args:

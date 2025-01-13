@@ -1,6 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Optional, Type
+from typing import TYPE_CHECKING, Optional, Type
 
 import torch
 
@@ -256,7 +256,7 @@ class PlaceholderAttentionMetadataBuilder(
         self.prefill_seq_lens: list[int] = []
         self.context_lens: list[int] = []
         self.curr_seq_lens: list[int] = []
-        self.multimodal_placeholder_maps: Dict[
+        self.multimodal_placeholder_maps: dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
         self.num_prefills = 0

@@ -7,8 +7,7 @@ from dataclasses import dataclass
 from multiprocessing import Queue
 from multiprocessing.connection import wait
 from multiprocessing.process import BaseProcess
-from typing import (Any, Callable, Dict, Generic, Optional, TextIO, TypeVar,
-                    Union)
+from typing import (Any, Callable, Generic, Optional, TextIO, TypeVar, Union)
 
 import torch
 
@@ -79,7 +78,7 @@ class ResultHandler(threading.Thread):
     def __init__(self) -> None:
         super().__init__(daemon=True)
         self.result_queue = get_mp_context().Queue()
-        self.tasks: Dict[uuid.UUID, Union[ResultFuture, asyncio.Future]] = {}
+        self.tasks: dict[uuid.UUID, Union[ResultFuture, asyncio.Future]] = {}
 
     def run(self):
         for result in iter(self.result_queue.get, _TERMINATE):

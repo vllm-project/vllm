@@ -1,6 +1,6 @@
 import inspect
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Type
+from typing import Any, Optional, Type
 
 import torch
 from torch import nn
@@ -87,7 +87,7 @@ class QuantizationConfig(ABC):
 
     @classmethod
     @abstractmethod
-    def from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+    def from_config(cls, config: dict[str, Any]) -> "QuantizationConfig":
         """Create a config class from the model's quantization config."""
         raise NotImplementedError
 
@@ -103,7 +103,7 @@ class QuantizationConfig(ABC):
         return None
 
     @staticmethod
-    def get_from_keys(config: Dict[str, Any], keys: list[str]) -> Any:
+    def get_from_keys(config: dict[str, Any], keys: list[str]) -> Any:
         """Get a value from the model's quantization config."""
         for key in keys:
             if key in config:
@@ -112,7 +112,7 @@ class QuantizationConfig(ABC):
                          "quantization config.")
 
     @staticmethod
-    def get_from_keys_or(config: Dict[str, Any], keys: list[str],
+    def get_from_keys_or(config: dict[str, Any], keys: list[str],
                          default: Any) -> Any:
         """Get a optional value from the model's quantization config."""
         try:

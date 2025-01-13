@@ -5,7 +5,7 @@ import json
 import random
 import time
 from functools import cache
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 import uvloop
@@ -71,7 +71,7 @@ def lora_path_on_disk(lora_path: str) -> str:
     return get_adapter_absolute_path(lora_path)
 
 
-lora_tokenizer_cache: Dict[int, AnyTokenizer] = {}
+lora_tokenizer_cache: dict[int, AnyTokenizer] = {}
 
 
 def get_random_lora_request(
@@ -446,8 +446,8 @@ if __name__ == "__main__":
                         type=str,
                         default=None,
                         help="Path to the dataset. The dataset is expected to "
-                        "be a json in form of list[Dict[..., conversations: "
-                        "list[Dict[..., value: <prompt_or_response>]]]]")
+                        "be a json in form of list[dict[..., conversations: "
+                        "list[dict[..., value: <prompt_or_response>]]]]")
     parser.add_argument("--input-len",
                         type=int,
                         default=None,

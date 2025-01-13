@@ -1,4 +1,4 @@
-from typing import Dict, Type
+from typing import Type
 
 import torch.nn as nn
 
@@ -129,7 +129,7 @@ class CustomOp(nn.Module):
     # Examples:
     # - MyOp.enabled()
     # - op_registry["my_op"].enabled()
-    op_registry: Dict[str, Type['CustomOp']] = {}
+    op_registry: dict[str, Type['CustomOp']] = {}
 
     # Decorator to register custom ops.
     @classmethod

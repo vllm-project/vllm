@@ -33,7 +33,7 @@ import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, AsyncGenerator, Collection, Dict, Optional
+from typing import Any, AsyncGenerator, Collection, Optional
 
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
@@ -204,8 +204,8 @@ def sample_mmmu_pro_vision_requests(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
-) -> list[tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
-    sampled_requests: list[tuple[str, int, int, Dict[str,
+) -> list[tuple[str, str, int, Optional[dict[str, Collection[str]]]]]:
+    sampled_requests: list[tuple[str, int, int, dict[str,
                                                      Collection[str]]]] = []
     for data in dataset:
         if len(sampled_requests) == num_requests:
@@ -257,7 +257,7 @@ def sample_hf_requests(
     tokenizer: PreTrainedTokenizerBase,
     random_seed: int,
     fixed_output_len: Optional[int] = None,
-) -> list[tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
+) -> list[tuple[str, str, int, Optional[dict[str, Collection[str]]]]]:
 
     # Special case for MMMU-Pro vision dataset
     if dataset_path == 'MMMU/MMMU_Pro' and dataset_subset == 'vision':
@@ -281,7 +281,7 @@ def sample_hf_requests(
         "HF Dataset must have 'conversations' column.")
     filter_func = lambda x: len(x["conversations"]) >= 2
     filtered_dataset = dataset.shuffle(seed=random_seed).filter(filter_func)
-    sampled_requests: list[tuple[str, int, int, Dict[str,
+    sampled_requests: list[tuple[str, int, int, dict[str,
                                                      Collection[str]]]] = []
     for data in filtered_dataset:
         if len(sampled_requests) == num_requests:
@@ -423,7 +423,7 @@ def calculate_metrics(
     tokenizer: PreTrainedTokenizerBase,
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
-    gootput_config_dict: Dict[str, float],
+    gootput_config_dict: dict[str, float],
 ) -> tuple[BenchmarkMetrics, list[int]]:
     actual_output_lens: list[int] = []
     total_input = 0
@@ -536,7 +536,7 @@ async def benchmark(
     selected_percentile_metrics: list[str],
     selected_percentiles: list[str],
     ignore_eos: bool,
-    gootput_config_dict: Dict[str, float],
+    gootput_config_dict: dict[str, float],
     max_concurrency: Optional[int],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
@@ -896,7 +896,7 @@ def main(args: argparse.Namespace):
 
     # Save config and results to json
     if args.save_result:
-        result_json: Dict[str, Any] = {}
+        result_json: dict[str, Any] = {}
 
         # Setup
         current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")

@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Callable, Dict, Type, Union
+from typing import Callable, Type, Union
 
 from torch._C._profiler import _EventType, _ProfilerEvent, _TensorMetadata
 
@@ -29,7 +29,7 @@ def trim_string_back(string, width):
 class TablePrinter:
 
     def __init__(self, row_cls: Type[dataclasses.dataclass],
-                 column_widths: Dict[str, int]):
+                 column_widths: dict[str, int]):
         self.row_cls = row_cls
         self.fieldnames = [x.name for x in dataclasses.fields(row_cls)]
         self.column_widths = column_widths

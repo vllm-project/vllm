@@ -1,7 +1,7 @@
 import itertools
 import random
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Optional
 from unittest.mock import Mock, patch
 
 import pytest
@@ -214,7 +214,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 eos_token_id=eos_token_id,
                 stop_token_ids=stop_token_ids)
 
-            seq_data: Dict[int, SequenceData] = {}
+            seq_data: dict[int, SequenceData] = {}
             seq_group_penalization: list[bool] = []
             for _ in range(num_seqs):
                 num_input = random.randint(1, 100)
@@ -490,7 +490,7 @@ def test_sampler_mixed(seed: int, device: str):
             ))
         seq_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    generators: Dict[str, torch.Generator] = {}
+    generators: dict[str, torch.Generator] = {}
 
     def test_sampling():
         sampling_metadata = SamplingMetadata.prepare(

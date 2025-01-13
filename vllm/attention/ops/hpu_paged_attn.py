@@ -3,7 +3,7 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 from vllm_hpu_extension import cache_ops, ops
@@ -83,7 +83,7 @@ class HPUPagedAttention:
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: dict[int, int],
     ) -> None:
         src_key_cache = src_kv_cache[0]
         dst_key_cache = dst_kv_cache[0]
@@ -96,7 +96,7 @@ class HPUPagedAttention:
     @staticmethod
     def copy_blocks(
         kv_caches: list[torch.Tensor],
-        src_to_dists: Dict[int, list[int]],
+        src_to_dists: dict[int, list[int]],
     ) -> None:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]

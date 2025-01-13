@@ -14,7 +14,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncIterator, Dict, Optional, Union
+from typing import AsyncIterator, Optional, Union
 
 import uvloop
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -496,7 +496,7 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
     return await create_score(request, raw_request)
 
 
-TASK_HANDLERS: Dict[str, Dict[str, tuple]] = {
+TASK_HANDLERS: dict[str, dict[str, tuple]] = {
     "generate": {
         "messages": (ChatCompletionRequest, create_chat_completion),
         "default": (CompletionRequest, create_completion),

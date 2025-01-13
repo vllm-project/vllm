@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass, fields
 from functools import reduce
-from typing import Dict, Optional, Union
+from typing import Optional, Union
 
 import jinja2
 # yapf conflicts with isort for this block
@@ -513,7 +513,7 @@ def generate():
         for cond, tile_config in default_tile_heuristic_config.items()
     ]
 
-    def get_unique_schedules(heuristic: Dict[str, ScheduleConfig]):
+    def get_unique_schedules(heuristic: dict[str, ScheduleConfig]):
         # Do not use schedules = list(set(...)) because we need to make sure
         # the output list is deterministic; otherwise the generated kernel file
         # will be non-deterministic and causes ccache miss.

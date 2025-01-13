@@ -3,8 +3,7 @@ import os
 import tempfile
 from collections import UserList
 from enum import Enum
-from typing import (Any, Callable, Dict, Optional, Type, TypedDict, TypeVar,
-                    Union)
+from typing import (Any, Callable, Optional, Type, TypedDict, TypeVar, Union)
 
 import numpy as np
 import pytest
@@ -194,7 +193,7 @@ class DecoderPromptType(Enum):
 
 @pytest.fixture
 def example_encoder_decoder_prompts(
-) -> Dict[DecoderPromptType, list[ExplicitEncoderDecoderPrompt]]:
+) -> dict[DecoderPromptType, list[ExplicitEncoderDecoderPrompt]]:
     '''
     Returns an encoder prompt list and a decoder prompt list, wherein each pair
     of same-index entries in both lists corresponds to an (encoder prompt,
@@ -269,7 +268,7 @@ class HfRunner:
         model_name: str,
         dtype: str = "half",
         *,
-        model_kwargs: Optional[Dict[str, Any]] = None,
+        model_kwargs: Optional[dict[str, Any]] = None,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
@@ -346,7 +345,7 @@ class HfRunner:
 
         all_inputs: list[BatchEncoding] = []
         for i, prompt in enumerate(prompts):
-            processor_kwargs: Dict[str, Any] = {
+            processor_kwargs: dict[str, Any] = {
                 "text": prompt,
                 "return_tensors": "pt",
             }
@@ -501,12 +500,12 @@ class HfRunner:
         self,
         hidden_states: tuple[tuple[torch.Tensor, ...], ...],
         num_logprobs: int,
-    ) -> tuple[list[Dict[int, float]], int]:
+    ) -> tuple[list[dict[int, float]], int]:
         seq_logprobs = self._hidden_states_to_seq_logprobs(hidden_states)
         output_len = len(hidden_states)
 
         # convert to dict
-        seq_logprobs_lst: list[Dict[int, float]] = []
+        seq_logprobs_lst: list[dict[int, float]] = []
         for tok_idx, tok_logprobs in enumerate(seq_logprobs):
             # drop prompt logprobs
             if tok_idx == 0:
@@ -539,7 +538,7 @@ class HfRunner:
                                      videos=videos,
                                      audios=audios)
 
-        all_logprobs: list[list[Dict[int, float]]] = []
+        all_logprobs: list[list[dict[int, float]]] = []
         all_output_ids: list[list[int]] = []
         all_output_strs: list[str] = []
 
@@ -583,13 +582,13 @@ class HfRunner:
         Greedy logprobs generation for vLLM encoder/decoder models
         '''
 
-        all_logprobs: list[list[Dict[int, float]]] = []
+        all_logprobs: list[list[dict[int, float]]] = []
         all_output_ids: list[list[int]] = []
         all_output_strs: list[str] = []
 
         for i, (encoder_prompt, decoder_prompt) in enumerate(
                 to_enc_dec_tuple_list(encoder_decoder_prompts)):
-            processor_kwargs: Dict[str, Any] = {
+            processor_kwargs: dict[str, Any] = {
                 "text": encoder_prompt,
                 "return_tensors": "pt",
             }

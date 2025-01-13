@@ -1,5 +1,4 @@
 import functools
-from typing import Dict
 
 import torch
 
@@ -34,7 +33,7 @@ def _get_default_config(op_type: str, batch: int, hidden_size: int):
 
 
 def get_lora_op_configs(op_type: str, batch: int,
-                        hidden_size: int) -> Dict[str, int]:
+                        hidden_size: int) -> dict[str, int]:
     """Inspired by `fused_moe_kernel`
     The return value will be a dictionary mapping an irregular grid of batch 
     sizes and hidden_size to configurations of the bgmv-related kernel. 
@@ -48,8 +47,8 @@ def get_lora_op_configs(op_type: str, batch: int,
     return config
 
 
-_LORA_A_PTR_DICT: Dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
-_LORA_B_PTR_DICT: Dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
+_LORA_A_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
+_LORA_B_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
 
 
 def _get_lora_a_ptr(lora_a_weights: list[torch.Tensor], device: str):

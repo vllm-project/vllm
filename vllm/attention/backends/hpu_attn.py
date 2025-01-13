@@ -4,7 +4,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Type
+from typing import Any, Optional, Type
 
 import torch
 import vllm_hpu_extension.ops as ops
@@ -52,14 +52,14 @@ class HPUAttentionBackend(AttentionBackend):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: dict[int, int],
     ) -> None:
         HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: list[torch.Tensor],
-        src_to_dists: Dict[int, list[int]],
+        src_to_dists: dict[int, list[int]],
     ) -> None:
         HPUPagedAttention.copy_blocks(kv_caches, src_to_dists)
 
@@ -100,7 +100,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         max_seq_len: int = 4096,
         attn_type: str = AttentionType.DECODER,
     ) -> None:

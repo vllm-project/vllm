@@ -1,6 +1,6 @@
 import os
 from functools import cached_property
-from typing import Callable, Dict, Optional, Sequence, Type, Union
+from typing import Callable, Optional, Sequence, Type, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
@@ -20,7 +20,7 @@ class ToolParser:
     """
 
     def __init__(self, tokenizer: AnyTokenizer):
-        self.prev_tool_call_arr: list[Dict] = []
+        self.prev_tool_call_arr: list[dict] = []
         # the index of the tool call that is currently being parsed
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
@@ -29,7 +29,7 @@ class ToolParser:
         self.model_tokenizer = tokenizer
 
     @cached_property
-    def vocab(self) -> Dict[str, int]:
+    def vocab(self) -> dict[str, int]:
         # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
@@ -77,7 +77,7 @@ class ToolParser:
 
 
 class ToolParserManager:
-    tool_parsers: Dict[str, Type] = {}
+    tool_parsers: dict[str, Type] = {}
 
     @classmethod
     def get_tool_parser(cls, name) -> Type:

@@ -1,7 +1,7 @@
 import argparse
 import time
 from datetime import datetime
-from typing import Any, Dict, TypedDict
+from typing import Any, TypedDict
 
 import ray
 import torch
@@ -141,7 +141,7 @@ def benchmark_config(
     return avg
 
 
-def get_configs_compute_bound() -> list[Dict[str, int]]:
+def get_configs_compute_bound() -> list[dict[str, int]]:
     # Reduced search space for faster tuning.
     # TODO(woosuk): Increase the search space and use a performance model to
     # prune the search space.
@@ -181,7 +181,7 @@ class BenchmarkWorker:
         dtype: torch.dtype,
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
-    ) -> tuple[Dict[str, int], float]:
+    ) -> tuple[dict[str, int], float]:
         current_platform.seed_everything(self.seed)
         dtype_str = get_config_dtype_str(dtype,
                                          use_int8_w8a16=use_int8_w8a16,
@@ -213,8 +213,8 @@ class BenchmarkWorker:
         dtype: torch.dtype,
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
-        search_space: list[Dict[str, int]],
-    ) -> Dict[str, int]:
+        search_space: list[dict[str, int]],
+    ) -> dict[str, int]:
         best_config = None
         best_time = float("inf")
         for config in tqdm(search_space):
@@ -253,7 +253,7 @@ def sort_config(config: BenchmarkConfig) -> BenchmarkConfig:
     }
 
 
-def save_configs(configs: Dict[int, BenchmarkConfig], num_experts: int,
+def save_configs(configs: dict[int, BenchmarkConfig], num_experts: int,
                  shard_intermediate_size: int, hidden_size: int, topk: int,
                  dtype: torch.dtype, use_fp8_w8a8: bool,
                  use_int8_w8a16: bool) -> None:

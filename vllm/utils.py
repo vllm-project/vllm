@@ -31,8 +31,8 @@ from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
-                    Dict, Generator, Generic, Iterator, Literal, NamedTuple,
-                    Optional, Type, TypeVar, Union, overload)
+                    Generator, Generic, Iterator, Literal, NamedTuple, Optional,
+                    Type, TypeVar, Union, overload)
 from uuid import uuid4
 
 import numpy as np
@@ -539,7 +539,7 @@ def find_process_using_port(port: int) -> Optional[psutil.Process]:
     return None
 
 
-def update_environment_variables(envs: Dict[str, str]):
+def update_environment_variables(envs: dict[str, str]):
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
             logger.warning(
@@ -814,7 +814,7 @@ def is_list_of(
     assert_never(check)
 
 
-JSONTree = Union[Dict[str, "JSONTree[T]"], list["JSONTree[T]"],
+JSONTree = Union[dict[str, "JSONTree[T]"], list["JSONTree[T]"],
                  tuple["JSONTree[T]", ...], T]
 """A nested JSON structure where the leaves need not be JSON-serializable."""
 
@@ -822,8 +822,8 @@ JSONTree = Union[Dict[str, "JSONTree[T]"], list["JSONTree[T]"],
 @overload
 def json_map_leaves(
     func: Callable[[T], U],
-    value: Dict[str, JSONTree[T]],
-) -> Dict[str, JSONTree[U]]:
+    value: dict[str, JSONTree[T]],
+) -> dict[str, JSONTree[U]]:
     ...
 
 
@@ -1300,7 +1300,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         # only expecting a flat dictionary of atomic types
         processed_args: list[str] = []
 
-        config: Dict[str, Union[int, str]] = {}
+        config: dict[str, Union[int, str]] = {}
         try:
             with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
@@ -1384,7 +1384,7 @@ def resolve_mm_processor_kwargs(
     *,
     requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Applies filtering to eliminate invalid mm_processor_kwargs, i.e.,
     those who are not explicit keywords to the given callable (of one is
     given; otherwise no filtering is done), then merges the kwarg dicts,
@@ -1425,7 +1425,7 @@ def get_allowed_kwarg_only_overrides(
     *,
     requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Given a callable which has one or more keyword only params and a dict
     mapping param names to values, drop values that can be not be kwarg
@@ -1516,9 +1516,9 @@ class AtomicCounter:
 # Adapted from: https://stackoverflow.com/a/47212782/5082708
 class LazyDict(Mapping[str, T], Generic[T]):
 
-    def __init__(self, factory: Dict[str, Callable[[], T]]):
+    def __init__(self, factory: dict[str, Callable[[], T]]):
         self._factory = factory
-        self._dict: Dict[str, T] = {}
+        self._dict: dict[str, T] = {}
 
     def __getitem__(self, key: str) -> T:
         if key not in self._dict:
@@ -2140,7 +2140,7 @@ def get_mp_context():
 
 
 def bind_kv_cache(
-        ctx: Dict[str, Any],
+        ctx: dict[str, Any],
         kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
 ) -> None:
     # Bind the kv_cache tensor to Attention modules, similar to

@@ -1,5 +1,5 @@
 from functools import lru_cache, partial
-from typing import Dict, FrozenSet, Iterable, Optional, Union
+from typing import FrozenSet, Iterable, Optional, Union
 
 import torch
 
@@ -41,7 +41,7 @@ def _get_allowed_token_ids_logits_processor(
 
 
 def logit_bias_logits_processor(
-    logit_bias: Dict[int, float],
+    logit_bias: dict[int, float],
     token_ids: list[int],
     logits: torch.Tensor,
 ) -> torch.Tensor:
@@ -51,7 +51,7 @@ def logit_bias_logits_processor(
 
 
 def get_logits_processors(
-    logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]],
+    logit_bias: Optional[Union[dict[int, float], dict[str, float]]],
     allowed_token_ids: Optional[list[int]],
     tokenizer: AnyTokenizer,
 ) -> list[LogitsProcessor]:
@@ -60,7 +60,7 @@ def get_logits_processors(
         try:
             # Convert token_id to integer
             # Clamp the bias between -100 and 100 per OpenAI API spec
-            clamped_logit_bias: Dict[int, float] = {
+            clamped_logit_bias: dict[int, float] = {
                 int(token_id): min(100.0, max(-100.0, bias))
                 for token_id, bias in logit_bias.items()
             }

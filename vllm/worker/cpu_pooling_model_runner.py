@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Any, Dict, Optional, Type, Union
+from typing import Any, Optional, Type, Union
 
 import torch
 
@@ -84,7 +84,7 @@ class CPUPoolingModelRunner(
 
     def make_model_input_from_broadcasted_tensor_dict(
             self,
-            tensor_dict: Dict[str,
+            tensor_dict: dict[str,
                               Any]) -> ModelInputForCPUWithPoolingMetadata:
         return ModelInputForCPUWithPoolingMetadata.from_broadcasted_tensor_dict(
             tensor_dict,
@@ -121,7 +121,7 @@ class CPUPoolingModelRunner(
             pooling_params = seq_group_metadata.pooling_params
             seq_groups.append((seq_ids, pooling_params))
 
-        seq_data: Dict[int, SequenceData] = {}
+        seq_data: dict[int, SequenceData] = {}
         for seq_group_metadata in seq_group_metadata_list:
             seq_data.update(seq_group_metadata.seq_data)
 

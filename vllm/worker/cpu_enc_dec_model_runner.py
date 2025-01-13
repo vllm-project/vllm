@@ -1,5 +1,5 @@
 import dataclasses
-from typing import TYPE_CHECKING, Any, Dict, Optional, Type, cast
+from typing import TYPE_CHECKING, Any, Optional, Type, cast
 
 import torch
 
@@ -29,7 +29,7 @@ class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
     encoder_input_tokens: Optional[torch.Tensor] = None
     encoder_input_positions: Optional[torch.Tensor] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -45,7 +45,7 @@ class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "EncoderDecoderModelInputForCPU":
         return cast(
@@ -78,7 +78,7 @@ class CPUEncoderDecoderModelRunner(
         return self._list_to_long_tensor([])
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: Dict[str,
+            self, tensor_dict: dict[str,
                                     Any]) -> EncoderDecoderModelInputForCPU:
         return EncoderDecoderModelInputForCPU.from_broadcasted_tensor_dict(
             tensor_dict,

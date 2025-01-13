@@ -9,7 +9,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Type, Union
+from typing import Any, Callable, Optional, Type, Union
 
 import openai
 import pytest
@@ -72,7 +72,7 @@ class RemoteOpenAIServer:
                  model: str,
                  vllm_serve_args: list[str],
                  *,
-                 env_dict: Optional[Dict[str, str]] = None,
+                 env_dict: Optional[dict[str, str]] = None,
                  auto_port: bool = True,
                  max_wait_seconds: Optional[float] = None) -> None:
         if auto_port:
@@ -399,8 +399,8 @@ def _test_image_text(
 def compare_two_settings(model: str,
                          arg1: list[str],
                          arg2: list[str],
-                         env1: Optional[Dict[str, str]] = None,
-                         env2: Optional[Dict[str, str]] = None,
+                         env1: Optional[dict[str, str]] = None,
+                         env2: Optional[dict[str, str]] = None,
                          *,
                          method: str = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
@@ -427,7 +427,7 @@ def compare_two_settings(model: str,
 
 def compare_all_settings(model: str,
                          all_args: list[list[str]],
-                         all_envs: list[Optional[Dict[str, str]]],
+                         all_envs: list[Optional[dict[str, str]]],
                          *,
                          method: str = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
@@ -609,8 +609,8 @@ def wait_for_gpu_memory_to_clear(devices: list[int],
     devices = get_physical_device_indices(devices)
     start_time = time.time()
     while True:
-        output: Dict[int, str] = {}
-        output_raw: Dict[int, float] = {}
+        output: dict[int, str] = {}
+        output_raw: dict[int, float] = {}
         for device in devices:
             if current_platform.is_rocm():
                 dev_handle = amdsmi_get_processor_handles()[device]

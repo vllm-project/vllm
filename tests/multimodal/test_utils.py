@@ -2,7 +2,7 @@ import base64
 import mimetypes
 import os
 from tempfile import NamedTemporaryFile, TemporaryDirectory
-from typing import TYPE_CHECKING, Dict, NamedTuple, Optional
+from typing import TYPE_CHECKING, NamedTuple, Optional
 
 import numpy as np
 import pytest
@@ -28,7 +28,7 @@ TEST_IMAGE_URLS = [
 
 
 @pytest.fixture(scope="module")
-def url_images() -> Dict[str, Image.Image]:
+def url_images() -> dict[str, Image.Image]:
     connector = MediaConnector()
 
     return {
@@ -64,7 +64,7 @@ async def test_fetch_image_http(image_url: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
-async def test_fetch_image_base64(url_images: Dict[str, Image.Image],
+async def test_fetch_image_base64(url_images: dict[str, Image.Image],
                                   image_url: str, suffix: str):
     connector = MediaConnector()
     url_image = url_images[image_url]

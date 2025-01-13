@@ -2,7 +2,7 @@ import asyncio
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import (TYPE_CHECKING, Any, Awaitable, Dict, Optional, Union)
+from typing import (TYPE_CHECKING, Any, Awaitable, Optional, Union)
 
 import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorAsyncBase
@@ -33,7 +33,7 @@ class RayTPUExecutor(TPUExecutor):
         self.parallel_worker_tasks: Optional[Union[Any, Awaitable[Any]]] = None
         # Updated by implementations that require additional args to be passed
         # to the _run_workers execute_model call
-        self.extra_execute_model_run_workers_kwargs: Dict[str, Any] = {}
+        self.extra_execute_model_run_workers_kwargs: dict[str, Any] = {}
 
         super().__init__(*args, **kwargs)
 
@@ -113,7 +113,7 @@ class RayTPUExecutor(TPUExecutor):
             ray.get(worker.get_node_ip.remote())  # type: ignore[attr-defined]
             for worker in self.workers
         ]
-        ip_counts: Dict[str, int] = {}
+        ip_counts: dict[str, int] = {}
         for ip in worker_ips:
             ip_counts[ip] = ip_counts.get(ip, 0) + 1
 
@@ -203,7 +203,7 @@ class RayTPUExecutor(TPUExecutor):
         *args,
         async_run_remote_workers_only: bool = False,
         all_args: Optional[list[tuple[Any, ...]]] = None,
-        all_kwargs: Optional[list[Dict[str, Any]]] = None,
+        all_kwargs: Optional[list[dict[str, Any]]] = None,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
         **kwargs,

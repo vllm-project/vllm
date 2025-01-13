@@ -1,7 +1,7 @@
 import copy
 from collections import defaultdict
 from functools import cached_property
-from typing import Any, Dict, Optional, Type
+from typing import Any, Optional, Type
 
 import torch
 
@@ -140,7 +140,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     def create_worker(
         cls,
         scorer_worker: WorkerBase,
-        draft_worker_kwargs: Dict[str, Any],
+        draft_worker_kwargs: dict[str, Any],
         disable_mqa_scorer: bool,
         disable_by_batch_size: Optional[int],
         draft_token_acceptance_method: str,
@@ -296,7 +296,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self._seq_with_bonus_token_in_last_step: set[int] = set()
         # Tracks the currently active request ids and the sequence IDs
         # corresponding to them
-        self._request_id_seq_id_mapping: Dict[str, set[int]] = defaultdict(set)
+        self._request_id_seq_id_mapping: dict[str, set[int]] = defaultdict(set)
         # Tracks if the proposer worker uses the KV cache or not.
 
         self.probs_dtype = self.spec_decode_sampler.probs_dtype
@@ -812,7 +812,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
         # Sampler arguments
-        sampler_extra_kwargs: Dict[str, Any] = {}
+        sampler_extra_kwargs: dict[str, Any] = {}
         if self.generators and isinstance(self.spec_decode_sampler,
                                           SpecDecodeStochasticBaseSampler):
             sampler_extra_kwargs["seeded_seqs"] = {
@@ -1079,7 +1079,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
     def _track_sequences_with_bonus_tokens(
             self, seq_ids: list[int],
-            request_ids_seq_ids_mapping: Dict[str, set[int]],
+            request_ids_seq_ids_mapping: dict[str, set[int]],
             accepted_token_ids_by_step: list[list[int]]):
         """
         Updates the internal data structures which keep track of sequences

@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -42,7 +42,7 @@ class DeepSpeedFPConfig(QuantizationConfig):
         return "DeepSpeedFP"
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "DeepSpeedFPConfig":
+    def from_config(cls, config: dict[str, Any]) -> "DeepSpeedFPConfig":
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         return cls(weight_bits=weight_bits, group_size=group_size)

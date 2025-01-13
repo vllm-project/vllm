@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 
@@ -85,7 +85,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "GPTQMarlinConfig":
+    def from_config(cls, config: dict[str, Any]) -> "GPTQMarlinConfig":
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
@@ -127,7 +127,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         return None
 
     @classmethod
-    def is_gptq_marlin_compatible(cls, quant_config: Dict[str, Any]):
+    def is_gptq_marlin_compatible(cls, quant_config: dict[str, Any]):
         # Extract data from quant config.
         quant_method = quant_config.get("quant_method", "").lower()
         num_bits = quant_config.get("bits")

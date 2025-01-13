@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Callable, Dict, Type
+from typing import Callable, Type
 
 import pytest
 import torch
@@ -65,7 +65,7 @@ def get_messages(image: Image.Image, text: str, embed_text: bool):
 
 
 def apply_chat_template_and_add_eos(
-    messages: list[Dict],
+    messages: list[dict],
     apply_chat_template_fn: Callable,
 ):
     prompt = apply_chat_template_fn(

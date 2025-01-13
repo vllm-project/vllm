@@ -1,4 +1,3 @@
-from typing import Dict
 
 import openai
 import pytest
@@ -48,7 +47,7 @@ async def client(server):
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image() -> Dict[str, str]:
+def base64_encoded_image() -> dict[str, str]:
     return {
         image_url: encode_image_base64(fetch_image(image_url))
         for image_url in TEST_IMAGE_URLS
@@ -150,7 +149,7 @@ async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_base64encoded(
         client: openai.AsyncOpenAI, model_name: str, image_url: str,
-        base64_encoded_image: Dict[str, str]):
+        base64_encoded_image: dict[str, str]):
 
     messages = [{
         "role":
@@ -208,7 +207,7 @@ async def test_single_chat_session_image_base64encoded(
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_base64encoded_beamsearch(
         client: openai.AsyncOpenAI, model_name: str, image_url: str,
-        base64_encoded_image: Dict[str, str]):
+        base64_encoded_image: dict[str, str]):
 
     messages = [{
         "role":

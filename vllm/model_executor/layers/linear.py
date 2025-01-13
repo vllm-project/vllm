@@ -1,6 +1,6 @@
 import itertools
 from abc import abstractmethod
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -45,7 +45,7 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
 
 
 def adjust_bitsandbytes_4bit_shard(param: Parameter,
-                                   shard_offsets: Dict[str, tuple[int, int]],
+                                   shard_offsets: dict[str, tuple[int, int]],
                                    loaded_shard_id: str) -> tuple[int, int]:
     """Adjust the quantization offsets and sizes for BitsAndBytes sharding."""
 

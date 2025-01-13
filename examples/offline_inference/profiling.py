@@ -4,7 +4,7 @@ import os
 import sys
 from argparse import RawTextHelpFormatter
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Generator, Optional, TypeAlias
+from typing import Any, Generator, Optional, TypeAlias
 
 import torch
 import tqdm
@@ -40,7 +40,7 @@ def get_dtype(dtype: str):
         return dtype
 
 
-OutputLen_NumReqs_Map: TypeAlias = Dict[int, int]
+OutputLen_NumReqs_Map: TypeAlias = dict[int, int]
 def compute_request_output_lengths(batch_size: int, step_requests: list[int]) \
       -> OutputLen_NumReqs_Map:
     """

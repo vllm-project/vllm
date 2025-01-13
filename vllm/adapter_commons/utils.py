@@ -1,8 +1,8 @@
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 
 ## model functions
-def deactivate_adapter(adapter_id: int, active_adapters: Dict[int, None],
+def deactivate_adapter(adapter_id: int, active_adapters: dict[int, None],
                        deactivate_func: Callable) -> bool:
     if adapter_id in active_adapters:
         deactivate_func(adapter_id)
@@ -11,7 +11,7 @@ def deactivate_adapter(adapter_id: int, active_adapters: Dict[int, None],
     return False
 
 
-def add_adapter(adapter: Any, registered_adapters: Dict[int, Any],
+def add_adapter(adapter: Any, registered_adapters: dict[int, Any],
                 capacity: int, add_func: Callable) -> bool:
     if adapter.id not in registered_adapters:
         if len(registered_adapters) >= capacity:
@@ -30,18 +30,18 @@ def set_adapter_mapping(mapping: Any, last_mapping: Any,
     return last_mapping
 
 
-def remove_adapter(adapter_id: int, registered_adapters: Dict[int, Any],
+def remove_adapter(adapter_id: int, registered_adapters: dict[int, Any],
                    deactivate_func: Callable) -> bool:
     deactivate_func(adapter_id)
     return bool(registered_adapters.pop(adapter_id, None))
 
 
-def list_adapters(registered_adapters: Dict[int, Any]) -> Dict[int, Any]:
+def list_adapters(registered_adapters: dict[int, Any]) -> dict[int, Any]:
     return dict(registered_adapters)
 
 
 def get_adapter(adapter_id: int,
-                registered_adapters: Dict[int, Any]) -> Optional[Any]:
+                registered_adapters: dict[int, Any]) -> Optional[Any]:
     return registered_adapters.get(adapter_id)
 
 

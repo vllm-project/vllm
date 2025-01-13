@@ -1,6 +1,6 @@
 import dataclasses
 import itertools
-from typing import Any, Dict, Optional, Type, cast
+from typing import Any, Optional, Type, cast
 
 import torch
 import torch.distributed
@@ -42,7 +42,7 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
     encoder_input_tokens: Optional[torch.Tensor] = None
     encoder_input_positions: Optional[torch.Tensor] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(self) -> dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -61,7 +61,7 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
     @classmethod
     def from_broadcasted_tensor_dict(
         cls,
-        tensor_dict: Dict[str, Any],
+        tensor_dict: dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "EncoderDecoderModelInput":
         return cast(
@@ -207,7 +207,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         return [output]
 
     def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: Dict[str, Any]) -> EncoderDecoderModelInput:
+            self, tensor_dict: dict[str, Any]) -> EncoderDecoderModelInput:
         return EncoderDecoderModelInput.from_broadcasted_tensor_dict(
             tensor_dict,
             attn_backend=self.attn_backend,

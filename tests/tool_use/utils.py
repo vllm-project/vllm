@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from openai.types.chat import (ChatCompletionMessageParam,
                                ChatCompletionToolParam)
@@ -16,8 +16,8 @@ class ServerConfig(TypedDict, total=False):
     supports_rocm: Optional[bool]
 
 
-def patch_system_prompt(messages: list[Dict[str, Any]],
-                        system_prompt: str) -> list[Dict[str, Any]]:
+def patch_system_prompt(messages: list[dict[str, Any]],
+                        system_prompt: str) -> list[dict[str, Any]]:
     new_messages = deepcopy(messages)
     if new_messages[0]["role"] == "system":
         new_messages[0]["content"] = system_prompt
@@ -26,8 +26,8 @@ def patch_system_prompt(messages: list[Dict[str, Any]],
     return new_messages
 
 
-def ensure_system_prompt(messages: list[Dict[str, Any]],
-                         config: ServerConfig) -> list[Dict[str, Any]]:
+def ensure_system_prompt(messages: list[dict[str, Any]],
+                         config: ServerConfig) -> list[dict[str, Any]]:
     prompt = config.get("system_prompt")
     if prompt:
         return patch_system_prompt(messages, prompt)
@@ -39,7 +39,7 @@ def ensure_system_prompt(messages: list[Dict[str, Any]],
 # and change type or KV cache quantization or something.
 ARGS: list[str] = ["--enable-auto-tool-choice", "--max-model-len", "1024"]
 
-CONFIGS: Dict[str, ServerConfig] = {
+CONFIGS: dict[str, ServerConfig] = {
     "hermes": {
         "model":
         "NousResearch/Hermes-3-Llama-3.1-8B",

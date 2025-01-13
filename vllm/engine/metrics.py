@@ -1,7 +1,7 @@
 import time
 from typing import TYPE_CHECKING
 from typing import Counter as CollectionsCounter
-from typing import Dict, Optional, Type, Union, cast
+from typing import Optional, Type, Union, cast
 
 import numpy as np
 import prometheus_client
@@ -521,7 +521,7 @@ class PrometheusStatLogger(StatLoggerBase):
     _metrics_cls = Metrics
     _gauge_cls = prometheus_client.Gauge
 
-    def __init__(self, local_interval: float, labels: Dict[str, str],
+    def __init__(self, local_interval: float, labels: dict[str, str],
                  vllm_config: VllmConfig) -> None:
         super().__init__(local_interval, vllm_config)
         # Prometheus metrics
@@ -554,7 +554,7 @@ class PrometheusStatLogger(StatLoggerBase):
         for datum in data:
             histogram.labels(**self.labels).observe(datum)
 
-    def _log_gauge_string(self, gauge, data: Dict[str, str]) -> None:
+    def _log_gauge_string(self, gauge, data: dict[str, str]) -> None:
         gauge.labels(**data).set_to_current_time()
 
     def _log_prometheus(self, stats: Stats) -> None:

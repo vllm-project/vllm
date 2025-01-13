@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Optional
+from typing import Optional
 
 import openai
 import pytest
@@ -52,7 +52,7 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
         assert isinstance(tool_call.function.arguments, str)
 
         parsed_arguments = json.loads(tool_call.function.arguments)
-        assert isinstance(parsed_arguments, Dict)
+        assert isinstance(parsed_arguments, dict)
         assert isinstance(parsed_arguments.get("city"), str)
         assert isinstance(parsed_arguments.get("state"), str)
 

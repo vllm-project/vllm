@@ -1,6 +1,6 @@
 import os
 from importlib.util import find_spec
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from torch.nn import Module
 
@@ -43,7 +43,7 @@ class NeuronQuantConfig(QuantizationConfig):
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "NeuronQuantConfig":
+    def from_config(cls, config: dict[str, Any]) -> "NeuronQuantConfig":
         quantize_method = cls.get_from_keys(config, ["quantize_method"])
         dequant_dtype = cls.get_from_keys(config, ["dequant_dtype"])
         return cls(dequant_dtype=dequant_dtype,
