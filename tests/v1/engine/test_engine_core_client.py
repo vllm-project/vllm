@@ -6,6 +6,7 @@ from typing import Dict, List
 import pytest
 from transformers import AutoTokenizer
 
+from tests.utils import fork_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
@@ -42,7 +43,7 @@ def make_request(params: SamplingParams) -> EngineCoreRequest:
 def loop_until_done(client: EngineCoreClient, outputs: Dict):
 
     while True:
-        engine_core_outputs = client.get_output()
+        engine_core_outputs = client.get_output().outputs
 
         if len(engine_core_outputs) == 0:
             break
@@ -60,7 +61,7 @@ def loop_until_done(client: EngineCoreClient, outputs: Dict):
 async def loop_until_done_async(client: EngineCoreClient, outputs: Dict):
 
     while True:
-        engine_core_outputs = await client.get_output_async()
+        engine_core_outputs = await client.get_output_async().outputs
 
         if len(engine_core_outputs) == 0:
             break
@@ -75,6 +76,7 @@ async def loop_until_done_async(client: EngineCoreClient, outputs: Dict):
             break
 
 
+@fork_new_process_for_each_test
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
 def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
@@ -143,6 +145,7 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
         client.abort_requests([request.request_id])
 
 
+@fork_new_process_for_each_test
 @pytest.mark.asyncio
 async def test_engine_core_client_asyncio(monkeypatch):
 

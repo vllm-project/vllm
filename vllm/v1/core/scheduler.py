@@ -5,12 +5,11 @@ from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalKwargs
-from vllm.multimodal.base import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.engine import EngineCoreOutput
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -396,12 +395,12 @@ class Scheduler:
         self,
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
-    ) -> List[EngineCoreOutput]:
+    ) -> EngineCoreOutputs:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
-        engine_core_outputs: List[EngineCoreOutput] = []
+        outputs: List[EngineCoreOutput] = []
         for request in self.running:
             req_id = request.request_id
             request.num_computed_tokens += num_scheduled_tokens[req_id]
@@ -440,7 +439,7 @@ class Scheduler:
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
                     stop_reason=request.stop_reason)
-                engine_core_outputs.append(output)
+                outputs.append(output)
 
                 # Breakout of the loop.
                 if stopped:
@@ -448,7 +447,10 @@ class Scheduler:
 
             new_running.append(request)
         self.running = new_running
-        return engine_core_outputs
+        return EngineCoreOutputs(
+            outputs=outputs,
+            scheduler_stats=self.make_stats(),
+        )
 
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len
@@ -516,6 +518,12 @@ class Scheduler:
 
     def has_unfinished_requests(self) -> bool:
         return self.get_num_unfinished_requests() > 0
+
+    def make_stats(self) -> SchedulerStats:
+        return SchedulerStats(
+            num_running_reqs=len(self.running),
+            num_waiting_reqs=len(self.waiting),
+        )
 
 
 @dataclass

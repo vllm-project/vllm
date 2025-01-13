@@ -237,6 +237,7 @@ class AttentionImpl(ABC, Generic[T]):
         kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         raise NotImplementedError
 
@@ -250,7 +251,6 @@ class AttentionImpl(ABC, Generic[T]):
         attn_metadata: T,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
-        attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
         fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]] = None,
     ) -> torch.Tensor:

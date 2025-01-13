@@ -46,7 +46,7 @@ import zmq
 import zmq.asyncio
 from packaging.version import Version
 from torch.library import Library
-from typing_extensions import ParamSpec, TypeIs, assert_never
+from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
@@ -564,7 +564,7 @@ def get_ip() -> str:
         logger.warning(
             "The environment variable HOST_IP is deprecated and ignored, as"
             " it is often used by Docker and other software to"
-            "interact with the container's network stack. Please"
+            "interact with the container's network stack. Please "
             "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
             " to communicate with each other.")
     if host_ip:
@@ -642,6 +642,13 @@ def get_open_port() -> int:
 
 
 def find_process_using_port(port: int) -> Optional[psutil.Process]:
+    # TODO: We can not check for running processes with network
+    # port on macOS. Therefore, we can not have a full graceful shutdown
+    # of vLLM. For now, let's not look for processes in this case.
+    # Ref: https://www.florianreinhard.de/accessdenied-in-psutil/
+    if sys.platform.startswith("darwin"):
+        return None
+
     for conn in psutil.net_connections():
         if conn.laddr.port == port:
             try:
@@ -805,18 +812,6 @@ def create_kv_caches_with_random(
                 f"Does not support value cache of type {cache_dtype}")
         value_caches.append(value_cache)
     return key_caches, value_caches
-
-
-@lru_cache
-def print_info_once(msg: str) -> None:
-    # Set the stacklevel to 2 to print the caller's line info
-    logger.info(msg, stacklevel=2)
-
-
-@lru_cache
-def print_warning_once(msg: str) -> None:
-    # Set the stacklevel to 2 to print the caller's line info
-    logger.warning(msg, stacklevel=2)
 
 
 @lru_cache(maxsize=None)
@@ -1065,6 +1060,39 @@ def find_nccl_library() -> str:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
         logger.info("Found nccl from library %s", so_file)
     return so_file
+
+
+prev_set_stream = torch.cuda.set_stream
+
+_current_stream = None
+
+
+def _patched_set_stream(stream: torch.cuda.Stream) -> None:
+    global _current_stream
+    _current_stream = stream
+    prev_set_stream(stream)
+
+
+torch.cuda.set_stream = _patched_set_stream
+
+
+def current_stream() -> torch.cuda.Stream:
+    """
+    replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
+    it turns out that `torch.cuda.current_stream()` is quite expensive,
+    as it will construct a new stream object at each call.
+    here we patch `torch.cuda.set_stream` to keep track of the current stream
+    directly, so that we can avoid calling `torch.cuda.current_stream()`.
+
+    the underlying hypothesis is that we do not call `torch._C._cuda_setStream`
+    from C/C++ code.
+    """
+    global _current_stream
+    if _current_stream is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _current_stream = torch.cuda.current_stream()
+    return _current_stream
 
 
 def enable_trace_function_call_for_thread(vllm_config: "VllmConfig") -> None:
@@ -1739,24 +1767,183 @@ def get_vllm_optional_dependencies():
     }
 
 
-@dataclass(frozen=True)
-class PlaceholderModule:
+class _PlaceholderBase:
+    """
+    Disallows downstream usage of placeholder modules.
+
+    We need to explicitly override each dunder method because
+    :meth:`__getattr__` is not called when they are accessed.
+
+    See also:
+        [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
+    """
+
+    def __getattr__(self, key: str) -> Never:
+        """
+        The main class should implement this to throw an error
+        for attribute accesses representing downstream usage.
+        """
+        raise NotImplementedError
+
+    # [Basic customization]
+
+    def __lt__(self, other: object):
+        return self.__getattr__("__lt__")
+
+    def __le__(self, other: object):
+        return self.__getattr__("__le__")
+
+    def __eq__(self, other: object):
+        return self.__getattr__("__eq__")
+
+    def __ne__(self, other: object):
+        return self.__getattr__("__ne__")
+
+    def __gt__(self, other: object):
+        return self.__getattr__("__gt__")
+
+    def __ge__(self, other: object):
+        return self.__getattr__("__ge__")
+
+    def __hash__(self):
+        return self.__getattr__("__hash__")
+
+    def __bool__(self):
+        return self.__getattr__("__bool__")
+
+    # [Callable objects]
+
+    def __call__(self, *args: object, **kwargs: object):
+        return self.__getattr__("__call__")
+
+    # [Container types]
+
+    def __len__(self):
+        return self.__getattr__("__len__")
+
+    def __getitem__(self, key: object):
+        return self.__getattr__("__getitem__")
+
+    def __setitem__(self, key: object, value: object):
+        return self.__getattr__("__setitem__")
+
+    def __delitem__(self, key: object):
+        return self.__getattr__("__delitem__")
+
+    # __missing__ is optional according to __getitem__ specification,
+    # so it is skipped
+
+    # __iter__ and __reversed__ have a default implementation
+    # based on __len__ and __getitem__, so they are skipped.
+
+    # [Numeric Types]
+
+    def __add__(self, other: object):
+        return self.__getattr__("__add__")
+
+    def __sub__(self, other: object):
+        return self.__getattr__("__sub__")
+
+    def __mul__(self, other: object):
+        return self.__getattr__("__mul__")
+
+    def __matmul__(self, other: object):
+        return self.__getattr__("__matmul__")
+
+    def __truediv__(self, other: object):
+        return self.__getattr__("__truediv__")
+
+    def __floordiv__(self, other: object):
+        return self.__getattr__("__floordiv__")
+
+    def __mod__(self, other: object):
+        return self.__getattr__("__mod__")
+
+    def __divmod__(self, other: object):
+        return self.__getattr__("__divmod__")
+
+    def __pow__(self, other: object, modulo: object = ...):
+        return self.__getattr__("__pow__")
+
+    def __lshift__(self, other: object):
+        return self.__getattr__("__lshift__")
+
+    def __rshift__(self, other: object):
+        return self.__getattr__("__rshift__")
+
+    def __and__(self, other: object):
+        return self.__getattr__("__and__")
+
+    def __xor__(self, other: object):
+        return self.__getattr__("__xor__")
+
+    def __or__(self, other: object):
+        return self.__getattr__("__or__")
+
+    # r* and i* methods have lower priority than
+    # the methods for left operand so they are skipped
+
+    def __neg__(self):
+        return self.__getattr__("__neg__")
+
+    def __pos__(self):
+        return self.__getattr__("__pos__")
+
+    def __abs__(self):
+        return self.__getattr__("__abs__")
+
+    def __invert__(self):
+        return self.__getattr__("__invert__")
+
+    # __complex__, __int__ and __float__ have a default implementation
+    # based on __index__, so they are skipped.
+
+    def __index__(self):
+        return self.__getattr__("__index__")
+
+    def __round__(self, ndigits: object = ...):
+        return self.__getattr__("__round__")
+
+    def __trunc__(self):
+        return self.__getattr__("__trunc__")
+
+    def __floor__(self):
+        return self.__getattr__("__floor__")
+
+    def __ceil__(self):
+        return self.__getattr__("__ceil__")
+
+    # [Context managers]
+
+    def __enter__(self):
+        return self.__getattr__("__enter__")
+
+    def __exit__(self, *args: object, **kwargs: object):
+        return self.__getattr__("__exit__")
+
+
+class PlaceholderModule(_PlaceholderBase):
     """
     A placeholder object to use when a module does not exist.
 
     This enables more informative errors when trying to access attributes
     of a module that does not exists.
     """
-    name: str
+
+    def __init__(self, name: str) -> None:
+        super().__init__()
+
+        # Apply name mangling to avoid conflicting with module attributes
+        self.__name = name
 
     def placeholder_attr(self, attr_path: str):
         return _PlaceholderModuleAttr(self, attr_path)
 
     def __getattr__(self, key: str):
-        name = self.name
+        name = self.__name
 
         try:
-            importlib.import_module(self.name)
+            importlib.import_module(name)
         except ImportError as exc:
             for extra, names in get_vllm_optional_dependencies().items():
                 if name in names:
@@ -1769,17 +1956,21 @@ class PlaceholderModule:
                              "when the original module can be imported")
 
 
-@dataclass(frozen=True)
-class _PlaceholderModuleAttr:
-    module: PlaceholderModule
-    attr_path: str
+class _PlaceholderModuleAttr(_PlaceholderBase):
+
+    def __init__(self, module: PlaceholderModule, attr_path: str) -> None:
+        super().__init__()
+
+        # Apply name mangling to avoid conflicting with module attributes
+        self.__module = module
+        self.__attr_path = attr_path
 
     def placeholder_attr(self, attr_path: str):
-        return _PlaceholderModuleAttr(self.module,
-                                      f"{self.attr_path}.{attr_path}")
+        return _PlaceholderModuleAttr(self.__module,
+                                      f"{self.__attr_path}.{attr_path}")
 
     def __getattr__(self, key: str):
-        getattr(self.module, f"{self.attr_path}.{key}")
+        getattr(self.__module, f"{self.__attr_path}.{key}")
 
         raise AssertionError("PlaceholderModule should not be used "
                              "when the original module can be imported")
@@ -1882,10 +2073,10 @@ class MemorySnapshot:
     timestamp: float = 0.0
 
     def measure(self):
-        self.torch_peak_in_bytes = torch.cuda.memory_stats(
-        )["allocated_bytes.all.peak"]
-        self.torch_memory_in_bytes = torch.cuda.memory_stats(
-        )["allocated_bytes.all.current"]
+        self.torch_peak_in_bytes = torch.cuda.max_memory_reserved()
+        # torch.cuda.memory_reserved() is how many bytes
+        # PyTorch gets from cuda (by calling cudaMalloc, etc.)
+        self.torch_memory_in_bytes = torch.cuda.memory_reserved()
         self.timestamp = time.time()
 
     def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
@@ -1962,10 +2153,10 @@ def memory_profiling(
 
     The memory used for loading weights (a.) is directly given from the argument `weights_memory_in_bytes`.
 
-    The increase of ``torch.cuda.memory_stats()["allocated_bytes.all.peak"]` after profiling gives (b.).
+    The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]` after profiling gives (b.).
 
     (c.) is tricky. We measure the total memory used in this GPU (`torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]`),
-    subtract the baseline memory, the memory used by the model weights, and diff of `torch.cuda.memory_stats()["allocated_bytes.all.current"]`.
+    subtract the baseline memory, the memory used by the model weights, and diff of `torch.cuda.memory_reserved()`.
     """ # noqa
     torch.cuda.reset_peak_memory_stats()
 
@@ -2087,3 +2278,37 @@ def get_mp_context():
     _check_multiproc_method()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
     return multiprocessing.get_context(mp_method)
+
+
+def bind_kv_cache(
+        ctx: Dict[str, Any],
+        kv_cache: List[List[torch.Tensor]],  # [virtual_engine][layer_index]
+) -> None:
+    # Bind the kv_cache tensor to Attention modules, similar to
+    # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
+    # Special things handled here:
+    # 1. Some models have non-attention layers, e.g., Jamba
+    # 2. Pipeline parallelism, each rank only has a subset of layers
+    # 3. Encoder attention has no kv cache
+    # 4. Encoder-decoder models, encoder-decoder attention and decoder-only
+    #    attention of the same layer (e.g., bart's decoder.layers.1.self_attn
+    #    and decoder.layers.1.encoder_attn) is mapped to the same kv cache
+    #    tensor
+    from vllm.attention import AttentionType
+    from vllm.model_executor.models.utils import extract_layer_index
+    layer_need_kv_cache = [
+        layer_name for layer_name in ctx
+        if ctx[layer_name].attn_type in (AttentionType.DECODER,
+                                         AttentionType.ENCODER_DECODER)
+    ]
+    layer_index_sorted = sorted(
+        set(
+            extract_layer_index(layer_name)
+            for layer_name in layer_need_kv_cache))
+    for layer_name in layer_need_kv_cache:
+        kv_cache_idx = layer_index_sorted.index(
+            extract_layer_index(layer_name))
+        forward_ctx = ctx[layer_name]
+        assert len(forward_ctx.kv_cache) == len(kv_cache)
+        for ve, ve_kv_cache in enumerate(kv_cache):
+            forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]

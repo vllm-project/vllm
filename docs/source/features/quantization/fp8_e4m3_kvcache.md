@@ -17,7 +17,7 @@ unquantized model through a quantizer tool (e.g. AMD quantizer or NVIDIA AMMO).
 To install AMMO (AlgorithMic Model Optimization):
 
 ```console
-$ pip install --no-cache-dir --extra-index-url https://pypi.nvidia.com nvidia-ammo
+pip install --no-cache-dir --extra-index-url https://pypi.nvidia.com nvidia-ammo
 ```
 
 Studies have shown that FP8 E4M3 quantization typically only minimally degrades inference accuracy. The most recent silicon
