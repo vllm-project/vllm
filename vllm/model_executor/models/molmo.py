@@ -972,8 +972,6 @@ def image_input_mapper_for_molmo(
         assert len(data) == 1, "Molmo supports only one image per prompt."
         data = data[0]
 
-    # Remove unused dummy PIL image
-    data.pop('raw_mm_data', None)
     return MultiModalKwargs(data)
 
 
@@ -1019,7 +1017,6 @@ def dummy_data_for_molmo(ctx: InputContext, seq_len: int,
     dummy_imgdata = {
         "images": out["images"],
         "image_input_idx": out["image_input_idx"],
-        "raw_mm_data": dummy_image,
     }
     if "image_masks" in out:
         dummy_imgdata["image_masks"] = out["image_masks"]
@@ -1071,7 +1068,7 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
         trust_remote_code=model_config.trust_remote_code)
 
     # NOTE: message formatting for raw text prompt is only applied for
-    # offline inference; for online inference, the prompt is always in
+    # offline inference; for online serving, the prompt is always in
     # instruction format and tokenized.
     if prompt is not None and re.match(r"^User:[\s\S]*?(Assistant:)*$",
                                        prompt):

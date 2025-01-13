@@ -121,21 +121,23 @@ class Attention(nn.Module):
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
         self.attn_type = attn_type
+        # use a placeholder kv cache tensor during init, which will be replaced
+        # by bind_kv_cache
+        # this variable will not be accessed if use_direct_call is True
+        self.kv_cache = [
+            torch.tensor([]) for _ in range(get_current_vllm_config(
+            ).parallel_config.pipeline_parallel_size)
+        ]
 
     def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
+        _kv_cache: torch.Tensor,
+        _attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-
-        if self.use_direct_call:
-            return self.impl.forward(query, key, value, kv_cache,
-                                     attn_metadata, self._k_scale,
-                                     self._v_scale)
-        elif self.use_output:
+        if self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
             # Reshape the query, key, and value tensors.
@@ -147,12 +149,19 @@ class Attention(nn.Module):
                 key = key.view(-1, self.num_kv_heads, self.head_size)
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size)
-            torch.ops.vllm.unified_attention_with_output(
-                query, key, value, output, kv_cache, self.layer_name)
+            if self.use_direct_call:
+                unified_attention_with_output(query, key, value, output,
+                                              self.layer_name)
+            else:
+                torch.ops.vllm.unified_attention_with_output(
+                    query, key, value, output, self.layer_name)
             return output.view(-1, hidden_size)
         else:
-            return torch.ops.vllm.unified_attention(query, key, value,
-                                                    kv_cache, self.layer_name)
+            if self.use_direct_call:
+                return unified_attention(query, key, value, self.layer_name)
+            else:
+                return torch.ops.vllm.unified_attention(
+                    query, key, value, self.layer_name)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
@@ -223,19 +232,19 @@ class MultiHeadAttention(nn.Module):
                                                  value,
                                                  scale=self.scale)
             out = out.transpose(1, 2)
-        return out.view(bsz, q_len, -1)
+        return out.reshape(bsz, q_len, -1)
 
 
 def unified_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    kv_cache: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.dynamic_forward_context
-    self = forward_context.static_forward_context[layer_name]
+    attn_metadata = forward_context.attn_metadata
+    self = forward_context.attn_layers[layer_name]
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
     return self.impl.forward(query, key, value, kv_cache, attn_metadata,
                              self._k_scale, self._v_scale)
 
@@ -244,7 +253,6 @@ def unified_attention_fake(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    kv_cache: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
     return torch.empty_like(query).contiguous()
@@ -253,7 +261,7 @@ def unified_attention_fake(
 direct_register_custom_op(
     op_name="unified_attention",
     op_func=unified_attention,
-    mutates_args=["kv_cache"],
+    mutates_args=[],
     fake_impl=unified_attention_fake,
     dispatch_key=current_platform.dispatch_key,
 )
@@ -264,12 +272,12 @@ def unified_attention_with_output(
     key: torch.Tensor,
     value: torch.Tensor,
     output: torch.Tensor,
-    kv_cache: torch.Tensor,
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.dynamic_forward_context
-    self = forward_context.static_forward_context[layer_name]
+    attn_metadata = forward_context.attn_metadata
+    self = forward_context.attn_layers[layer_name]
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
     self.impl.forward(query,
                       key,
                       value,
@@ -285,7 +293,6 @@ def unified_attention_with_output_fake(
     key: torch.Tensor,
     value: torch.Tensor,
     output: torch.Tensor,
-    kv_cache: torch.Tensor,
     layer_name: str,
 ) -> None:
     return
@@ -294,7 +301,7 @@ def unified_attention_with_output_fake(
 direct_register_custom_op(
     op_name="unified_attention_with_output",
     op_func=unified_attention_with_output,
-    mutates_args=["kv_cache", "output"],
+    mutates_args=["output"],
     fake_impl=unified_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
 )

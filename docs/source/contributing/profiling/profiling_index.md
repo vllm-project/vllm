@@ -26,7 +26,7 @@ Set the env variable VLLM_RPC_TIMEOUT to a big number before you start the serve
 
 ### Offline Inference
 
-Refer to <gh-file:examples/offline_inference_with_profiler.py> for an example.
+Refer to <gh-file:examples/offline_inference/simple_profiling.py> for an example.
 
 ### OpenAI Server
 

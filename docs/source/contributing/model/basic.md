@@ -1,6 +1,6 @@
 (new-model-basic)=
 
-# Basic Implementation
+# Implementing a Basic Model
 
 This guide walks you through the steps to implement a basic vLLM model.
 
@@ -57,7 +57,17 @@ class MyModelForCausalLM(nn.Module):
 
 ### Computation Code
 
-Rewrite the {meth}`~torch.nn.Module.forward` method of your model to remove any unnecessary code, such as training-specific code. Modify the input parameters to treat `input_ids` and `positions` as flattened tensors with a single batch size dimension, without a max-sequence length dimension.
+- Add a `get_input_embeddings` method inside `MyModel` module that returns the text embeddings given `input_ids`. This is equivalent to directly calling the text embedding layer, but provides a unified interface in case `MyModel` is used within a composite multimodal model.
+
+```python
+class MyModel(nn.Module):
+        ...
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        ... 
+```
+
+- Rewrite the {meth}`~torch.nn.Module.forward` method of your model to remove any unnecessary code, such as training-specific code. Modify the input parameters to treat `input_ids` and `positions` as flattened tensors with a single batch size dimension, without a max-sequence length dimension.
 
 ```python
 def forward(

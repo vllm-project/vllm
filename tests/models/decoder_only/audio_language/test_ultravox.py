@@ -237,8 +237,8 @@ def test_models_with_multiple_audios(vllm_runner, audio_assets, dtype: str,
 
 
 @pytest.mark.asyncio
-async def test_online_inference(client, audio_assets):
-    """Exercises online inference with/without chunked prefill enabled."""
+async def test_online_serving(client, audio_assets):
+    """Exercises online serving with/without chunked prefill enabled."""
 
     messages = [{
         "role":
