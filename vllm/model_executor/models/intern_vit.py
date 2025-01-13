@@ -271,7 +271,7 @@ class InternSdpaAttention(nn.Module):
         v = v.transpose(1, 2)
 
         x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
-        x = x.transpose(1, 2).view(B, N, -1)
+        x = x.transpose(1, 2).reshape(B, N, -1)
 
         x = self.proj(x)
         return x
