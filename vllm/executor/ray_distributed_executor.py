@@ -163,9 +163,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     num_gpus=num_gpus,
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(
-                    vllm_config=self.vllm_config,
-                    rank=rank)
+                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
+                                            rank=rank)
             else:
                 worker = ray.remote(
                     num_cpus=0,
@@ -173,9 +172,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     resources={current_platform.ray_device_key: num_gpus},
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(
-                    vllm_config=self.vllm_config,
-                    rank=rank)
+                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
+                                            rank=rank)
             worker_metadata.append(
                 RayWorkerMetaData(worker=worker, created_rank=rank))
             rank += 1
