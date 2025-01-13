@@ -19,6 +19,11 @@ from .utils import maybe_prefix
 
 class DummyInputLayerNorm(nn.Module):
 
+    def __init__(self, weight=None, bias=None):
+        super().__init__()
+        self.weight = nn.Parameter(weight) if weight is not None else None
+        self.bias = nn.Parameter(bias) if bias is not None else None
+
     def forward(self, x):
         return x
 
@@ -69,7 +74,11 @@ class EAGLE(nn.Module):
 
         # Modify layer normalization and residual connections as suggested
         # in the EAGLE framework: https://github.com/SafeAILab/EAGLE
-        self.model.model.layers[0].input_layernorm = DummyInputLayerNorm()
+        # While weights and biases are generally not needed,
+        # they are retained here to support certain unit tests
+        # (e.g., spec_decode/e2e/test_eagle_correctness.py).
+        self.model.model.layers[0].input_layernorm = DummyInputLayerNorm(
+            weight=self.model.model.layers[0].input_layernorm.weight)
         self.model.model.norm = DummyOutputNorm()
 
         self.orig_vocab_size = config.vocab_size
