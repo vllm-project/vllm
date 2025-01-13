@@ -1,5 +1,5 @@
 # Test the AsyncLLMEngine with multi-step-decoding
-from typing import List, Optional
+from typing import Optional
 
 import pytest
 
@@ -15,7 +15,7 @@ MODELS = [
 NUM_SCHEDULER_STEPS = [8]  # Multi-step decoding steps
 NUM_PROMPTS = [10]
 
-DEFAULT_SERVER_ARGS: List[str] = [
+DEFAULT_SERVER_ARGS: list[str] = [
     "--worker-use-ray",
     "--gpu-memory-utilization",
     "0.85",

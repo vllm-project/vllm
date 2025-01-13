@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Optional
 
 from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
@@ -18,7 +18,6 @@ class BaseTokenizerGroup(ABC):
     @abstractmethod
     def ping(self) -> bool:
         """Check if the tokenizer group is alive."""
-        pass
 
     @abstractmethod
     def get_max_input_len(
@@ -26,16 +25,14 @@ class BaseTokenizerGroup(ABC):
         lora_request: Optional[LoRARequest] = None,
     ) -> Optional[int]:
         """Get the maximum input length for the LoRA request."""
-        pass
 
     @abstractmethod
     def encode(self,
                prompt: str,
                request_id: Optional[str] = None,
                lora_request: Optional[LoRARequest] = None,
-               add_special_tokens: Optional[bool] = None) -> List[int]:
+               add_special_tokens: Optional[bool] = None) -> list[int]:
         """Encode a prompt using the tokenizer group."""
-        pass
 
     @abstractmethod
     async def encode_async(
@@ -43,9 +40,8 @@ class BaseTokenizerGroup(ABC):
             prompt: str,
             request_id: Optional[str] = None,
             lora_request: Optional[LoRARequest] = None,
-            add_special_tokens: Optional[bool] = None) -> List[int]:
+            add_special_tokens: Optional[bool] = None) -> list[int]:
         """Encode a prompt using the tokenizer group."""
-        pass
 
     @abstractmethod
     def get_lora_tokenizer(
@@ -53,7 +49,6 @@ class BaseTokenizerGroup(ABC):
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
         """Get a tokenizer for a LoRA request."""
-        pass
 
     @abstractmethod
     async def get_lora_tokenizer_async(
@@ -61,7 +56,6 @@ class BaseTokenizerGroup(ABC):
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
         """Get a tokenizer for a LoRA request."""
-        pass
 
     def check_health(self):
         """Raise exception if the tokenizer group is unhealthy."""

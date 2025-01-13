@@ -1,4 +1,4 @@
-from typing import List, Optional, Type
+from typing import Optional, Type
 
 import pytest
 import torch
@@ -22,7 +22,7 @@ def run_awq_test(
     source_model: str,
     quant_model: str,
     *,
-    size_factors: List[float],
+    size_factors: list[float],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,

@@ -1,5 +1,5 @@
 """Tests for rejection sampling."""
-from typing import List, Tuple
+from typing import Tuple
 
 import pytest
 import torch
@@ -414,8 +414,8 @@ def test_rejection_sampling_approximates_target_distribution(
         draft_and_target_probs_equal)
 
     sample_sizes = [10, 100, 1_000, 10_000, 100_000]
-    distance_wrt_reference: List[float] = []
-    distance_wrt_target: List[float] = []
+    distance_wrt_reference: list[float] = []
+    distance_wrt_target: list[float] = []
 
     for num_samples in sample_sizes:
         (reference_vs_rejsample_dist,
@@ -450,7 +450,7 @@ def test_rejection_sampling_approximates_target_distribution(
             expected_improvement_multiplier)
 
 
-def get_ratio_first_to_last(elements: List[float]) -> float:
+def get_ratio_first_to_last(elements: list[float]) -> float:
     return elements[0] / elements[-1]
 
 

@@ -1,5 +1,5 @@
-from typing import (Callable, Iterable, List, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Callable, Iterable, Mapping, Optional, Set, Tuple, TypedDict,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -576,7 +576,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.sampler = get_sampler()
 
     def _validate_image_sizes(
-            self, images: List[torch.Tensor]) -> List[torch.Tensor]:
+            self, images: list[torch.Tensor]) -> list[torch.Tensor]:
         if not all(img.shape == images[0].shape for img in images):
             raise ValueError("All images must be the same size")
         return images
@@ -643,7 +643,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,

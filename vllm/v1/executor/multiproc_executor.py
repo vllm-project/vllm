@@ -7,7 +7,7 @@ import weakref
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing.process import BaseProcess
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import psutil
 import zmq
@@ -77,7 +77,7 @@ class MultiprocExecutor(Executor):
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
-        self.workers: List[WorkerProcHandle] = []
+        self.workers: list[WorkerProcHandle] = []
         for rank in range(self.world_size):
             worker = WorkerProc.make_worker_process(vllm_config, rank, rank,
                                                     distributed_init_method,
@@ -118,7 +118,7 @@ class MultiprocExecutor(Executor):
                        method: str,
                        timeout: Optional[float] = None,
                        args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       kwargs: Optional[Dict] = None) -> list[Any]:
         """
         Execute an RPC call on workers.
         

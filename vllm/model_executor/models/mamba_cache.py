@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict
 
 import torch
 
@@ -140,7 +140,7 @@ class MambaCacheManager:
 
     def _prepare_current_run_mamba_cache(
             self, request_ids_to_seq_ids: Dict[str, list[int]],
-            finished_requests_ids: List[str]) -> List[int]:
+            finished_requests_ids: list[str]) -> list[int]:
         return [
             self._assign_seq_id_to_cache_index(req_id, seq_id,
                                                finished_requests_ids)
@@ -149,7 +149,7 @@ class MambaCacheManager:
         ]
 
     def _release_finished_requests(self,
-                                   finished_seq_groups_req_ids: List[str]):
+                                   finished_seq_groups_req_ids: list[str]):
         for req_id in finished_seq_groups_req_ids:
             if req_id in self.mamba_cache_indices_mapping:
                 for seq_id in self.mamba_cache_indices_mapping[req_id]:

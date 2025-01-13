@@ -1,5 +1,5 @@
 """A Neuron worker class."""
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.distributed
@@ -82,7 +82,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return False
 
     @property
-    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+    def kv_cache(self) -> Optional[list[list[torch.Tensor]]]:
         return None
 
     @torch.inference_mode()

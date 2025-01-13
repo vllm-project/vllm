@@ -1,9 +1,9 @@
-from typing import Dict, List, Type
+from typing import Dict, Type
 
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
-QUANTIZATION_METHODS: List[str] = [
+QUANTIZATION_METHODS: list[str] = [
     "aqlm",
     "awq",
     "deepspeedfp",

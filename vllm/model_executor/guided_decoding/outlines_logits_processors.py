@@ -17,7 +17,7 @@ import copy
 import json
 from collections import defaultdict
 from functools import lru_cache
-from typing import Callable, DefaultDict, Dict, List, Union
+from typing import Callable, DefaultDict, Dict, Union
 
 import numpy as np
 import torch
@@ -39,7 +39,7 @@ class BaseLogitsProcessor:
         self._fsm_state: DefaultDict[int, Union[int,
                                                 CFGState]] = defaultdict(int)
 
-    def __call__(self, input_ids: List[int],
+    def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
         seq_id = hash(tuple(input_ids))
@@ -208,11 +208,11 @@ def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
         return string
 
     def change_decoder(
-        decoder: Callable[[List[int]],
-                          str]) -> Callable[[List[int]], List[str]]:
+        decoder: Callable[[list[int]],
+                          str]) -> Callable[[list[int]], list[str]]:
         """Sync vLLM's decoder with the outlines by returning list."""
 
-        def new_decoder(inp_tokens: List[int]) -> List[str]:
+        def new_decoder(inp_tokens: list[int]) -> list[str]:
             if (isinstance(inp_tokens, list) and len(inp_tokens) == 1
                     and isinstance(inp_tokens[0], list)):
                 inp_tokens = inp_tokens[0]

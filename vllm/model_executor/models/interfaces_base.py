@@ -1,5 +1,5 @@
-from typing import (TYPE_CHECKING, List, Optional, Protocol, Type, Union,
-                    overload, runtime_checkable)
+from typing import (TYPE_CHECKING, Optional, Protocol, Type, Union, overload,
+                    runtime_checkable)
 
 import torch
 import torch.nn as nn
@@ -24,7 +24,7 @@ C_co = TypeVar("C_co", bound=PretrainedConfig, covariant=True)
 
 # The type of hidden states
 # Currently, T = torch.Tensor for all models except for Medusa
-# which has T = List[torch.Tensor]
+# which has T = list[torch.Tensor]
 T = TypeVar("T", default=torch.Tensor)
 T_co = TypeVar("T_co", default=torch.Tensor, covariant=True)
 
@@ -48,7 +48,7 @@ class VllmModel(Protocol[C_co, T_co]):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: "AttentionMetadata",
     ) -> T_co:
         ...

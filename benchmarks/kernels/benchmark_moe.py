@@ -1,7 +1,7 @@
 import argparse
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Tuple, TypedDict
+from typing import Any, Dict, Tuple, TypedDict
 
 import ray
 import torch
@@ -126,7 +126,7 @@ def benchmark_config(
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
-    latencies: List[float] = []
+    latencies: list[float] = []
     for i in range(num_iters):
         prepare(i)
         torch.cuda.synchronize()
@@ -141,11 +141,11 @@ def benchmark_config(
     return avg
 
 
-def get_configs_compute_bound() -> List[Dict[str, int]]:
+def get_configs_compute_bound() -> list[Dict[str, int]]:
     # Reduced search space for faster tuning.
     # TODO(woosuk): Increase the search space and use a performance model to
     # prune the search space.
-    configs: List[BenchmarkConfig] = []
+    configs: list[BenchmarkConfig] = []
     for num_stages in [2, 3, 4, 5]:
         for block_m in [16, 32, 64, 128, 256]:
             for block_k in [64, 128, 256]:
@@ -213,7 +213,7 @@ class BenchmarkWorker:
         dtype: torch.dtype,
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
-        search_space: List[Dict[str, int]],
+        search_space: list[Dict[str, int]],
     ) -> Dict[str, int]:
         best_config = None
         best_time = float("inf")
@@ -310,7 +310,7 @@ def main(args: argparse.Namespace):
     num_gpus = int(ray.available_resources()["GPU"])
     workers = [BenchmarkWorker.remote(args.seed) for _ in range(num_gpus)]
 
-    def _distribute(method: str, inputs: List[Any]) -> List[Any]:
+    def _distribute(method: str, inputs: list[Any]) -> list[Any]:
         outputs = []
         worker_idx = 0
         for input_args in inputs:

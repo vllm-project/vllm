@@ -1,4 +1,3 @@
-from typing import List
 
 import pytest
 
@@ -43,7 +42,7 @@ def test_parse_single_batch_string_consistent(string_input: str):
 
 
 @pytest.mark.parametrize('token_input', TOKEN_INPUTS)
-def test_parse_single_batch_token_consistent(token_input: List[int]):
+def test_parse_single_batch_token_consistent(token_input: list[int]):
     assert parse_and_batch_prompt(token_input) \
         == parse_and_batch_prompt([token_input])
 

@@ -2,7 +2,7 @@ import asyncio
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 import msgspec
 
@@ -65,7 +65,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
 
         self.input_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
         self.output_decoder = msgspec.msgpack.Decoder(
-            Optional[List[SamplerOutput]])
+            Optional[list[SamplerOutput]])
 
     def shutdown(self) -> None:
         if hasattr(self, "forward_dag") and self.forward_dag is not None:
@@ -87,12 +87,12 @@ class RayHPUExecutor(DistributedGPUExecutor):
         # It holds the resource for the driver worker.
         self.driver_dummy_worker: Optional[RayWorkerWrapper] = None
         # The remaining workers are the actual ray actors.
-        self.workers: List[RayWorkerWrapper] = []
+        self.workers: list[RayWorkerWrapper] = []
 
         # Used in ray compiled DAG: indexed first by PP rank,
         # and then TP rank. In other words, the inner list is
         # the TP group of workers for a PP rank.
-        self.pp_tp_workers: List[List[RayWorkerWrapper]] = []
+        self.pp_tp_workers: list[list[RayWorkerWrapper]] = []
 
         logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
 
@@ -252,11 +252,11 @@ class RayHPUExecutor(DistributedGPUExecutor):
         # This is the list of workers that are rank 0 of each TP group EXCEPT
         # global rank 0. These are the workers that will broadcast to the
         # rest of the workers.
-        self.tp_driver_workers: List[RayWorkerWrapper] = []
+        self.tp_driver_workers: list[RayWorkerWrapper] = []
         # This is the list of workers that are not drivers and not the first
         # worker in a TP group. These are the workers that will be
         # broadcasted to.
-        self.non_driver_workers: List[RayWorkerWrapper] = []
+        self.non_driver_workers: list[RayWorkerWrapper] = []
 
         # Enforce rank order for correct rank to return final output.
         for index, worker in enumerate(self.workers):
@@ -269,7 +269,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
 
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution
@@ -282,7 +282,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
 
     def execute_model(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest) -> list[SamplerOutput]:
         if not self.use_ray_spmd_worker:
             return super().execute_model(execute_model_req)
 
@@ -299,8 +299,8 @@ class RayHPUExecutor(DistributedGPUExecutor):
         method: str,
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
-        all_args: Optional[List[Tuple[Any, ...]]] = None,
-        all_kwargs: Optional[List[Dict[str, Any]]] = None,
+        all_args: Optional[list[Tuple[Any, ...]]] = None,
+        all_kwargs: Optional[list[Dict[str, Any]]] = None,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
@@ -445,7 +445,7 @@ class RayHPUExecutorAsync(RayHPUExecutor, DistributedGPUExecutorAsync):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.pp_locks: Optional[List[asyncio.Lock]] = None
+        self.pp_locks: Optional[list[asyncio.Lock]] = None
         self.use_ray_spmd_worker = envs.VLLM_USE_RAY_SPMD_WORKER
         if not self.use_ray_compiled_dag:
             self.driver_exec_method = make_async(
@@ -453,7 +453,7 @@ class RayHPUExecutorAsync(RayHPUExecutor, DistributedGPUExecutorAsync):
 
     async def execute_model_async(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest) -> list[SamplerOutput]:
         if not self.use_ray_spmd_worker:
             return await super().execute_model_async(execute_model_req)
 
@@ -468,7 +468,7 @@ class RayHPUExecutorAsync(RayHPUExecutor, DistributedGPUExecutorAsync):
     async def _driver_execute_model_async(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         assert not self.use_ray_spmd_worker, (
             "driver_worker does not exist for VLLM_USE_RAY_SPMD_WORKER=1")
         if not self.tp_driver_workers:

@@ -6,7 +6,7 @@
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
 from functools import partial
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 from PIL import Image
@@ -74,7 +74,7 @@ def dynamic_preprocess(
     image_size: int,
     use_thumbnail: bool,
     prior_aspect_ratio: Optional[Tuple[int, int]] = None,
-) -> Tuple[List[Image.Image], Tuple[int, int]]:
+) -> Tuple[list[Image.Image], Tuple[int, int]]:
     orig_width, orig_height = image.size
 
     # calculate the number of blocks based on prior aspect ratio if available

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 @dataclass
 class DetokenizerOutput:
     output_text: str
-    token_ids: List[int]
+    token_ids: list[int]
     finished: bool
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
@@ -25,12 +25,12 @@ class IncrementalDetokenizer:
 
     # Generation data
     output_text: str
-    tokens: List[str]
-    token_ids: List[int]
+    tokens: list[str]
+    token_ids: list[int]
     prompt_len: int
 
     # Stop strings
-    stop: List[str]
+    stop: list[str]
     include_stop_str_in_output: bool
 
     # Metadata for incremental detokenization
@@ -50,7 +50,7 @@ class IncrementalDetokenizer:
     _last_output_text_offset: int = 0
 
     @property
-    def output_token_ids(self) -> List[int]:
+    def output_token_ids(self) -> list[int]:
         return self.token_ids[self.prompt_len:]
 
     @classmethod

@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import openai
 import pytest
@@ -165,7 +165,7 @@ async def test_tool_call_with_results(client: openai.AsyncOpenAI):
         logprobs=False,
         stream=True)
 
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     role_sent: bool = False
 

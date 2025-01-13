@@ -1,5 +1,5 @@
 """Core test implementation to be shared across modalities."""
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Type, Union
 
 import torch
 from PIL.Image import Image
@@ -16,7 +16,7 @@ def run_test(
     *,
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    inputs: List[Tuple[List[str], List[Union[List[Image], Image]]]],
+    inputs: list[Tuple[list[str], list[Union[list[Image], Image]]]],
     model: str,
     dtype: str,
     max_tokens: int,
@@ -31,8 +31,8 @@ def run_test(
     postprocess_inputs: Callable[[BatchEncoding], BatchEncoding],
     comparator: Callable[..., None],
     get_stop_token_ids: Optional[Callable[[PreTrainedTokenizerBase],
-                                          List[int]]],
-    stop_str: Optional[List[str]],
+                                          list[int]]],
+    stop_str: Optional[list[str]],
     tokenizer_mode: str,
     limit_mm_per_prompt: Dict[str, int],
     vllm_runner_kwargs: Optional[Dict[str, Any]],

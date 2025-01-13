@@ -1,4 +1,4 @@
-from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, NamedTuple, Optional, Tuple
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -546,7 +546,7 @@ class FusionPass(VllmInductorPass):
             "FusionPass singleton instance already exists"
         super().__init__(config)
 
-        self.matches: List[MultiOutputMatch] = []
+        self.matches: list[MultiOutputMatch] = []
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="fusion_pass")
 

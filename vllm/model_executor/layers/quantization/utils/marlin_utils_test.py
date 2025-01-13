@@ -1,6 +1,6 @@
 """Utility functions used for tests and benchmarks"""
 
-from typing import List, Optional
+from typing import Optional
 
 import numpy as np
 import torch
@@ -63,9 +63,9 @@ def marlin_weights(q_w, size_k, size_n, num_bits, perm):
 
 
 def get_weight_perm(num_bits: int):
-    perm_list: List[int] = []
+    perm_list: list[int] = []
     for i in range(32):
-        perm1: List[int] = []
+        perm1: list[int] = []
         col = i // 4
         for block in [0, 1]:
             for row in [

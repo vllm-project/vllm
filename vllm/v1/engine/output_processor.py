@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.detokenizer_utils import AnyTokenizer
@@ -14,8 +14,8 @@ from vllm.v1.metrics.stats import IterationStats
 @dataclass
 class OutputProcessorOutput:
 
-    request_outputs: List[RequestOutput]
-    reqs_to_abort: List[str]
+    request_outputs: list[RequestOutput]
+    reqs_to_abort: list[str]
     iteration_stats: IterationStats
 
 
@@ -25,7 +25,7 @@ class RequestState:
         self,
         request_id: str,
         prompt: Optional[str],
-        prompt_token_ids: List[int],
+        prompt_token_ids: list[int],
         detokenizer: IncrementalDetokenizer,
         queue: Optional[asyncio.Queue[RequestOutput]],
     ):
@@ -79,7 +79,7 @@ class OutputProcessor:
 
     def abort_requests(
         self,
-        request_ids: List[str],
+        request_ids: list[str],
     ) -> None:
         for request_id in request_ids:
             self.request_states.pop(request_id, None)
@@ -100,7 +100,7 @@ class OutputProcessor:
 
     def process_outputs(
         self,
-        engine_core_outputs: List[EngineCoreOutput],
+        engine_core_outputs: list[EngineCoreOutput],
     ) -> OutputProcessorOutput:
         """
         Process the EngineCoreOutputs:
@@ -131,8 +131,8 @@ class OutputProcessor:
         **********************************************************
         """
 
-        request_outputs: List[RequestOutput] = []
-        reqs_to_abort: List[str] = []
+        request_outputs: list[RequestOutput] = []
+        reqs_to_abort: list[str] = []
         iteration_stats = IterationStats(self.log_stats)
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id

@@ -4,7 +4,7 @@
 
 import gc
 import os
-from typing import List, Optional, Set, Tuple, Type
+from typing import Optional, Set, Tuple, Type
 
 import habana_frameworks.torch as htorch  # noqa:F401
 import torch
@@ -65,9 +65,9 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             vllm_config=vllm_config, is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: List[HPUCacheEngine]
+        self.cache_engine: list[HPUCacheEngine]
         # Initialize gpu_cache as pooling models don't initialize kv_caches
-        self.hpu_cache: Optional[List[List[torch.Tensor]]] = None
+        self.hpu_cache: Optional[list[list[torch.Tensor]]] = None
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
@@ -236,7 +236,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         return self.parallel_config.tensor_parallel_size > 1
 
     @property
-    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+    def kv_cache(self) -> Optional[list[list[torch.Tensor]]]:
         return self.hpu_cache
 
     @torch.inference_mode()
@@ -396,11 +396,11 @@ class HPUCacheEngine(CacheEngine):
         self,
         num_blocks: int,
         device: str,
-    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> list[Tuple[torch.Tensor, torch.Tensor]]:
         """Allocates KV cache on the specified device."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
-        kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        kv_cache: list[Tuple[torch.Tensor, torch.Tensor]] = []
         for _ in range(self.num_attention_layers):
             key_cache = torch.zeros(kv_cache_shape,
                                     dtype=self.dtype,

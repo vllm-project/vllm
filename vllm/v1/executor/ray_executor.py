@@ -1,7 +1,7 @@
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -43,7 +43,7 @@ class RayExecutor(Executor):
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         # A list of workers to run a model.
-        self.workers: List[RayWorkerWrapper] = []
+        self.workers: list[RayWorkerWrapper] = []
         if self.parallel_config.ray_workers_use_nsight:
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
                 ray_remote_kwargs)
@@ -248,8 +248,8 @@ class RayExecutor(Executor):
         self,
         method: str,
         *args,
-        all_args: Optional[List[Tuple[Any, ...]]] = None,
-        all_kwargs: Optional[List[Dict[str, Any]]] = None,
+        all_args: Optional[list[Tuple[Any, ...]]] = None,
+        all_kwargs: Optional[list[Dict[str, Any]]] = None,
         **kwargs,
     ) -> Any:
         """

@@ -1,6 +1,6 @@
 import os
 from functools import lru_cache
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 
@@ -34,7 +34,7 @@ if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) in ["fork", None]:
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 # Models not supported by ROCm.
-_ROCM_UNSUPPORTED_MODELS: List[str] = []
+_ROCM_UNSUPPORTED_MODELS: list[str] = []
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.

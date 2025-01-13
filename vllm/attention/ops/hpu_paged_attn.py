@@ -3,7 +3,7 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 from vllm_hpu_extension import cache_ops, ops
@@ -26,7 +26,7 @@ class HPUPagedAttentionMetadata:
 class HPUPagedAttention:
 
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
+    def get_supported_head_sizes() -> list[int]:
         return [64, 80, 96, 112, 128, 256]
 
     @staticmethod
@@ -95,8 +95,8 @@ class HPUPagedAttention:
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        kv_caches: list[torch.Tensor],
+        src_to_dists: Dict[int, list[int]],
     ) -> None:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]

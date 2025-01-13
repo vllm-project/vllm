@@ -1,7 +1,7 @@
 import asyncio
 from http import HTTPStatus
 from io import StringIO
-from typing import Awaitable, Callable, List, Optional
+from typing import Awaitable, Callable, Optional
 
 import aiohttp
 import torch
@@ -244,7 +244,7 @@ async def main(args):
     logger.info("Reading batch from %s...", args.input_file)
 
     # Submit all requests in the file to the engine "concurrently".
-    response_futures: List[Awaitable[BatchRequestOutput]] = []
+    response_futures: list[Awaitable[BatchRequestOutput]] = []
     for request_json in (await read_file(args.input_file)).strip().split("\n"):
         # Skip empty lines.
         request_json = request_json.strip()

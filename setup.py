@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 from shutil import which
-from typing import Dict, List
+from typing import Dict
 
 import torch
 from packaging.version import Version, parse
@@ -531,10 +531,10 @@ def read_readme() -> str:
         return ""
 
 
-def get_requirements() -> List[str]:
+def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
 
-    def _read_requirements(filename: str) -> List[str]:
+    def _read_requirements(filename: str) -> list[str]:
         with open(get_path(filename)) as f:
             requirements = f.read().strip().split("\n")
         resolved_requirements = []

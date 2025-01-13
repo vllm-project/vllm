@@ -1,6 +1,6 @@
 import enum
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import msgspec
 
@@ -24,10 +24,10 @@ class EngineCoreRequest:
     # NOTE(ywang96): original text prompt is needed when a request is added to
     # Detokenizer, but set to None when it is added to EngineCoreClient.
     prompt: Optional[str]
-    prompt_token_ids: List[int]
-    mm_inputs: Optional[List[Optional["MultiModalKwargs"]]]
-    mm_hashes: Optional[List[str]]
-    mm_placeholders: Optional[List["PlaceholderRange"]]
+    prompt_token_ids: list[int]
+    mm_inputs: Optional[list[Optional["MultiModalKwargs"]]]
+    mm_hashes: Optional[list[str]]
+    mm_placeholders: Optional[list["PlaceholderRange"]]
     sampling_params: "SamplingParams"
     eos_token_id: Optional[int]
     arrival_time: float
@@ -41,7 +41,7 @@ class EngineCoreOutput(
         gc=False):  # type: ignore[call-arg]
 
     request_id: str
-    new_token_ids: List[int]
+    new_token_ids: list[int]
     finished: bool
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
@@ -57,7 +57,7 @@ class EngineCoreOutputs(
     # e.g. columnwise layout and using an int enum for finish/stop reason
 
     # [num_reqs]
-    outputs: List[EngineCoreOutput]
+    outputs: list[EngineCoreOutput]
     scheduler_stats: SchedulerStats
 
 
@@ -76,4 +76,4 @@ class EngineCoreRequestType(enum.Enum):
     PROFILE = b'\x02'
 
 
-EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile, List[str]]
+EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile, list[str]]

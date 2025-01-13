@@ -1,5 +1,5 @@
 import asyncio
-from typing import List, Mapping, Optional, Union
+from typing import Mapping, Optional, Union
 
 from typing_extensions import assert_never
 
@@ -89,7 +89,7 @@ class InputPreprocessor:
 
         return dec_start_token_id
 
-    def _get_default_enc_dec_decoder_prompt(self) -> List[int]:
+    def _get_default_enc_dec_decoder_prompt(self) -> list[int]:
         '''
         Specifically for encoder/decoder models:
         generate a default decoder prompt for when
@@ -127,8 +127,8 @@ class InputPreprocessor:
 
     def _prepare_decoder_input_ids_for_generation(
         self,
-        decoder_input_ids: Optional[List[int]],
-    ) -> List[int]:
+        decoder_input_ids: Optional[list[int]],
+    ) -> list[int]:
         """
         Prepares `decoder_input_ids` for generation with encoder-decoder models.
 
@@ -165,9 +165,9 @@ class InputPreprocessor:
 
     def _apply_prompt_adapter(
         self,
-        prompt_token_ids: List[int],
+        prompt_token_ids: list[int],
         prompt_adapter_request: Optional[PromptAdapterRequest],
-    ) -> List[int]:
+    ) -> list[int]:
         if prompt_adapter_request:
             prompt_token_ids = (
                 [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens
@@ -180,7 +180,7 @@ class InputPreprocessor:
         prompt: str,
         request_id: str,
         lora_request: Optional[LoRARequest],
-    ) -> List[int]:
+    ) -> list[int]:
         """
         Apply the model's tokenizer to a text prompt, returning the
         corresponding token IDs.
@@ -208,7 +208,7 @@ class InputPreprocessor:
         prompt: str,
         request_id: str,
         lora_request: Optional[LoRARequest],
-    ) -> List[int]:
+    ) -> list[int]:
         """Async version of :meth:`_tokenize_prompt`."""
         tokenizer = self.get_tokenizer_group()
         add_special_tokens = None
@@ -243,7 +243,7 @@ class InputPreprocessor:
 
     def _process_multimodal(
         self,
-        prompt: Union[str, List[int]],
+        prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
         lora_request: Optional[LoRARequest],
@@ -267,7 +267,7 @@ class InputPreprocessor:
 
     async def _process_multimodal_async(
         self,
-        prompt: Union[str, List[int]],
+        prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
         lora_request: Optional[LoRARequest],

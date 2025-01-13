@@ -1,7 +1,7 @@
 """KV-Cache Utilities."""
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, List, NamedTuple, Optional, Tuple
+from typing import Any, NamedTuple, Optional, Tuple
 
 from vllm.logger import init_logger
 from vllm.v1.request import Request
@@ -83,7 +83,7 @@ class FreeKVCacheBlockQueue:
         blocks: A list of KVCacheBlock objects.
     """
 
-    def __init__(self, blocks: List[KVCacheBlock]) -> None:
+    def __init__(self, blocks: list[KVCacheBlock]) -> None:
         self.num_free_blocks = len(blocks)
 
         # Initialize the doubly linked list of free blocks.
@@ -152,7 +152,7 @@ class FreeKVCacheBlockQueue:
         block.next_free_block = None
         self.num_free_blocks += 1
 
-    def get_all_free_blocks(self) -> List[KVCacheBlock]:
+    def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
         
         Returns:
@@ -264,7 +264,7 @@ def hash_block_tokens(
 
 
 def hash_request_tokens(block_size: int,
-                        request: Request) -> List[BlockHashType]:
+                        request: Request) -> list[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 

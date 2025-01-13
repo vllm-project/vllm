@@ -1,5 +1,5 @@
 import warnings
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Dict, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -7,7 +7,7 @@ from vllm.config import ModelConfig, TaskOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
-TokensText = Tuple[List[int], str]
+TokensText = Tuple[list[int], str]
 
 
 def check_outputs_equal(
@@ -44,7 +44,7 @@ def check_outputs_equal(
 # * List of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TokensTextLogprobs = Tuple[List[int], str, Optional[Union[List[Dict[int,
+TokensTextLogprobs = Tuple[list[int], str, Optional[Union[list[Dict[int,
                                                                     float]],
                                                           SampleLogprobs]]]
 
@@ -55,8 +55,8 @@ TokensTextLogprobs = Tuple[List[int], str, Optional[Union[List[Dict[int,
 # * Optional list of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TextTextLogprobs = Tuple[List[str], str, Optional[Union[List[Dict[str, float]],
-                                                        List[Dict[str,
+TextTextLogprobs = Tuple[list[str], str, Optional[Union[list[Dict[str, float]],
+                                                        list[Dict[str,
                                                                   Logprob]]]]]
 
 # Representation of generated sequence as a tuple of
@@ -67,8 +67,8 @@ TextTextLogprobs = Tuple[List[str], str, Optional[Union[List[Dict[str, float]],
 #
 # Allows prompt logprobs to be requested.
 TokensTextLogprobsPromptLogprobs = Tuple[
-    List[int], str, Optional[Union[List[Dict[int, float]], SampleLogprobs]],
-    Optional[Union[List[Optional[Dict[int, float]]], PromptLogprobs]]]
+    list[int], str, Optional[Union[list[Dict[int, float]], SampleLogprobs]],
+    Optional[Union[list[Optional[Dict[int, float]]], PromptLogprobs]]]
 
 
 def check_logprobs_close(

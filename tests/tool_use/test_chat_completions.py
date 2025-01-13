@@ -1,4 +1,3 @@
-from typing import List
 
 import openai
 import pytest
@@ -43,7 +42,7 @@ async def test_chat_completion_without_tools(client: openai.AsyncOpenAI,
         logprobs=False,
         stream=True,
     )
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     role_sent: bool = False
 
@@ -114,7 +113,7 @@ async def test_chat_completion_with_tools(client: openai.AsyncOpenAI,
         stream=True,
     )
 
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     role_sent: bool = False
 

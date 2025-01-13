@@ -1,4 +1,3 @@
-from typing import List
 
 import pytest
 
@@ -17,7 +16,7 @@ def test_load_checkpoints_from_huggingface(lora_fixture_name, request):
     packed_modules_mapping = LlamaForCausalLM.packed_modules_mapping
     embedding_modules = LlamaForCausalLM.embedding_modules
     embed_padding_modules = LlamaForCausalLM.embedding_padding_modules
-    expected_lora_modules: List[str] = []
+    expected_lora_modules: list[str] = []
     for module in supported_lora_modules:
         if module in packed_modules_mapping:
             expected_lora_modules.extend(packed_modules_mapping[module])

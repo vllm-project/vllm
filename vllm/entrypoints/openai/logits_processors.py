@@ -1,5 +1,5 @@
 from functools import lru_cache, partial
-from typing import Dict, FrozenSet, Iterable, List, Optional, Union
+from typing import Dict, FrozenSet, Iterable, Optional, Union
 
 import torch
 
@@ -12,10 +12,10 @@ class AllowedTokenIdsLogitsProcessor:
     specific set of token ids."""
 
     def __init__(self, allowed_ids: Iterable[int]):
-        self.allowed_ids: Optional[List[int]] = list(allowed_ids)
+        self.allowed_ids: Optional[list[int]] = list(allowed_ids)
         self.mask: Optional[torch.Tensor] = None
 
-    def __call__(self, token_ids: List[int],
+    def __call__(self, token_ids: list[int],
                  logits: torch.Tensor) -> torch.Tensor:
         if self.mask is None:
             self.mask = torch.ones((logits.shape[-1], ),
@@ -42,7 +42,7 @@ def _get_allowed_token_ids_logits_processor(
 
 def logit_bias_logits_processor(
     logit_bias: Dict[int, float],
-    token_ids: List[int],
+    token_ids: list[int],
     logits: torch.Tensor,
 ) -> torch.Tensor:
     for token_id, bias in logit_bias.items():
@@ -52,10 +52,10 @@ def logit_bias_logits_processor(
 
 def get_logits_processors(
     logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]],
-    allowed_token_ids: Optional[List[int]],
+    allowed_token_ids: Optional[list[int]],
     tokenizer: AnyTokenizer,
-) -> List[LogitsProcessor]:
-    logits_processors: List[LogitsProcessor] = []
+) -> list[LogitsProcessor]:
+    logits_processors: list[LogitsProcessor] = []
     if logit_bias:
         try:
             # Convert token_id to integer

@@ -4,7 +4,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Type, Union
+from typing import Any, Callable, Dict, Optional, Sequence, Type, Union
 
 import safetensors.torch
 import torch
@@ -40,7 +40,7 @@ _GLOBAL_LORA_ID = 0
 class LongContextLoRAContext:
     """Context for lora adapters that support long context."""
     # The scaling factors to support long context lora fine tuned models.
-    scaling_factors: List[float]
+    scaling_factors: list[float]
     # dimension to apply rotary embedding.
     rot_dim: int
     # offsets to the sin_cos_cache for each lora_id loaded.
@@ -112,7 +112,7 @@ class LoRAModel(AdapterModel):
         embeddings: Optional[Dict[str, torch.Tensor]] = None,
         target_embedding_padding: Optional[int] = None,
         embedding_modules: Optional[Dict[str, str]] = None,
-        embedding_padding_modules: Optional[List[str]] = None,
+        embedding_padding_modules: Optional[list[str]] = None,
         weights_mapper: Optional[WeightsMapper] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
@@ -179,7 +179,7 @@ class LoRAModel(AdapterModel):
     def from_local_checkpoint(
         cls,
         lora_dir: str,
-        expected_lora_modules: List[str],
+        expected_lora_modules: list[str],
         *,
         max_position_embeddings: Optional[int] = None,
         lora_model_id: Optional[int] = None,
@@ -187,7 +187,7 @@ class LoRAModel(AdapterModel):
         dtype: Optional[torch.dtype] = None,
         target_embedding_padding: Optional[int] = None,
         embedding_modules: Optional[Dict[str, str]] = None,
-        embedding_padding_modules: Optional[List[str]] = None,
+        embedding_padding_modules: Optional[list[str]] = None,
         weights_mapper: Optional[WeightsMapper] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
@@ -219,7 +219,7 @@ class LoRAModel(AdapterModel):
 
         config["vllm_max_position_embeddings"] = max_position_embeddings
         peft_helper = PEFTHelper.from_dict(config)
-        unexpected_modules: List[Union[list[str], str]]
+        unexpected_modules: list[Union[list[str], str]]
         if os.path.isfile(lora_tensor_path):
             tensors: Dict[str, torch.Tensor] = {}
             # Find unexpected modules.
@@ -325,7 +325,7 @@ class LoRAModelManager(AdapterModelManager):
         self.max_num_seqs = max_num_seqs
         assert self.capacity >= self.lora_slots
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
-        self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
+        self.lora_index_to_id: list[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
         self.long_lora_context: Optional[LongContextLoRAContext] = None
         self.punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
@@ -350,7 +350,7 @@ class LoRAModelManager(AdapterModelManager):
             # In case the model only supports LoRA for
             # text modules (e.g. ChatGLM)
             and hasattr(self.model, "get_mm_mapping"))
-        self.packed_modules: Dict[str, List[str]] = {}
+        self.packed_modules: Dict[str, list[str]] = {}
         self.modules: Dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a Set for compatibility with LRUCache.
         self._last_mapping: Optional[LoRAMapping] = None
@@ -570,7 +570,7 @@ class LoRAModelManager(AdapterModelManager):
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
-                subloras: List[Optional[LoRALayerWeights]] = []
+                subloras: list[Optional[LoRALayerWeights]] = []
                 for i, r in enumerate(replacements):
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
@@ -622,7 +622,7 @@ class LoRAModelManager(AdapterModelManager):
 
     def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
         for module_name, new_module_names in self.packed_modules.items():
-            replacement_loras: List[Optional[LoRALayerWeights]] = []
+            replacement_loras: list[Optional[LoRALayerWeights]] = []
             has_replacement = False
             for r in new_module_names:
                 lora = lora_model.get_lora(r)

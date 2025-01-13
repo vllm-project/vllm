@@ -1,5 +1,5 @@
 """A CPU worker class."""
-from typing import Dict, List, Optional, Set, Tuple, Type
+from typing import Dict, Optional, Set, Tuple, Type
 
 import torch
 import torch.distributed
@@ -70,11 +70,11 @@ class CPUCacheEngine:
     def _allocate_kv_cache(
         self,
         num_blocks: int,
-    ) -> List[torch.Tensor]:
+    ) -> list[torch.Tensor]:
         """Allocates KV cache on CPU."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_heads, self.head_size)
-        kv_cache: List[torch.Tensor] = []
+        kv_cache: list[torch.Tensor] = []
         for _ in range(self.num_layers):
             kv_cache.append(
                 torch.empty(kv_cache_shape, dtype=self.dtype, device="cpu"))
@@ -86,7 +86,7 @@ class CPUCacheEngine:
     def swap_out(self, src_to_dst: Dict[int, int]) -> None:
         raise NotImplementedError("Swap is not supported in CPUCacheEngine.")
 
-    def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
+    def copy(self, src_to_dsts: Dict[int, list[int]]) -> None:
         self.attn_backend.copy_blocks(self.cpu_cache, src_to_dsts)
 
     @staticmethod
@@ -177,9 +177,9 @@ class CPUWorker(LocalOrDistributedWorkerBase):
             self.model_runner = model_runner_cls(self.model_runner)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: List[CPUCacheEngine]
+        self.cache_engine: list[CPUCacheEngine]
         # Initialize cpu_cache as pooling models don't initialize kv_caches
-        self.cpu_cache: Optional[List[List[torch.Tensor]]] = None
+        self.cpu_cache: Optional[list[list[torch.Tensor]]] = None
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
@@ -323,7 +323,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         return self.parallel_config.tensor_parallel_size > 1
 
     @property
-    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+    def kv_cache(self) -> Optional[list[list[torch.Tensor]]]:
         return self.cpu_cache
 
     @property

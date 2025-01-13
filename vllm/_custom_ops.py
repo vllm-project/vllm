@@ -1,6 +1,6 @@
 import contextlib
 import importlib
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import torch
 import torch.library
@@ -345,7 +345,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     @register_fake("_C::aqlm_gemm")
     def _aqlm_gemm_fake(input: torch.Tensor, codes: torch.Tensor,
                         codebooks: torch.Tensor, scales: torch.Tensor,
-                        codebook_partition_sizes: List[int],
+                        codebook_partition_sizes: list[int],
                         bias: Optional[torch.Tensor]) -> torch.Tensor:
         out_features = codes.size(0) * codebooks.size(2)
         flat_input = input.reshape((-1, input.size(-1)))
@@ -361,7 +361,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     @register_fake("_C::aqlm_dequant")
     def _aqlm_dequant_fake(
             codes: torch.Tensor, codebooks: torch.Tensor,
-            codebook_partition_sizes: List[int]) -> torch.Tensor:
+            codebook_partition_sizes: list[int]) -> torch.Tensor:
         in_features = codes.size(1) * 8
         out_features = codes.size(0)
         return torch.empty((out_features, in_features),
@@ -602,14 +602,14 @@ def cutlass_scaled_sparse_mm(
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,
-              codebook_partition_sizes: List[int],
+              codebook_partition_sizes: list[int],
               bias: Optional[torch.Tensor]) -> torch.Tensor:
     return torch.ops._C.aqlm_gemm(input, codes, codebooks, scales,
                                   codebook_partition_sizes, bias)
 
 
 def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
-                 codebook_partition_sizes: List[int]) -> torch.Tensor:
+                 codebook_partition_sizes: list[int]) -> torch.Tensor:
     return torch.ops._C.aqlm_dequant(codes, codebooks,
                                      codebook_partition_sizes)
 
@@ -694,7 +694,7 @@ def machete_supported_schedules(
         group_zeros_type: Optional[torch.dtype] = None,
         channel_scales_type: Optional[torch.dtype] = None,
         token_scales_type: Optional[torch.dtype] = None,
-        out_type: Optional[torch.dtype] = None) -> List[str]:
+        out_type: Optional[torch.dtype] = None) -> list[str]:
     return torch.ops._C.machete_supported_schedules(
         a_type, b_type.id, group_scales_type, group_zeros_type,
         channel_scales_type, token_scales_type, out_type)
@@ -980,8 +980,8 @@ def reshape_and_cache_flash(
                                                    v_scale)
 
 
-def copy_blocks(key_caches: List[torch.Tensor],
-                value_caches: List[torch.Tensor],
+def copy_blocks(key_caches: list[torch.Tensor],
+                value_caches: list[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
     torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
@@ -1009,7 +1009,7 @@ def get_max_shared_memory_per_block_device_attribute(device: int) -> int:
 
 
 # custom ar
-def init_custom_ar(ipc_tensors: List[torch.Tensor], rank_data: torch.Tensor,
+def init_custom_ar(ipc_tensors: list[torch.Tensor], rank_data: torch.Tensor,
                    rank: int, full_nvlink: bool) -> int:
     return torch.ops._C_custom_ar.init_custom_ar(ipc_tensors, rank_data, rank,
                                                  full_nvlink)
@@ -1029,14 +1029,14 @@ def meta_size() -> int:
     return torch.ops._C_custom_ar.meta_size()
 
 
-def register_buffer(fa: int, ipc_tensors: List[int]) -> None:
+def register_buffer(fa: int, ipc_tensors: list[int]) -> None:
     return torch.ops._C_custom_ar.register_buffer(fa, ipc_tensors)
 
 
-def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[int], List[int]]:
+def get_graph_buffer_ipc_meta(fa: int) -> Tuple[list[int], list[int]]:
     return torch.ops._C_custom_ar.get_graph_buffer_ipc_meta(fa)
 
 
-def register_graph_buffers(fa: int, handles: List[List[int]],
-                           offsets: List[List[int]]) -> None:
+def register_graph_buffers(fa: int, handles: list[list[int]],
+                           offsets: list[list[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)

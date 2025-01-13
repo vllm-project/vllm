@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional
 
 from vllm.sequence import SequenceGroupMetadata
 from vllm.worker.model_runner_base import (ModelRunnerBase,
@@ -26,9 +26,9 @@ class TargetModelRunner(ModelRunnerWrapperBase):
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None,
+        finished_requests_ids: Optional[list[str]] = None,
     ) -> ModelRunnerInputBase:
         model_input: ModelRunnerInputBase =\
             self.model_runner.prepare_model_input(

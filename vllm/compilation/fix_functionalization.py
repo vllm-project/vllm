@@ -1,5 +1,5 @@
 import operator
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, Optional, Tuple, Union
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -25,7 +25,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         self.begin()
         self.dump_graph(graph, "before_fix_functionalization")
 
-        self.nodes_to_remove: List[torch.fx.Node] = []
+        self.nodes_to_remove: list[torch.fx.Node] = []
         count = 0
         for node in graph.nodes:
             if not is_func(node, auto_functionalized):

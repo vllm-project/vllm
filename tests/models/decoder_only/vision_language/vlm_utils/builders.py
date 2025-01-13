@@ -1,7 +1,7 @@
 """Helpers for building inputs that can be leveraged for different test types.
 """
 from pathlib import PosixPath
-from typing import Callable, Iterable, List, Optional, Tuple, Union
+from typing import Callable, Iterable, Optional, Tuple, Union
 
 import torch
 
@@ -32,7 +32,7 @@ def replace_test_placeholder(prompt: str, img_idx_to_prompt: Callable[[int],
 def get_model_prompts(base_prompts: Iterable[str],
                       img_idx_to_prompt: Optional[Callable[[int], str]],
                       video_idx_to_prompt: Optional[Callable[[int], str]],
-                      prompt_formatter: Callable[[str], str]) -> List[str]:
+                      prompt_formatter: Callable[[str], str]) -> list[str]:
     """Given a model-agnostic base prompt and test configuration for a model(s)
     to be tested, update the media placeholders and apply the prompt formatting
     to get the test prompt string for this model.

@@ -4,8 +4,7 @@ import itertools
 import random
 import unittest
 from numbers import Number
-from typing import (Any, Dict, List, NamedTuple, Optional, Sequence, Tuple,
-                    Union)
+from typing import (Any, Dict, NamedTuple, Optional, Sequence, Tuple, Union)
 
 import pytest
 import torch
@@ -49,8 +48,8 @@ class QKVInputs(NamedTuple):
     query: torch.Tensor
     key: torch.Tensor
     value: torch.Tensor
-    q_seq_lens: List[int]
-    kv_seq_lens: List[int]
+    q_seq_lens: list[int]
+    kv_seq_lens: list[int]
 
 
 class QKVO(NamedTuple):
@@ -88,10 +87,10 @@ class PackedQKVInputs(NamedTuple):
     query: torch.Tensor
     key: torch.Tensor
     value: torch.Tensor
-    q_start_loc_list: Optional[List[int]]
-    kv_start_loc_list: Optional[List[int]]
-    q_seq_lens: Optional[List[int]]
-    kv_seq_lens: Optional[List[int]]
+    q_start_loc_list: Optional[list[int]]
+    kv_start_loc_list: Optional[list[int]]
+    q_seq_lens: Optional[list[int]]
+    kv_seq_lens: Optional[list[int]]
 
 
 class PackedQKVO(NamedTuple):
@@ -145,7 +144,7 @@ class PhaseTestParameters(NamedTuple):
 
 
 def maybe_make_int_tensor(
-    _list: Optional[List[int]],
+    _list: Optional[list[int]],
     device: Union[torch.device, str],
 ) -> torch.Tensor:
     '''
@@ -161,7 +160,7 @@ def maybe_make_int_tensor(
 
 
 def maybe_make_long_tensor(
-    _list: Optional[List[int]],
+    _list: Optional[list[int]],
     device: Union[torch.device, str],
 ) -> torch.Tensor:
     '''
@@ -176,7 +175,7 @@ def maybe_make_long_tensor(
         _list, dtype=torch.long, device=device)
 
 
-def maybe_max(_list: Optional[List]) -> Optional[Number]:
+def maybe_max(_list: Optional[list]) -> Optional[Number]:
     '''
     Returns:
 
@@ -231,8 +230,8 @@ def ref_masked_attention(query: torch.Tensor,
                          value: torch.Tensor,
                          scale: float,
                          custom_mask: Optional[torch.Tensor] = None,
-                         q_seq_lens: Optional[List] = None,
-                         kv_seq_lens: Optional[List] = None) -> torch.Tensor:
+                         q_seq_lens: Optional[list] = None,
+                         kv_seq_lens: Optional[list] = None) -> torch.Tensor:
     '''
     "Golden" masked attention reference. Supports two types of masking:
 
@@ -294,7 +293,7 @@ def make_qkv(
     num_heads: int,
     head_size: int,
     device: Union[torch.device, str],
-    force_kv_seq_lens: Optional[List[int]] = None,
+    force_kv_seq_lens: Optional[list[int]] = None,
     attn_type: AttentionType = AttentionType.ENCODER_DECODER,
     force_max_len: bool = False,
 ) -> Tuple[QKVInputs, QKVInputs, QKVInputs]:
@@ -428,8 +427,8 @@ def make_qkv(
 
 
 def pack_tensor(
-        unpacked_tensor: torch.Tensor, seq_lens: List[int],
-        device: Union[torch.device, str]) -> Tuple[torch.Tensor, List[int]]:
+        unpacked_tensor: torch.Tensor, seq_lens: list[int],
+        device: Union[torch.device, str]) -> Tuple[torch.Tensor, list[int]]:
     '''
     Pack a batch_size x padded_seq_len x num_heads x head_size tensor into an
     unpadded number_of_tokens x num_heads x head_size tensor, where
@@ -536,9 +535,9 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
 
 def _make_metadata_tensors(
-    seq_lens: Optional[List[int]],
-    context_lens: Optional[List[int]],
-    encoder_seq_lens: Optional[List[int]],
+    seq_lens: Optional[list[int]],
+    context_lens: Optional[list[int]],
+    encoder_seq_lens: Optional[list[int]],
     device: Union[torch.device, str],
 ) -> Tuple[torch.Tensor, torch.Tensor, Any, Any, Optional[torch.Tensor],
            torch.Tensor, torch.Tensor, Optional[int]]:
@@ -653,7 +652,7 @@ def make_empty_block_tables_tensor(device: Union[torch.device, str]):
     return torch.tensor([], device=device)
 
 
-def split_slot_mapping(slot_mapping_list: torch.Tensor, seq_lens: List[int],
+def split_slot_mapping(slot_mapping_list: torch.Tensor, seq_lens: list[int],
                        device: Union[torch.device, str]):
     '''
     Split a slot mapping into valid prefill- and decode-phase slot mappings.
@@ -711,9 +710,9 @@ def split_slot_mapping(slot_mapping_list: torch.Tensor, seq_lens: List[int],
 
 def make_block_tables_slot_mapping(
         block_size: int,
-        seq_lens: List[int],
+        seq_lens: list[int],
         device: Union[torch.device, str],
-        block_base_addr: int = 0) -> Tuple[torch.Tensor, List[int], int]:
+        block_base_addr: int = 0) -> Tuple[torch.Tensor, list[int], int]:
     '''
     Construct fake block tables & slot mappings.
 
@@ -793,7 +792,7 @@ def make_block_tables_slot_mapping(
 def make_test_metadata(
     attn_backend: _Backend,
     is_prompt: bool,
-    seq_lens: Optional[List[int]],
+    seq_lens: Optional[list[int]],
     decoder_test_params: Optional[PhaseTestParameters],
     device: Union[torch.device, str],
     encoder_test_params: Optional[PhaseTestParameters] = None,
@@ -1040,7 +1039,7 @@ def fp8_allclose(
 # Marlin MoE test utils
 
 
-def stack_and_dev(tensors: List[torch.Tensor]):
+def stack_and_dev(tensors: list[torch.Tensor]):
     dev = tensors[0].device
     return torch.stack(tensors, dim=0).to(dev)
 

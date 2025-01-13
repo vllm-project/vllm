@@ -11,8 +11,8 @@ import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import (AbstractSet, Callable, Dict, List, Optional, Tuple, Type,
-                    TypeVar, Union)
+from typing import (AbstractSet, Callable, Dict, Optional, Tuple, Type, TypeVar,
+                    Union)
 
 import cloudpickle
 import torch.nn as nn
@@ -339,7 +339,7 @@ class _ModelRegistry:
 
         self.models[model_arch] = model
 
-    def _raise_for_unsupported(self, architectures: List[str]):
+    def _raise_for_unsupported(self, architectures: list[str]):
         all_supported_archs = self.get_supported_archs()
 
         if any(arch in all_supported_archs for arch in architectures):
@@ -366,8 +366,8 @@ class _ModelRegistry:
 
     def _normalize_archs(
         self,
-        architectures: Union[str, List[str]],
-    ) -> List[str]:
+        architectures: Union[str, list[str]],
+    ) -> list[str]:
         if isinstance(architectures, str):
             architectures = [architectures]
         if not architectures:
@@ -377,7 +377,7 @@ class _ModelRegistry:
 
     def inspect_model_cls(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> Tuple[_ModelInfo, str]:
         architectures = self._normalize_archs(architectures)
 
@@ -390,7 +390,7 @@ class _ModelRegistry:
 
     def resolve_model_cls(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> Tuple[Type[nn.Module], str]:
         architectures = self._normalize_archs(architectures)
 
@@ -403,56 +403,56 @@ class _ModelRegistry:
 
     def is_text_generation_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_text_generation_model
 
     def is_pooling_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_pooling_model
 
     def is_cross_encoder_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_cross_encoding
 
     def is_multimodal_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_multimodal
 
     def is_pp_supported_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_pp
 
     def model_has_inner_state(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.has_inner_state
 
     def is_attention_free_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_attention_free
 
     def is_hybrid_model(
         self,
-        architectures: Union[str, List[str]],
+        architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.is_hybrid

@@ -1,6 +1,6 @@
 import logging
 import math
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, Optional, Type
 
 import torch
 from torch import nn
@@ -43,7 +43,7 @@ def convert_to_embedding_indices(indices):
 
 def convert_mapping(
     mapping: PromptAdapterMapping,
-    prompt_adapter_index_to_id: List[Optional[int]],
+    prompt_adapter_index_to_id: list[Optional[int]],
 ) -> torch.Tensor:
     """Converts PromptAdapterMapping to index tensors.
 
@@ -126,7 +126,7 @@ class PromptAdapterModelManager(AdapterModelManager):
         """
         self.model: nn.Module = model
         # Dict instead of a Set for compatibility with LRUCache.
-        self.prompt_adapter_index_to_id: List[
+        self.prompt_adapter_index_to_id: list[
             Optional[int]] = [None] * self.prompt_adapter_slots
         self.max_num_seqs = max_num_seqs
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8

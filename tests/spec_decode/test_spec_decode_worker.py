@@ -1,7 +1,7 @@
 import random
 from collections import defaultdict
 from types import SimpleNamespace
-from typing import Dict, List, Set
+from typing import Dict, Set
 from unittest.mock import MagicMock
 
 import pytest
@@ -118,7 +118,7 @@ def test_batch_expansion_correctly_calls_target_model(
             seq_group_metadata_list=seq_group_metadata_list,
             num_lookahead_slots=k))
 
-    seen_contexts: List[List[int]] = []
+    seen_contexts: list[list[int]] = []
 
     call_args_list = target_worker.execute_model.call_args_list
     assert len(call_args_list) == 1
@@ -131,7 +131,7 @@ def test_batch_expansion_correctly_calls_target_model(
             for seq_data in seq_group_metadata.seq_data.values():
                 seen_contexts.append(seq_data.get_token_ids())
 
-    expected_seen_contexts: List[List[int]] = []
+    expected_seen_contexts: list[list[int]] = []
 
     for prompt, prev_generated, draft_tokens in zip(
             prompts, prev_output_tokens, proposal_token_ids.tolist()):
@@ -333,11 +333,11 @@ def test_correctly_formats_output(k: int, batch_size: int,
         next(iter(seq_group_metadata.seq_data.keys()))
         for seq_group_metadata in seq_group_metadata_list
     ]
-    actual_output_by_seq: Dict[int, List[SequenceOutput]] = {
+    actual_output_by_seq: Dict[int, list[SequenceOutput]] = {
         seq_id: []
         for seq_id in seq_ids
     }
-    expected_output_by_seq: Dict[int, List[SequenceOutput]] = {
+    expected_output_by_seq: Dict[int, list[SequenceOutput]] = {
         seq_id: []
         for seq_id in seq_ids
     }

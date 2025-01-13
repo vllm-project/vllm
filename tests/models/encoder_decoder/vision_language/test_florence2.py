@@ -1,5 +1,5 @@
 from functools import partial
-from typing import List, Optional, Tuple, Type
+from typing import Optional, Tuple, Type
 
 import pytest
 from PIL import Image
@@ -31,7 +31,7 @@ PROMPTS = [
 ]
 
 
-def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+def vllm_to_hf_output(vllm_output: Tuple[list[int], str,
                                          Optional[SampleLogprobs]], ):
     """Sanitize vllm output to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
@@ -44,7 +44,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    prompts: List[ExplicitEncoderDecoderPrompt],
+    prompts: list[ExplicitEncoderDecoderPrompt],
     model: str,
     *,
     dtype: str,

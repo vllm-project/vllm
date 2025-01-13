@@ -1,6 +1,6 @@
 from array import array
 from itertools import chain, count
-from typing import Iterator, List, Optional, Tuple
+from typing import Iterator, Optional, Tuple
 
 import torch
 
@@ -109,10 +109,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
     def _expand_batch(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        proposal_token_ids_list: List[List[TokenId]],
-        proposal_lens_list: List[int],
-    ) -> Tuple[List[int], List[int], List[SequenceGroupMetadata], int]:
+        seq_group_metadata_list: list[SequenceGroupMetadata],
+        proposal_token_ids_list: list[list[TokenId]],
+        proposal_lens_list: list[int],
+    ) -> Tuple[list[int], list[int], list[SequenceGroupMetadata], int]:
         """Given the input sequences and potentially multiple corresponding
         proposal tokens, create a new batch where each sequence has a single
         query token.
@@ -144,10 +144,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 num_scoring_tokens)
 
     def _contract_batch(
-        self, contracted_seq_group_metadata_list: List[SequenceGroupMetadata],
+        self, contracted_seq_group_metadata_list: list[SequenceGroupMetadata],
         target_sampler_output: SamplerOutput, proposals: SpeculativeProposals,
-        num_scoring_tokens: int, non_spec_indices: List[int],
-        spec_indices: List[int], k: int
+        num_scoring_tokens: int, non_spec_indices: list[int],
+        spec_indices: list[int], k: int
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
                Optional[torch.Tensor]]:
         """Contract the expanded batch back into its original size.
@@ -255,10 +255,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
     def _create_scoring_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        proposal_token_ids: List[List[TokenId]],  # shape: [batch_size, k]
+        seq_group_metadata_list: list[SequenceGroupMetadata],
+        proposal_token_ids: list[list[TokenId]],  # shape: [batch_size, k]
         target_seq_ids_iter: Iterator[TargetSeqId],
-    ) -> List[SequenceGroupMetadata]:
+    ) -> list[SequenceGroupMetadata]:
         """Given the original input sequences and proposed tokens from the draft
         model, create a list of target sequences that can be used for scoring.
 
@@ -285,10 +285,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
     def _create_target_seq_group_metadata(
         self,
         input_seq_group_metadata: SequenceGroupMetadata,
-        proposal_token_ids: List[List[TokenId]],  # shape: [batch_size, k]
+        proposal_token_ids: list[list[TokenId]],  # shape: [batch_size, k]
         batch_index: int,
         target_seq_ids_iter: Iterator[TargetSeqId],
-    ) -> List[SequenceGroupMetadata]:
+    ) -> list[SequenceGroupMetadata]:
         """Given an input sequence group metadata and a list of draft tokens,
         create a list of target SequenceGroupMetadata, one for each
         token id that needs to be scored.
@@ -308,7 +308,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             proposal_token_ids[batch_index])
 
         sampling_params = input_seq_group_metadata.sampling_params
-        target_seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        target_seq_group_metadata_list: list[SequenceGroupMetadata] = []
         for i, token_ids in enumerate(token_ids_to_score):
             target_seq_group_metadata_list.append(
                 self._create_single_target_seq_group_metadata(
@@ -326,7 +326,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         seq_group_metadata: SequenceGroupMetadata,
         seq_id: SeqId,
         target_seq_id: TargetSeqId,
-        token_ids: List[TokenId],
+        token_ids: list[TokenId],
         sampling_params: SamplingParams,
     ) -> SequenceGroupMetadata:
         """Create a single target SequenceGroupMetadata.
@@ -409,7 +409,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
     @staticmethod
     def _create_target_seq_id_iterator(
-            seq_ids: List[SeqId]) -> Iterator[TargetSeqId]:
+            seq_ids: list[SeqId]) -> Iterator[TargetSeqId]:
         """Create an iterator for creating target sequence ids.
         Target sequence ids are distinct from sequence ids because we create a
         distinct target sequence id for each proposal token to be scored.
@@ -421,8 +421,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
     @staticmethod
     def _get_token_ids_to_score(
-        full_spec_token_ids: List[TokenId]  # shape: [k]
-    ) -> List[List[TokenId]]:
+        full_spec_token_ids: list[TokenId]  # shape: [k]
+    ) -> list[list[TokenId]]:
         """Given an int tensor of proposal token ids, return a list of
         token ids that should be scored.
 
@@ -438,7 +438,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 [0, 1, 2]
                 [0, 1, 2, 3]
         """
-        empty_token_ids: List[TokenId] = []
+        empty_token_ids: list[TokenId] = []
 
         token_ids_to_score = [empty_token_ids]
         token_ids_to_score.extend(full_spec_token_ids[:i + 1]

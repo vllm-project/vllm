@@ -1,7 +1,7 @@
 import json
 import math
 import os
-from typing import Dict, List
+from typing import Dict
 
 import pytest
 import torch
@@ -126,7 +126,7 @@ def test_from_lora_tensors(sql_lora_files, device):
             assert lora.embeddings_tensor is None
 
 
-def create_lora(lora_id: int, model: nn.Module, sub_modules: List[str],
+def create_lora(lora_id: int, model: nn.Module, sub_modules: list[str],
                 device: torch.device) -> LoRAModel:
     loras: Dict[str, LoRALayerWeights] = {}
     for name in sub_modules:

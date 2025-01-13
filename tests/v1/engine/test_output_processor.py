@@ -1,4 +1,3 @@
-from typing import List
 
 import pytest
 from transformers import AutoTokenizer
@@ -47,11 +46,11 @@ GENERATION_STRINGS = [
 class MockEngineCore:
     """Mock outputs form premade tokens lists."""
 
-    def __init__(self, tokens_list: List[List[int]]):
+    def __init__(self, tokens_list: list[list[int]]):
         self.tokens_list = tokens_list
         self.current_idx = 0
 
-    def get_outputs(self) -> List[EngineCoreOutput]:
+    def get_outputs(self) -> list[EngineCoreOutput]:
         token_idx = self.current_idx
         self.current_idx += 1
 

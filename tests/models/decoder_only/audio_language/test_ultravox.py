@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Type
+from typing import Optional, Tuple, Type
 
 import numpy as np
 import pytest
@@ -76,7 +76,7 @@ def _get_prompt(audio_count, question, placeholder):
                                          add_generation_prompt=True)
 
 
-def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+def vllm_to_hf_output(vllm_output: Tuple[list[int], str,
                                          Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
@@ -96,7 +96,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    prompts_and_audios: List[Tuple[str, str, AudioTuple]],
+    prompts_and_audios: list[Tuple[str, str, AudioTuple]],
     model: str,
     *,
     dtype: str,
@@ -157,7 +157,7 @@ def run_test(
 
 def run_multi_audio_test(
     vllm_runner: Type[VllmRunner],
-    prompts_and_audios: List[Tuple[str, List[AudioTuple]]],
+    prompts_and_audios: list[Tuple[str, list[AudioTuple]]],
     model: str,
     *,
     dtype: str,

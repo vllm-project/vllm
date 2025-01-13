@@ -202,4 +202,3 @@ def test_failure_with_async_out_proc(vllm_runner) -> None:
         # Clean up
         if filename is not None:
             os.remove(filename)
-        pass

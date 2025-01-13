@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 from itertools import product
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -147,7 +147,7 @@ def can_actually_p2p(
     p_src.join()
     p_tgt.join()
     assert p_src.exitcode == 0 and p_tgt.exitcode == 0
-    result: List[bool] = []
+    result: list[bool] = []
     for src, tgt in zip(batch_src, batch_tgt):
         a = result_queue.get()
         b = result_queue.get()

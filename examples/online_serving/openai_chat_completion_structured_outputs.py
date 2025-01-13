@@ -31,7 +31,7 @@ completion = client.chat.completions.create(
         "content": prompt,
     }],
     extra_body={
-        "guided_regex": "\w+@\w+\.com\n",
+        "guided_regex": r"\w+@\w+\.com\n",
         "stop": ["\n"]
     },
 )

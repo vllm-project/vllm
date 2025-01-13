@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -22,7 +22,7 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         """Create weights for embedding layer."""
@@ -295,7 +295,7 @@ class VocabParallelEmbedding(torch.nn.Module):
             org_vocab_start_index, org_vocab_end_index,
             added_vocab_start_index, added_vocab_end_index)
 
-    def get_sharded_to_full_mapping(self) -> Optional[List[int]]:
+    def get_sharded_to_full_mapping(self) -> Optional[list[int]]:
         """Get a mapping that can be used to reindex the gathered
         logits for sampling.
         
@@ -309,9 +309,9 @@ class VocabParallelEmbedding(torch.nn.Module):
         if self.tp_size < 2:
             return None
 
-        base_embeddings: List[int] = []
-        added_embeddings: List[int] = []
-        padding: List[int] = []
+        base_embeddings: list[int] = []
+        added_embeddings: list[int] = []
+        padding: list[int] = []
         for tp_rank in range(self.tp_size):
             shard_indices = self._get_indices(self.num_embeddings_padded,
                                               self.org_vocab_size_padded,

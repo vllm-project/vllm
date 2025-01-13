@@ -1,7 +1,7 @@
 import itertools
 from dataclasses import dataclass, field
-from typing import (Callable, Dict, Iterable, List, Literal, Mapping, Optional,
-                    Protocol, Set, Tuple, Union, overload)
+from typing import (Callable, Dict, Iterable, Literal, Mapping, Optional, Protocol,
+                    Set, Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -80,8 +80,8 @@ class AutoWeightsLoader:
         self,
         module: nn.Module,
         *,
-        skip_prefixes: Optional[List[str]] = None,
-        ignore_unexpected_prefixes: Optional[List[str]] = None,
+        skip_prefixes: Optional[list[str]] = None,
+        ignore_unexpected_prefixes: Optional[list[str]] = None,
     ) -> None:
         super().__init__()
 
@@ -264,13 +264,13 @@ def flatten_bn(x: torch.Tensor) -> torch.Tensor:
 
 
 @overload
-def flatten_bn(x: List[torch.Tensor]) -> List[torch.Tensor]:
+def flatten_bn(x: list[torch.Tensor]) -> list[torch.Tensor]:
     ...
 
 
 @overload
 def flatten_bn(
-    x: Union[List[torch.Tensor], torch.Tensor],
+    x: Union[list[torch.Tensor], torch.Tensor],
     *,
     concat: Literal[True],
 ) -> torch.Tensor:
@@ -279,18 +279,18 @@ def flatten_bn(
 
 @overload
 def flatten_bn(
-    x: Union[List[torch.Tensor], torch.Tensor],
+    x: Union[list[torch.Tensor], torch.Tensor],
     *,
     concat: bool = False,
-) -> Union[List[torch.Tensor], torch.Tensor]:
+) -> Union[list[torch.Tensor], torch.Tensor]:
     ...
 
 
 def flatten_bn(
-    x: Union[List[torch.Tensor], torch.Tensor],
+    x: Union[list[torch.Tensor], torch.Tensor],
     *,
     concat: bool = False,
-) -> Union[List[torch.Tensor], torch.Tensor]:
+) -> Union[list[torch.Tensor], torch.Tensor]:
     """
     Flatten the ``B`` and ``N`` dimensions of batched multimodal inputs.
 
@@ -414,7 +414,7 @@ def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
-    placeholder_token_id: Union[int, List[int]],
+    placeholder_token_id: Union[int, list[int]],
 ) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
@@ -560,10 +560,10 @@ def make_layers(
 
 
 # NOTE: don't use lru_cache here because it can prevent garbage collection
-_model_to_pp_missing_layer_names: Dict[int, List[str]] = {}
+_model_to_pp_missing_layer_names: Dict[int, list[str]] = {}
 
 
-def get_pp_missing_layer_names(model: torch.nn.Module) -> List[str]:
+def get_pp_missing_layer_names(model: torch.nn.Module) -> list[str]:
     """Get the names of the missing layers in a pipeline parallel model."""
     model_id = id(model)
     if model_id in _model_to_pp_missing_layer_names:
@@ -591,7 +591,7 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
         for missing_layer_name in get_pp_missing_layer_names(model))
 
 
-def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):
+def make_empty_intermediate_tensors_factory(keys: list[str], hidden_size: int):
 
     def make_empty_intermediate_tensors(
         batch_size: int,
@@ -631,7 +631,7 @@ def extract_layer_index(layer_name: str) -> int:
     - "model.encoder.layers.0.sub.1" -> ValueError
     """
     subnames = layer_name.split(".")
-    int_vals: List[int] = []
+    int_vals: list[int] = []
     for subname in subnames:
         try:
             int_vals.append(int(subname))

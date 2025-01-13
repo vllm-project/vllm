@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set
+from typing import Dict, Optional, Set
 
 import torch
 
@@ -26,6 +26,6 @@ class SamplingMetadata:
     presence_penalties: torch.Tensor
     repetition_penalties: torch.Tensor
 
-    output_token_ids: List[List[int]]
-    min_tokens: List[int]
-    stop_token_ids: List[Set[int]]
+    output_token_ids: list[list[int]]
+    min_tokens: list[int]
+    stop_token_ids: list[Set[int]]

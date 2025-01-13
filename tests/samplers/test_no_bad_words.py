@@ -3,7 +3,7 @@
 Run `pytest tests/samplers/test_no_bad_words.py`.
 
 """
-from typing import List, Optional
+from typing import Optional
 
 from transformers import AutoTokenizer
 
@@ -15,8 +15,8 @@ def _generate(
     prompt: str,
     num_prompt_tokens: int,
     temperature: float = 0,
-    bad_words: Optional[List[str]] = None,
-) -> List[int]:
+    bad_words: Optional[list[str]] = None,
+) -> list[int]:
     sampling_params = SamplingParams(
         temperature=temperature,
         bad_words=bad_words,
@@ -58,7 +58,7 @@ class TestOneTokenBadWord:
 
     def _generate(self,
                   model: LLM,
-                  bad_words: Optional[List[str]] = None) -> List[int]:
+                  bad_words: Optional[list[str]] = None) -> list[int]:
         return _generate(
             model=model,
             prompt=self.PROMPT,
@@ -68,7 +68,7 @@ class TestOneTokenBadWord:
 
     def _encode(self,
                 prompt: str,
-                add_special_tokens: bool = True) -> List[int]:
+                add_special_tokens: bool = True) -> list[int]:
         return self.tokenizer(prompt,
                               add_special_tokens=add_special_tokens).input_ids
 
@@ -148,7 +148,7 @@ class TestTwoTokenBadWord:
 
     def _generate(self,
                   model: LLM,
-                  bad_words: Optional[List[str]] = None) -> List[int]:
+                  bad_words: Optional[list[str]] = None) -> list[int]:
         return _generate(
             model=model,
             prompt=self.PROMPT,
@@ -157,7 +157,7 @@ class TestTwoTokenBadWord:
         )
 
     @staticmethod
-    def _contains(sequence: List[int], subsequence: List[int]) -> bool:
+    def _contains(sequence: list[int], subsequence: list[int]) -> bool:
         searched = False
 
         for start in range(len(sequence)):
@@ -180,6 +180,6 @@ class TestTwoTokenBadWord:
 
     def _encode(self,
                 prompt: str,
-                add_special_tokens: bool = True) -> List[int]:
+                add_special_tokens: bool = True) -> list[int]:
         return self.tokenizer(prompt,
                               add_special_tokens=add_special_tokens).input_ids

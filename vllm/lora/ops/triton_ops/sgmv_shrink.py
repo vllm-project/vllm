@@ -5,7 +5,6 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import List
 
 import torch
 import triton
@@ -127,7 +126,7 @@ def _sgmv_shrink_kernel(
 @torch.inference_mode()
 def _sgmv_shrink(
     inputs: torch.Tensor,
-    lora_a_weights: List[torch.Tensor],
+    lora_a_weights: list[torch.Tensor],
     output_tensor: torch.Tensor,
     b_seq_start_loc: torch.Tensor,
     seq_len_tensor: torch.Tensor,
@@ -140,7 +139,7 @@ def _sgmv_shrink(
     """
     Args:
         inputs (torch.Tensor): input tensor
-        lora_a_weights (List[torch.Tensor]): lora'a weight
+        lora_a_weights (list[torch.Tensor]): lora'a weight
         output_tensor (torch.Tensor): output tensor
         b_seq_start_loc (torch.Tensor): (batch_size,). The cumulative
             sequence lengths of the sequences in the batch, used to index
@@ -213,7 +212,7 @@ def _sgmv_shrink(
 
 def sgmv_shrink_fake(
     inputs: torch.Tensor,
-    lora_a_weights: List[torch.Tensor],
+    lora_a_weights: list[torch.Tensor],
     output_tensor: torch.Tensor,
     b_seq_start_loc: torch.Tensor,
     seq_len_tensor: torch.Tensor,

@@ -2,7 +2,7 @@ import os
 import signal
 import weakref
 from abc import ABC, abstractmethod
-from typing import List, Type
+from typing import Type
 
 import msgspec
 import zmq
@@ -69,7 +69,7 @@ class EngineCoreClient(ABC):
     def profile(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
-    def abort_requests(self, request_ids: List[str]) -> None:
+    def abort_requests(self, request_ids: list[str]) -> None:
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -81,7 +81,7 @@ class EngineCoreClient(ABC):
     async def profile_async(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
-    async def abort_requests_async(self, request_ids: List[str]) -> None:
+    async def abort_requests_async(self, request_ids: list[str]) -> None:
         raise NotImplementedError
 
 
@@ -104,7 +104,7 @@ class InprocClient(EngineCoreClient):
     def add_request(self, request: EngineCoreRequest) -> None:
         self.engine_core.add_request(request)
 
-    def abort_requests(self, request_ids: List[str]) -> None:
+    def abort_requests(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
             self.engine_core.abort_requests(request_ids)
 
@@ -221,7 +221,7 @@ class SyncMPClient(MPClient):
         request.prompt = None
         self._send_input(EngineCoreRequestType.ADD, request)
 
-    def abort_requests(self, request_ids: List[str]) -> None:
+    def abort_requests(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
@@ -259,7 +259,7 @@ class AsyncMPClient(MPClient):
         request.prompt = None
         await self._send_input(EngineCoreRequestType.ADD, request)
 
-    async def abort_requests_async(self, request_ids: List[str]) -> None:
+    async def abort_requests_async(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 

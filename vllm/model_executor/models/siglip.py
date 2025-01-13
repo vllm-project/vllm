@@ -2,7 +2,7 @@
 within a vision language model."""
 
 import math
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -118,7 +118,7 @@ def input_processor_for_siglip(
     inputs: DecoderOnlyInputs,
     *,
     image_token_id: int,
-    image_feature_size_override: Optional[Union[int, List[int]]] = None,
+    image_feature_size_override: Optional[Union[int, list[int]]] = None,
 ):
     multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:

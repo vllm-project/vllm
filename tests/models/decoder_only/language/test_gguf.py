@@ -4,7 +4,7 @@ Note: To pass the test, quantization higher than Q4 should be used
 """
 
 import os
-from typing import List, NamedTuple, Type
+from typing import NamedTuple, Type
 
 import pytest
 from huggingface_hub import hf_hub_download
@@ -86,7 +86,7 @@ MODELS = [
 def test_models(
     num_gpus_available: int,
     vllm_runner: Type[VllmRunner],
-    example_prompts: List[str],
+    example_prompts: list[str],
     model: GGUFTestConfig,
     dtype: str,
     max_tokens: int,

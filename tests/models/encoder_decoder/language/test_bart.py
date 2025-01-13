@@ -2,7 +2,7 @@
 
 Run `pytest tests/models/encoder_decoder/language/test_bart.py`.
 """
-from typing import List, Optional, Tuple, Type
+from typing import Optional, Tuple, Type
 
 import pytest
 from transformers import AutoModelForSeq2SeqLM
@@ -16,7 +16,7 @@ from ...utils import check_logprobs_close
 
 
 def vllm_to_hf_output(
-    vllm_output: Tuple[List[int], str, Optional[SampleLogprobs]],
+    vllm_output: Tuple[list[int], str, Optional[SampleLogprobs]],
     decoder_prompt_type: DecoderPromptType,
 ):
     """Sanitize vllm output to be comparable with hf output."""
@@ -32,7 +32,7 @@ def vllm_to_hf_output(
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
+    prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
     decoder_prompt_type: DecoderPromptType,
     model: str,
     *,

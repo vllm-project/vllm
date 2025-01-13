@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Any, AsyncGenerator, Dict, List, Optional, Union, cast
+from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
 
 from fastapi import Request
 
@@ -21,8 +21,8 @@ from vllm.utils import make_async, merge_async_iterators
 logger = init_logger(__name__)
 
 
-def make_pairs(text_1: Union[List[str], str], text_2: Union[List[str],
-                                                            str]) -> List:
+def make_pairs(text_1: Union[list[str], str], text_2: Union[list[str],
+                                                            str]) -> list:
     if isinstance(text_1, (str, dict)):
         # Convert a single prompt to a list.
         text_1 = [text_1]
@@ -106,7 +106,7 @@ class OpenAIServingScores(OpenAIServing):
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
         input_pairs = make_pairs(request.text_1, request.text_2)
 
@@ -164,7 +164,7 @@ class OpenAIServingScores(OpenAIServing):
         num_prompts = len(engine_prompts)
 
         # Non-streaming response
-        final_res_batch: List[Optional[PoolingRequestOutput]]
+        final_res_batch: list[Optional[PoolingRequestOutput]]
         final_res_batch = [None] * num_prompts
 
         try:
@@ -173,7 +173,7 @@ class OpenAIServingScores(OpenAIServing):
 
             assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(List[PoolingRequestOutput],
+            final_res_batch_checked = cast(list[PoolingRequestOutput],
                                            final_res_batch)
 
             response = self.request_output_to_score_response(
@@ -192,12 +192,12 @@ class OpenAIServingScores(OpenAIServing):
 
     def request_output_to_score_response(
         self,
-        final_res_batch: List[PoolingRequestOutput],
+        final_res_batch: list[PoolingRequestOutput],
         request_id: str,
         created_time: int,
         model_name: str,
     ) -> ScoreResponse:
-        items: List[ScoreResponseData] = []
+        items: list[ScoreResponseData] = []
         num_prompt_tokens = 0
 
         for idx, final_res in enumerate(final_res_batch):

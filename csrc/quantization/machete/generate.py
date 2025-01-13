@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass, fields
 from functools import reduce
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import jinja2
 # yapf conflicts with isort for this block
@@ -275,8 +275,8 @@ class PrepackTypeConfig:
 @dataclass
 class ImplConfig:
     types: TypeConfig
-    schedules: List[ScheduleConfig]
-    heuristic: List[Tuple[Optional[str], ScheduleConfig]]
+    schedules: list[ScheduleConfig]
+    heuristic: list[Tuple[Optional[str], ScheduleConfig]]
 
 
 def generate_sch_sig(schedule_config: ScheduleConfig) -> str:
@@ -331,7 +331,7 @@ def is_power_of_two(n):
     return (n != 0) and (n & (n - 1) == 0)
 
 
-def to_cute_constant(value: List[int]):
+def to_cute_constant(value: list[int]):
 
     def _to_cute_constant(value: int):
         if is_power_of_two(value):
@@ -345,7 +345,7 @@ def to_cute_constant(value: List[int]):
         return _to_cute_constant(value)
 
 
-def unique_schedules(impl_configs: List[ImplConfig]):
+def unique_schedules(impl_configs: list[ImplConfig]):
     return list(
         set(sch for impl_config in impl_configs
             for sch in impl_config.schedules))
@@ -389,7 +389,7 @@ mm_impl_template = create_template(IMPL_TEMPLATE)
 prepack_dispatch_template = create_template(PREPACK_TEMPLATE)
 
 
-def create_sources(impl_configs: List[ImplConfig], num_impl_files=8):
+def create_sources(impl_configs: list[ImplConfig], num_impl_files=8):
     sources = []
 
     sources.append((
@@ -433,7 +433,7 @@ def create_sources(impl_configs: List[ImplConfig], num_impl_files=8):
     num_impls = reduce(lambda x, y: x + len(y.schedules), impl_configs, 0)
     num_impls_per_file = math.ceil(num_impls / num_impl_files)
 
-    files_impls: List[List[ImplConfig]] = [[]]
+    files_impls: list[list[ImplConfig]] = [[]]
 
     curr_num_impls_assigned = 0
     curr_impl_in_file = 0

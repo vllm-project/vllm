@@ -1,5 +1,5 @@
 """Tests for Qwen's multimodal preprocessing kwargs."""
-from typing import Dict, List, Union
+from typing import Dict, Union
 
 import pytest
 import torch
@@ -89,9 +89,9 @@ def test_input_processor_valid_mm_data(input_processor_for_qwen,
     ])
 def test_input_mapper_valid_mm_data(input_mapper_for_qwen,
                                     qwen_vl_context: InputContext,
-                                    img_data: Union[torch.Tensor, List[Image],
+                                    img_data: Union[torch.Tensor, list[Image],
                                                     Image],
-                                    expected_shape: List[int]):
+                                    expected_shape: list[int]):
     """Happy cases for image inputs to Qwen's multimodal input mapper."""
     mapped_img_data = input_mapper_for_qwen(qwen_vl_context, img_data)
     # Ensure that we get the appropriately shaped pixel_values
@@ -137,7 +137,7 @@ def test_input_processor_invalid_mm_data(input_processor_for_qwen,
 def test_input_mapper_invalid_mm_data(
     input_mapper_for_qwen,
     qwen_vl_context: InputContext,
-    img_data: Union[torch.Tensor, List[Image], Image],
+    img_data: Union[torch.Tensor, list[Image], Image],
 ):
     """Sad cases validated in Qwen VL's multimodal input mapper."""
     with pytest.raises(ValueError):

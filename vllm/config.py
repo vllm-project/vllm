@@ -9,8 +9,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
-                    Final, List, Literal, Mapping, Optional, Protocol, Set,
-                    Tuple, Type, Union)
+                    Final, Literal, Mapping, Optional, Protocol, Set, Tuple,
+                    Type, Union)
 
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
@@ -59,7 +59,7 @@ _ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
 
 RunnerType = Literal["generate", "pooling", "draft"]
 
-_RUNNER_TASKS: Dict[RunnerType, List[_ResolvedTask]] = {
+_RUNNER_TASKS: Dict[RunnerType, list[_ResolvedTask]] = {
     "generate": ["generate"],
     "pooling": ["embed", "classify", "score", "reward"],
     "draft": ["draft"],
@@ -183,7 +183,7 @@ class ModelConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: List[Any] = []
+        factors: list[Any] = []
         factors.append(self.model)
         factors.append(self.dtype)
         factors.append(self.quantization)
@@ -218,7 +218,7 @@ class ModelConfig:
                  max_logprobs: int = 20,
                  disable_sliding_window: bool = False,
                  skip_tokenizer_init: bool = False,
-                 served_model_name: Optional[Union[str, List[str]]] = None,
+                 served_model_name: Optional[Union[str, list[str]]] = None,
                  limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
                  use_async_output_proc: bool = True,
                  config_format: ConfigFormat = ConfigFormat.AUTO,
@@ -449,7 +449,7 @@ class ModelConfig:
 
     def _get_preferred_task(
         self,
-        architectures: List[str],
+        architectures: list[str],
         supported_tasks: Set[_ResolvedTask],
     ) -> Optional[_ResolvedTask]:
         model_id = self.model
@@ -458,7 +458,7 @@ class ModelConfig:
         if ModelRegistry.is_cross_encoder_model(architectures):
             return "score"
 
-        suffix_to_preferred_task: List[Tuple[str, _ResolvedTask]] = [
+        suffix_to_preferred_task: list[Tuple[str, _ResolvedTask]] = [
             # Other models follow this pattern
             ("ForCausalLM", "generate"),
             ("ForConditionalGeneration", "generate"),
@@ -492,13 +492,13 @@ class ModelConfig:
             "generate": ModelRegistry.is_text_generation_model(architectures),
             "pooling": ModelRegistry.is_pooling_model(architectures),
         }
-        supported_runner_types_lst: List[RunnerType] = [
+        supported_runner_types_lst: list[RunnerType] = [
             runner_type
             for runner_type, is_supported in runner_support.items()
             if is_supported
         ]
 
-        supported_tasks_lst: List[_ResolvedTask] = [
+        supported_tasks_lst: list[_ResolvedTask] = [
             task for runner_type in supported_runner_types_lst
             for task in _RUNNER_TASKS[runner_type]
         ]
@@ -698,7 +698,7 @@ class ModelConfig:
                 self.use_async_output_proc = False
 
     def get_hf_config_sliding_window(
-            self) -> Union[Optional[int], List[Optional[int]]]:
+            self) -> Union[Optional[int], list[Optional[int]]]:
         """Get the sliding window size, or None if disabled."""
 
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
@@ -709,7 +709,7 @@ class ModelConfig:
             return None
         return getattr(self.hf_text_config, "sliding_window", None)
 
-    def get_sliding_window(self) -> Optional[Union[int, List[Optional[int]]]]:
+    def get_sliding_window(self) -> Optional[Union[int, list[Optional[int]]]]:
         """Get the sliding window size, or None if disabled.
         """
         # If user disables sliding window, return None.
@@ -968,7 +968,7 @@ class CacheConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: List[Any] = []
+        factors: list[Any] = []
         factors.append(self.cache_dtype)
         # `cpu_offload_gb` does not use `torch.compile` yet.
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
@@ -1084,7 +1084,7 @@ class TokenizerPoolConfig:
         """
         # no factors to consider.
         # this config will not affect the computation graph.
-        factors: List[Any] = []
+        factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -1169,7 +1169,7 @@ class LoadConfig:
     download_dir: Optional[str] = None
     model_loader_extra_config: Optional[Union[str, dict]] = field(
         default_factory=dict)
-    ignore_patterns: Optional[Union[List[str], str]] = None
+    ignore_patterns: Optional[Union[list[str], str]] = None
 
     def compute_hash(self) -> str:
         """
@@ -1185,7 +1185,7 @@ class LoadConfig:
         """
         # no factors to consider.
         # this config will not affect the computation graph.
-        factors: List[Any] = []
+        factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -1260,7 +1260,7 @@ class ParallelConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: List[Any] = []
+        factors: list[Any] = []
         factors.append(self.pipeline_parallel_size)
         factors.append(self.tensor_parallel_size)
         return hashlib.sha256(str(factors).encode()).hexdigest()
@@ -1424,7 +1424,7 @@ class SchedulerConfig:
         """
         # no factors to consider.
         # this config will not affect the computation graph.
-        factors: List[Any] = []
+        factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -1520,7 +1520,7 @@ class DeviceConfig:
         # no factors to consider.
         # the device/platform information will be summarized
         # by torch/vllm automatically.
-        factors: List[Any] = []
+        factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -1566,7 +1566,7 @@ class SpeculativeConfig:
         """
         # no factors to consider.
         # spec decode does not use `torch.compile` yet.
-        factors: List[Any] = []
+        factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -2024,7 +2024,7 @@ class LoRAConfig:
         """
         # no factors to consider.
         # LoRA is not compatible with `torch.compile` .
-        factors: List[Any] = []
+        factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -2096,7 +2096,7 @@ class PromptAdapterConfig:
         """
         # no factors to consider.
         # this config will not affect the computation graph.
-        factors: List[Any] = []
+        factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -2141,7 +2141,7 @@ class MultiModalConfig:
         """
         # no factors to consider.
         # this config will not affect the computation graph.
-        factors: List[Any] = []
+        factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -2177,7 +2177,7 @@ class PoolerConfig:
     are returned.
     """
 
-    returned_token_ids: Optional[List[int]] = None
+    returned_token_ids: Optional[list[int]] = None
     """
     A list of indices for the vocabulary dimensions to be extracted,
     such as the token IDs of ``good_token`` and ``bad_token`` in the
@@ -2198,7 +2198,7 @@ class PoolerConfig:
         """
         # no factors to consider.
         # this config will not affect the computation graph.
-        factors: List[Any] = []
+        factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -2215,7 +2215,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
 }
 
-_ROCM_NOT_SUPPORTED_DTYPE: List[str] = []  #
+_ROCM_NOT_SUPPORTED_DTYPE: list[str] = []  #
 
 
 def _get_and_verify_dtype(
@@ -2288,11 +2288,9 @@ def _get_and_verify_dtype(
         if torch_dtype == torch.float32:
             # Upcasting to float32 is allowed.
             logger.info("Upcasting %s to %s.", config_dtype, torch_dtype)
-            pass
         elif config_dtype == torch.float32:
             # Downcasting from float32 to float16 or bfloat16 is allowed.
             logger.info("Downcasting %s to %s.", config_dtype, torch_dtype)
-            pass
         else:
             # Casting between float16 and bfloat16 is allowed with a warning.
             logger.warning("Casting %s to %s.", config_dtype, torch_dtype)
@@ -2304,7 +2302,7 @@ def _get_and_verify_max_len(
     hf_config: PretrainedConfig,
     max_model_len: Optional[int],
     disable_sliding_window: bool,
-    sliding_window_len: Optional[Union[int, List[Optional[int]]]],
+    sliding_window_len: Optional[Union[int, list[Optional[int]]]],
     spec_target_max_model_len: Optional[int] = None,
     encoder_config: Optional[Any] = None,
 ) -> int:
@@ -2430,7 +2428,7 @@ def _get_and_verify_max_len(
 
 
 def get_min_sliding_window(
-        sliding_window: Union[int, List[Optional[int]]]) -> int:
+        sliding_window: Union[int, list[Optional[int]]]) -> int:
     if isinstance(sliding_window, list):
         return min(s for s in sliding_window if s is not None)
 
@@ -2438,7 +2436,7 @@ def get_min_sliding_window(
 
 
 def get_served_model_name(model: str,
-                          served_model_name: Optional[Union[str, List[str]]]):
+                          served_model_name: Optional[Union[str, list[str]]]):
     """
     If the input is a non-empty list, the first model_name in
     `served_model_name` is taken.
@@ -2475,7 +2473,7 @@ class DecodingConfig:
         """
         # no factors to consider.
         # this config will not affect the computation graph.
-        factors: List[Any] = []
+        factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -2514,7 +2512,7 @@ class ObservabilityConfig:
         """
         # no factors to consider.
         # this config will not affect the computation graph.
-        factors: List[Any] = []
+        factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -2573,7 +2571,7 @@ class KVTransferConfig(BaseModel):
         """
         # no factors to consider.
         # this config will not affect the computation graph.
-        factors: List[Any] = []
+        factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -2670,7 +2668,7 @@ class CompilationConfig(BaseModel):
             torch.compile will handle cudagraph capture logic in the future.
         - cudagraph_capture_sizes: sizes to capture cudagraph.
             - None (default): capture sizes are inferred from vllm config.
-            - List[int]: capture sizes are specified as given.
+            - list[int]: capture sizes are specified as given.
         - cudagraph_num_of_warmups: number of warmup runs for cudagraph.
             It means the first several runs will be treated as warmup runs.
             Only after that, the execution will be recorded, and the recorded
@@ -2711,17 +2709,17 @@ class CompilationConfig(BaseModel):
     debug_dump_path: str = ""
     cache_dir: str = ""
     backend: str = ""
-    custom_ops: List[str] = Field(default_factory=list)
-    splitting_ops: List[str] = Field(default=None)  # type: ignore
+    custom_ops: list[str] = Field(default_factory=list)
+    splitting_ops: list[str] = Field(default=None)  # type: ignore
 
     use_inductor: bool = True
-    candidate_compile_sizes: Optional[List[int]] = Field(default=None)
+    candidate_compile_sizes: Optional[list[int]] = Field(default=None)
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
 
     use_cudagraph: bool = False
     cudagraph_num_of_warmups: int = 0
-    cudagraph_capture_sizes: Optional[List[int]] = None
+    cudagraph_capture_sizes: Optional[list[int]] = None
     cudagraph_copy_inputs: bool = False
 
     class PassConfig(BaseModel):
@@ -2737,7 +2735,7 @@ class CompilationConfig(BaseModel):
         - enable_reshape: whether to enable the custom reshape elimination pass.
             TODO better pass enabling system.
         """
-        dump_graph_stages: List[str] = Field(default_factory=list)
+        dump_graph_stages: list[str] = Field(default_factory=list)
         dump_graph_dir: Path = Field(default=Path("."))
         enable_fusion: bool = True
         enable_reshape: bool = True
@@ -2763,14 +2761,14 @@ class CompilationConfig(BaseModel):
     pass_config: PassConfig = Field(default_factory=PassConfig)
 
     # not configurable, computed after init
-    compile_sizes: List[int] = PrivateAttr
-    capture_sizes: List[int] = PrivateAttr
+    compile_sizes: list[int] = PrivateAttr
+    capture_sizes: list[int] = PrivateAttr
     max_capture_size: int = PrivateAttr
     # optimization:
     # Intuitively, bs_to_padded_graph_size should be Dict[int, int].
     # since we know all keys are in a range [0, max_capture_size],
-    # we can optimize it to List[int] for better lookup performance.
-    bs_to_padded_graph_size: List[int] = PrivateAttr
+    # we can optimize it to list[int] for better lookup performance.
+    bs_to_padded_graph_size: list[int] = PrivateAttr
 
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = PrivateAttr
@@ -2794,7 +2792,7 @@ class CompilationConfig(BaseModel):
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: List[Any] = []
+        factors: list[Any] = []
         factors.append(self.level)
         factors.append(self.backend)
         factors.append(self.custom_ops)
@@ -2899,7 +2897,7 @@ class CompilationConfig(BaseModel):
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)
 
-    def init_with_cudagraph_sizes(self, sizes_to_specialize: List[int]):
+    def init_with_cudagraph_sizes(self, sizes_to_specialize: list[int]):
         """To complete the initialization of config,
         we need to know the cudagraph sizes."""
 
@@ -2988,7 +2986,7 @@ class VllmConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: List[Any] = []
+        factors: list[Any] = []
         # summarize system state
         from torch._inductor.codecache import CacheBase
         system_factors = CacheBase.get_system()
@@ -3000,7 +2998,7 @@ class VllmConfig:
         factors.append(torch_factors)
 
         # summarize vllm config
-        vllm_factors: List[Any] = []
+        vllm_factors: list[Any] = []
         from vllm import __version__
         vllm_factors.append(__version__)
         if self.model_config:

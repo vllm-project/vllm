@@ -1,6 +1,6 @@
 import asyncio
 import os
-from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
+from typing import AsyncGenerator, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -45,7 +45,7 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
         self.log_stats = log_stats
-        self.stat_loggers: List[StatLoggerBase] = [
+        self.stat_loggers: list[StatLoggerBase] = [
             LoggingStatLogger(),
             # TODO(rob): PrometheusStatLogger(),
         ]

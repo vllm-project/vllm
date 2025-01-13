@@ -3,7 +3,7 @@ import re
 from array import array
 from dataclasses import dataclass
 from functools import lru_cache, partial
-from typing import Iterable, List, Mapping, Optional, Set, Tuple, TypedDict
+from typing import Iterable, Mapping, Optional, Set, Tuple, TypedDict
 
 import torch
 from einops import rearrange
@@ -265,7 +265,7 @@ class BlockCollection(nn.Module):
             for _ in range(config.image_num_layers)
         ])
 
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
         hidden_states = []
         for r in self.resblocks:
             x = r(x)
@@ -332,7 +332,7 @@ class VisionTransformer(nn.Module):
 
     def forward(self,
                 x: torch.Tensor,
-                patch_num: int = None) -> List[torch.Tensor]:
+                patch_num: int = None) -> list[torch.Tensor]:
         """
         : param x: (batch_size, num_patch, n_pixels)
         """
@@ -838,7 +838,7 @@ class MolmoModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
@@ -1334,7 +1334,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         self,
         input_ids: torch.LongTensor,
         positions: torch.LongTensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,

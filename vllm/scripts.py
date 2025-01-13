@@ -3,7 +3,7 @@ import argparse
 import os
 import signal
 import sys
-from typing import List, Optional
+from typing import Optional
 
 import uvloop
 from openai import OpenAI
@@ -76,7 +76,7 @@ def complete(model_name: str, client: OpenAI) -> None:
 
 def chat(system_prompt: Optional[str], model_name: str,
          client: OpenAI) -> None:
-    conversation: List[ChatCompletionMessageParam] = []
+    conversation: list[ChatCompletionMessageParam] = []
     if system_prompt is not None:
         conversation.append({"role": "system", "content": system_prompt})
 

@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch.nn import Module
@@ -27,7 +27,7 @@ class Int8TpuConfig(QuantizationConfig):
     def get_name(self) -> str:
         return "tpu_int8"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.float16, torch.bfloat16]
 
     @classmethod
@@ -36,7 +36,7 @@ class Int8TpuConfig(QuantizationConfig):
             "This function should not be called with TPU Backend")
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
+    def get_config_filenames() -> list[str]:
         return []
 
     @classmethod
@@ -58,7 +58,7 @@ class TPUInt8LinearMethod(LinearMethodBase):
         self.quant_config = quant_config
 
     def create_weights(self, layer: Module, input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
 

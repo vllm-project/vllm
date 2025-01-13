@@ -1,5 +1,5 @@
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import triton
@@ -9,7 +9,7 @@ import triton.language as tl
 def apply_w8a8_block_fp8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
-    block_size: List[int],
+    block_size: list[int],
     weight_scale: torch.Tensor,
     input_scale: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
@@ -49,7 +49,7 @@ def input_to_float8(
 def block_quant_to_tensor_quant(
     x_q_block: torch.Tensor,
     x_s: torch.Tensor,
-    block_size: List[int],
+    block_size: list[int],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """This function converts block-wise quantization to tensor-wise
     quantization. The inputs are block-wise quantization tensor `x_q_block`,
@@ -273,7 +273,7 @@ def w8a8_block_fp8_matmul(
     B: torch.Tensor,
     As: torch.Tensor,
     Bs: torch.Tensor,
-    block_size: List[int],
+    block_size: list[int],
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     """This function performs matrix multiplication with block-wise

@@ -1,7 +1,7 @@
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, Optional, Set
 
 import numpy as np
 import torch
@@ -19,16 +19,16 @@ if TYPE_CHECKING:
 class CachedRequestState:
 
     req_id: str
-    prompt_token_ids: List[int]
+    prompt_token_ids: list[int]
     prompt: Optional[str]
-    mm_inputs: List[MultiModalKwargs]
-    mm_positions: List["PlaceholderRange"]
+    mm_inputs: list[MultiModalKwargs]
+    mm_positions: list["PlaceholderRange"]
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: List[int]
+    block_ids: list[int]
     num_computed_tokens: int
-    output_token_ids: List[int]
+    output_token_ids: list[int]
 
     @property
     def num_tokens(self) -> int:
@@ -53,7 +53,7 @@ class InputBatch:
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
 
-        self.req_ids: List[Optional[str]] = [None] * max_num_reqs
+        self.req_ids: list[Optional[str]] = [None] * max_num_reqs
         self.req_id_to_index: Dict[str, int] = {}
 
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
@@ -150,8 +150,8 @@ class InputBatch:
             self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: Set[str] = set()
 
-        self.min_tokens: List[int] = [0] * max_num_reqs
-        self.stop_token_ids: List[Set[int]] = [
+        self.min_tokens: list[int] = [0] * max_num_reqs
+        self.stop_token_ids: list[Set[int]] = [
             set() for _ in range(max_num_reqs)
         ]
         self.prompt_token_ids: Optional[torch.Tensor] = None
@@ -262,7 +262,7 @@ class InputBatch:
         self.num_logprobs.clear()
         self.prompt_logprob_reqs.clear()
 
-    def condense(self, empty_req_indices: List[int]) -> None:
+    def condense(self, empty_req_indices: list[int]) -> None:
         if self.num_reqs == 0:
             # The batched states are empty.
             return
@@ -318,7 +318,7 @@ class InputBatch:
 
     def make_sampling_metadata(
         self,
-        req_id_output_token_ids: Dict[str, List[int]],
+        req_id_output_token_ids: Dict[str, list[int]],
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         if not skip_copy:
@@ -346,7 +346,7 @@ class InputBatch:
                 # there are requests which need penalties to be applied.
                 self.prompt_token_ids = self._make_prompt_token_ids_tensor()
 
-        output_token_ids: List[List[int]] = []
+        output_token_ids: list[list[int]] = []
 
         for req_id in self.req_ids[:self.num_reqs]:
             assert req_id is not None

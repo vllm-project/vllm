@@ -1,7 +1,7 @@
 import math
 from dataclasses import dataclass, fields
 from functools import cached_property
-from typing import Iterable, List, Mapping, Optional, Set, Tuple, Union
+from typing import Iterable, Mapping, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -273,7 +273,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
@@ -303,10 +303,10 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _parse_and_validate_image_input(
         self,
-        images: Optional[Union[List[List[torch.Tensor]], List[torch.Tensor],
+        images: Optional[Union[list[list[torch.Tensor]], list[torch.Tensor],
                                torch.Tensor]] = None,
         image_tokens: Optional[torch.Tensor] = None,
-    ) -> Tuple[Optional[List[torch.Tensor]], Optional[torch.Tensor]]:
+    ) -> Tuple[Optional[list[torch.Tensor]], Optional[torch.Tensor]]:
         if images is None:
             return None, None
 
@@ -339,7 +339,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         return images, image_tokens
 
     def _process_image_input(self,
-                             image_input: List[torch.Tensor]) -> torch.Tensor:
+                             image_input: list[torch.Tensor]) -> torch.Tensor:
         return self.vision_language_adapter(self.vision_encoder(image_input))
 
     def compute_logits(
@@ -566,7 +566,7 @@ class Transformer(nn.Module):
         return x
 
 
-def position_meshgrid(patch_embeds_list: List[torch.Tensor], ) -> torch.Tensor:
+def position_meshgrid(patch_embeds_list: list[torch.Tensor], ) -> torch.Tensor:
     positions = torch.cat([
         torch.stack(
             torch.meshgrid(
@@ -628,7 +628,7 @@ class VisionTransformer(nn.Module):
 
     def forward(
         self,
-        images: List[torch.Tensor],
+        images: list[torch.Tensor],
     ) -> torch.Tensor:
         """
         Args:
@@ -1025,7 +1025,7 @@ class PixtralHFVisionModel(nn.Module):
 
     def forward(
         self,
-        pixel_values: List[torch.Tensor],
+        pixel_values: list[torch.Tensor],
         feature_sample_layers: Optional[list[int]] = None,
     ) -> torch.Tensor:
         """

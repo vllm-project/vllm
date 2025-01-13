@@ -1,8 +1,7 @@
 import asyncio
 import json
 import time
-from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, Final, List,
-                    Optional)
+from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, Final, Optional)
 from typing import Sequence as GenericSequence
 from typing import Union
 
@@ -183,7 +182,7 @@ class OpenAIServingChat(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[RequestOutput, None]] = []
+        generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
@@ -260,7 +259,7 @@ class OpenAIServingChat(OpenAIServing):
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         model_name: str,
-        conversation: List[ConversationMessage],
+        conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
@@ -285,7 +284,7 @@ class OpenAIServingChat(OpenAIServing):
             not tool_choice_function_name
             and self._should_stream_with_auto_tool_parsing(request))
 
-        all_previous_token_ids: Optional[List[List[int]]]
+        all_previous_token_ids: Optional[list[list[int]]]
         if tool_choice_auto:
             # These are only required in "auto" tool choice case
             previous_texts = [""] * num_choices
@@ -296,7 +295,7 @@ class OpenAIServingChat(OpenAIServing):
         # Prepare the tool parser if it's needed
         try:
             if tool_choice_auto and self.tool_parser:
-                tool_parsers: List[Optional[ToolParser]] = [
+                tool_parsers: list[Optional[ToolParser]] = [
                     self.tool_parser(tokenizer)
                 ] * num_choices
             else:
@@ -363,7 +362,7 @@ class OpenAIServingChat(OpenAIServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo:
-                        last_msg_content: Union[str, List[Dict[str, str]]] = ""
+                        last_msg_content: Union[str, list[Dict[str, str]]] = ""
                         if conversation and "content" in conversation[
                                 -1] and conversation[-1].get("role") == role:
                             last_msg_content = conversation[-1]["content"] or ""
@@ -605,7 +604,7 @@ class OpenAIServingChat(OpenAIServing):
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         model_name: str,
-        conversation: List[ConversationMessage],
+        conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
@@ -624,7 +623,7 @@ class OpenAIServingChat(OpenAIServing):
 
         assert final_res is not None
 
-        choices: List[ChatCompletionResponseChoice] = []
+        choices: list[ChatCompletionResponseChoice] = []
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
@@ -720,7 +719,7 @@ class OpenAIServingChat(OpenAIServing):
             choices.append(choice_data)
 
         if request.echo:
-            last_msg_content: Union[str, List[Dict[str, str]]] = ""
+            last_msg_content: Union[str, list[Dict[str, str]]] = ""
             if conversation and "content" in conversation[-1] and conversation[
                     -1].get("role") == role:
                 last_msg_content = conversation[-1]["content"] or ""
@@ -762,7 +761,7 @@ class OpenAIServingChat(OpenAIServing):
 
     def _get_top_logprobs(
             self, logprobs: Dict[int, Logprob], top_logprobs: Optional[int],
-            tokenizer: AnyTokenizer) -> List[ChatCompletionLogProb]:
+            tokenizer: AnyTokenizer) -> list[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(token=(token := self._get_decoded_token(
                 p[1],
@@ -784,7 +783,7 @@ class OpenAIServingChat(OpenAIServing):
         num_output_top_logprobs: Optional[int] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
-        logprobs_content: List[ChatCompletionLogProbsContent] = []
+        logprobs_content: list[ChatCompletionLogProbsContent] = []
 
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]

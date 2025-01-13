@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, Optional, Tuple, Type
 
 import openvino as ov
 import torch
@@ -72,15 +72,15 @@ class OpenVINOAttentionBackend(AttentionBackend):
     def swap_blocks(
         src_tensor: ov.Tensor,
         dst_tensor: ov.Tensor,
-        src_to_dists: List[Tuple[int, int]],
+        src_to_dists: list[Tuple[int, int]],
     ) -> None:
         for src, dst in src_to_dists:
             copy_cache_block(src_tensor, dst_tensor, src, dst)
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[Tuple[ov.Tensor, ov.Tensor]],
-        src_to_dists: List[Tuple[int, int]],
+        kv_caches: list[Tuple[ov.Tensor, ov.Tensor]],
+        src_to_dists: list[Tuple[int, int]],
     ) -> None:
         for src, dst in src_to_dists:
             for key_cache, value_cache in kv_caches:

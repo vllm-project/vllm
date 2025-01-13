@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -51,7 +51,7 @@ class DeepSpeedFPConfig(QuantizationConfig):
         return DeepSpeedFPLinearMethod(self)
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.half, torch.bfloat16]
 
     @classmethod
@@ -60,7 +60,7 @@ class DeepSpeedFPConfig(QuantizationConfig):
         return 60
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
+    def get_config_filenames() -> list[str]:
         return [
             "quant_config.json",
             "quantize_config.json",
@@ -87,7 +87,7 @@ class DeepSpeedFPLinearMethod(LinearMethodBase):
     def create_weights(self,
                        layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int],
+                       output_partition_sizes: list[int],
                        input_size: int,
                        output_size: int,
                        params_dtype: torch.dtype,

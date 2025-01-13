@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional, Set, Tuple
+from typing import Optional, Set, Tuple
 
 from vllm.config import VllmConfig
 from vllm.lora.request import LoRARequest
@@ -65,7 +65,7 @@ class ExecutorBase(ABC):
     @abstractmethod
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         """Executes at least one model step on the given sequences."""
         raise NotImplementedError
 
@@ -125,7 +125,7 @@ class ExecutorAsyncBase(ExecutorBase):
     @abstractmethod
     async def execute_model_async(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest) -> list[SamplerOutput]:
         """Executes one model step on the given sequences."""
         raise NotImplementedError
 

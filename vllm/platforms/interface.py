@@ -213,7 +213,6 @@ class Platform:
 
         The config is passed by reference, so it can be modified in place.
         """
-        pass
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
@@ -225,7 +224,6 @@ class Platform:
         the current platform.
         - By default all models are considered supported.
         """
-        pass
 
     @classmethod
     def verify_quantization(cls, quant: str) -> None:

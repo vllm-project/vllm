@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, List, Set, Tuple
+from typing import Iterable, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -146,7 +146,7 @@ class MLPSpeculator(nn.Module):
         previous_hidden_states: torch.Tensor,
         num_predict_tokens: int,
         sampling_metadata: SamplingMetadata,
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         if num_predict_tokens > self.max_speculative_tokens:
             raise ValueError(f"Max speculative tokens for model is "
                              f"{self.max_speculative_tokens}, but "

@@ -1,7 +1,7 @@
 """ Attention layer with torch scaled_dot_product_attention
     and PagedAttention."""
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, Optional, Tuple, Type
 
 import torch
 from torch.nn.functional import scaled_dot_product_attention
@@ -62,7 +62,7 @@ class TorchSDPABackend(AttentionBackend):
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
@@ -75,7 +75,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     chunked_prefill: bool
-    seq_lens: Optional[List[int]] = None  # For non-chunked prefill
+    seq_lens: Optional[list[int]] = None  # For non-chunked prefill
 
     # For chunked prefill only
     max_query_len: Optional[int] = None
@@ -86,7 +86,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     # Begin encoder attn & enc/dec cross-attn fields...
     # Encoder sequence lengths representation
-    encoder_seq_lens: Optional[List[int]] = None
+    encoder_seq_lens: Optional[list[int]] = None
     encoder_seq_lens_tensor: Optional[torch.Tensor] = None
 
     # Maximum sequence length among encoder sequences
@@ -106,9 +106,9 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         # when alibi slopes is used. It is because of the limitation
         # from xformer API.
         # will not appear in the __repr__ and __init__
-        self.attn_bias: Optional[List[torch.Tensor]] = None
-        self.encoder_attn_bias: Optional[List[torch.Tensor]] = None
-        self.cross_attn_bias: Optional[List[torch.Tensor]] = None
+        self.attn_bias: Optional[list[torch.Tensor]] = None
+        self.encoder_attn_bias: Optional[list[torch.Tensor]] = None
+        self.cross_attn_bias: Optional[list[torch.Tensor]] = None
 
     @property
     def is_all_encoder_attn_metadata_set(self):
@@ -178,7 +178,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
     def get_attn_bias(
         self,
         attn_type: str,
-    ) -> Optional[List[torch.Tensor]]:
+    ) -> Optional[list[torch.Tensor]]:
         '''
         Extract appropriate attention bias from attention metadata
         according to attention type.
@@ -205,7 +205,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     def set_attn_bias(
         self,
-        attn_bias: List[torch.Tensor],
+        attn_bias: list[torch.Tensor],
         attn_type: str,
     ) -> None:
         '''
@@ -283,7 +283,7 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
         self.chunked_prefill = input_builder.chunked_prefill
         self.input_data = input_builder.input_data
 
-    def build(self, seq_lens: List[int], query_lens: List[int],
+    def build(self, seq_lens: list[int], query_lens: list[int],
               cuda_graph_pad_size: int, batch_size: int) -> TorchSDPAMetadata:
         input_data = self.input_data
         prefill_seq_lens = seq_lens[0:input_data.num_prefills]
@@ -388,7 +388,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
@@ -634,9 +634,9 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     dtype: torch.dtype,
-    seq_lens: List[int],
-) -> List[torch.Tensor]:
-    attn_biases: List[torch.Tensor] = []
+    seq_lens: list[int],
+) -> list[torch.Tensor]:
+    attn_biases: list[torch.Tensor] = []
     for seq_len in seq_lens:
         bias = torch.arange(seq_len, dtype=dtype)
         # NOTE(zhuohan): HF uses
@@ -658,11 +658,11 @@ def _make_alibi_bias(
 
 
 def _make_sliding_window_bias(
-    seq_lens: List[int],
+    seq_lens: list[int],
     window_size: Optional[int],
     dtype: torch.dtype,
-) -> List[torch.Tensor]:
-    attn_biases: List[torch.Tensor] = []
+) -> list[torch.Tensor]:
+    attn_biases: list[torch.Tensor] = []
     for seq_len in seq_lens:
         tensor = torch.full(
             (1, seq_len, seq_len),

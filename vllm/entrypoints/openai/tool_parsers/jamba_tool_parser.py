@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Dict, List, Sequence, Union
+from typing import Dict, Sequence, Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -33,9 +33,9 @@ class JambaToolParser(ToolParser):
             )
 
         self.current_tool_name_sent: bool = False
-        self.prev_tool_call_arr: List[Dict] = []
+        self.prev_tool_call_arr: list[Dict] = []
         self.current_tool_id: int = -1
-        self.streamed_args_for_tool: List[str] = [
+        self.streamed_args_for_tool: list[str] = [
         ]  # map what has been streamed for each tool so far to a list
 
         self.tool_calls_start_token: str = "<tool_calls>"
@@ -155,7 +155,7 @@ class JambaToolParser(ToolParser):
             # tool calls are generated in an array, so do partial JSON
             # parsing on the entire array
             try:
-                tool_call_arr: List[Dict] = partial_json_parser.loads(
+                tool_call_arr: list[Dict] = partial_json_parser.loads(
                     parsable_arr, flags)
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')

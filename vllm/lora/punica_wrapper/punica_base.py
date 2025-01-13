@@ -6,7 +6,7 @@ https://arxiv.org/abs/2310.18547
 """
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import torch
 
@@ -27,7 +27,7 @@ class PunicaWrapperABC(ABC):
     def update_metadata(
         self,
         mapping: "LoRAMapping",
-        lora_index_to_id: List[Optional[int]],
+        lora_index_to_id: list[Optional[int]],
         max_loras: int,
         vocab_size: int,
         extra_vocab_size: int,
@@ -149,7 +149,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         # 5 is the number of indicies tensors.
         # base_indices, sampler_indices, sampler_indices_padded,
         # embeddings_indices,long_lora_indices
-        self.indices_len: List[Optional[int]] = [None] * 5
+        self.indices_len: list[Optional[int]] = [None] * 5
         # these attributes are the information required for sgmv kernel
         self._seq_start_locs = torch.empty(max_batches,
                                            dtype=torch.long,
@@ -170,7 +170,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
     def _update_base_metadata(
         self,
         mapping: "LoRAMapping",
-        lora_index_to_id: List[Optional[int]],
+        lora_index_to_id: list[Optional[int]],
         max_loras: int,
         vocab_size: int,
         extra_vocab_size: int,
@@ -321,7 +321,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
     def update_metadata(
             self,
             mapping: "LoRAMapping",
-            lora_index_to_id: List[Optional[int]],
+            lora_index_to_id: list[Optional[int]],
             max_loras: int,
             vocab_size: int,
             extra_vocab_size: int,

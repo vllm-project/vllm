@@ -1,6 +1,6 @@
 import dataclasses
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 
@@ -33,7 +33,7 @@ class MultiStepWorker(Worker):
         )
 
         pipeline_parallel_size = self.parallel_config.pipeline_parallel_size
-        self.multi_step_states: List[
+        self.multi_step_states: list[
             Optional[MultiStepState]] = [None] * pipeline_parallel_size
         self.temp_output = None
 

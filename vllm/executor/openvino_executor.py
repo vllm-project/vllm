@@ -1,4 +1,4 @@
-from typing import List, Set, Tuple
+from typing import Set, Tuple
 
 import openvino as ov
 
@@ -72,7 +72,7 @@ class OpenVINOExecutor(ExecutorBase):
 
     def execute_model(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest) -> list[SamplerOutput]:
         output = self.driver_worker.execute_model(execute_model_req)
         return output
 
@@ -114,7 +114,7 @@ class OpenVINOExecutorAsync(OpenVINOExecutor, ExecutorAsyncBase):
 
     async def execute_model_async(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest) -> list[SamplerOutput]:
         output = await make_async(self.driver_worker.execute_model
                                   )(execute_model_req=execute_model_req, )
         return output

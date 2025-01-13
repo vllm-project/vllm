@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from torch import fx as fx
 
@@ -30,7 +30,7 @@ class PostGradPassManager:
     """
 
     def __init__(self):
-        self.passes: List[InductorPass] = []
+        self.passes: list[InductorPass] = []
 
     def __call__(self, graph: fx.Graph):
         for pass_ in self.passes:
@@ -53,7 +53,7 @@ class PostGradPassManager:
         assert isinstance(pass_, InductorPass)
         self.passes.append(pass_)
 
-    def __getstate__(self) -> Dict[str, List[Any]]:
+    def __getstate__(self) -> Dict[str, list[Any]]:
         """
         Custom pickling for the pass manager, as some passes cannot be pickled.
         Pickling occurs because the pass manager is set as the value of

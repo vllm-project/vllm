@@ -2,8 +2,8 @@ import asyncio
 import copy
 import pickle
 from contextlib import contextmanager, suppress
-from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
-                    Optional, Union, cast, overload)
+from typing import (Any, AsyncGenerator, Dict, Iterator, Mapping, Optional,
+                    Union, cast, overload)
 
 import cloudpickle
 import psutil
@@ -72,7 +72,7 @@ class MQLLMEngineClient(EngineClient):
         - Pulls RequestOutputs from its queue and yields them
 
     MQLLMEngine runs two background loops:
-        - output_loop: the output loop pulls List[RequestOutput]
+        - output_loop: the output loop pulls list[RequestOutput]
             from the MQLLMEngine via zmq (each list is the output
             of one engine_step in the LLMEngine). It then parses
             the list and pushes individual request_outputs into
@@ -389,12 +389,11 @@ class MQLLMEngineClient(EngineClient):
     async def do_log_stats(
         self,
         scheduler_outputs: Optional[SchedulerOutputs] = None,
-        model_output: Optional[List[SamplerOutput]] = None,
+        model_output: Optional[list[SamplerOutput]] = None,
     ) -> None:
         """
         Ignore do_log_stats (handled on MQLLMEngine polling)
         """
-        pass
 
     async def check_health(self):
         """

@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 import torch
 from torch.nn import Parameter
@@ -43,7 +43,7 @@ class AWQMarlinConfig(QuantizationConfig):
                  group_size: int,
                  zero_point: bool,
                  lm_head_quantized: bool,
-                 modules_to_not_convert: Optional[List[str]] = None) -> None:
+                 modules_to_not_convert: Optional[list[str]] = None) -> None:
         self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
         self.zero_point = zero_point
@@ -73,7 +73,7 @@ class AWQMarlinConfig(QuantizationConfig):
         return "awq_marlin"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.half, torch.bfloat16]
 
     @classmethod
@@ -81,7 +81,7 @@ class AWQMarlinConfig(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
     @classmethod
@@ -167,7 +167,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,

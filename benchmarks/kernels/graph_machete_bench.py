@@ -2,7 +2,6 @@ import math
 import pickle
 import re
 from collections import defaultdict
-from typing import List
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -21,7 +20,7 @@ if __name__ == "__main__":
 
     with open(args.filename, 'rb') as f:
         data = pickle.load(f)
-        raw_results: List[TMeasurement] = data["results"]
+        raw_results: list[TMeasurement] = data["results"]
 
     results = defaultdict(lambda: list())
     for v in raw_results:

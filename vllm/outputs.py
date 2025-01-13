@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, Generic, List, Optional
+from typing import Dict, Generic, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
@@ -107,14 +107,14 @@ class RequestOutput:
         self,
         request_id: str,
         prompt: Optional[str],
-        prompt_token_ids: Optional[List[int]],
+        prompt_token_ids: Optional[list[int]],
         prompt_logprobs: Optional[PromptLogprobs],
-        outputs: List[CompletionOutput],
+        outputs: list[CompletionOutput],
         finished: bool,
         metrics: Optional[RequestMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
         encoder_prompt: Optional[str] = None,
-        encoder_prompt_token_ids: Optional[List[int]] = None,
+        encoder_prompt_token_ids: Optional[list[int]] = None,
         num_cached_tokens: Optional[int] = None,
         *,
         multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
@@ -137,9 +137,9 @@ class RequestOutput:
         cls,
         request_id: str,
         prompt: Optional[str],
-        prompt_token_ids: Optional[List[int]],
+        prompt_token_ids: Optional[list[int]],
         text: str,
-        token_ids: List[int],
+        token_ids: list[int],
         finished: bool = False,
     ) -> "RequestOutput":
         """Initialize a new RequestOutput object."""
@@ -339,12 +339,12 @@ class PoolingRequestOutput(Generic[_O]):
     Args:
         request_id (str): A unique identifier for the pooling request.
         outputs (PoolingOutput): The pooling results for the given input.
-        prompt_token_ids (List[int]): A list of token IDs used in the prompt.
+        prompt_token_ids (list[int]): A list of token IDs used in the prompt.
         finished (bool): A flag indicating whether the pooling is completed.
     """
 
     def __init__(self, request_id: str, outputs: _O,
-                 prompt_token_ids: List[int], finished: bool):
+                 prompt_token_ids: list[int], finished: bool):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.finished = finished

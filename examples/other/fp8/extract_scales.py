@@ -2,7 +2,7 @@ import argparse
 import glob
 import json
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -19,7 +19,7 @@ def _prepare_hf_weights(
     quantized_model_dir: str,
     load_format: str = "auto",
     fall_back_to_pt: bool = True,
-) -> Tuple[List[str], bool]:
+) -> Tuple[list[str], bool]:
     if not os.path.isdir(quantized_model_dir):
         raise FileNotFoundError(
             f"The quantized model directory `{quantized_model_dir}` "
@@ -40,7 +40,7 @@ def _prepare_hf_weights(
     if fall_back_to_pt:
         allow_patterns += ["*.pt"]
 
-    hf_weights_files: List[str] = []
+    hf_weights_files: list[str] = []
     for pattern in allow_patterns:
         hf_weights_files += glob.glob(
             os.path.join(quantized_model_dir, pattern))
@@ -94,7 +94,7 @@ def _hf_tensorfile_iterator(filename: str, load_format: str,
 
 
 def _kv_scales_extractor(
-        hf_tensor_files: List[str],
+        hf_tensor_files: list[str],
         use_safetensors: bool,
         rank_keyword: str = "rank",
         expected_tp_size: Optional[int] = None) -> Dict[int, Dict[int, float]]:

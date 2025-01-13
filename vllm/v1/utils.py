@@ -2,8 +2,8 @@ import multiprocessing
 import os
 import weakref
 from collections.abc import Sequence
-from typing import (Any, Callable, Dict, Generic, List, Optional, TypeVar,
-                    Union, overload)
+from typing import (Any, Callable, Dict, Generic, Optional, TypeVar, Union,
+                    overload)
 
 from vllm.logger import init_logger
 from vllm.utils import get_mp_context, kill_process_tree
@@ -15,7 +15,7 @@ T = TypeVar("T")
 
 class ConstantList(Generic[T], Sequence):
 
-    def __init__(self, x: List[T]) -> None:
+    def __init__(self, x: list[T]) -> None:
         self._x = x
 
     def append(self, item):
@@ -48,10 +48,10 @@ class ConstantList(Generic[T], Sequence):
         ...
 
     @overload
-    def __getitem__(self, s: slice, /) -> List[T]:
+    def __getitem__(self, s: slice, /) -> list[T]:
         ...
 
-    def __getitem__(self, item: Union[int, slice]) -> Union[T, List[T]]:
+    def __getitem__(self, item: Union[int, slice]) -> Union[T, list[T]]:
         return self._x[item]
 
     @overload
@@ -62,7 +62,7 @@ class ConstantList(Generic[T], Sequence):
     def __setitem__(self, s: slice, value: T, /):
         ...
 
-    def __setitem__(self, item: Union[int, slice], value: Union[T, List[T]]):
+    def __setitem__(self, item: Union[int, slice], value: Union[T, list[T]]):
         raise Exception("Cannot set item in a constant list")
 
     def __delitem__(self, item):

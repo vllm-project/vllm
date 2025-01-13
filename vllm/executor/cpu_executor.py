@@ -1,6 +1,6 @@
 import os
 from functools import partial
-from typing import Any, Awaitable, List, Optional, Set, Tuple, Union
+from typing import Any, Awaitable, Optional, Set, Tuple, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
@@ -188,7 +188,7 @@ class CPUExecutor(ExecutorBase):
 
     def execute_model(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest) -> list[SamplerOutput]:
         if (self.parallel_config.tensor_parallel_size > 1
                 and self.parallel_worker_tasks is None):
             self.parallel_worker_tasks = self._run_workers(
@@ -282,7 +282,7 @@ class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
 
     async def execute_model_async(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest) -> list[SamplerOutput]:
         output = await make_async(self.execute_model
                                   )(execute_model_req=execute_model_req, )
         return output

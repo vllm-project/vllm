@@ -2,8 +2,8 @@ import dataclasses
 import weakref
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Type,
-                    TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Dict, Optional, Set, Type, TypeVar,
+                    Union)
 
 import torch
 from torch import nn
@@ -51,8 +51,8 @@ class ModelInputForCPU(ModelRunnerInputBase):
     attn_metadata: Optional["AttentionMetadata"] = None
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
     virtual_engine: Optional[int] = None
-    seq_lens: Optional[List[int]] = None
-    query_lens: Optional[List[int]] = None
+    seq_lens: Optional[list[int]] = None
+    query_lens: Optional[list[int]] = None
     lora_mapping: Optional["LoRAMapping"] = None
     lora_requests: Optional[Set[LoRARequest]] = None
 
@@ -121,30 +121,30 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
         def __init__(self, use_mrope: bool):
             self.use_mrope = use_mrope
-            self.input_tokens: List[int] = []
-            self.input_positions: List[int] = []
-            self.token_type_ids: Optional[List[int]] = []
-            self.seq_lens: List[int] = []
-            self.query_lens: List[int] = []
-            self.prefill_block_tables: List[List[int]] = []
-            self.decode_block_tables: List[List[int]] = []
+            self.input_tokens: list[int] = []
+            self.input_positions: list[int] = []
+            self.token_type_ids: Optional[list[int]] = []
+            self.seq_lens: list[int] = []
+            self.query_lens: list[int] = []
+            self.prefill_block_tables: list[list[int]] = []
+            self.decode_block_tables: list[list[int]] = []
             self.max_decode_seq_len: int = 0
             self.num_prefills: int = 0
             self.num_prefill_tokens: int = 0
             self.num_decode_tokens: int = 0
-            self.slot_mapping: List[int] = []
-            self.multi_modal_inputs_list: List[MultiModalKwargs] = []
+            self.slot_mapping: list[int] = []
+            self.multi_modal_inputs_list: list[MultiModalKwargs] = []
             self.multi_modal_placeholder_maps: Dict[
                 str, MultiModalPlaceholderMap] = defaultdict(
                     MultiModalPlaceholderMap)
-            self.input_mrope_positions: List[List[int]] = [[]
+            self.input_mrope_positions: list[list[int]] = [[]
                                                            for _ in range(3)]
 
     def __init__(self,
                  runner: "CPUModelRunner",
-                 finished_requests_ids: Optional[List[str]] = None) -> None:
+                 finished_requests_ids: Optional[list[str]] = None) -> None:
         super().__init__()
-        self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        self.seq_group_metadata_list: list[SequenceGroupMetadata] = []
         self.runner = runner
 
         self.chunked_prefill = (runner.scheduler_config.chunked_prefill_enabled
@@ -165,7 +165,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.seq_group_metadata_list.append(seq_group_metadata)
 
     def set_seq_group_list(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata]):
+            self, seq_group_metadata_list: list[SequenceGroupMetadata]):
         self.seq_group_metadata_list = seq_group_metadata_list
 
     def build(self) -> ModelInputForCPU:
@@ -407,7 +407,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                 placeholder_map)
 
     def _prepare_lora_input(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
+            self, seq_group_metadata_list: list[SequenceGroupMetadata],
             is_prefill: bool) -> LoRAMapping:
         index_mapping = []
         prompt_mapping = []
@@ -511,8 +511,8 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
 
     def _prepare_model_input_tensors(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        finished_requests_ids: Optional[List[str]] = None
+        seq_group_metadata_list: list[SequenceGroupMetadata],
+        finished_requests_ids: Optional[list[str]] = None
     ) -> TModelInputForCPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
@@ -581,9 +581,9 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[list[str]] = None
     ) -> ModelInputForCPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -611,11 +611,11 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
     def execute_model(
         self,
         model_input: ModelInputForCPUWithSamplingMetadata,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         previous_hidden_states: Optional[torch.Tensor] = None,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         if num_steps > 1:
             raise ValueError(
                 "CPU worker does not support multi-step execution.")

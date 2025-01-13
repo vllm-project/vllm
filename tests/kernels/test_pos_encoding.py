@@ -1,5 +1,5 @@
 from itertools import accumulate, product
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import pytest
 import torch
@@ -164,7 +164,7 @@ def test_batched_rotary_embedding_multi_lora(
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
-    scaling_factors: List[int] = [1, 2, 4]
+    scaling_factors: list[int] = [1, 2, 4]
     rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style, {
         "rope_type": "linear",
         "factor": tuple(scaling_factors)

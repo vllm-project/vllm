@@ -1,4 +1,4 @@
-from typing import List, Set, Tuple
+from typing import Set, Tuple
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
@@ -53,7 +53,7 @@ class NeuronExecutor(ExecutorBase):
 
     def execute_model(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest) -> list[SamplerOutput]:
         assert (not execute_model_req.blocks_to_swap_in
                 and not execute_model_req.blocks_to_swap_out
                 and not execute_model_req.blocks_to_copy), (
@@ -103,7 +103,7 @@ class NeuronExecutorAsync(NeuronExecutor, ExecutorAsyncBase):
     async def execute_model_async(
         self,
         execute_model_req: ExecuteModelRequest,
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         output = await make_async(self.driver_worker.execute_model
                                   )(execute_model_req=execute_model_req, )
         return output

@@ -6,7 +6,7 @@ from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import reduce
-from typing import Any, Callable, DefaultDict, Dict, List, Mapping, Optional
+from typing import Any, Callable, DefaultDict, Dict, Mapping, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Union
 
@@ -49,9 +49,9 @@ class Logprob:
 
 # {token_id -> logprob} per each sequence group. None if the corresponding
 # sequence group doesn't require prompt logprob.
-PromptLogprobs = List[Optional[Dict[int, Logprob]]]
+PromptLogprobs = list[Optional[Dict[int, Logprob]]]
 # {token_id -> logprob} for each sequence group.
-SampleLogprobs = List[Dict[int, Logprob]]
+SampleLogprobs = list[Dict[int, Logprob]]
 
 
 class SequenceStatus(enum.IntEnum):
@@ -128,7 +128,7 @@ class SequenceDataDelta(
         omit_defaults=True):  # type: ignore[call-arg]
     """Delta SequenceData to send to workers per step."""
     # A new token to be appended to existing SequenceData.
-    new_output_token_ids: List[int]
+    new_output_token_ids: list[int]
     # Overwriting existing `cumulative_logprob`
     new_cumulative_logprob: float
     # Overwriting existing `num_computed_tokens`.
@@ -151,7 +151,7 @@ class SequenceData(msgspec.Struct,
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
     """
-    # NOTE: we cannot use Union[List, array] because msgspec cannot support
+    # NOTE: we cannot use Union[list, array] because msgspec cannot support
     # union of 2 list types.
     _prompt_token_ids: array
     _output_token_ids: array = msgspec.field(
@@ -166,11 +166,11 @@ class SequenceData(msgspec.Struct,
     # The number of tokens with prefix cache hit.
     _num_cached_tokens: int = 0
     _stage: SequenceStage = SequenceStage.PREFILL
-    _cached_all_token_ids: List[int] = msgspec.field(default_factory=list)
+    _cached_all_token_ids: list[int] = msgspec.field(default_factory=list)
 
     # It is used to get delta input. It is reset when `get_delta_and_reset`
     # is called.
-    _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
+    _new_appended_tokens: list[int] = msgspec.field(default_factory=list)
 
     # It is used to compute mrope_position_ids.
     _mrope_position_delta: Optional[int] = None
@@ -226,7 +226,7 @@ class SequenceData(msgspec.Struct,
     def _update_cached_all_tokens(self):
         assert isinstance(self._prompt_token_ids, array)
         assert isinstance(self._output_token_ids, array)
-        self._cached_all_token_ids: List[int] = list(self._prompt_token_ids +
+        self._cached_all_token_ids: list[int] = list(self._prompt_token_ids +
                                                      self._output_token_ids)
 
     @property
@@ -294,7 +294,7 @@ class SequenceData(msgspec.Struct,
     def get_output_len(self) -> int:
         return len(self._output_token_ids)
 
-    def get_token_ids(self) -> List[int]:
+    def get_token_ids(self) -> list[int]:
         return self._cached_all_token_ids
 
     def get_prefix_token_ids(
@@ -431,7 +431,7 @@ class Sequence:
         self.prefix_offset = 0
         self.read_offset = 0
         # Input + output tokens
-        self.tokens: Optional[List[str]] = None
+        self.tokens: Optional[list[str]] = None
 
     @property
     def n_blocks(self) -> int:
@@ -442,7 +442,7 @@ class Sequence:
         return self.inputs.prompt
 
     @property
-    def prompt_token_ids(self) -> List[int]:
+    def prompt_token_ids(self) -> list[int]:
         return self.inputs.prompt_token_ids
 
     @property
@@ -450,7 +450,7 @@ class Sequence:
         return self.inputs.prompt_embeds
 
     @property
-    def token_type_ids(self) -> List[int]:
+    def token_type_ids(self) -> list[int]:
         return self.inputs.token_type_ids
 
     @property
@@ -562,7 +562,7 @@ class Sequence:
     def get_output_len(self) -> int:
         return self.data.get_output_len()
 
-    def get_token_ids(self) -> List[int]:
+    def get_token_ids(self) -> list[int]:
         return self.data.get_token_ids()
 
     def get_prompt_token_ids(self) -> Tuple[int, ...]:
@@ -643,7 +643,7 @@ class SequenceGroup:
     def __init__(
         self,
         request_id: str,
-        seqs: List[Sequence],
+        seqs: list[Sequence],
         arrival_time: float,
         sampling_params: Optional[SamplingParams] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -685,7 +685,7 @@ class SequenceGroup:
         return self.first_seq.prompt
 
     @property
-    def prompt_token_ids(self) -> List[int]:
+    def prompt_token_ids(self) -> list[int]:
         return self.first_seq.prompt_token_ids
 
     @property
@@ -697,7 +697,7 @@ class SequenceGroup:
                 if self.encoder_seq is not None else None)
 
     @property
-    def encoder_prompt_token_ids(self) -> Optional[List[int]]:
+    def encoder_prompt_token_ids(self) -> Optional[list[int]]:
         # There are either 0 or 1 encoder sequences
         # If one is present, its prompt token ids are
         # distinct from the decoder's.
@@ -705,7 +705,7 @@ class SequenceGroup:
                 if self.encoder_seq is not None else None)
 
     @property
-    def token_type_ids(self) -> Optional[List[int]]:
+    def token_type_ids(self) -> Optional[list[int]]:
         return self.first_seq.token_type_ids
 
     @property
@@ -820,7 +820,7 @@ class SequenceGroup:
     def get_seqs(
         self,
         status: Optional[SequenceStatus] = None,
-    ) -> List[Sequence]:
+    ) -> list[Sequence]:
         if status is None:
             return self.seqs
 
@@ -832,7 +832,7 @@ class SequenceGroup:
     def get_encoder_seq(self) -> Optional[Sequence]:
         return self.encoder_seq
 
-    def get_finished_seqs(self) -> List[Sequence]:
+    def get_finished_seqs(self) -> list[Sequence]:
         return self.seqs if self.first_seq.is_finished() else []
 
     def update_num_computed_tokens(self, num_new_computed_tokens: int):
@@ -886,11 +886,11 @@ class SequenceGroupMetadataDelta(
     """
     seq_data_delta: Dict[int, SequenceDataDelta]
     request_id: str
-    block_tables: Dict[int, List[int]]
+    block_tables: Dict[int, list[int]]
     is_prompt: bool
     do_sample: bool = True
     token_chunk_size: Optional[int] = None
-    computed_block_nums: Optional[List[int]] = None
+    computed_block_nums: Optional[list[int]] = None
     state: Optional[SequenceGroupState] = msgspec.field(
         default_factory=lambda: SequenceGroupState())
 
@@ -936,21 +936,21 @@ class SequenceGroupMetadata(
     is_prompt: bool
     seq_data: Dict[int, SequenceData]
     sampling_params: Optional[SamplingParams]
-    block_tables: Dict[int, List[int]]
+    block_tables: Dict[int, list[int]]
     do_sample: bool = True
     pooling_params: Optional[PoolingParams] = None
     lora_request: Optional[LoRARequest] = None
-    computed_block_nums: Optional[List[int]] = None
+    computed_block_nums: Optional[list[int]] = None
     state: Optional[SequenceGroupState] = msgspec.field(
         default_factory=lambda: SequenceGroupState())
     # "MultiModalDataDict" types. We have to use Any due to msgspec
     # doesn't allow to have union of 2 different dicts.
-    token_type_ids: Optional[List[int]] = None
+    token_type_ids: Optional[list[int]] = None
     multi_modal_data: Optional[Any] = None
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
-    cross_block_table: Optional[List[int]] = None
+    cross_block_table: Optional[list[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
     token_chunk_size: Optional[int] = None
 
@@ -1063,7 +1063,7 @@ class CompletionSequenceGroupOutput(
         array_like=True):  # type: ignore[call-arg]
     """The model output associated with a completion sequence group."""
     __metaclass__ = SequenceGroupOutput
-    samples: List[SequenceOutput]
+    samples: list[SequenceOutput]
     # Prompt logprob for each prompt query token.
     prompt_logprobs: Optional[PromptLogprobs]
 
@@ -1139,7 +1139,7 @@ class PoolerOutput(
         omit_defaults=True,  # type: ignore[call-arg]
         array_like=True):  # type: ignore[call-arg]
     """The output from a pooling operation in the pooling model."""
-    outputs: List[PoolingSequenceGroupOutput]
+    outputs: list[PoolingSequenceGroupOutput]
 
     def __getitem__(self, idx: int) -> PoolingSequenceGroupOutput:
         return self.outputs[idx]
@@ -1156,7 +1156,7 @@ class PoolerOutput(
 
 
 def get_all_seq_ids(
-        seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[int]:
+        seq_group_metadata_list: list[SequenceGroupMetadata]) -> list[int]:
     """Given a list of SequenceGroupMetadata, create a list of all
     sequence ids.
     """
@@ -1164,12 +1164,12 @@ def get_all_seq_ids(
 
 
 def get_all_seq_ids_and_request_ids(
-    seq_group_metadata_list: List[SequenceGroupMetadata]
-) -> Tuple[List[int], Dict[str, Set[int]]]:
+    seq_group_metadata_list: list[SequenceGroupMetadata]
+) -> Tuple[list[int], Dict[str, Set[int]]]:
     """Given a list of SequenceGroupMetadata, create a list of all
     sequence ids.
     """
-    seq_ids: List[int] = []
+    seq_ids: list[int] = []
     request_id_seq_ids_mapping: DefaultDict[str, Set[int]] = defaultdict(set)
     for sg in seq_group_metadata_list:
         for seq_id in sg.seq_data:
@@ -1190,14 +1190,14 @@ class HiddenStates(msgspec.Struct, array_like=True,
     # all tokens, whereas for decode step, it use used for last accepted tokens.
     hidden_states: torch.Tensor
     # The sequence group metadata list. Only needed for decode step.
-    seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
+    seq_group_metadata_list: Optional[list[SequenceGroupMetadata]] = None
     # Scorer hidden states of the 2nd last token proposed by the proposer (
     # irrespective of whether it was accepted or not). Only used for cases when
     # last proposed token is accepted (i.e., in case of bonus tokens). For the
     # case of no bonus tokens, these are ignored.
     second_last_token_hidden_states: Optional[torch.Tensor] = None
 
-    _seq_ids: List[int] = msgspec.field(default_factory=list)
+    _seq_ids: list[int] = msgspec.field(default_factory=list)
 
     def __post_init__(self):
         if self.seq_group_metadata_list is not None:
@@ -1205,12 +1205,12 @@ class HiddenStates(msgspec.Struct, array_like=True,
             self._seq_ids = get_all_seq_ids(self.seq_group_metadata_list)
 
     @property
-    def seq_ids(self) -> List[int]:
+    def seq_ids(self) -> list[int]:
         return self._seq_ids
 
     def update(self,
                hidden_states: torch.Tensor,
-               seq_group_metadata_list: List[SequenceGroupMetadata],
+               seq_group_metadata_list: list[SequenceGroupMetadata],
                second_last_token_hidden_states: Optional[torch.Tensor] = None):
         """Update hidden states from target model invocation. Only used for
         decode steps"""
@@ -1228,7 +1228,7 @@ class HiddenStates(msgspec.Struct, array_like=True,
             ])
 
     def prune(self,
-              seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
+              seq_group_metadata_list: list[SequenceGroupMetadata]) -> None:
         """Prune to provided list of sequence ids. Only used for decode steps.
         """
         # Currently this prunes all seq_ids not present in
@@ -1271,16 +1271,16 @@ class ExecuteModelRequest(
     """The model execution request, containing CPU metadata only. The LLM
     engine should create an instance of this class for each request batch."""
     # The sequence group metadata list.
-    seq_group_metadata_list: List[Union[SequenceGroupMetadata,
+    seq_group_metadata_list: list[Union[SequenceGroupMetadata,
                                         SequenceGroupMetadataDelta]]
     # Blocks to swap in. List of CPU -> GPU block number.
-    blocks_to_swap_in: List[Tuple[int,
+    blocks_to_swap_in: list[Tuple[int,
                                   int]] = msgspec.field(default_factory=list)
     # Blocks to swap out. List of GPU -> CPU block number.
-    blocks_to_swap_out: List[Tuple[int,
+    blocks_to_swap_out: list[Tuple[int,
                                    int]] = msgspec.field(default_factory=list)
     # Blocks to copy. Source to dest block.
-    blocks_to_copy: List[Tuple[int, int]] = msgspec.field(default_factory=list)
+    blocks_to_copy: list[Tuple[int, int]] = msgspec.field(default_factory=list)
     # Virtual engine ID for pipeline parallel.
     virtual_engine: int = 0
     # The number of slots for lookahead decoding.
@@ -1292,7 +1292,7 @@ class ExecuteModelRequest(
     # The number of forward steps to run.
     num_steps: int = 1
     # Finished request ids since last step.
-    finished_requests_ids: List[str] = msgspec.field(default_factory=list)
+    finished_requests_ids: list[str] = msgspec.field(default_factory=list)
     # The last sampled token ids for multi step decoding.
     last_sampled_token_ids: Optional[torch.Tensor] = None
     # Async callback
@@ -1326,7 +1326,7 @@ class ExecuteModelRequest(
         return state.current_step
 
     def clone(
-        self, seq_group_metadata_list: List[Union[SequenceGroupMetadata,
+        self, seq_group_metadata_list: list[Union[SequenceGroupMetadata,
                                                   SequenceGroupMetadataDelta]]
     ) -> "ExecuteModelRequest":
         """Clone the request with a new sequence group metadata list."""

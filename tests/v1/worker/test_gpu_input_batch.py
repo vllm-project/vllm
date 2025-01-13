@@ -1,4 +1,4 @@
-from typing import Dict, List, Set, Tuple
+from typing import Dict, Set, Tuple
 
 import numpy as np
 import pytest
@@ -20,7 +20,7 @@ MAX_NUM_PROMPT_TOKENS = 64
 
 def _remove_requests(
         input_batch: InputBatch, batch_size: int,
-        reqs: List[CachedRequestState]) -> Tuple[Set[str], List[int]]:
+        reqs: list[CachedRequestState]) -> Tuple[Set[str], list[int]]:
     """
     Remove some requests randomly from the batch and returns a Tuple
     of 1) set of request removed 2) indices of the requests removed
@@ -43,7 +43,7 @@ def _remove_requests(
 
 
 def _construct_expected_sampling_metadata(
-        reqs: List[CachedRequestState], req_ids_retained: Set[int],
+        reqs: list[CachedRequestState], req_ids_retained: Set[int],
         req_id_index_in_input_batch: Dict[str, int],
         device: torch.device) -> SamplingMetadata:
     """
@@ -51,15 +51,15 @@ def _construct_expected_sampling_metadata(
     batch.
     """
     num_reqs = len(req_ids_retained)
-    output_token_ids: List[List[int]] = [list() for _ in range(num_reqs)]
-    prompt_token_ids: List[List[int]] = [list() for _ in range(num_reqs)]
+    output_token_ids: list[list[int]] = [list() for _ in range(num_reqs)]
+    prompt_token_ids: list[list[int]] = [list() for _ in range(num_reqs)]
     presence_penalties = [0.0 for _ in range(num_reqs)]
     frequency_penalties = [0.0 for _ in range(num_reqs)]
     repetition_penalties = [1.0 for _ in range(num_reqs)]
     top_k = [0 for _ in range(num_reqs)]
     top_p = [0.0 for _ in range(num_reqs)]
     temperature = [0.0 for _ in range(num_reqs)]
-    stop_token_ids: List[Set[int]] = [set() for _ in range(num_reqs)]
+    stop_token_ids: list[Set[int]] = [set() for _ in range(num_reqs)]
     min_tokens = [0 for _ in range(num_reqs)]
     for req in reqs:
         if req.req_id not in req_ids_retained:
@@ -167,7 +167,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
                                          device=torch.device(device),
                                          pin_memory=is_pin_memory_available(),
                                          vocab_size=1024)
-    reqs: List[CachedRequestState] = []
+    reqs: list[CachedRequestState] = []
     req_id_reqs = {}
     req_id_output_token_ids = {}
     # Add requests

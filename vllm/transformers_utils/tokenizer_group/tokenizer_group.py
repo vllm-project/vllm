@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional
 
 from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
@@ -41,7 +41,7 @@ class TokenizerGroup(BaseTokenizerGroup):
         return self.max_input_length
 
     def _raise_if_input_too_long(self,
-                                 encoded_tokens: List[int],
+                                 encoded_tokens: list[int],
                                  lora_request: Optional[LoRARequest] = None):
         input_length = len(encoded_tokens)
         if lora_request:
@@ -56,7 +56,7 @@ class TokenizerGroup(BaseTokenizerGroup):
                prompt: str,
                request_id: Optional[str] = None,
                lora_request: Optional[LoRARequest] = None,
-               add_special_tokens: Optional[bool] = None) -> List[int]:
+               add_special_tokens: Optional[bool] = None) -> list[int]:
         tokenizer = self.get_lora_tokenizer(lora_request)
         ret = encode_tokens(tokenizer,
                             prompt,
@@ -69,7 +69,7 @@ class TokenizerGroup(BaseTokenizerGroup):
             prompt: str,
             request_id: Optional[str] = None,
             lora_request: Optional[LoRARequest] = None,
-            add_special_tokens: Optional[bool] = None) -> List[int]:
+            add_special_tokens: Optional[bool] = None) -> list[int]:
         tokenizer = await self.get_lora_tokenizer_async(lora_request)
         ret = encode_tokens(tokenizer,
                             prompt,

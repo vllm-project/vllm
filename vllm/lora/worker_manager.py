@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from typing import Any, Dict, List, Literal, Optional, Set, Type, Union
+from typing import Any, Dict, Literal, Optional, Set, Type, Union
 
 import torch
 
@@ -34,7 +34,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
         lora_config: LoRAConfig,
         device: torch.device,
         embedding_modules: Dict[str, str],
-        embedding_padding_modules: List[str],
+        embedding_padding_modules: list[str],
         lora_model_cls: Type[LoRAModel] = LoRAModel,
         max_position_embeddings: Optional[int] = None,
     ):
@@ -84,7 +84,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
             model = self._adapter_manager.model
             supported_lora_modules = model.supported_lora_modules
             packed_modules_mapping = model.packed_modules_mapping
-            expected_lora_modules: List[str] = []
+            expected_lora_modules: list[str] = []
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
                     expected_lora_modules.extend(

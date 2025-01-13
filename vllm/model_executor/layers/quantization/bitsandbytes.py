@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -25,7 +25,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         bnb_4bit_use_double_quant: bool = False,
         llm_int8_enable_fp32_cpu_offload: bool = False,
         llm_int8_has_fp16_weight: bool = False,
-        llm_int8_skip_modules: Optional[List[str]] = None,
+        llm_int8_skip_modules: Optional[list[str]] = None,
         llm_int8_threshold: float = 6.0,
     ) -> None:
 
@@ -57,7 +57,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         return "bitsandbytes"
 
     @classmethod
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.float32, torch.float16, torch.bfloat16]
 
     @classmethod
@@ -65,7 +65,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         return 70
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
+    def get_config_filenames() -> list[str]:
         return [
             "adapter_config.json",
         ]
@@ -126,7 +126,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         return None
 
 
-def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: List[str]):
+def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: list[str]):
     # Split the prefix into its dot-separated components
     components = prefix.split('.')
 
@@ -157,7 +157,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         from bitsandbytes.nn import Int8Params

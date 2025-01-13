@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy
 import torch
@@ -173,10 +173,10 @@ def marlin_sort_g_idx(
 
 
 def get_scale_perms():
-    scale_perm: List[int] = []
+    scale_perm: list[int] = []
     for i in range(8):
         scale_perm.extend([i + 8 * j for j in range(8)])
-    scale_perm_single: List[int] = []
+    scale_perm_single: list[int] = []
     for i in range(4):
         scale_perm_single.extend(
             [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])

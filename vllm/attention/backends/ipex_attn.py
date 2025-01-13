@@ -1,7 +1,7 @@
 """ Attention layer with torch scaled_dot_product_attention
     and PagedAttention."""
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, Optional, Tuple, Type
 
 import torch
 
@@ -54,7 +54,7 @@ class IpexAttnBackend(AttentionBackend):
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
         from vllm._ipex_ops import ipex_ops as ops
@@ -71,7 +71,7 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
     slot_mapping: torch.Tensor
-    seq_lens: Optional[List[int]]
+    seq_lens: Optional[list[int]]
     seqlen_q: Optional[torch.Tensor]
     max_seqlen: Optional[int]
 
@@ -81,7 +81,7 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
         # when alibi slopes is used. It is because of the limitation
         # from xformer API.
         # will not appear in the __repr__ and __init__
-        self.attn_bias: Optional[List[torch.Tensor]] = None
+        self.attn_bias: Optional[list[torch.Tensor]] = None
 
     @property
     def prefill_metadata(self) -> Optional["IpexAttnMetadata"]:
@@ -110,7 +110,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
@@ -340,8 +340,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     dtype: torch.dtype,
-    seq_lens: List[int],
-) -> List[torch.Tensor]:
+    seq_lens: list[int],
+) -> list[torch.Tensor]:
     attn_biases = []
     for seq_len in seq_lens:
         bias = torch.arange(seq_len, dtype=dtype, device=alibi_slopes.device)
@@ -365,10 +365,10 @@ def _make_alibi_bias(
 
 
 def _make_sliding_window_bias(
-    seq_lens: List[int],
+    seq_lens: list[int],
     window_size: Optional[int],
     dtype: torch.dtype,
-) -> List[torch.Tensor]:
+) -> list[torch.Tensor]:
     attn_biases = []
     for seq_len in seq_lens:
         tensor = torch.full(

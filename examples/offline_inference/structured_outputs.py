@@ -17,7 +17,7 @@ outputs = llm.generate(
 print(outputs[0].outputs[0].text)
 
 # Guided decoding by Regex
-guided_decoding_params = GuidedDecodingParams(regex="\w+@\w+\.com\n")
+guided_decoding_params = GuidedDecodingParams(regex=r"\w+@\w+\.com\n")
 sampling_params = SamplingParams(guided_decoding=guided_decoding_params,
                                  stop=["\n"])
 prompt = ("Generate an email address for Alan Turing, who works in Enigma."

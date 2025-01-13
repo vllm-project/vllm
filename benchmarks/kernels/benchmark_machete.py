@@ -7,7 +7,7 @@ import pickle as pkl
 import time
 from dataclasses import dataclass
 from itertools import product
-from typing import Callable, Iterable, List, Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 
 import pandas as pd
 import torch
@@ -101,7 +101,7 @@ def quantize_and_pack(atype: torch.dtype,
 
 
 def create_bench_tensors(shape: Tuple[int, int, int], types: TypeConfig,
-                         group_size: Optional[int]) -> List[BenchmarkTensors]:
+                         group_size: Optional[int]) -> list[BenchmarkTensors]:
     m, n, k = shape
 
     # we want to make sure that weights don't fit into L2 cache between runs so
@@ -112,7 +112,7 @@ def create_bench_tensors(shape: Tuple[int, int, int], types: TypeConfig,
 
     a = rand_data((m, k), types.act_type, scale=5)
 
-    benchmark_tensors: List[BenchmarkTensors] = []
+    benchmark_tensors: list[BenchmarkTensors] = []
     for _ in range(num_weights):
         w = rand_data((k, n), types.act_type, scale=5)
 
@@ -274,7 +274,7 @@ def machete_create_bench_fn(bt: BenchmarkTensors,
 
 
 def bench_fns(label: str, sub_label: str, description: str,
-              fns: List[Callable]):
+              fns: list[Callable]):
 
     min_run_time = 1 if not NVTX_PROFILE else 0.1
     res = TBenchmark.Timer(
@@ -309,7 +309,7 @@ def bench(types: TypeConfig,
           n: int,
           label: str,
           sub_label: str,
-          sweep_schedules: bool = True) -> List[TMeasurement]:
+          sweep_schedules: bool = True) -> list[TMeasurement]:
     benchmark_tensors = create_bench_tensors((m, n, k), types, group_size)
     sub_label += f", L={len(benchmark_tensors)}"
 
@@ -412,7 +412,7 @@ def bench(types: TypeConfig,
 
 
 # runner
-def print_timers(timers: List[TMeasurement]):
+def print_timers(timers: list[TMeasurement]):
     compare = TBenchmark.Compare(timers)
     compare.print()
 
@@ -429,7 +429,7 @@ def run(args, MKNs: Iterable[Tuple[int, int, int]]) -> Iterable[TMeasurement]:
         token_scale_type=args.token_scale_type,
     )
 
-    results: List[TMeasurement] = []
+    results: list[TMeasurement] = []
     for m, k, n in MKNs:
         timers = bench(types,
                        args.group_size,
@@ -447,7 +447,7 @@ def run(args, MKNs: Iterable[Tuple[int, int, int]]) -> Iterable[TMeasurement]:
 
 # output makers
 def make_output(
-    data: List[TMeasurement],
+    data: list[TMeasurement],
     MKNs: Iterable[Tuple[int, int, int]],
     base_description: str,
     timestamp=None,
@@ -495,7 +495,7 @@ def run_model_bench(args):
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")
 
-    def model_shapes(model_name: str, tp_size: int) -> List[Tuple[int, int]]:
+    def model_shapes(model_name: str, tp_size: int) -> list[Tuple[int, int]]:
         KNs = []
         for KN, tp_split_dim in copy.deepcopy(WEIGHT_SHAPES[model_name]):
             KN[tp_split_dim] = KN[tp_split_dim] // tp_size

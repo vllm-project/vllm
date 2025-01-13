@@ -4,7 +4,7 @@ import signal
 import threading
 import time
 from multiprocessing.connection import Connection
-from typing import List, Tuple, Type
+from typing import Tuple, Type
 
 import psutil
 import zmq
@@ -99,7 +99,7 @@ class EngineCore:
 
         self.scheduler.add_request(req)
 
-    def abort_requests(self, request_ids: List[str]):
+    def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
 
         # TODO: The scheduler doesn't really need to know the

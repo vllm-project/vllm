@@ -5,8 +5,8 @@ from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import (Any, Awaitable, Callable, Dict, Generic, Iterable, List,
-                    Literal, Optional, Tuple, TypeVar, Union, cast)
+from typing import (Any, Awaitable, Callable, Dict, Generic, Iterable, Literal,
+                    Optional, Tuple, TypeVar, Union, cast)
 
 import jinja2.nodes
 import transformers.utils.chat_template_utils as hf_chat_utils
@@ -115,7 +115,7 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     role: Required[str]
     """The role of the message's author."""
 
-    content: Union[str, List[ChatCompletionContentPartParam]]
+    content: Union[str, list[ChatCompletionContentPartParam]]
     """The contents of the message."""
 
     name: str
@@ -141,7 +141,7 @@ class ConversationMessage(TypedDict, total=False):
     role: Required[str]
     """The role of the message's author."""
 
-    content: Union[Optional[str], List[Dict[str, str]]]
+    content: Union[Optional[str], list[Dict[str, str]]]
     """The contents of the message"""
 
     tool_call_id: Optional[str]
@@ -651,7 +651,7 @@ def _get_full_multimodal_text_prompt(placeholder_counts: Dict[str, int],
     """Combine multimodal prompts for a multimodal language model."""
 
     # Look through the text prompt to check for missing placeholders
-    missing_placeholders: List[str] = []
+    missing_placeholders: list[str] = []
     for placeholder in placeholder_counts:
 
         # For any existing placeholder in the text prompt, we leave it as is
@@ -767,7 +767,7 @@ def _parse_chat_message_content_parts(
     mm_tracker: BaseMultiModalItemTracker,
     *,
     wrap_dicts: bool,
-) -> List[ConversationMessage]:
+) -> list[ConversationMessage]:
     content = list[_ContentPart]()
 
     mm_parser = mm_tracker.create_parser()
@@ -785,7 +785,7 @@ def _parse_chat_message_content_parts(
         # Parsing wraps images and texts as interleaved dictionaries
         return [ConversationMessage(role=role,
                                     content=content)]  # type: ignore
-    texts = cast(List[str], content)
+    texts = cast(list[str], content)
     text_prompt = "\n".join(texts)
     mm_placeholder_counts = mm_parser.mm_placeholder_counts()
     if mm_placeholder_counts:
@@ -860,7 +860,7 @@ def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
     content_format: _ChatTemplateContentFormat,
-) -> List[ConversationMessage]:
+) -> list[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
 
@@ -894,7 +894,7 @@ def _parse_chat_message_content(
     return result
 
 
-def _postprocess_messages(messages: List[ConversationMessage]) -> None:
+def _postprocess_messages(messages: list[ConversationMessage]) -> None:
     # per the Transformers docs & maintainers, tool call arguments in
     # assistant-role messages with tool_calls need to be dicts not JSON str -
     # this is how tool-use chat templates will expect them moving forwards
@@ -910,12 +910,12 @@ def _postprocess_messages(messages: List[ConversationMessage]) -> None:
 
 
 def parse_chat_messages(
-    messages: List[ChatCompletionMessageParam],
+    messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
     content_format: _ChatTemplateContentFormat,
-) -> Tuple[List[ConversationMessage], Optional[MultiModalDataDict]]:
-    conversation: List[ConversationMessage] = []
+) -> Tuple[list[ConversationMessage], Optional[MultiModalDataDict]]:
+    conversation: list[ConversationMessage] = []
     mm_tracker = MultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
@@ -933,12 +933,12 @@ def parse_chat_messages(
 
 
 def parse_chat_messages_futures(
-    messages: List[ChatCompletionMessageParam],
+    messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
     content_format: _ChatTemplateContentFormat,
-) -> Tuple[List[ConversationMessage], Awaitable[Optional[MultiModalDataDict]]]:
-    conversation: List[ConversationMessage] = []
+) -> Tuple[list[ConversationMessage], Awaitable[Optional[MultiModalDataDict]]]:
+    conversation: list[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
@@ -957,7 +957,7 @@ def parse_chat_messages_futures(
 
 def apply_hf_chat_template(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-    conversation: List[ConversationMessage],
+    conversation: list[ConversationMessage],
     chat_template: Optional[str],
     *,
     tokenize: bool = False,  # Different from HF's default
@@ -979,10 +979,10 @@ def apply_hf_chat_template(
 
 def apply_mistral_chat_template(
     tokenizer: MistralTokenizer,
-    messages: List[ChatCompletionMessageParam],
+    messages: list[ChatCompletionMessageParam],
     chat_template: Optional[str] = None,
     **kwargs: Any,
-) -> List[int]:
+) -> list[int]:
     if chat_template is not None:
         logger.warning_once(
             "'chat_template' cannot be overridden for mistral tokenizer.")

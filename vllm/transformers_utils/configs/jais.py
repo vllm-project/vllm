@@ -106,7 +106,7 @@ class JAISConfig(PretrainedConfig):
             formats are `{"type": strategy name, "factor": scaling factor}` or
             `{"type": strategy name,
             "train_seq_len": training sequence length}`.
-        architectures (`List`, *optional*, defaults to ['JAISLMHeadModel']):
+        architectures (`list`, *optional*, defaults to ['JAISLMHeadModel']):
             architecture names for Jais.
 
     Example:

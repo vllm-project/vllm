@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import pytest
 import torch
@@ -80,7 +80,7 @@ CASES = [
 @pytest.mark.parametrize("num_blocks", [2048])
 @torch.inference_mode()
 def test_cascade(
-    seq_lens_and_common_prefix: Tuple[List[Tuple[int, int]], int],
+    seq_lens_and_common_prefix: Tuple[list[Tuple[int, int]], int],
     num_heads: Tuple[int, int],
     head_size: int,
     dtype: torch.dtype,

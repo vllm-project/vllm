@@ -23,8 +23,8 @@
 import math
 import re
 from functools import cached_property, partial
-from typing import (Any, Callable, Iterable, List, Literal, Mapping, Optional,
-                    Set, Tuple, TypedDict, Union)
+from typing import (Any, Callable, Iterable, Literal, Mapping, Optional, Set,
+                    Tuple, TypedDict, Union)
 
 import torch
 import torch.types
@@ -72,7 +72,7 @@ class MiniCPMVRawImageInput(TypedDict):
 
 class MiniCPMVImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: List[torch.Tensor]
+    data: list[torch.Tensor]
     """
     Shape: `(batch_size * num_images, num_channels, height, width)`
 
@@ -312,7 +312,7 @@ def input_processor_for_minicpmv(ctx: InputContext, inputs: DecoderOnlyInputs):
             image_size_list = [image.size for image in images]
 
         text_chunks = prompt.split(pattern)
-        new_prompt_chunks: List[str] = []
+        new_prompt_chunks: list[str] = []
         for i in range(len(image_size_list)):
             new_prompt_chunks += [
                 text_chunks[i],
@@ -511,8 +511,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             raise ValueError("Inconsistent batch lengths, found: "
                              f"{len(pixel_values)} vs. {len(tgt_sizes)}")
 
-        pixel_values_flat: List[torch.Tensor] = []
-        tgt_sizes_flat: List[torch.Tensor] = []
+        pixel_values_flat: list[torch.Tensor] = []
+        tgt_sizes_flat: list[torch.Tensor] = []
         for pixel_b, tgt_b in zip(pixel_values, tgt_sizes):
             if len(pixel_b) != len(tgt_b):
                 raise ValueError("Inconsistent N lengths, found: "
@@ -548,7 +548,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: Any,
@@ -627,7 +627,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def get_vision_embedding(
         self,
-        pixel_values: List[torch.Tensor],
+        pixel_values: list[torch.Tensor],
         patch_attn_mask: Optional[torch.Tensor] = None,
         tgt_sizes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -706,7 +706,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
 
     def get_vision_embedding(
         self,
-        pixel_values: List[torch.Tensor],
+        pixel_values: list[torch.Tensor],
         patch_attn_mask: Optional[torch.Tensor] = None,
         tgt_sizes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -815,7 +815,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
 
     def get_vision_embedding(
         self,
-        pixel_values: List[torch.Tensor],
+        pixel_values: list[torch.Tensor],
         patch_attn_mask: Optional[torch.Tensor] = None,
         tgt_sizes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -936,7 +936,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
 
     def get_vision_embedding(
         self,
-        pixel_values: List[torch.Tensor],
+        pixel_values: list[torch.Tensor],
         patch_attn_mask: Optional[torch.Tensor] = None,
         tgt_sizes: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:

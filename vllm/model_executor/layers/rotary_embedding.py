@@ -21,7 +21,7 @@
 # limitations under the License.
 """Rotary Positional Embeddings."""
 import math
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -292,12 +292,12 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
         max_position_embeddings: int,
         base: int,
         is_neox_style: bool,
-        scaling_factors: Union[List[float], float],
+        scaling_factors: Union[list[float], float],
         dtype: torch.dtype,
     ) -> None:
         if isinstance(scaling_factors, float):
             scaling_factors = [scaling_factors]
-        self.scaling_factors: List[float] = scaling_factors  # noqa
+        self.scaling_factors: list[float] = scaling_factors  # noqa
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
         # Lazy initialized.
@@ -305,10 +305,10 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.base)
-        cache_list: List[torch.Tensor] = []
+        cache_list: list[torch.Tensor] = []
         # offsets to the next cache in a tensor.
         # Each offset corresponds to the same index in scaling_factors.
-        offsets: List[int] = []
+        offsets: list[int] = []
         for scaling_factor in self.scaling_factors:
             # NOTE(woosuk): self.max_position_embeddings is the original
             # maximum length before applying the rope scaling.
@@ -499,8 +499,8 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         base: int,
         is_neox_style: bool,
         dtype: torch.dtype,
-        short_factor: List[float],
-        long_factor: List[float],
+        short_factor: list[float],
+        long_factor: list[float],
         short_mscale: Optional[float] = None,
         long_mscale: Optional[float] = None,
     ):
@@ -551,7 +551,7 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
                              long_short_cache,
                              persistent=False)
 
-    def _compute_inv_freq(self, rescale_factors: List[float]) -> torch.Tensor:
+    def _compute_inv_freq(self, rescale_factors: list[float]) -> torch.Tensor:
         rescale_factors = torch.tensor(rescale_factors, dtype=torch.float32)
         inv_freq = 1.0 / (rescale_factors * (self.base**(torch.arange(
             0, self.head_size, 2, dtype=torch.float) / self.head_size)))
@@ -560,7 +560,7 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
     def _compute_cos_sin_cache(
         self,
         max_position_embeddings: int,
-        rescale_factors: List[float],
+        rescale_factors: list[float],
         mscale: float,
     ) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(rescale_factors)
@@ -768,7 +768,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         base: int,
         is_neox_style: bool,
         dtype: torch.dtype,
-        mrope_section: Optional[List[int]] = None,
+        mrope_section: Optional[list[int]] = None,
     ) -> None:
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
@@ -828,9 +828,9 @@ class MRotaryEmbedding(RotaryEmbedding):
 
     @staticmethod
     def get_input_positions(
-        input_tokens: List[int],
-        image_grid_thw: Union[List[List[int]], torch.Tensor],
-        video_grid_thw: Union[List[List[int]], torch.Tensor],
+        input_tokens: list[int],
+        image_grid_thw: Union[list[list[int]], torch.Tensor],
+        video_grid_thw: Union[list[list[int]], torch.Tensor],
         image_token_id: int,
         video_token_id: int,
         vision_start_token_id: int,
@@ -838,7 +838,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         spatial_merge_size: int,
         context_len: int = 0,
         seq_len: Optional[int] = None,
-    ) -> Tuple[List[List[int]], int]:
+    ) -> Tuple[list[list[int]], int]:
         """Get mrope input positions and delta value."""
 
         if isinstance(image_grid_thw, torch.Tensor):
@@ -923,7 +923,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         mrope_position_delta: int,
         context_len: int,
         seq_len: int,
-    ) -> List[List[int]]:
+    ) -> list[list[int]]:
         return [
             list(
                 range(context_len + mrope_position_delta,

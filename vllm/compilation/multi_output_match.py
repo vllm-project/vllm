@@ -1,7 +1,7 @@
 import abc
 import operator
 from abc import abstractmethod
-from typing import Iterable, List, Tuple
+from typing import Iterable, Tuple
 
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -54,7 +54,7 @@ class MultiOutputMatch(abc.ABC):
         raise NotImplementedError
 
     @property
-    def nodes(self) -> List[fx.Node]:
+    def nodes(self) -> list[fx.Node]:
         return self.match.nodes
 
     @property

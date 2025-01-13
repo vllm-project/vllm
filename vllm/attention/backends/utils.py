@@ -2,7 +2,7 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from itertools import accumulate
-from typing import TYPE_CHECKING, Any, Dict, List, Tuple, Type, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Dict, Tuple, Type, TypeVar, Union
 
 import numpy as np
 import torch
@@ -52,8 +52,8 @@ def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,
     return start_idx
 
 
-def _compute_slot_mapping_python(slot_mapping: List[int],
-                                 block_table: List[int], range_start: int,
+def _compute_slot_mapping_python(slot_mapping: list[int],
+                                 block_table: list[int], range_start: int,
                                  range_end: int, block_size: int):
     for i in range(range_start, range_end):
         block_number = block_table[i // block_size]
@@ -62,8 +62,8 @@ def _compute_slot_mapping_python(slot_mapping: List[int],
         slot_mapping.append(slot)
 
 
-def _compute_slot_mapping_numpy(slot_mapping: List[int],
-                                block_table: List[int], range_start: int,
+def _compute_slot_mapping_numpy(slot_mapping: list[int],
+                                block_table: list[int], range_start: int,
                                 range_end: int, block_size: int):
     block_table_array = np.array(block_table)
     idx = np.arange(range_start, range_end)
@@ -75,10 +75,10 @@ def _compute_slot_mapping_numpy(slot_mapping: List[int],
     slot_mapping.extend(seq_slot_mapping_array)
 
 
-def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
+def compute_slot_mapping(is_profile_run: bool, slot_mapping: list[int],
                          seq_id: int, seq_len: int, context_len: int,
                          start_idx: int, block_size: int,
-                         block_tables: Dict[int, List[int]]):
+                         block_tables: Dict[int, list[int]]):
     """
     Compute slot mapping.
     """
@@ -122,11 +122,11 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
     _metadata_cls: Type[TAttentionMetadata]
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
-        self.slot_mapping: List[int] = []
-        self.prefill_seq_lens: List[int] = []
-        self.context_lens: List[int] = []
-        self.block_tables: List[List[int]] = []
-        self.curr_seq_lens: List[int] = []
+        self.slot_mapping: list[int] = []
+        self.prefill_seq_lens: list[int] = []
+        self.context_lens: list[int] = []
+        self.block_tables: list[list[int]] = []
+        self.curr_seq_lens: list[int] = []
         self.multimodal_placeholder_maps: Dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
@@ -195,7 +195,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
 
-    def build(self, seq_lens: List[int], query_lens: List[int],
+    def build(self, seq_lens: list[int], query_lens: list[int],
               cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors.
 

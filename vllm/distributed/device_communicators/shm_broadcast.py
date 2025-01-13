@@ -5,7 +5,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 from unittest.mock import patch
 
 import torch
@@ -164,7 +164,7 @@ class ShmRingBuffer:
 @dataclass
 class Handle:
     connect_ip: str
-    local_reader_ranks: List[int] = field(default_factory=list)
+    local_reader_ranks: list[int] = field(default_factory=list)
 
     buffer_handle: Optional[Tuple[int, int, int, str]] = None
     local_subscribe_port: Optional[int] = None
@@ -177,7 +177,7 @@ class MessageQueue:
         self,
         n_reader,  # number of all readers
         n_local_reader,  # number of local readers through shared memory
-        local_reader_ranks: Optional[List[int]] = None,
+        local_reader_ranks: Optional[list[int]] = None,
         max_chunk_bytes: int = 1024 * 1024 * 10,
         max_chunks: int = 10,
         connect_ip: Optional[str] = None,

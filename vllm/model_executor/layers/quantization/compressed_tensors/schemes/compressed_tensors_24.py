@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 import torch
 from compressed_tensors.quantization import (QuantizationArgs,
@@ -35,7 +35,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         return 90
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
-                       output_partition_sizes: List[int],
+                       output_partition_sizes: list[int],
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):

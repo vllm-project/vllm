@@ -1,5 +1,5 @@
 import dataclasses
-from typing import List, Tuple, Type
+from typing import Tuple, Type
 
 import torch
 
@@ -55,7 +55,7 @@ class MockAttentionBackend(AttentionBackend):
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
         pass

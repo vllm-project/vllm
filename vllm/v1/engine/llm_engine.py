@@ -1,4 +1,4 @@
-from typing import Dict, List, Mapping, Optional, Type, Union
+from typing import Dict, Mapping, Optional, Type, Union
 
 from typing_extensions import TypeVar
 
@@ -108,7 +108,7 @@ class LLMEngine:
     def validate_outputs(cls, outputs, output_type):
         return outputs
 
-    def abort_request(self, request_ids: List[str]) -> None:
+    def abort_request(self, request_ids: list[str]) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
         self.engine_core.abort_requests(request_ids)
@@ -139,7 +139,7 @@ class LLMEngine:
         # 3) Add the request to EngineCore.
         self.engine_core.add_request(request)
 
-    def step(self) -> List[RequestOutput]:
+    def step(self) -> list[RequestOutput]:
 
         # 1) Get EngineCoreOutput from the EngineCore.
         outputs = self.engine_core.get_output()

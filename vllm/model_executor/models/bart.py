@@ -17,7 +17,7 @@
 # limitations under the License.
 """PyTorch BART model."""
 import math
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 import torch
 from torch import nn
@@ -608,7 +608,7 @@ class BartEncoder(nn.Module):
         self.layernorm_embedding = nn.LayerNorm(embed_dim)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
+                kv_caches: list[torch.Tensor],
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
         r"""
         Args:
@@ -692,7 +692,7 @@ class BartDecoder(nn.Module):
     def forward(self, decoder_input_ids: torch.Tensor,
                 decoder_positions: torch.Tensor,
                 encoder_hidden_states: Optional[torch.Tensor],
-                kv_caches: List[torch.Tensor],
+                kv_caches: list[torch.Tensor],
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
         r"""
         Args:
@@ -766,7 +766,7 @@ class BartModel(nn.Module):
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 encoder_input_ids: torch.Tensor,
-                encoder_positions: torch.Tensor, kv_caches: List[torch.Tensor],
+                encoder_positions: torch.Tensor, kv_caches: list[torch.Tensor],
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
         r"""
         Args:
@@ -843,7 +843,7 @@ class BartForConditionalGeneration(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         *,

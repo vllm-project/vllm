@@ -8,7 +8,7 @@ All distributed communications are abstracted behind this class.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Optional
 
 import torch
 
@@ -70,7 +70,7 @@ class KVLookupBufferBase(ABC):
     @abstractmethod
     def drop_select(
             self, input_tokens: Optional[torch.Tensor],
-            roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
+            roi: Optional[torch.Tensor]) -> list[Optional[torch.Tensor]]:
         """Select and *drop* KV cache entries from the lookup buffer.
         
         The functionality is similar to the following python statements
@@ -88,7 +88,7 @@ class KVLookupBufferBase(ABC):
             roi (torch.Tensor): A binary mask on top of the input tokens
 
         Returns:
-            List[Optional[torch.Tensor]]: A list of tensors. Can be None.
+            list[Optional[torch.Tensor]]: A list of tensors. Can be None.
 
         Raises:
             NotImplementedError: This method must be implemented in subclasses.

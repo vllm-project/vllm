@@ -1,6 +1,6 @@
 import inspect
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, Optional, Type
 
 import torch
 from torch import nn
@@ -64,7 +64,7 @@ class QuantizationConfig(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         """List of supported activation dtypes."""
         raise NotImplementedError
 
@@ -81,7 +81,7 @@ class QuantizationConfig(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_config_filenames() -> List[str]:
+    def get_config_filenames() -> list[str]:
         """List of filenames to search for in the model directory."""
         raise NotImplementedError
 
@@ -103,7 +103,7 @@ class QuantizationConfig(ABC):
         return None
 
     @staticmethod
-    def get_from_keys(config: Dict[str, Any], keys: List[str]) -> Any:
+    def get_from_keys(config: Dict[str, Any], keys: list[str]) -> Any:
         """Get a value from the model's quantization config."""
         for key in keys:
             if key in config:
@@ -112,7 +112,7 @@ class QuantizationConfig(ABC):
                          "quantization config.")
 
     @staticmethod
-    def get_from_keys_or(config: Dict[str, Any], keys: List[str],
+    def get_from_keys_or(config: Dict[str, Any], keys: list[str],
                          default: Any) -> Any:
         """Get a optional value from the model's quantization config."""
         try:

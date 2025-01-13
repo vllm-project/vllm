@@ -1,7 +1,7 @@
 import enum
 import heapq
 from abc import ABC, abstractmethod
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 
 
 class EvictionPolicy(enum.Enum):
@@ -29,23 +29,19 @@ class Evictor(ABC):
         """Runs the eviction algorithm and returns the evicted block's
         content hash along with physical block id along with physical block id
         """
-        pass
 
     @abstractmethod
     def add(self, block_id: int, content_hash: int, num_hashed_tokens: int,
             last_accessed: float):
         """Adds block to the evictor, making it a candidate for eviction"""
-        pass
 
     @abstractmethod
     def update(self, block_id: int, last_accessed: float):
         """Update corresponding block's access time in metadata"""
-        pass
 
     @abstractmethod
     def remove(self, block_id: int):
         """Remove a given block id from the cache."""
-        pass
 
     @property
     @abstractmethod
@@ -126,7 +122,7 @@ class LRUEvictor(Evictor):
             self._cleanup()
 
     def _cleanup(self):
-        new_priority_queue: List[Tuple[float, int, int, int]] = []
+        new_priority_queue: list[Tuple[float, int, int, int]] = []
 
         for block_id, block in self.free_table.items():
             new_priority_queue.append(

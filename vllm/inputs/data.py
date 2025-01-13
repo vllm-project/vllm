@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from functools import cached_property
-from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List, Literal,
-                    Optional, Tuple, Union, cast)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, Literal, Optional,
+                    Tuple, Union, cast)
 
 import torch
 from typing_extensions import NotRequired, TypedDict, TypeVar, assert_never
@@ -36,10 +36,10 @@ class TextPrompt(TypedDict):
 class TokensPrompt(TypedDict):
     """Schema for a tokenized prompt."""
 
-    prompt_token_ids: List[int]
+    prompt_token_ids: list[int]
     """A list of token IDs to pass to the model."""
 
-    token_type_ids: NotRequired[List[int]]
+    token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
     multi_modal_data: NotRequired["MultiModalDataDict"]
@@ -134,10 +134,10 @@ class TokenInputs(TypedDict):
     type: Literal["token"]
     """The type of inputs."""
 
-    prompt_token_ids: List[int]
+    prompt_token_ids: list[int]
     """The token IDs of the prompt."""
 
-    token_type_ids: NotRequired[List[int]]
+    token_type_ids: NotRequired[list[int]]
     """The token type IDs of the prompt."""
 
     prompt: NotRequired[str]
@@ -162,7 +162,7 @@ class TokenInputs(TypedDict):
     Placeholder ranges for the multi-modal data.
     """
 
-    multi_modal_hashes: NotRequired[List[str]]
+    multi_modal_hashes: NotRequired[list[str]]
     """
     The hashes of the multi-modal data.
     """
@@ -177,12 +177,12 @@ class TokenInputs(TypedDict):
 
 
 def token_inputs(
-    prompt_token_ids: List[int],
-    token_type_ids: Optional[List[int]] = None,
+    prompt_token_ids: list[int],
+    token_type_ids: Optional[list[int]] = None,
     prompt: Optional[str] = None,
     multi_modal_data: Optional["MultiModalDataDict"] = None,
     multi_modal_inputs: Optional["MultiModalKwargs"] = None,
-    multi_modal_hashes: Optional[List[str]] = None,
+    multi_modal_hashes: Optional[list[str]] = None,
     multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None,
     mm_processor_kwargs: Optional[Dict[str, Any]] = None,
 ) -> TokenInputs:
@@ -253,7 +253,7 @@ class SingletonInputsAdapter:
         assert_never(inputs)  # type: ignore[arg-type]
 
     @cached_property
-    def prompt_token_ids(self) -> List[int]:
+    def prompt_token_ids(self) -> list[int]:
         inputs = self.inputs
 
         if inputs["type"] == "token" or inputs["type"] == "multimodal":
@@ -262,7 +262,7 @@ class SingletonInputsAdapter:
         assert_never(inputs)  # type: ignore[arg-type]
 
     @cached_property
-    def token_type_ids(self) -> List[int]:
+    def token_type_ids(self) -> list[int]:
         inputs = self.inputs
 
         if inputs["type"] == "token" or inputs["type"] == "multimodal":
@@ -304,7 +304,7 @@ class SingletonInputsAdapter:
         assert_never(inputs)  # type: ignore[arg-type]
 
     @cached_property
-    def multi_modal_hashes(self) -> List[str]:
+    def multi_modal_hashes(self) -> list[str]:
         inputs = self.inputs
 
         if inputs["type"] == "token":
@@ -368,7 +368,7 @@ def zip_enc_dec_prompts(
     dec_prompts: Iterable[Optional[_T2]],
     mm_processor_kwargs: Optional[Union[Iterable[Dict[str, Any]],
                                         Dict[str, Any]]] = None,
-) -> List[ExplicitEncoderDecoderPrompt[_T1, _T2]]:
+) -> list[ExplicitEncoderDecoderPrompt[_T1, _T2]]:
     """
     Zip encoder and decoder prompts together into a list of
     :class:`ExplicitEncoderDecoderPrompt` instances.
@@ -397,7 +397,7 @@ def zip_enc_dec_prompts(
 
 def to_enc_dec_tuple_list(
     enc_dec_prompts: Iterable[ExplicitEncoderDecoderPrompt[_T1, _T2]],
-) -> List[Tuple[_T1, Optional[_T2]]]:
+) -> list[Tuple[_T1, Optional[_T2]]]:
     return [(enc_dec_prompt["encoder_prompt"],
              enc_dec_prompt["decoder_prompt"])
             for enc_dec_prompt in enc_dec_prompts]

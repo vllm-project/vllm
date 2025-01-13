@@ -1,7 +1,7 @@
 """A XPU worker class."""
 import gc
 import os
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import intel_extension_for_pytorch  # noqa: F401
 import oneccl_bindings_for_pytorch  # noqa: F401
@@ -63,8 +63,8 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: List[CacheEngine]
-        self.gpu_cache: Optional[List[List[torch.Tensor]]]
+        self.cache_engine: list[CacheEngine]
+        self.gpu_cache: Optional[list[list[torch.Tensor]]]
 
     def init_device(self) -> None:
         if self.device_config.device.type == "xpu" and current_platform.is_xpu(

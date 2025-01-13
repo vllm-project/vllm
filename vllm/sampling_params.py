@@ -3,7 +3,7 @@ import copy
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Dict, Optional, Set, Union
 
 import msgspec
 from pydantic import BaseModel
@@ -30,7 +30,7 @@ class GuidedDecodingParams:
     """One of these fields will be used to build a logit processor."""
     json: Optional[Union[str, Dict]] = None
     regex: Optional[str] = None
-    choice: Optional[List[str]] = None
+    choice: Optional[list[str]] = None
     grammar: Optional[str] = None
     json_object: Optional[bool] = None
     """These are other options that can be set"""
@@ -41,7 +41,7 @@ class GuidedDecodingParams:
     def from_optional(
         json: Optional[Union[Dict, BaseModel, str]] = None,
         regex: Optional[str] = None,
-        choice: Optional[List[str]] = None,
+        choice: Optional[list[str]] = None,
         grammar: Optional[str] = None,
         json_object: Optional[bool] = None,
         backend: Optional[str] = None,
@@ -178,9 +178,9 @@ class SamplingParams(
     top_k: int = -1
     min_p: float = 0.0
     seed: Optional[int] = None
-    stop: Optional[Union[str, List[str]]] = None
-    stop_token_ids: Optional[List[int]] = None
-    bad_words: Optional[List[str]] = None
+    stop: Optional[Union[str, list[str]]] = None
+    stop_token_ids: Optional[list[int]] = None
+    bad_words: Optional[list[str]] = None
     ignore_eos: bool = False
     max_tokens: Optional[int] = 16
     min_tokens: int = 0
@@ -192,8 +192,8 @@ class SamplingParams(
     detokenize: bool = True
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    # Optional[List[LogitsProcessor]] type. We use Any here because
-    # Optional[List[LogitsProcessor]] type is not supported by msgspec.
+    # Optional[list[LogitsProcessor]] type. We use Any here because
+    # Optional[list[LogitsProcessor]] type is not supported by msgspec.
     logits_processors: Optional[Any] = None
     include_stop_str_in_output: bool = False
     truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
@@ -207,7 +207,7 @@ class SamplingParams(
     # Fields used to construct logits processors
     guided_decoding: Optional[GuidedDecodingParams] = None
     logit_bias: Optional[Dict[int, float]] = None
-    allowed_token_ids: Optional[List[int]] = None
+    allowed_token_ids: Optional[list[int]] = None
 
     @staticmethod
     def from_optional(
@@ -221,9 +221,9 @@ class SamplingParams(
         top_k: int = -1,
         min_p: float = 0.0,
         seed: Optional[int] = None,
-        stop: Optional[Union[str, List[str]]] = None,
-        stop_token_ids: Optional[List[int]] = None,
-        bad_words: Optional[List[str]] = None,
+        stop: Optional[Union[str, list[str]]] = None,
+        stop_token_ids: Optional[list[int]] = None,
+        bad_words: Optional[list[str]] = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: Optional[int] = 16,
@@ -233,13 +233,13 @@ class SamplingParams(
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
-        logits_processors: Optional[List[LogitsProcessor]] = None,
+        logits_processors: Optional[list[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int,
                                                    msgspec.Meta(ge=1)]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]] = None,
-        allowed_token_ids: Optional[List[int]] = None,
+        allowed_token_ids: Optional[list[int]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             logit_bias = {

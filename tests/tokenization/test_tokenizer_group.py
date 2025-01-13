@@ -1,7 +1,7 @@
 import asyncio
 import os
 import sys
-from typing import List, Optional
+from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -127,7 +127,7 @@ async def test_tokenizer_group_ray_pool_fault_tolerance(tokenizer_group_type):
 
         def __init__(self,
                      *args,
-                     fail_at: Optional[List[int]] = None,
+                     fail_at: Optional[list[int]] = None,
                      **kwargs):
             super().__init__(*args, **kwargs)
             self.i = 0

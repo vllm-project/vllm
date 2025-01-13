@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -48,7 +48,7 @@ class Florence2LanguageModel(nn.Module):
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 encoder_input_ids: torch.Tensor,
-                encoder_positions: torch.Tensor, kv_caches: List[torch.Tensor],
+                encoder_positions: torch.Tensor, kv_caches: list[torch.Tensor],
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
         r"""
         Args:
@@ -120,7 +120,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         positions: torch.Tensor,
         encoder_input_ids: torch.Tensor,
         encoder_positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> torch.Tensor:
@@ -211,7 +211,7 @@ class Florence2ForConditionalGeneration(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         *,

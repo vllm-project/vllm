@@ -5,7 +5,7 @@ Run `pytest tests/kernels/test_machete_mm.py`.
 
 import math
 from dataclasses import dataclass, fields
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import pytest
 import torch
@@ -44,7 +44,7 @@ MNK_SHAPES = [
     (1024, 8192, 4096),
 ]
 
-GROUP_SIZES_TO_TEST: List[Optional[int]] = [128, -1]
+GROUP_SIZES_TO_TEST: list[Optional[int]] = [128, -1]
 
 
 @dataclass
@@ -74,7 +74,7 @@ class Tensors:
 #  Ch Scales Type, Tok Scales Type)
 # NOTE: None "Scale Type" means the act type is floating point
 #       None "Output Type" means the output type is the same as the act type
-TestTypeTuple = Tuple[List[torch.dtype], ScalarType, Optional[torch.dtype],
+TestTypeTuple = Tuple[list[torch.dtype], ScalarType, Optional[torch.dtype],
                       Optional[torch.dtype], bool]
 TEST_TYPES = [
     # GPTQ style
@@ -264,7 +264,7 @@ def machete_mm_test_helper(types: TypeConfig,
 @pytest.mark.parametrize("types", TEST_TYPES)
 def test_machete_all_schedules(shape, types: TypeConfig):
 
-    group_sizes: List[Optional[int]] = []
+    group_sizes: list[Optional[int]] = []
     if types.group_scale_type is None:
         group_sizes = [None]
     else:
@@ -293,7 +293,7 @@ def test_machete_all_schedules(shape, types: TypeConfig):
                          ids=lambda x: "x".join(str(v) for v in x))
 @pytest.mark.parametrize("types", TEST_TYPES)
 def test_machete_heuristic(shape, types: TypeConfig):
-    group_sizes: List[Optional[int]] = []
+    group_sizes: list[Optional[int]] = []
     if types.group_scale_type is None:
         group_sizes = [None]
     else:

@@ -1,7 +1,7 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
-                    Tuple, Union)
+from typing import (TYPE_CHECKING, Deque, Dict, Iterable, Optional, Set, Tuple,
+                    Union)
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
@@ -55,7 +55,7 @@ class Scheduler:
         self.requests: Dict[str, Request] = {}
         # Priority queues for requests.
         self.waiting: Deque[Request] = deque()
-        self.running: List[Request] = []
+        self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -90,16 +90,16 @@ class Scheduler:
         # num_tokens. This is general enough to cover chunked prefills,
         # prefix caching, and the "jump decoding" optimization in the future.
 
-        scheduled_new_reqs: List[Request] = []
-        scheduled_resumed_reqs: List[Request] = []
-        scheduled_running_reqs: List[Request] = []
-        preempted_reqs: List[Request] = []
+        scheduled_new_reqs: list[Request] = []
+        scheduled_resumed_reqs: list[Request] = []
+        scheduled_running_reqs: list[Request] = []
+        preempted_reqs: list[Request] = []
 
-        req_to_new_block_ids: Dict[str, List[int]] = {}
+        req_to_new_block_ids: Dict[str, list[int]] = {}
         num_scheduled_tokens: Dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
-        scheduled_encoder_inputs: Dict[str, List[int]] = {}
+        scheduled_encoder_inputs: Dict[str, list[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
 
         # First, schedule the RUNNING requests.
@@ -310,7 +310,7 @@ class Scheduler:
     def _make_running_request_data(
         self,
         request: Request,
-        new_block_ids: List[int],
+        new_block_ids: list[int],
         num_computed_tokens: int,
     ) -> "RunningRequestData":
         # OPTIMIZATION: Cache the RunningRequestData objects to avoid creating
@@ -331,7 +331,7 @@ class Scheduler:
         num_computed_tokens: int,
         num_new_tokens: int,
         encoder_budget: int,
-    ) -> Tuple[List[int], int, int]:
+    ) -> Tuple[list[int], int, int]:
         """
         Determine which encoder inputs need to be scheduled in the current step,
         and update `num_new_tokens` and encoder token budget accordingly.
@@ -351,7 +351,7 @@ class Scheduler:
         if not request.has_encoder_inputs():
             return [], num_new_tokens, encoder_budget
 
-        encoder_inputs_to_schedule: List[int] = []
+        encoder_inputs_to_schedule: list[int] = []
         mm_positions = request.mm_positions
         assert mm_positions is not None
         assert len(mm_positions) > 0
@@ -399,8 +399,8 @@ class Scheduler:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        new_running: List[Request] = []
-        outputs: List[EngineCoreOutput] = []
+        new_running: list[Request] = []
+        outputs: list[EngineCoreOutput] = []
         for request in self.running:
             req_id = request.request_id
             request.num_computed_tokens += num_scheduled_tokens[req_id]
@@ -530,20 +530,20 @@ class Scheduler:
 class NewRequestData:
 
     req_id: str
-    prompt_token_ids: List[int]
+    prompt_token_ids: list[int]
     prompt: Optional[str]
-    mm_inputs: List["MultiModalKwargs"]
-    mm_hashes: List[str]
-    mm_positions: List["PlaceholderRange"]
+    mm_inputs: list["MultiModalKwargs"]
+    mm_hashes: list[str]
+    mm_positions: list["PlaceholderRange"]
     sampling_params: SamplingParams
-    block_ids: List[int]
+    block_ids: list[int]
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        block_ids: List[int],
+        block_ids: list[int],
         num_computed_tokens: int,
     ) -> "NewRequestData":
         return cls(
@@ -563,14 +563,14 @@ class NewRequestData:
 class ResumedRequestData:
 
     req_id: str
-    block_ids: List[int]
+    block_ids: list[int]
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        block_ids: List[int],
+        block_ids: list[int],
         num_computed_tokens: int,
     ) -> "ResumedRequestData":
         return cls(
@@ -584,14 +584,14 @@ class ResumedRequestData:
 class RunningRequestData:
 
     req_id: str
-    new_block_ids: List[int]
+    new_block_ids: list[int]
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        new_block_ids: List[int],
+        new_block_ids: list[int],
         num_computed_tokens: int,
     ) -> "RunningRequestData":
         return cls(
@@ -604,15 +604,15 @@ class RunningRequestData:
 @dataclass
 class SchedulerOutput:
 
-    scheduled_new_reqs: List[NewRequestData]
-    scheduled_resumed_reqs: List[ResumedRequestData]
-    scheduled_running_reqs: List[RunningRequestData]
+    scheduled_new_reqs: list[NewRequestData]
+    scheduled_resumed_reqs: list[ResumedRequestData]
+    scheduled_running_reqs: list[RunningRequestData]
 
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int
-    scheduled_encoder_inputs: Dict[str, List[int]]
+    scheduled_encoder_inputs: Dict[str, list[int]]
     num_common_prefix_blocks: int
 
     preempted_req_ids: Set[str]
     finished_req_ids: Set[str]
-    free_encoder_input_ids: List[Tuple[str, int]]
+    free_encoder_input_ids: list[Tuple[str, int]]

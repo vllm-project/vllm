@@ -1,4 +1,4 @@
-from typing import List, Type
+from typing import Type
 
 import pytest
 import torch.nn.functional as F
@@ -36,7 +36,7 @@ MODELS = ["royokong/e5-v"]
 def _run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    input_texts: List[str],
+    input_texts: list[str],
     input_images: PromptImageInput,
     model: str,
     *,

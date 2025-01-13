@@ -6,7 +6,7 @@ import pprint
 import time
 from collections import defaultdict
 from contextlib import ExitStack
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
 
 import torch
@@ -129,7 +129,7 @@ class AlwaysHitShapeEnv:
     """
 
     def __init__(self) -> None:
-        self.guards: List[Any] = []
+        self.guards: list[Any] = []
 
     def evaluate_guards_expression(self, *args, **kwargs):
         return True
@@ -288,7 +288,7 @@ class SplitItem:
 
 
 def split_graph(graph: fx.GraphModule,
-                ops: List[str]) -> Tuple[fx.GraphModule, List[SplitItem]]:
+                ops: list[str]) -> Tuple[fx.GraphModule, list[SplitItem]]:
     # split graph by ops
     subgraph_id = 0
     node_to_subgraph_id = {}
@@ -354,7 +354,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     """
 
     def __init__(self, module: torch.fx.GraphModule,
-                 compile_submod_names: List[str], vllm_config: VllmConfig,
+                 compile_submod_names: list[str], vllm_config: VllmConfig,
                  graph_pool, vllm_backend: "VllmBackend"):
         super().__init__(module)
         from torch._guards import detect_fake_mode
@@ -427,12 +427,12 @@ class VllmBackend:
     graph: fx.GraphModule
     # the stiching graph module for all the piecewise graphs
     split_gm: fx.GraphModule
-    piecewise_graphs: List[SplitItem]
+    piecewise_graphs: list[SplitItem]
     returned_callable: Callable
     # Inductor passes to run on the graph pre-defunctionalization
     post_grad_passes: Sequence[Callable]
-    sym_tensor_indices: List[int]
-    input_buffers: List[torch.Tensor]
+    sym_tensor_indices: list[int]
+    input_buffers: list[torch.Tensor]
     inductor_hash_cache: InductorHashCache
 
     def __init__(
@@ -620,14 +620,14 @@ class ConcreteSizeEntry:
 
     # for cudagraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
-    input_addresses: Optional[List[int]] = None
+    input_addresses: Optional[list[int]] = None
 
 
 class PiecewiseBackend:
 
     def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
                  graph_pool: Any, piecewise_compile_index: int,
-                 total_piecewise_compiles: int, sym_shape_indices: List[int],
+                 total_piecewise_compiles: int, sym_shape_indices: list[int],
                  compiled_graph_for_general_shape: Callable,
                  vllm_backend: VllmBackend):
         """

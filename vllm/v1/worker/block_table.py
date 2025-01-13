@@ -1,4 +1,3 @@
-from typing import List
 
 import numpy as np
 import torch
@@ -42,13 +41,13 @@ class BlockTable:
         self,
         row_idx: int,
         start: int,
-        block_ids: List[int],
+        block_ids: list[int],
     ) -> None:
         num_blocks = len(block_ids)
         self.block_table_np[row_idx, start:start + num_blocks] = block_ids
         self.num_blocks_per_row[row_idx] = start + num_blocks
 
-    def add_row(self, row_idx: int, block_ids: List[int]) -> None:
+    def add_row(self, row_idx: int, block_ids: list[int]) -> None:
         self.append_row(row_idx, 0, block_ids)
 
     def move_row(self, src: int, tgt: int) -> None:

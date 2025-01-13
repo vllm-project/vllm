@@ -7,7 +7,7 @@ if the config `tractable_init` is set to True. Otherwise, the weights are
 initialized randomly with a fixed seed.
 """
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 from torch import nn
@@ -55,7 +55,7 @@ class LlamaConfig:
     random_seed: int = 0
 
     def compute_hash(self) -> str:
-        factors: List[Any] = []
+        factors: list[Any] = []
         for k, v in self.__dict__.items():
             if k == "random_seed":
                 continue

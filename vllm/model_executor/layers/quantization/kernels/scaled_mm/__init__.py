@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List, Optional, Type
+from typing import Dict, Optional, Type
 
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
     CutlassScaledMMLinearKernel)
@@ -12,7 +12,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.xla import (
 from vllm.platforms import PlatformEnum, current_platform
 
 # in priority/performance order (when available)
-_POSSIBLE_KERNELS: Dict[PlatformEnum, List[Type[ScaledMMLinearKernel]]] = {
+_POSSIBLE_KERNELS: Dict[PlatformEnum, list[Type[ScaledMMLinearKernel]]] = {
     PlatformEnum.CPU: [CutlassScaledMMLinearKernel],
     PlatformEnum.CUDA: [CutlassScaledMMLinearKernel],
     # TODO(rob): Create TritonScaledMMLinear kernel. ROCM will

@@ -11,8 +11,8 @@ import os
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import (Any, Callable, Dict, Generator, Iterable, List, Optional,
-                    Tuple, cast)
+from typing import (Any, Callable, Dict, Generator, Iterable, Optional, Tuple,
+                    cast)
 
 import gguf
 import huggingface_hub
@@ -217,7 +217,7 @@ class DefaultModelLoader(BaseModelLoader):
         model_name_or_path: str,
         revision: Optional[str],
         fall_back_to_pt: bool,
-    ) -> Tuple[str, List[str], bool]:
+    ) -> Tuple[str, list[str], bool]:
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
@@ -259,7 +259,7 @@ class DefaultModelLoader(BaseModelLoader):
         else:
             hf_folder = model_name_or_path
 
-        hf_weights_files: List[str] = []
+        hf_weights_files: list[str] = []
         for pattern in allow_patterns:
             hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
             if len(hf_weights_files) > 0:
@@ -552,7 +552,7 @@ class ShardedStateLoader(BaseModelLoader):
         Filter out all tensors that share the same memory or a subset of the
         memory of another tensor.
         """
-        same_storage_groups: Dict[Any, List[Tuple[str, torch.Tensor]]] = (
+        same_storage_groups: Dict[Any, list[Tuple[str, torch.Tensor]]] = (
             collections.defaultdict(list))
         for key, tensor in tensors.items():
             if tensor.numel():
@@ -702,21 +702,21 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         super().__init__(load_config)
 
         # Save the module names without sharding.
-        self.unsharded_weights_modules: List[str] = []
+        self.unsharded_weights_modules: list[str] = []
         # Save the module names that are sharded by column.
-        self.column_sharded_weights_modules: List[str] = []
+        self.column_sharded_weights_modules: list[str] = []
         # Store all module names (from transformers) that support
         # BNB quantization.
-        self.target_modules: List[str] = []
+        self.target_modules: list[str] = []
         # mapping weight names from transformers to vllm.
         self.weight_mapper: Callable = lambda name: name
 
     def _get_weight_files(
         self,
         model_name_or_path: str,
-        allowed_patterns: List[str],
+        allowed_patterns: list[str],
         revision: Optional[str] = None,
-    ) -> Tuple[List[str], str]:
+    ) -> Tuple[list[str], str]:
         """Retrieve weight files. Download the files if necessary.
 
         Return the weight files and the file pattern."""
@@ -747,7 +747,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             f"No model weights found in: `{model_name_or_path}`")
 
     def _prepare_weights(self, model_name_or_path: str,
-                         revision: Optional[str]) -> Tuple[List[str], bool]:
+                         revision: Optional[str]) -> Tuple[list[str], bool]:
         """Prepare weight files for the model."""
 
         allowed_patterns = ["*.safetensors", "*.bin", "*.pt"]
@@ -985,7 +985,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         # TODO: Maybe we can replace bitsandbytes_stacked_params_mapping with
         # packed_modules_mapping.
-        inverse_stacked_mapping: Dict[str, List[str]] = {}
+        inverse_stacked_mapping: Dict[str, list[str]] = {}
         for orig, (
                 packed,
                 idx,
@@ -1029,7 +1029,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             self.weight_mapper = lambda name: hf_to_vllm_mapper._map_name(name)
         # Modules whose weights might have fused on disk
         # we need their output_sizes to make shard in flight correctly with TP
-        self.maybe_fused_weights_modules: Dict[str, List[int]] = {}
+        self.maybe_fused_weights_modules: Dict[str, list[int]] = {}
         self._get_bnb_target_modules(model)
         for name, module in model.named_modules():
             # Some modules like `ReplicatedLinear` should not have their weights
@@ -1279,7 +1279,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 os.environ["RUNAI_STREAMER_S3_ENDPOINT"] = aws_endpoint_url
 
     def _prepare_weights(self, model_name_or_path: str,
-                         revision: Optional[str]) -> List[str]:
+                         revision: Optional[str]) -> list[str]:
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""

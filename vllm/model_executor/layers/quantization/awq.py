@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -22,7 +22,7 @@ class AWQConfig(QuantizationConfig):
         weight_bits: int,
         group_size: int,
         zero_point: bool,
-        modules_to_not_convert: Optional[List[str]] = None,
+        modules_to_not_convert: Optional[list[str]] = None,
     ) -> None:
         self.weight_bits = weight_bits
         self.group_size = group_size
@@ -44,7 +44,7 @@ class AWQConfig(QuantizationConfig):
     def get_name(self) -> str:
         return "awq"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.half]
 
     @classmethod
@@ -53,7 +53,7 @@ class AWQConfig(QuantizationConfig):
         return 75
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
+    def get_config_filenames() -> list[str]:
         return [
             "quant_config.json",  # E.g., casperhansen/vicuna-7b-v1.5-awq
             # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq
@@ -78,7 +78,7 @@ class AWQConfig(QuantizationConfig):
         return None
 
 
-def is_layer_skipped_awq(prefix: str, modules_to_not_convert: List[str]):
+def is_layer_skipped_awq(prefix: str, modules_to_not_convert: list[str]):
     return any(module_name in prefix for module_name in modules_to_not_convert)
 
 
@@ -94,7 +94,7 @@ class AWQLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         if input_size_per_partition % self.quant_config.group_size != 0:

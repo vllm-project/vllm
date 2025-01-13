@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Callable, Dict, List, Type
+from typing import Callable, Dict, Type
 
 import pytest
 import torch
@@ -65,7 +65,7 @@ def get_messages(image: Image.Image, text: str, embed_text: bool):
 
 
 def apply_chat_template_and_add_eos(
-    messages: List[Dict],
+    messages: list[Dict],
     apply_chat_template_fn: Callable,
 ):
     prompt = apply_chat_template_fn(
@@ -80,9 +80,9 @@ def postprocess_inputs(hf_model: HfRunner, inputs: BatchEncoding, **kwargs):
 def _run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    input_texts: List[str],
+    input_texts: list[str],
     input_images: PromptImageInput,
-    embed_texts: List[bool],
+    embed_texts: list[bool],
     model: str,
     *,
     dtype: str,

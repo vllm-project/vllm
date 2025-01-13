@@ -13,8 +13,8 @@
 # limitations under the License.
 """PyTorch Mllama model."""
 import math
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Iterable, Literal, Mapping, Optional, Set, Tuple, TypedDict,
+                    Union)
 
 import numpy as np
 import torch
@@ -78,7 +78,7 @@ class MllamaImagePixelInputs(TypedDict):
 # TODO: support LlamaImageEmbeddingInputs
 
 
-def _get_num_image_in_last_group(prompt_token_ids: List[int]) -> int:
+def _get_num_image_in_last_group(prompt_token_ids: list[int]) -> int:
     num_images = 0
     for token_id in prompt_token_ids[::-1]:
         if token_id == MLLAMA_IMAGE_TOKEN_ID:
@@ -784,7 +784,7 @@ class MllamaTextCrossAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
-        kv_range_for_decode: Optional[List[Tuple[int, int]]],
+        kv_range_for_decode: Optional[list[Tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
@@ -826,7 +826,7 @@ class MllamaTextCrossAttention(nn.Module):
         v: torch.Tensor,
         kv_cache: torch.Tensor,
         attention_mask: torch.Tensor,
-        kv_range_for_decode: List[Tuple[int, int]],
+        kv_range_for_decode: list[Tuple[int, int]],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         # Skip writing kv-cache for the initial profiling run.
@@ -935,9 +935,9 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
         hidden_states: torch.Tensor,
         cross_attention_states: torch.Tensor,
         cross_attention_mask: torch.Tensor,
-        kv_range_for_decode: Optional[List[Tuple[int, int]]],
+        kv_range_for_decode: Optional[list[Tuple[int, int]]],
         full_text_row_masked_out_mask: torch.Tensor,
-        kv_cache: List[torch.Tensor],
+        kv_cache: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
@@ -1010,10 +1010,10 @@ class MllamaTextModel(nn.Module):
         positions: Optional[torch.LongTensor],
         cross_attention_states: Optional[torch.LongTensor],
         cross_attention_mask: Optional[torch.LongTensor],
-        kv_range_for_decode: Optional[List[Tuple[int, int]]],
+        kv_range_for_decode: Optional[list[Tuple[int, int]]],
         full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor,
                                                       torch.Tensor]],
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         skip_cross_attention: bool,
     ) -> torch.Tensor:
@@ -1080,10 +1080,10 @@ class MllamaForCausalLM(nn.Module):
         positions: Optional[torch.LongTensor],
         cross_attention_states: Optional[torch.LongTensor],
         cross_attention_mask: Optional[torch.LongTensor],
-        kv_range_for_decode: Optional[List[Tuple[int, int]]],
+        kv_range_for_decode: Optional[list[Tuple[int, int]]],
         full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor,
                                                       torch.Tensor]],
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         skip_cross_attention: bool,
     ) -> torch.Tensor:
@@ -1169,26 +1169,26 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def _parse_and_validate_image_input(self, **kwargs: object):
         # tensor with the same shape will be batched together by
         # MultiModalKwargs.batch, so pixel_values here can be:
-        #   - List[List[torch.Tensor]]:
+        #   - list[list[torch.Tensor]]:
         #       with shape (num_tiles, 3, image_res, image_res)
-        #   - List[torch.Tensor]:
+        #   - list[torch.Tensor]:
         #       with shape (num_image, num_tiles, 3, image_res, image_res)
         #   - torch.Tensor:
         #       with shape (bs, num_image, num_tiles, 3, image_res, image_res)
-        pixel_values: Optional[Union[List[List[torch.Tensor]],
-                                     List[torch.Tensor],
+        pixel_values: Optional[Union[list[list[torch.Tensor]],
+                                     list[torch.Tensor],
                                      torch.Tensor]] = kwargs.pop(
                                          "pixel_values", None)
-        image_embeds: Optional[Union[List[List[torch.Tensor]],
-                                     List[torch.Tensor],
+        image_embeds: Optional[Union[list[list[torch.Tensor]],
+                                     list[torch.Tensor],
                                      torch.Tensor]] = kwargs.pop(
                                          "image_embeds", None)
-        aspect_ratio_ids: Optional[Union[List[List[torch.Tensor]],
-                                         List[torch.Tensor],
+        aspect_ratio_ids: Optional[Union[list[list[torch.Tensor]],
+                                         list[torch.Tensor],
                                          torch.Tensor]] = kwargs.pop(
                                              "aspect_ratio_ids", None)
-        aspect_ratio_mask: Optional[Union[List[List[torch.Tensor]],
-                                          List[torch.Tensor],
+        aspect_ratio_mask: Optional[Union[list[list[torch.Tensor]],
+                                          list[torch.Tensor],
                                           torch.Tensor]] = kwargs.pop(
                                               "aspect_ratio_mask", None)
 
@@ -1253,7 +1253,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def flat_encoder_result(self, cross_attention_states: torch.Tensor,
                             attn_metadata: AttentionMetadata,
-                            actual_encoder_seq_lens: List[int]):
+                            actual_encoder_seq_lens: list[int]):
 
         cross_attention_states_flat = torch.zeros(
             sum(actual_encoder_seq_lens),
@@ -1274,7 +1274,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self,
         image_inputs: MllamaImagePixelInputs,
         attn_metadata: AttentionMetadata,
-        actual_encoder_seq_lens: List[int],
+        actual_encoder_seq_lens: list[int],
     ) -> Tuple[torch.Tensor]:
         # NOTE: llama's reference implementation runs vision model on CPU
         pixel_values = image_inputs['data']
@@ -1299,7 +1299,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self,
         input_ids: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        num_tiles: List[List[int]],
+        num_tiles: list[list[int]],
         num_tokens_per_tile: int,
         dtype: torch.dtype,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1353,7 +1353,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         **kwargs: object,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
@@ -1452,7 +1452,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         return updated_params
 
 
-def skip_attention_mask(sparse_mask: List[List[int]]) -> bool:
+def skip_attention_mask(sparse_mask: list[list[int]]) -> bool:
     for mask in sparse_mask:
         # Skip text-only samples.
         if len(mask) == 0:
@@ -1470,10 +1470,10 @@ def skip_attention_mask(sparse_mask: List[List[int]]) -> bool:
 
 
 def convert_sparse_cross_attention_mask_to_dense(
-    sparse_mask: List[List[List[int]]],
-    num_tiles: List[List[int]],
-    lengths: List[int],
-) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
+    sparse_mask: list[list[list[int]]],
+    num_tiles: list[list[int]],
+    lengths: list[int],
+) -> Tuple[np.ndarray, list[Tuple[int, int]]]:
     total_length = sum(lengths)
     total_tiles = sum([sum(tiles) for tiles in num_tiles])
     dense_mask = np.zeros(shape=(total_length, total_tiles), dtype=np.int64)

@@ -1,4 +1,3 @@
-from typing import List
 from unittest.mock import MagicMock
 
 import pytest
@@ -123,7 +122,7 @@ TEST_CASES = [
 @pytest.mark.parametrize("streaming, model_output, expected_tool_calls",
                          TEST_CASES)
 def test_tool_call(streaming: bool, model_output: str,
-                   expected_tool_calls: List[FunctionCall]):
+                   expected_tool_calls: list[FunctionCall]):
     mock_tokenizer = MagicMock()
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
         mock_tokenizer)

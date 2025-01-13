@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -56,10 +56,10 @@ class MMInputMapperClient:
     def process_inputs(
         self,
         mm_data: MultiModalDataDict,
-        mm_hashes: Optional[List[str]],
+        mm_hashes: Optional[list[str]],
         mm_processor_kwargs: Optional[Dict[str, Any]],
-        precomputed_mm_inputs: Optional[List[MultiModalKwargs]],
-    ) -> List[MultiModalKwargs]:
+        precomputed_mm_inputs: Optional[list[MultiModalKwargs]],
+    ) -> list[MultiModalKwargs]:
         if precomputed_mm_inputs is None:
             image_inputs = mm_data["image"]
             if not isinstance(image_inputs, list):
@@ -76,7 +76,7 @@ class MMInputMapperClient:
         # Process each image input separately, so that later we can schedule
         # them in a fine-grained manner.
         # Apply caching (if enabled) and reuse precomputed inputs (if provided)
-        ret_inputs: List[MultiModalKwargs] = []
+        ret_inputs: list[MultiModalKwargs] = []
         for input_id in range(num_inputs):
             if self.mm_debug_cache_hit_ratio_steps is not None:
                 self.cache_hit_ratio(self.mm_debug_cache_hit_ratio_steps)
@@ -120,9 +120,9 @@ class MMInputMapperServer:
 
     def process_inputs(
         self,
-        mm_inputs: List[Optional[MultiModalKwargs]],
-        mm_hashes: List[str],
-    ) -> List[MultiModalKwargs]:
+        mm_inputs: list[Optional[MultiModalKwargs]],
+        mm_hashes: list[str],
+    ) -> list[MultiModalKwargs]:
         assert len(mm_inputs) == len(mm_hashes)
 
         if not self.use_cache:

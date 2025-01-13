@@ -1,5 +1,5 @@
 import weakref
-from typing import List, Optional, Set, Tuple
+from typing import Optional, Set, Tuple
 
 import torch
 
@@ -46,7 +46,7 @@ class MedusaWorker(NonLLMProposerWorkerBase, WorkerWrapperBase):
         sample_len: int,
         # Unused parameter.
         seq_ids_with_bonus_token_in_last_step: Set[int],
-    ) -> Tuple[List[SamplerOutput], bool]:
+    ) -> Tuple[list[SamplerOutput], bool]:
         """Run the model forward pass to generate sample_len future tokens.
         Returns the list of sampler output, one per layer, along with indicator
         of whether torch tensor in sampler output need to be transposed in
@@ -76,13 +76,13 @@ class MedusaWorker(NonLLMProposerWorkerBase, WorkerWrapperBase):
 
     def _prepare_input_tensors(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[List[int], List[int]]:
+        seq_group_metadata_list: Optional[list[SequenceGroupMetadata]],
+    ) -> Tuple[list[int], list[int]]:
         if not seq_group_metadata_list:
             return [], []
 
-        seq_lens: List[int] = []
-        query_lens: List[int] = []
+        seq_lens: list[int] = []
+        query_lens: list[int] = []
 
         for seq_group_metadata in seq_group_metadata_list:
             is_prompt = seq_group_metadata.is_prompt

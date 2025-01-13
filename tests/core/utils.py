@@ -1,6 +1,6 @@
 import time
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple
 
@@ -18,7 +18,7 @@ def create_dummy_prompt(
     block_size: Optional[int] = None,
     lora_request: Optional[LoRARequest] = None,
     best_of: int = 1,
-    prompt_tokens: Optional[List[int]] = None,
+    prompt_tokens: Optional[list[int]] = None,
     min_tokens: int = 0,
     max_tokens: int = 16,
 ) -> Tuple[Sequence, SequenceGroup]:
@@ -46,7 +46,7 @@ def create_dummy_prompt(
     return prompt, seq_group
 
 
-def create_dummy_lora_sequence(request_id: int, token_ids: List[int],
+def create_dummy_lora_sequence(request_id: int, token_ids: list[int],
                                block_size: int, lora_int_id: int) -> Sequence:
     return Sequence(seq_id=request_id,
                     inputs=token_inputs(token_ids),
@@ -56,7 +56,7 @@ def create_dummy_lora_sequence(request_id: int, token_ids: List[int],
                                              lora_int_id=lora_int_id))
 
 
-def create_dummy_sequence(request_id: int, token_ids: List[int],
+def create_dummy_sequence(request_id: int, token_ids: list[int],
                           block_size: int) -> Sequence:
     return Sequence(
         seq_id=request_id,
@@ -123,7 +123,7 @@ def create_seq_group(
 
     prompt_token_ids = [0] * seq_prompt_len
 
-    seqs: List[Sequence] = []
+    seqs: list[Sequence] = []
     for seq_id_offset, output_len in enumerate(seq_output_lens):
         seq = Sequence(
             seq_id=seq_id_start + seq_id_offset,
@@ -239,7 +239,7 @@ class SchedulerProxy:
 
     def __init__(self, scheduler: Scheduler):
         self.scheduler_ = scheduler
-        self.call_history: Dict[str, List[Any]] = defaultdict(list)
+        self.call_history: Dict[str, list[Any]] = defaultdict(list)
 
     def __getattr__(self, name: str) -> Any:
 
@@ -251,6 +251,6 @@ class SchedulerProxy:
         return wrapper
 
     def last_schedule_ret(
-        self, ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs, Any]:
+        self, ) -> Tuple[list[SequenceGroupMetadata], SchedulerOutputs, Any]:
         _, _, ret = self.call_history["schedule"][-1]
         return ret

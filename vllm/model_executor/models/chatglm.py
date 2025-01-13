@@ -3,8 +3,7 @@
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
 from array import array
-from typing import (Dict, Iterable, List, Mapping, Optional, Set, Tuple,
-                    TypedDict)
+from typing import (Dict, Iterable, Mapping, Optional, Set, Tuple, TypedDict)
 
 import torch
 from PIL import Image
@@ -149,7 +148,7 @@ def dummy_data_for_glmv(ctx: InputContext, seq_len: int,
     raise NotImplementedError(msg)
 
 
-def find_all_positions(input_ids: List[int], target: int) -> List[int]:
+def find_all_positions(input_ids: list[int], target: int) -> list[int]:
     return [index for index, value in enumerate(input_ids) if value == target]
 
 
@@ -474,7 +473,7 @@ class GLMTransformer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         for i in range(self.start_layer, self.end_layer):
@@ -576,7 +575,7 @@ class ChatGLMModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
@@ -634,7 +633,7 @@ class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP):
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
+                kv_caches: list[torch.Tensor],
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 **kwargs) -> torch.Tensor:

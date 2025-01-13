@@ -6,8 +6,8 @@
 # --------------------------------------------------------
 import re
 from functools import cached_property, partial
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Iterable, Literal, Mapping, Optional, Set, Tuple, TypedDict,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -52,7 +52,7 @@ class InternVLImagePixelInputs(TypedDict):
     Shape:
     `(batch_size * num_images * (1 + num_patches), num_channels, height, width)`
     """
-    patches_per_image: List[int]
+    patches_per_image: list[int]
     """
     List of number of total patches for each image in the batch.
     """
@@ -154,7 +154,7 @@ def calculate_num_blocks_wrapper(
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
 def dynamic_preprocess(image: Image.Image, min_num: int, max_num: int,
                        image_size: int,
-                       use_thumbnail: bool) -> List[Image.Image]:
+                       use_thumbnail: bool) -> list[Image.Image]:
     orig_width, orig_height = image.size
 
     # calculate the number of blocks without thumbnail
@@ -292,7 +292,7 @@ class InternVLInputPipeline:
     def _expand_image_prompt(
         self,
         prompt: str,
-        feature_sizes: List[int],
+        feature_sizes: list[int],
         num_patches: int,
     ) -> str:
         image_idx = sorted(
@@ -719,7 +719,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,

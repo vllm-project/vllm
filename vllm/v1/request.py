@@ -1,5 +1,5 @@
 import enum
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
@@ -19,10 +19,10 @@ class Request:
         self,
         request_id: str,
         prompt: Optional[str],
-        prompt_token_ids: List[int],
-        multi_modal_inputs: Optional[List["MultiModalKwargs"]],
-        multi_modal_hashes: Optional[List[str]],
-        multi_modal_placeholders: Optional[List["PlaceholderRange"]],
+        prompt_token_ids: list[int],
+        multi_modal_inputs: Optional[list["MultiModalKwargs"]],
+        multi_modal_hashes: Optional[list[str]],
+        multi_modal_placeholders: Optional[list["PlaceholderRange"]],
         sampling_params: SamplingParams,
         eos_token_id: Optional[int],
         arrival_time: float,
@@ -47,14 +47,14 @@ class Request:
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
-        self._output_token_ids: List[int] = []
-        self._all_token_ids: List[int] = self.prompt_token_ids.copy()
+        self._output_token_ids: list[int] = []
+        self._all_token_ids: list[int] = self.prompt_token_ids.copy()
         self.num_computed_tokens = 0
 
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []
         self.mm_inputs = multi_modal_inputs or []
-        self.mm_hashes: List[str] = multi_modal_hashes or []
+        self.mm_hashes: list[str] = multi_modal_hashes or []
 
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
@@ -62,7 +62,7 @@ class Request:
 
         # Cache the computed kv block hashes of the request to avoid
         # recomputing.
-        self._kv_block_hashes: List[BlockHashType] = []
+        self._kv_block_hashes: list[BlockHashType] = []
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -93,7 +93,7 @@ class Request:
 
     def append_output_token_ids(
         self,
-        token_ids: Union[int, List[int]],
+        token_ids: Union[int, list[int]],
     ) -> None:
         if isinstance(token_ids, int):
             token_ids = [token_ids]
@@ -131,7 +131,7 @@ class Request:
         # Prevent directly appending to the kv_block_hashes.
         return ConstantList(self._kv_block_hashes)
 
-    def set_kv_block_hashes(self, value: List["BlockHashType"]) -> None:
+    def set_kv_block_hashes(self, value: list["BlockHashType"]) -> None:
         self._kv_block_hashes = value
 
     def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:

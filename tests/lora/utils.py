@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import torch
 
@@ -74,11 +74,11 @@ class DummyLoRAManager:
         self,
         module_name: str,
         input_dim: int,
-        output_dims: List[int],
-        noop_lora_index: Optional[List[int]] = None,
+        output_dims: list[int],
+        noop_lora_index: Optional[list[int]] = None,
         rank: int = 8,
     ):
-        base_loras: List[LoRALayerWeights] = []
+        base_loras: list[LoRALayerWeights] = []
         noop_lora_index_set = set(noop_lora_index or [])
 
         for i, out_dim in enumerate(output_dims):

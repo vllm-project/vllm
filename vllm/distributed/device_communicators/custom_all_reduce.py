@@ -1,6 +1,6 @@
 import ctypes
 from contextlib import contextmanager
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -174,7 +174,7 @@ class CustomAllreduce:
     @staticmethod
     def create_shared_buffer(
             size_in_bytes: int,
-            group: Optional[ProcessGroup] = None) -> List[int]:
+            group: Optional[ProcessGroup] = None) -> list[int]:
         """
         Creates a shared buffer and returns a list of pointers
         representing the buffer on all processes in the group.
@@ -187,7 +187,7 @@ class CustomAllreduce:
         handles = [None] * world_size
         dist.all_gather_object(handles, handle, group=group)
 
-        pointers: List[int] = []
+        pointers: list[int] = []
         for i, h in enumerate(handles):
             if i == rank:
                 pointers.append(pointer.value)  # type: ignore
@@ -198,7 +198,7 @@ class CustomAllreduce:
         return pointers
 
     @staticmethod
-    def free_shared_buffer(pointers: List[int],
+    def free_shared_buffer(pointers: list[int],
                            group: Optional[ProcessGroup] = None) -> None:
         rank = dist.get_rank(group=group)
         lib = CudaRTLibrary()

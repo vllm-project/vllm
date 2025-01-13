@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict
 
 import openai
 import pytest
@@ -277,7 +277,7 @@ async def test_chat_streaming_video(client: openai.AsyncOpenAI,
         temperature=0.0,
         stream=True,
     )
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         delta = chunk.choices[0].delta
@@ -300,7 +300,7 @@ async def test_chat_streaming_video(client: openai.AsyncOpenAI,
     "video_urls",
     [TEST_VIDEO_URLS[:i] for i in range(2, len(TEST_VIDEO_URLS))])
 async def test_multi_video_input(client: openai.AsyncOpenAI, model_name: str,
-                                 video_urls: List[str]):
+                                 video_urls: list[str]):
 
     messages = [{
         "role":

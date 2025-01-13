@@ -1,5 +1,5 @@
 import asyncio
-from typing import List, Tuple
+from typing import Tuple
 
 import pytest
 
@@ -79,7 +79,7 @@ async def test_abort(monkeypatch):
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
 
         # Create concurrent requests.
-        tasks: List[asyncio.Task] = []
+        tasks: list[asyncio.Task] = []
         for request_id in request_ids:
             tasks.append(
                 asyncio.create_task(

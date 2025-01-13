@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from multiprocessing import Queue
 from multiprocessing.connection import wait
 from multiprocessing.process import BaseProcess
-from typing import (Any, Callable, Dict, Generic, List, Optional, TextIO,
-                    TypeVar, Union)
+from typing import (Any, Callable, Dict, Generic, Optional, TextIO, TypeVar,
+                    Union)
 
 import torch
 
@@ -99,7 +99,7 @@ class ResultHandler(threading.Thread):
 class WorkerMonitor(threading.Thread):
     """Monitor worker status (in background thread)"""
 
-    def __init__(self, workers: List['ProcessWorkerWrapper'],
+    def __init__(self, workers: list['ProcessWorkerWrapper'],
                  result_handler: ResultHandler):
         super().__init__(daemon=True)
         self.workers = workers

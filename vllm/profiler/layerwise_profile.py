@@ -1,7 +1,7 @@
 import copy
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple, TypeAlias, Union
+from typing import Callable, Dict, Optional, Tuple, TypeAlias, Union
 
 import pandas as pd
 from torch._C._autograd import DeviceType, _KinetoEvent, _ProfilerResult
@@ -18,7 +18,7 @@ from vllm.profiler.utils import (TablePrinter, event_has_module,
 class _ModuleTreeNode:
     event: _ProfilerEvent
     parent: Optional['_ModuleTreeNode'] = None
-    children: List['_ModuleTreeNode'] = field(default_factory=list)
+    children: list['_ModuleTreeNode'] = field(default_factory=list)
     trace: str = ""
 
     @property
@@ -58,7 +58,7 @@ StatsEntry: TypeAlias = Union[ModelStatsEntry, SummaryStatsEntry]
 @dataclass
 class _StatsTreeNode:
     entry: StatsEntry
-    children: List[StatsEntry]
+    children: list[StatsEntry]
     parent: Optional[StatsEntry]
 
 
@@ -66,11 +66,11 @@ class _StatsTreeNode:
 class LayerwiseProfileResults(profile):
     _kineto_results: _ProfilerResult
     _kineto_event_correlation_map: Dict[int,
-                                        List[_KinetoEvent]] = field(init=False)
-    _event_correlation_map: Dict[int, List[FunctionEvent]] = field(init=False)
-    _module_tree: List[_ModuleTreeNode] = field(init=False)
-    _model_stats_tree: List[_StatsTreeNode] = field(init=False)
-    _summary_stats_tree: List[_StatsTreeNode] = field(init=False)
+                                        list[_KinetoEvent]] = field(init=False)
+    _event_correlation_map: Dict[int, list[FunctionEvent]] = field(init=False)
+    _module_tree: list[_ModuleTreeNode] = field(init=False)
+    _model_stats_tree: list[_StatsTreeNode] = field(init=False)
+    _summary_stats_tree: list[_StatsTreeNode] = field(init=False)
 
     # profile metadata
     num_running_seqs: Optional[int] = None
@@ -140,7 +140,7 @@ class LayerwiseProfileResults(profile):
         }
 
     @staticmethod
-    def _indent_row_names_based_on_depth(depths_rows: List[Tuple[int,
+    def _indent_row_names_based_on_depth(depths_rows: list[Tuple[int,
                                                                  StatsEntry]],
                                          indent_style: Union[Callable[[int],
                                                                       str],
@@ -311,8 +311,8 @@ class LayerwiseProfileResults(profile):
             self._model_stats_tree.append(build_model_stats_tree_df(root))
 
     def _flatten_stats_tree(
-            self, tree: List[_StatsTreeNode]) -> List[Tuple[int, StatsEntry]]:
-        entries: List[Tuple[int, StatsEntry]] = []
+            self, tree: list[_StatsTreeNode]) -> list[Tuple[int, StatsEntry]]:
+        entries: list[Tuple[int, StatsEntry]] = []
 
         def df_traversal(node: _StatsTreeNode, depth=0):
             entries.append((depth, node.entry))
@@ -325,10 +325,10 @@ class LayerwiseProfileResults(profile):
         return entries
 
     def _convert_stats_tree_to_dict(self,
-                                    tree: List[_StatsTreeNode]) -> List[Dict]:
-        root_dicts: List[Dict] = []
+                                    tree: list[_StatsTreeNode]) -> list[Dict]:
+        root_dicts: list[Dict] = []
 
-        def df_traversal(node: _StatsTreeNode, curr_json_list: List[Dict]):
+        def df_traversal(node: _StatsTreeNode, curr_json_list: list[Dict]):
             curr_json_list.append({
                 "entry": asdict(node.entry),
                 "children": []

@@ -1,6 +1,6 @@
 import os
 import re
-from typing import List, Optional, Set, Tuple, Type, Union
+from typing import Optional, Set, Tuple, Type, Union
 
 import huggingface_hub
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
@@ -55,7 +55,7 @@ _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
 def from_layer(layer: nn.Module,
                max_loras: int,
                lora_config: LoRAConfig,
-               packed_modules_list: List,
+               packed_modules_list: list,
                model_config: Optional[PretrainedConfig] = None) -> nn.Module:
     for lora_cls in _all_lora_classes:
         # specifying kwargs so they can be easily accessed in decorator
@@ -136,8 +136,8 @@ def parse_fine_tuned_lora_name(
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
-def is_regex_target_modules(load_modules: Union[str, List[str]],
-                            expected_lora_modules: List[str]) -> bool:
+def is_regex_target_modules(load_modules: Union[str, list[str]],
+                            expected_lora_modules: list[str]) -> bool:
     """
     PEFT supports passing `target_modules` in the form of regular expressions, 
     such as `model.*(q_proj|k_proj|v_proj)$`. This function is mainly used to 

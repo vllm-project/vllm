@@ -56,7 +56,6 @@ def test_offline_mode(monkeypatch):
         # NB: Assuming tests are run in online mode
         monkeypatch.delenv("HF_HUB_OFFLINE")
         _re_import_modules()
-        pass
 
 
 def _re_import_modules():

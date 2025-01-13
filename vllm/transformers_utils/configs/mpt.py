@@ -160,7 +160,6 @@ class MPTConfig(PretrainedConfig):
         if self.fc_type == 'te' or self.ffn_config['ffn_type'] == 'te_ln_mlp':
             try:
                 # pylint: disable=import-outside-toplevel
-                import transformer_engine.pytorch as te
                 del te
             except Exception as exc:
                 raise ImportError(

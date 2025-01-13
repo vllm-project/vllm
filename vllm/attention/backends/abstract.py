@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
-                    Tuple, Type, TypeVar)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Optional, Set, Tuple,
+                    Type, TypeVar)
 
 import torch
 
@@ -88,7 +88,7 @@ class AttentionBackend(ABC):
     @staticmethod
     @abstractmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
         raise NotImplementedError
@@ -129,14 +129,12 @@ class AttentionMetadata:
     def prefill_metadata(self) -> Optional["AttentionMetadata"]:
         """Return the attention metadata that's required to run prefill
         attention."""
-        pass
 
     @property
     @abstractmethod
     def decode_metadata(self) -> Optional["AttentionMetadata"]:
         """Return the attention metadata that's required to run decode
         attention."""
-        pass
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
@@ -213,7 +211,7 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
         raise NotImplementedError
 
     @abstractmethod
-    def build(self, seq_lens: List[int], query_lens: List[int],
+    def build(self, seq_lens: list[int], query_lens: list[int],
               cuda_graph_pad_size: int, batch_size: int) -> T:
         """Build attention metadata with on-device tensors."""
         raise NotImplementedError
@@ -228,7 +226,7 @@ class AttentionImpl(ABC, Generic[T]):
         head_size: int,
         scale: float,
         num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
+        alibi_slopes: Optional[list[float]] = None,
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,

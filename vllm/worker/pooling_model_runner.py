@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, Optional, Tuple, Type, Union
 
 import torch
 
@@ -46,10 +46,10 @@ class PoolingModelRunner(
     def execute_model(
         self,
         model_input: ModelInputForGPUWithPoolingMetadata,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> Optional[Union[List[PoolerOutput], IntermediateTensors]]:
+    ) -> Optional[Union[list[PoolerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError(
                 "PoolingModelRunner does not support multi-step execution.")
@@ -161,9 +161,9 @@ class PoolingModelRunner(
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: Optional[list[SequenceGroupMetadata]],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[list[str]] = None
     ) -> ModelInputForGPUWithPoolingMetadata:
         assert seq_group_metadata_list is not None
         model_input = self._prepare_model_input_tensors(
@@ -178,11 +178,11 @@ class PoolingModelRunner(
 
     def _prepare_pooling(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        prompt_lens: List[int],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
+        prompt_lens: list[int],
     ) -> PoolingMetadata:
         """Prepare PoolingMetadata for the sequence group metadata list."""
-        seq_groups: List[Tuple[List[int], PoolingParams]] = []
+        seq_groups: list[Tuple[list[int], PoolingParams]] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             seq_ids = list(seq_group_metadata.seq_data.keys())
             pooling_params = seq_group_metadata.pooling_params

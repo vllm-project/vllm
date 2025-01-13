@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import torch
 
@@ -41,14 +41,14 @@ def compute_meta(
 # TODO see if this can be vectorized
 def convert_mapping(
     mapping: "LoRAMapping",
-    lora_index_to_id: List[Optional[int]],
+    lora_index_to_id: list[Optional[int]],
     max_loras: int,
     vocab_size: int,
     extra_vocab_size: int,
     device: torch.device,
     long_lora_context: Optional["LongContextLoRAContext"] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-           Optional[torch.Tensor], List[int]]:
+           Optional[torch.Tensor], list[int]]:
     """Converts LoRAMapping to index tensors.
 
     Args:
@@ -82,7 +82,7 @@ def convert_mapping(
                 (base_indices, sampler_indices, sampler_indices_padded,
                 embeddings_indices, long_lora_indices).
     """
-    index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
+    index_mapping_indices: list[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
     long_lora_offsets: Optional[torch.Tensor] = None
@@ -90,7 +90,7 @@ def convert_mapping(
         long_lora_offsets = torch.zeros(len(index_mapping_indices),
                                         device=device,
                                         dtype=torch.long)
-    prompt_mapping: List[int] = [
+    prompt_mapping: list[int] = [
         lora_index_to_id.index(x) if x > 0 else -1
         for x in mapping.prompt_mapping
     ]
@@ -107,7 +107,7 @@ def convert_mapping(
                 index_mapping_indices[i], 0)
             long_lora_offsets[i] = lora_offset
 
-    indices_list: List[Union[List[int], torch.Tensor]] = [
+    indices_list: list[Union[list[int], torch.Tensor]] = [
         index_mapping_indices,
         lora_indices,
         embedding_indices,

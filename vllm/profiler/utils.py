@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Callable, Dict, List, Type, Union
+from typing import Callable, Dict, Type, Union
 
 from torch._C._profiler import _EventType, _ProfilerEvent, _TensorMetadata
 
@@ -35,7 +35,7 @@ class TablePrinter:
         self.column_widths = column_widths
         assert set(self.column_widths.keys()) == set(self.fieldnames)
 
-    def print_table(self, rows: List[dataclasses.dataclass]):
+    def print_table(self, rows: list[dataclasses.dataclass]):
         self._print_header()
         self._print_line()
         for row in rows:

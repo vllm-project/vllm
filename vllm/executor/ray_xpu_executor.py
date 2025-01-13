@@ -1,5 +1,5 @@
 import asyncio
-from typing import List, Optional
+from typing import Optional
 
 import ray
 
@@ -37,4 +37,4 @@ class RayXPUExecutorAsync(RayXPUExecutor, RayGPUExecutorAsync):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.driver_exec_method = make_async(self.driver_worker.execute_method)
-        self.pp_locks: Optional[List[asyncio.Lock]] = None
+        self.pp_locks: Optional[list[asyncio.Lock]] = None

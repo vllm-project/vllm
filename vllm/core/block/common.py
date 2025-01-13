@@ -1,6 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, List, Optional, Protocol, Tuple
+from typing import Deque, Dict, Iterable, Optional, Protocol, Tuple
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 
@@ -105,7 +105,7 @@ class CopyOnWriteTracker:
     """
 
     def __init__(self, refcounter: RefCounterProtocol):
-        self._copy_on_writes: List[Tuple[BlockId, BlockId]] = []
+        self._copy_on_writes: list[Tuple[BlockId, BlockId]] = []
         self._refcounter = refcounter
 
     def is_appendable(self, block: Block) -> bool:
@@ -132,7 +132,7 @@ class CopyOnWriteTracker:
         assert trg_block_id is not None
         self._copy_on_writes.append((src_block_id, trg_block_id))
 
-    def clear_cows(self) -> List[Tuple[BlockId, BlockId]]:
+    def clear_cows(self) -> list[Tuple[BlockId, BlockId]]:
         """Clears the copy-on-write tracking information and returns the current
         state.
 
@@ -141,7 +141,7 @@ class CopyOnWriteTracker:
         It then clears the internal tracking information.
 
         Returns:
-            List[Tuple[BlockId, BlockId]]: A list mapping source
+            list[Tuple[BlockId, BlockId]]: A list mapping source
                 block indices to destination block indices for the
                 current copy-on-write operations.
         """
@@ -200,7 +200,7 @@ class BlockPool:
 
     def init_block(self,
                    prev_block: Optional[Block],
-                   token_ids: List[int],
+                   token_ids: list[int],
                    block_size: int,
                    physical_block_id: Optional[int],
                    extra_hash: Optional[int] = None) -> Block:
@@ -232,9 +232,9 @@ class BlockList:
     list on every iteration of the block manager
     """
 
-    def __init__(self, blocks: List[Block]):
-        self._blocks: List[Block] = []
-        self._block_ids: List[int] = []
+    def __init__(self, blocks: list[Block]):
+        self._blocks: list[Block] = []
+        self._block_ids: list[int] = []
 
         self.update(blocks)
 
@@ -247,7 +247,7 @@ class BlockList:
         assert new_block_id is not None
         self._block_ids[block_index] = new_block_id
 
-    def update(self, blocks: List[Block]):
+    def update(self, blocks: list[Block]):
         self._blocks = blocks
 
         # Cache block ids for fast query
@@ -255,7 +255,7 @@ class BlockList:
         for block in self._blocks:
             self._add_block_id(block.block_id)
 
-    def append_token_ids(self, block_index: int, token_ids: List[int]) -> None:
+    def append_token_ids(self, block_index: int, token_ids: list[int]) -> None:
         block = self._blocks[block_index]
         prev_block_id = block.block_id
 
@@ -283,10 +283,10 @@ class BlockList:
         self._blocks = []
         self._block_ids = []
 
-    def list(self) -> List[Block]:
+    def list(self) -> list[Block]:
         return self._blocks
 
-    def ids(self) -> List[int]:
+    def ids(self) -> list[int]:
         return self._block_ids
 
 
@@ -342,7 +342,7 @@ class CacheMetricData:
         return (completed_block_hit + incompleted_block_hit) / total_blocks
 
 
-def get_all_blocks_recursively(last_block: Block) -> List[Block]:
+def get_all_blocks_recursively(last_block: Block) -> list[Block]:
     """Retrieves all the blocks in a sequence starting from the last block.
 
     This function recursively traverses the sequence of blocks in reverse order,
@@ -353,15 +353,15 @@ def get_all_blocks_recursively(last_block: Block) -> List[Block]:
         last_block (Block): The last block in the sequence.
 
     Returns:
-        List[Block]: A list of all the blocks in the sequence, in the order they
+        list[Block]: A list of all the blocks in the sequence, in the order they
             appear.
     """
 
-    def recurse(block: Block, lst: List[Block]) -> None:
+    def recurse(block: Block, lst: list[Block]) -> None:
         if block.prev_block is not None:
             recurse(block.prev_block, lst)
         lst.append(block)
 
-    all_blocks: List[Block] = []
+    all_blocks: list[Block] = []
     recurse(last_block, all_blocks)
     return all_blocks

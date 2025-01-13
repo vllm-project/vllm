@@ -1,5 +1,5 @@
 """This file is used for /tests and /benchmarks"""
-from typing import List, Optional
+from typing import Optional
 
 import numpy
 import torch
@@ -13,7 +13,7 @@ SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 
 # Note: this is a hack. We should update each model to register the
 # stacked params and get it from there instead in a future PR.
-# fused_name: List[shard_name]
+# fused_name: list[shard_name]
 FUSED_LAYER_NAME_MAPPING = {
     "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     "gate_up_proj": ["gate_proj", "up_proj"]
@@ -63,7 +63,7 @@ def unpack_quantized_values_into_int32(w_q: torch.Tensor,
     return res.permute(inv_perm)
 
 
-def is_layer_skipped(prefix: str, ignored_layers: List[str]) -> bool:
+def is_layer_skipped(prefix: str, ignored_layers: list[str]) -> bool:
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
     proj_name = prefix.split(".")[-1]

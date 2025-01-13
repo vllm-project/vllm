@@ -1,7 +1,7 @@
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Mapping, Optional, Union, overload
+from typing import Mapping, Optional, Union, overload
 
 from typing_extensions import deprecated
 
@@ -136,7 +136,7 @@ class RPCAdapterLoadedResponse:
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
                       RPCUProfileRequest, RPCLoadAdapterRequest]
 
-REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
+REQUEST_OUTPUTS_T = Union[list[RequestOutput], RPCAdapterLoadedResponse,
                           RPCError]
 
 

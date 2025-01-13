@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Type, overload
+from typing import Optional, Tuple, Type, overload
 
 import pytest
 from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
@@ -34,7 +34,7 @@ models = [
 ]
 
 
-def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+def vllm_to_hf_output(vllm_output: Tuple[list[int], str,
                                          Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
@@ -61,9 +61,9 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 def _get_inputs(
     image_assets: _ImageAssets,
     *,
-    size_factors: Optional[List[float]] = None,
-    sizes: Optional[List[Tuple[int, int]]] = None,
-) -> List[Tuple[List[str], PromptImageInput]]:
+    size_factors: Optional[list[float]] = None,
+    sizes: Optional[list[Tuple[int, int]]] = None,
+) -> list[Tuple[list[str], PromptImageInput]]:
     images = [asset.pil_image for asset in image_assets]
 
     if size_factors is not None:
@@ -98,7 +98,7 @@ def run_test(
     image_assets: _ImageAssets,
     model: str,
     *,
-    size_factors: List[float],
+    size_factors: list[float],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -115,7 +115,7 @@ def run_test(
     image_assets: _ImageAssets,
     model: str,
     *,
-    sizes: List[Tuple[int, int]],
+    sizes: list[Tuple[int, int]],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -131,8 +131,8 @@ def run_test(
     image_assets: _ImageAssets,
     model: str,
     *,
-    size_factors: Optional[List[float]] = None,
-    sizes: Optional[List[Tuple[int, int]]] = None,
+    size_factors: Optional[list[float]] = None,
+    sizes: Optional[list[Tuple[int, int]]] = None,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -155,7 +155,7 @@ def run_test(
 def _run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    inputs: List[Tuple[List[str], PromptImageInput]],
+    inputs: list[Tuple[list[str], PromptImageInput]],
     model: str,
     *,
     dtype: str,

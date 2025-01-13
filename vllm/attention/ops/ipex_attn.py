@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 try:
     import intel_extension_for_pytorch.llm.modules as ipex_modules
@@ -14,7 +14,7 @@ from vllm import _custom_ops as ops
 class _PagedAttention:
 
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
+    def get_supported_head_sizes() -> list[int]:
         return [32, 64, 80, 96, 112, 128, 256]
 
     @staticmethod
@@ -115,8 +115,8 @@ class _PagedAttention:
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        kv_caches: list[torch.Tensor],
+        src_to_dists: Dict[int, list[int]],
         *args,
     ) -> None:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]

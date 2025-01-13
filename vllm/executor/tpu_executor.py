@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 import torch
 
@@ -90,7 +90,7 @@ class TPUExecutor(ExecutorBase):
     def execute_model(
         self,
         execute_model_req: ExecuteModelRequest,
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         output = self.driver_worker.execute_model(execute_model_req)
         return output
 

@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict
 
 import openai
 import pytest
@@ -253,7 +253,7 @@ async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
         temperature=0.0,
         stream=True,
     )
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         delta = chunk.choices[0].delta
@@ -313,7 +313,7 @@ async def test_chat_streaming_input_audio(client: openai.AsyncOpenAI,
         temperature=0.0,
         stream=True,
     )
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         delta = chunk.choices[0].delta

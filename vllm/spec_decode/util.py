@@ -1,6 +1,6 @@
 import time
 from contextlib import contextmanager
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import torch
 
@@ -14,14 +14,14 @@ SeqId = int
 
 
 def get_all_num_logprobs(
-        seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[int]:
+        seq_group_metadata_list: list[SequenceGroupMetadata]) -> list[int]:
     """Given a list of SequenceGroupMetadata, create a list of all num_logprobs.
 
     If the sampling params do not call for any logprobs, return 0 for that
     sequence.
     """
 
-    all_num_logprobs: List[int] = []
+    all_num_logprobs: list[int] = []
     for seq_group_metadata in seq_group_metadata_list:
         num_logprobs = seq_group_metadata.sampling_params.logprobs
         if num_logprobs is None:
@@ -55,8 +55,8 @@ def create_logprobs_output(
     token_id: int,
     token_id_logprob_rank: int,
     token_id_logprob: float,
-    topk_token_ids: List[Optional[int]],
-    topk_logprobs: List[Optional[float]],
+    topk_token_ids: list[Optional[int]],
+    topk_logprobs: list[Optional[float]],
 ) -> Dict[int, Logprob]:
     """Create a Logprob Dict for a token given the sampling results.
 
@@ -64,8 +64,8 @@ def create_logprobs_output(
         token_id (int): The sampled token for the sequence.
         token_id_logprob_rank (int): The logprob rank of the sampled token.
         token_id_logprob (float): The logprob value of the sampled token.
-        topk_token_ids (List[Optional[int]]): The list of top-k token ids.
-        topk_logprobs (List[Optional[float]]): The list of top-k logprobs.
+        topk_token_ids (list[Optional[int]]): The list of top-k token ids.
+        topk_logprobs (list[Optional[float]]): The list of top-k logprobs.
     """
     # vLLM logprobs always include the sampled token. In addition, the user may
     # request topk-logprobs (where top-k varies per user up to max_logprobs).
@@ -93,8 +93,8 @@ def create_sequence_group_output(
     token_id_logprob_rank: int,
     token_id_logprob: float,
     seq_id: SeqId,
-    topk_token_ids: List[Optional[int]],
-    topk_logprobs: List[Optional[float]],
+    topk_token_ids: list[Optional[int]],
+    topk_logprobs: list[Optional[float]],
     prompt_logprobs: Optional[PromptLogprobs] = None,
 ) -> CompletionSequenceGroupOutput:
     """Create a SequenceGroupOutput given the sampling results.
@@ -104,8 +104,8 @@ def create_sequence_group_output(
         token_id_logprob_rank (int): The logprob rank of the sampled token.
         token_id_logprob (float): The logprob value of the sampled token.
         seq_id (int): The sequence id.
-        topk_token_ids (List[Optional[int]]): The list of top-k token ids.
-        topk_logprobs (List[Optional[float]]): The list of top-k logprobs.
+        topk_token_ids (list[Optional[int]]): The list of top-k token ids.
+        topk_logprobs (list[Optional[float]]): The list of top-k logprobs.
     """
 
     logprobs = create_logprobs_output(
@@ -127,17 +127,17 @@ def create_sequence_group_output(
 
 
 def split_batch_by_proposal_len(
-    seq_group_metadata_list: List[SequenceGroupMetadata],
-    proposal_lens: List[int],
-) -> Tuple[Tuple[List[SequenceGroupMetadata], List[int]], Tuple[
-        List[SequenceGroupMetadata], List[int]]]:
+    seq_group_metadata_list: list[SequenceGroupMetadata],
+    proposal_lens: list[int],
+) -> Tuple[Tuple[list[SequenceGroupMetadata], list[int]], Tuple[
+        list[SequenceGroupMetadata], list[int]]]:
     """Utility function that splits a batch based on whether the proposal len is
     zero or not. We should remove this once vLLM supports per-sequence proposal
     lens in a batch.
     """
 
-    nonzero_lists: Tuple[List[SequenceGroupMetadata], List[int]] = ([], [])
-    zero_lists: Tuple[List[SequenceGroupMetadata], List[int]] = ([], [])
+    nonzero_lists: Tuple[list[SequenceGroupMetadata], list[int]] = ([], [])
+    zero_lists: Tuple[list[SequenceGroupMetadata], list[int]] = ([], [])
     for i, (seq_group, proposal_len) in enumerate(
             zip(seq_group_metadata_list, proposal_lens)):
         seq_groups, indices = nonzero_lists if proposal_len else zero_lists

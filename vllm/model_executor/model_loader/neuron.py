@@ -2,7 +2,7 @@
 import copy
 import importlib
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -123,7 +123,7 @@ def _get_model_architecture(config: PretrainedConfig) -> str:
         f"{list(_NEURON_SUPPORTED_MODELS.keys())}")
 
 
-def _get_buckets(env: str, default_value: List[int]) -> List[int]:
+def _get_buckets(env: str, default_value: list[int]) -> list[int]:
     env_value = os.getenv(env)
     if env_value is None:
         return default_value

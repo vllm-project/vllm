@@ -1,6 +1,6 @@
 import tempfile
 from collections import OrderedDict
-from typing import Dict, List, TypedDict
+from typing import Dict, TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -34,7 +34,7 @@ class ContextInfo(TypedDict):
     context_length: str
 
 
-LONG_LORA_INFOS: List[ContextIDInfo] = [{
+LONG_LORA_INFOS: list[ContextIDInfo] = [{
     "lora_id": 1,
     "context_length": "16k",
 }, {

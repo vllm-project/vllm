@@ -1,7 +1,7 @@
 import itertools
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 from unittest.mock import Mock, patch
 
 import pytest
@@ -51,8 +51,8 @@ def _do_sample(
     sampling_params: SamplingParams,
     device: str,
 ):
-    seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    seq_lens: List[int] = []
+    seq_group_metadata_list: list[SequenceGroupMetadata] = []
+    seq_lens: list[int] = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -169,7 +169,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
     def create_sampling_params(min_tokens,
                                eos_token_id=0,
                                *,
-                               stop_token_ids: Optional[List[int]] = None,
+                               stop_token_ids: Optional[list[int]] = None,
                                prompt_logprobs: Optional[int] = None):
         sampling_params = SamplingParams(
             min_tokens=min_tokens,
@@ -194,7 +194,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         batch_size = random.randint(1, 128)
 
         expected_penalization = []
-        sequence_metadata_list: List[SequenceGroupMetadata] = []
+        sequence_metadata_list: list[SequenceGroupMetadata] = []
         # 20% chance to generate seq group metadata list with all prompts
         is_prompt = random.random() < 0.2
         while batch_size > 0:
@@ -215,7 +215,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 stop_token_ids=stop_token_ids)
 
             seq_data: Dict[int, SequenceData] = {}
-            seq_group_penalization: List[bool] = []
+            seq_group_penalization: list[bool] = []
             for _ in range(num_seqs):
                 num_input = random.randint(1, 100)
                 num_generated = 0 if is_prompt else random.randint(1, 100)
@@ -374,16 +374,16 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
     else:
         test_cases = [generate_test_case()]
 
-    def run_test_case(*, expected_penalization: List[bool],
-                      seq_group_metadata_list: List[SequenceGroupMetadata]):
+    def run_test_case(*, expected_penalization: list[bool],
+                      seq_group_metadata_list: list[SequenceGroupMetadata]):
         assert expected_penalization, \
             "Invalid test case, need expected_penalization"
         assert seq_group_metadata_list, \
             "Invalid test case, need seq_group_metadata_list"
 
         batch_size = 0
-        seq_lens: List[int] = []
-        sampling_params_per_row: List[SamplingParams] = []
+        seq_lens: list[int] = []
+        sampling_params_per_row: list[SamplingParams] = []
         for sgm in seq_group_metadata_list:
             sampling_params = sgm.sampling_params
 
@@ -454,11 +454,11 @@ def test_sampler_mixed(seed: int, device: str):
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler = _prepare_test(batch_size)
 
-    seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    expected_tokens: List[Optional[List[int]]] = []
-    seq_lens: List[int] = []
+    seq_group_metadata_list: list[SequenceGroupMetadata] = []
+    expected_tokens: list[Optional[list[int]]] = []
+    seq_lens: list[int] = []
     for i in range(batch_size):
-        expected: Optional[List[int]] = None
+        expected: Optional[list[int]] = None
         sampling_type = random.randint(0, 2)
         if sampling_type == 0:
             sampling_params = SamplingParams(temperature=0)
@@ -585,8 +585,8 @@ def test_sampler_top_k_top_p(seed: int, device: str):
                                                         device=device)
     assert len(processors) == 2  # top_p and top_k
 
-    seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    seq_lens: List[int] = []
+    seq_group_metadata_list: list[SequenceGroupMetadata] = []
+    seq_lens: list[int] = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -667,10 +667,10 @@ def test_sampler_repetition_penalty_mixed(device: str):
 
     vocab_size = 8
 
-    def test_sampling_params(sampling_params: List[SamplingParams]):
+    def test_sampling_params(sampling_params: list[SamplingParams]):
 
-        seq_group_metadata_list: List[SequenceGroupMetadata] = []
-        seq_lens: List[int] = []
+        seq_group_metadata_list: list[SequenceGroupMetadata] = []
+        seq_lens: list[int] = []
         for i in range(2):
             seq_group_metadata_list.append(
                 SequenceGroupMetadata(

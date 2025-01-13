@@ -1,5 +1,5 @@
 """An OpenVINO worker class."""
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import openvino as ov
 import torch
@@ -78,13 +78,13 @@ class OpenVINOCacheEngine:
         )
 
         # Initialize the cache.
-        self.kv_cache: List[Tuple[ov.Tensor,
+        self.kv_cache: list[Tuple[ov.Tensor,
                                   ov.Tensor]] = self._allocate_kv_cache(
                                       self.num_device_blocks, ov_core,
                                       ov_device)
 
         # Initialize the swap.
-        self.swap_cache: List[Tuple[ov.Tensor,
+        self.swap_cache: list[Tuple[ov.Tensor,
                                     ov.Tensor]] = self._allocate_swap_cache(
                                         self.num_swap_blocks, ov_device)
 
@@ -93,11 +93,11 @@ class OpenVINOCacheEngine:
         num_blocks: int,
         ov_core: ov.Core,
         ov_device: str,
-    ) -> List[Tuple[ov.Tensor, ov.Tensor]]:
+    ) -> list[Tuple[ov.Tensor, ov.Tensor]]:
         """Allocates KV cache."""
         k_block_shape = v_block_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)[1:]
-        kv_cache: List[Tuple[ov.Tensor, ov.Tensor]] = []
+        kv_cache: list[Tuple[ov.Tensor, ov.Tensor]] = []
 
         if current_platform.is_openvino_cpu():
             for _ in range(self.num_layers):
@@ -132,11 +132,11 @@ class OpenVINOCacheEngine:
         self,
         num_blocks: int,
         ov_device: str,
-    ) -> List[Tuple[ov.Tensor, ov.Tensor]]:
+    ) -> list[Tuple[ov.Tensor, ov.Tensor]]:
         """Allocates swap cache."""
         k_block_shape = v_block_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)[1:]
-        swap_cache: List[Tuple[ov.Tensor, ov.Tensor]] = []
+        swap_cache: list[Tuple[ov.Tensor, ov.Tensor]] = []
 
         if num_blocks == 0:
             return swap_cache
@@ -157,21 +157,21 @@ class OpenVINOCacheEngine:
 
         return swap_cache
 
-    def swap_in(self, src_to_dst: List[Tuple[int, int]]) -> None:
+    def swap_in(self, src_to_dst: list[Tuple[int, int]]) -> None:
         for i in range(self.num_layers):
             for swap_tensor, kv_tensor in zip(self.swap_cache[i],
                                               self.kv_cache[i]):
                 self.attn_backend.swap_blocks(swap_tensor, kv_tensor,
                                               src_to_dst)
 
-    def swap_out(self, src_to_dst: List[Tuple[int, int]]) -> None:
+    def swap_out(self, src_to_dst: list[Tuple[int, int]]) -> None:
         for i in range(self.num_layers):
             for swap_tensor, kv_tensor in zip(self.swap_cache[i],
                                               self.kv_cache[i]):
                 self.attn_backend.swap_blocks(kv_tensor, swap_tensor,
                                               src_to_dst)
 
-    def copy(self, src_to_dsts: List[Tuple[int, int]]) -> None:
+    def copy(self, src_to_dsts: list[Tuple[int, int]]) -> None:
         if (len(src_to_dsts) > 0):
             self.attn_backend.copy_blocks(self.kv_cache, src_to_dsts)
 
@@ -243,7 +243,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: OpenVINOCacheEngine
-        self.kv_cache: List[Tuple[ov.Tensor, ov.Tensor]]
+        self.kv_cache: list[Tuple[ov.Tensor, ov.Tensor]]
 
     def init_device(self) -> None:
         self.init_distributed_environment()
@@ -352,15 +352,15 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
                 key_cache.data[:] = 0
                 value_cache.data[:] = 0
 
-    def cache_swap_in(self, src_to_dst: List[Tuple[int, int]]) -> None:
+    def cache_swap_in(self, src_to_dst: list[Tuple[int, int]]) -> None:
         self.cache_engine.swap_in(src_to_dst)
 
-    def cache_swap_out(self, src_to_dst: List[Tuple[int, int]]) -> None:
+    def cache_swap_out(self, src_to_dst: list[Tuple[int, int]]) -> None:
         self.cache_engine.swap_out(src_to_dst)
 
     def cache_copy(
         self,
-        blocks_to_copy: List[Tuple[int, int]],
+        blocks_to_copy: list[Tuple[int, int]],
     ) -> None:
         self.cache_engine.copy(blocks_to_copy)  # type: ignore
 
@@ -368,7 +368,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         if execute_model_req is None:
             seq_group_metadata_list = None
         else:
@@ -485,7 +485,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
 
             # Profile memory usage with max_num_sequences sequences and the
             # total # number of tokens equal to max_num_batched_tokens.
-            seqs: List[SequenceGroupMetadata] = []
+            seqs: list[SequenceGroupMetadata] = []
             for group_id in range(max_num_seqs):
                 seq_len = (max_num_batched_tokens // max_num_seqs +
                            (group_id < max_num_batched_tokens % max_num_seqs))

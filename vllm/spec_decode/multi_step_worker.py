@@ -1,6 +1,6 @@
 import copy
 import weakref
-from typing import Dict, List, Set, Tuple
+from typing import Dict, Set, Tuple
 
 import torch
 
@@ -65,7 +65,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
     def initialize_cache(self, *args, **kwargs) -> None:
         self.worker.initialize_cache(*args, **kwargs)
 
-    def execute_model(self, *args, **kwargs) -> List[SamplerOutput]:
+    def execute_model(self, *args, **kwargs) -> list[SamplerOutput]:
         return self.worker.execute_model(*args, **kwargs)
 
     @torch.inference_mode()
@@ -74,7 +74,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
         seq_ids_with_bonus_token_in_last_step: Set[int],
-    ) -> Tuple[List[SamplerOutput], bool]:
+    ) -> Tuple[list[SamplerOutput], bool]:
         """Run the model forward pass sample_len times. Returns the list of
         sampler output, one per model forward pass, along with indicator of
         whether torch tensor in sampler output need to be transposed in latter
@@ -91,7 +91,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
                 execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
         # Run model sample_len times.
-        model_outputs: List[SamplerOutput] = []
+        model_outputs: list[SamplerOutput] = []
         if current_platform.is_cuda_alike() and isinstance(
                 self.model_runner, TP1DraftModelRunner
         ) and self.model_runner.supports_gpu_multi_step(expanded_request):
@@ -109,7 +109,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
             # and other restrictions that are part of DraftModelRunner's
             # supports_gpu_multi_step(..)
             for _ in range(sample_len):
-                model_output: List[SamplerOutput] = self.worker.execute_model(
+                model_output: list[SamplerOutput] = self.worker.execute_model(
                     execute_model_req=expanded_request)
                 assert (len(model_output) == 1
                         ), "composing multistep workers not supported"
@@ -131,7 +131,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
     def _expand_execute_model_request(
         execute_model_req: ExecuteModelRequest,
         seq_with_bonus_token_in_last_step: set,
-    ) -> Tuple[ExecuteModelRequest, List[int]]:
+    ) -> Tuple[ExecuteModelRequest, list[int]]:
         """
         Expands the execute model request based on sequences with bonus
         tokens.
@@ -148,11 +148,11 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
             contain bonus tokens.
 
         Returns:
-            Tuple[ExecuteModelRequest, List[int]]: The updated execute model
+            Tuple[ExecuteModelRequest, list[int]]: The updated execute model
             request with expanded sequences and a list of indices corresponding
             to the original sequence groups.
         """
-        updated_seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        updated_seq_group_metadata_list: list[SequenceGroupMetadata] = []
         updated_execute_model_req = execute_model_req.clone(
             updated_seq_group_metadata_list)
         indices_of_original_sequence_groups = []
@@ -191,8 +191,8 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
 
     @staticmethod
     def _filter_model_output(
-            expanded_batch_outputs: List[SamplerOutput],
-            output_indices_to_retain: torch.Tensor) -> List[SamplerOutput]:
+            expanded_batch_outputs: list[SamplerOutput],
+            output_indices_to_retain: torch.Tensor) -> list[SamplerOutput]:
         """
         Filters the model output to include only the specified sequence
         outputs. This method contracts the expanded batch output from the
@@ -200,13 +200,13 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
         provided indices.
 
         Args:
-            expanded_batch_output (List[SamplerOutput]): The expanded output
+            expanded_batch_output (list[SamplerOutput]): The expanded output
                 batch from the model.
             output_indices_to_retain (torch.Tensor): Indices of the model
                 outputs to retain.
 
         Returns:
-            List[SamplerOutput]: A list containing the filtered model 
+            list[SamplerOutput]: A list containing the filtered model 
             outputs for the specified indices.
         """
         return [
@@ -243,9 +243,9 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
 
     @staticmethod
     def _append_new_tokens(
-            model_output: List[SamplerOutput],
-            seq_group_metadata_list: List[SequenceGroupMetadata],
-            indices_of_seq_with_bonus_tokens: List[int]) -> None:
+            model_output: list[SamplerOutput],
+            seq_group_metadata_list: list[SequenceGroupMetadata],
+            indices_of_seq_with_bonus_tokens: list[int]) -> None:
         """Given model output from a single run, append the tokens to the
         sequences. This is normally done outside of the worker, but it is
         required if the worker is to perform multiple forward passes.
@@ -344,7 +344,7 @@ class MultiStepWorker(ProposerWorkerBase, WorkerWrapperBase):
         return new_seq_group_metadata
 
     def _assert_enough_kv_space(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
+            self, seq_group_metadata_list: list[SequenceGroupMetadata],
             num_steps: int) -> None:
         """Assert there are enough physical blocks per sequence to store the
         current KV plus additional KV from num_steps tokens.

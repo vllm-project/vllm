@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from typing import (TYPE_CHECKING, Callable, ClassVar, Deque, Dict, Iterable,
-                    List, Mapping, NamedTuple, Optional)
+                    Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
@@ -71,15 +71,15 @@ _O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
 @dataclass
 class SchedulerOutputState:
     """Caches the scheduler outputs for a virtual engine. Used for Multi-Step"""
-    seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
+    seq_group_metadata_list: Optional[list[SequenceGroupMetadata]] = None
     scheduler_outputs: Optional[SchedulerOutputs] = None
     allow_async_output_proc: bool = False
     last_output: Optional[SamplerOutput] = None
 
 
 class OutputData(NamedTuple):
-    outputs: List[SamplerOutput]
-    seq_group_metadata_list: List[SequenceGroupMetadata]
+    outputs: list[SamplerOutput]
+    seq_group_metadata_list: list[SequenceGroupMetadata]
     scheduler_outputs: SchedulerOutputs
     is_async: bool
     is_last_step: bool
@@ -89,23 +89,23 @@ class OutputData(NamedTuple):
     # is_first_step_output is invalid when `outputs` has
     # outputs from multiple steps.
     is_first_step_output: Optional[bool]
-    skip: List[int]
+    skip: list[int]
 
 
 class SchedulerContext:
 
     def __init__(self, multi_step_stream_outputs: bool = False):
         self.output_queue: Deque[OutputData] = deque()
-        self.request_outputs: List[Union[RequestOutput,
+        self.request_outputs: list[Union[RequestOutput,
                                          PoolingRequestOutput]] = []
         self.seq_group_metadata_list: Optional[
-            List[SequenceGroupMetadata]] = None
+            list[SequenceGroupMetadata]] = None
         self.scheduler_outputs: Optional[SchedulerOutputs] = None
 
         self.multi_step_stream_outputs: bool = multi_step_stream_outputs
 
-    def append_output(self, outputs: List[SamplerOutput],
-                      seq_group_metadata_list: List[SequenceGroupMetadata],
+    def append_output(self, outputs: list[SamplerOutput],
+                      seq_group_metadata_list: list[SequenceGroupMetadata],
                       scheduler_outputs: SchedulerOutputs, is_async: bool,
                       is_last_step: bool,
                       is_first_step_output: Optional[bool]):
@@ -185,10 +185,10 @@ class LLMEngine:
         cls,
         outputs: GenericSequence[object],
         output_type: Type[_O],
-    ) -> List[_O]:
+    ) -> list[_O]:
         do_validate = cls.DO_VALIDATE_OUTPUT
 
-        outputs_: List[_O]
+        outputs_: list[_O]
         if TYPE_CHECKING or do_validate:
             outputs_ = []
             for output in outputs:
@@ -950,7 +950,7 @@ class LLMEngine:
     @staticmethod
     def _process_sequence_group_outputs(
         seq_group: SequenceGroup,
-        outputs: List[PoolingSequenceGroupOutput],
+        outputs: list[PoolingSequenceGroupOutput],
     ) -> None:
         seq_group.pooled_data = outputs[0].data
 
@@ -1029,7 +1029,7 @@ class LLMEngine:
             scheduler_outputs.scheduled_seq_groups)
 
         has_multiple_outputs: bool = len(outputs) > 1
-        outputs_by_sequence_group: List[List[SequenceGroupOutput]]
+        outputs_by_sequence_group: list[list[SequenceGroupOutput]]
         if has_multiple_outputs:
             assert self.scheduler_config.is_multi_step or \
                      self.speculative_config
@@ -1060,8 +1060,8 @@ class LLMEngine:
         else:
             indices = range(len(seq_group_metadata_list))  # type: ignore
 
-        finished_before: List[int] = []
-        finished_now: List[int] = []
+        finished_before: list[int] = []
+        finished_now: list[int] = []
         for i in indices:
             if i in skip:
                 continue
@@ -1075,7 +1075,7 @@ class LLMEngine:
                 finished_before.append(i)
                 continue
 
-            output: List[SequenceGroupOutput]
+            output: list[SequenceGroupOutput]
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
             else:
@@ -1219,9 +1219,9 @@ class LLMEngine:
         return None
 
     def _advance_to_next_step(
-            self, output: List[SamplerOutput],
-            seq_group_metadata_list: List[SequenceGroupMetadata],
-            scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
+            self, output: list[SamplerOutput],
+            seq_group_metadata_list: list[SequenceGroupMetadata],
+            scheduled_seq_groups: list[ScheduledSequenceGroup]) -> None:
         """Given model output from a single run, append the tokens to the
         sequences. This is normally done inside output processor, but it is
         required if the worker is to perform async forward pass to next step.
@@ -1262,7 +1262,7 @@ class LLMEngine:
                 else:
                     seq.append_token_id(sample.output_token, sample.logprobs)
 
-    def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
+    def step(self) -> list[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png
@@ -1468,7 +1468,7 @@ class LLMEngine:
         return ctx.request_outputs
 
     def _has_remaining_steps(
-        self, seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
+        self, seq_group_metadata_list: Optional[list[SequenceGroupMetadata]]
     ) -> bool:
         if (not self.scheduler_config.is_multi_step
                 or not seq_group_metadata_list):
@@ -1489,7 +1489,7 @@ class LLMEngine:
 
     def _cache_scheduler_outputs_for_multi_step(
             self, virtual_engine: int,
-            seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+            seq_group_metadata_list: Optional[list[SequenceGroupMetadata]],
             scheduler_outputs: SchedulerOutputs,
             allow_async_output_proc: bool) -> None:
         co = self.cached_scheduler_outputs[virtual_engine]
@@ -1501,7 +1501,7 @@ class LLMEngine:
 
     def _update_cached_scheduler_output(
             self, virtual_engine: int,
-            output: List[Optional[SamplerOutput]]) -> None:
+            output: list[Optional[SamplerOutput]]) -> None:
         if (self.parallel_config.pipeline_parallel_size > 1 and len(output) > 0
                 and output[0] is not None):
             last_output = output[-1]
@@ -1543,9 +1543,9 @@ class LLMEngine:
 
     def do_log_stats(self,
                      scheduler_outputs: Optional[SchedulerOutputs] = None,
-                     model_output: Optional[List[SamplerOutput]] = None,
-                     finished_before: Optional[List[int]] = None,
-                     skip: Optional[List[int]] = None) -> None:
+                     model_output: Optional[list[SamplerOutput]] = None,
+                     finished_before: Optional[list[int]] = None,
+                     skip: Optional[list[int]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
             stats = self._get_stats(scheduler_outputs, model_output,
@@ -1555,9 +1555,9 @@ class LLMEngine:
 
     def _get_stats(self,
                    scheduler_outputs: Optional[SchedulerOutputs],
-                   model_output: Optional[List[SamplerOutput]] = None,
-                   finished_before: Optional[List[int]] = None,
-                   skip: Optional[List[int]] = None) -> Stats:
+                   model_output: Optional[list[SamplerOutput]] = None,
+                   finished_before: Optional[list[int]] = None,
+                   skip: Optional[list[int]] = None) -> Stats:
         """Get Stats to be Logged to Prometheus.
 
         Args:
@@ -1609,28 +1609,28 @@ class LLMEngine:
         num_prompt_tokens_iter = 0
         num_generation_tokens_iter = 0
         num_tokens_iter = 0
-        time_to_first_tokens_iter: List[float] = []
-        time_per_output_tokens_iter: List[float] = []
+        time_to_first_tokens_iter: list[float] = []
+        time_per_output_tokens_iter: list[float] = []
         num_preemption_iter = (0 if scheduler_outputs is None else
                                scheduler_outputs.preempted)
 
         # Request stats
         #   Latency
-        time_e2e_requests: List[float] = []
-        time_queue_requests: List[float] = []
-        time_inference_requests: List[float] = []
-        time_prefill_requests: List[float] = []
-        time_decode_requests: List[float] = []
-        time_in_queue_requests: List[float] = []
-        model_forward_time_requests: List[float] = []
-        model_execute_time_requests: List[float] = []
+        time_e2e_requests: list[float] = []
+        time_queue_requests: list[float] = []
+        time_inference_requests: list[float] = []
+        time_prefill_requests: list[float] = []
+        time_decode_requests: list[float] = []
+        time_in_queue_requests: list[float] = []
+        model_forward_time_requests: list[float] = []
+        model_execute_time_requests: list[float] = []
         #   Metadata
-        num_prompt_tokens_requests: List[int] = []
-        num_generation_tokens_requests: List[int] = []
-        n_requests: List[int] = []
-        max_num_generation_tokens_requests: List[int] = []
-        max_tokens_requests: List[int] = []
-        finished_reason_requests: List[str] = []
+        num_prompt_tokens_requests: list[int] = []
+        num_generation_tokens_requests: list[int] = []
+        n_requests: list[int] = []
+        max_num_generation_tokens_requests: list[int] = []
+        max_tokens_requests: list[int] = []
+        finished_reason_requests: list[str] = []
 
         # Lora requests
         running_lora_adapters = dict(
@@ -1842,7 +1842,7 @@ class LLMEngine:
     def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
         return self.model_executor.remove_prompt_adapter(prompt_adapter_id)
 
-    def list_prompt_adapters(self) -> List[int]:
+    def list_prompt_adapters(self) -> list[int]:
         return self.model_executor.list_prompt_adapters()
 
     def check_health(self) -> None:
@@ -1871,7 +1871,7 @@ class LLMEngine:
 
     def do_tracing(self,
                    scheduler_outputs: SchedulerOutputs,
-                   finished_before: Optional[List[int]] = None) -> None:
+                   finished_before: Optional[list[int]] = None) -> None:
         if self.tracer is None:
             return
 

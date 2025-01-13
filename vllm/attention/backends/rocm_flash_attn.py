@@ -1,6 +1,6 @@
 """Attention layer ROCm GPUs."""
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Type
 
 import torch
 
@@ -69,7 +69,7 @@ class ROCmFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
@@ -86,7 +86,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     """
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
-    seq_lens: Optional[List[int]]
+    seq_lens: Optional[list[int]]
     # seq_lens stored as a tensor.
     seq_lens_tensor: Optional[torch.Tensor]
 
@@ -272,8 +272,8 @@ class ROCmFlashAttentionMetadataBuilder(
 
 def _make_alibi_bias(alibi_slopes: torch.Tensor,
                      dtype: torch.dtype,
-                     seq_lens: Optional[List[int]],
-                     make_attn_mask: bool = True) -> List[torch.Tensor]:
+                     seq_lens: Optional[list[int]],
+                     make_attn_mask: bool = True) -> list[torch.Tensor]:
     attn_biases = []
     if seq_lens:
         for seq_len in seq_lens:
@@ -333,7 +333,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
@@ -640,12 +640,12 @@ def _sdpa_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    seq_lens: List[int],
+    seq_lens: list[int],
     num_tokens: int,
     num_heads: int,
     head_size: int,
     scale: float,
-    attn_masks: Optional[List[torch.Tensor]] = None,
+    attn_masks: Optional[list[torch.Tensor]] = None,
 ) -> torch.Tensor:
     start = 0
     output = torch.empty((num_tokens, num_heads, head_size),

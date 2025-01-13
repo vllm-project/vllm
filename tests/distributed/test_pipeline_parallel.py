@@ -7,7 +7,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 """
 import os
 from dataclasses import dataclass
-from typing import List, Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple, Optional
 
 import pytest
 
@@ -38,8 +38,8 @@ class PPTestOptions(NamedTuple):
 
 @dataclass
 class PPTestSettings:
-    parallel_setups: List[ParallelSetup]
-    distributed_backends: List[str]
+    parallel_setups: list[ParallelSetup]
+    distributed_backends: list[str]
     task: TaskOption
     test_options: PPTestOptions
 

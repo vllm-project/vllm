@@ -1,8 +1,8 @@
 """Types for writing multimodal model tests."""
 from enum import Enum
 from pathlib import PosixPath
-from typing import (Any, Callable, Dict, Iterable, List, NamedTuple, Optional,
-                    Tuple, Type, Union)
+from typing import (Any, Callable, Dict, Iterable, NamedTuple, Optional, Tuple,
+                    Type, Union)
 
 import torch
 from PIL.Image import Image
@@ -34,7 +34,7 @@ VIDEO_BASE_PROMPT = f"{TEST_VIDEO_PLACEHOLDER}Why is this video funny?"
 
 IMAGE_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0)]
 EMBEDDING_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0)]
-RunnerOutput = Tuple[List[int], str, Optional[SampleLogprobs]]
+RunnerOutput = Tuple[list[int], str, Optional[SampleLogprobs]]
 # yapf: enable
 
 
@@ -52,7 +52,7 @@ class SizeType(Enum):
 
 
 class CustomTestOptions(NamedTuple):
-    inputs: List[Tuple[List[str], List[Union[List[Image], Image]]]]
+    inputs: list[Tuple[list[str], list[Union[list[Image], Image]]]]
     limit_mm_per_prompt: Dict[str, int]
     # kwarg to pass multimodal data in as to vllm/hf runner instances.
     runner_mm_key: str = "images"
@@ -68,7 +68,7 @@ class ImageSizeWrapper(NamedTuple):
 class VLMTestInfo(NamedTuple):
     """Holds the configuration for 1+ tests for one model architecture."""
 
-    models: List[str]
+    models: list[str]
     test_type: Union[VLMTestType, Iterable[VLMTestType]]
 
     # Should be None only if this is a CUSTOM_INPUTS test
@@ -100,10 +100,10 @@ class VLMTestInfo(NamedTuple):
 
     # Optional callable which gets a list of token IDs from the model tokenizer
     get_stop_token_ids: Optional[Callable[[PreTrainedTokenizerBase],
-                                          List[int]]] = None
+                                          list[int]]] = None
     # Optional list of strings to stop generation, useful when stop tokens are
     # not special tokens in the tokenizer
-    stop_str: Optional[List[str]] = None
+    stop_str: Optional[list[str]] = None
 
     # Exposed options for HF runner
     hf_model_kwargs: Optional[Dict[str, Any]] = None
@@ -147,13 +147,13 @@ class VLMTestInfo(NamedTuple):
     # for Qwen-VL, which requires encoding the image path / url into the prompt
     # for HF runner
     prompt_path_encoder: Optional[
-        Callable[[PosixPath, str, Union[List[ImageAsset], _ImageAssets]],
+        Callable[[PosixPath, str, Union[list[ImageAsset], _ImageAssets]],
                  str]] = None  # noqa: E501
 
     # Allows configuring a test to run with custom inputs
-    custom_test_opts: Optional[List[CustomTestOptions]] = None
+    custom_test_opts: Optional[list[CustomTestOptions]] = None
 
-    marks: Optional[List[MarkDecorator]] = None
+    marks: Optional[list[MarkDecorator]] = None
 
     tokenizer_mode: str = "auto"
 

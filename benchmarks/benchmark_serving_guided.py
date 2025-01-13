@@ -30,7 +30,7 @@ import random
 import time
 import warnings
 from dataclasses import dataclass
-from typing import AsyncGenerator, List, Optional, Tuple
+from typing import AsyncGenerator, Optional, Tuple
 
 import datasets
 import numpy as np
@@ -65,22 +65,22 @@ class BenchmarkMetrics:
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
-    percentiles_ttft_ms: List[Tuple[float, float]]
+    percentiles_ttft_ms: list[Tuple[float, float]]
     mean_tpot_ms: float
     median_tpot_ms: float
     std_tpot_ms: float
-    percentiles_tpot_ms: List[Tuple[float, float]]
+    percentiles_tpot_ms: list[Tuple[float, float]]
     mean_itl_ms: float
     median_itl_ms: float
     std_itl_ms: float
-    percentiles_itl_ms: List[Tuple[float, float]]
+    percentiles_itl_ms: list[Tuple[float, float]]
     # E2EL stands for end-to-end latency per request.
     # It is the time taken on the client side from sending
     # a request to receiving a complete response.
     mean_e2el_ms: float
     median_e2el_ms: float
     std_e2el_ms: float
-    percentiles_e2el_ms: List[Tuple[float, float]]
+    percentiles_e2el_ms: list[Tuple[float, float]]
 
 
 @dataclasses.dataclass
@@ -103,7 +103,7 @@ class SampleRequest:
 
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
-                    args: argparse.Namespace) -> List[SampleRequest]:
+                    args: argparse.Namespace) -> list[SampleRequest]:
     if args.dataset == 'json':
         if args.json_schema_path is None:
             dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -186,7 +186,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         ]
 
     elif args.dataset == "xgrammar_bench":
-        requests: List[SampleRequest] = []
+        requests: list[SampleRequest] = []
         dataset = datasets.load_dataset("NousResearch/json-mode-eval",
                                         split="train")
         print(f"dataset has {len(dataset)} entries")
@@ -213,7 +213,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
 
 
 async def get_request(
-    input_requests: List[SampleRequest],
+    input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
 ) -> AsyncGenerator[Tuple[int, SampleRequest], None]:
@@ -257,22 +257,22 @@ async def get_request(
 
 
 def calculate_metrics(
-    input_requests: List[Tuple[str, int, int]],
-    outputs: List[RequestFuncOutput],
+    input_requests: list[Tuple[str, int, int]],
+    outputs: list[RequestFuncOutput],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
-    selected_percentile_metrics: List[str],
-    selected_percentiles: List[float],
-) -> Tuple[BenchmarkMetrics, List[int]]:
-    actual_output_lens: List[int] = []
+    selected_percentile_metrics: list[str],
+    selected_percentiles: list[float],
+) -> Tuple[BenchmarkMetrics, list[int]]:
+    actual_output_lens: list[int] = []
     total_input = 0
     completed = 0
     good_completed = 0
-    itls: List[float] = []
-    tpots: List[float] = []
-    all_tpots: List[float] = []
-    ttfts: List[float] = []
-    e2els: List[float] = []
+    itls: list[float] = []
+    tpots: list[float] = []
+    all_tpots: list[float] = []
+    ttfts: list[float] = []
+    e2els: list[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             # We use the tokenizer to count the number of output tokens for all
@@ -344,13 +344,13 @@ async def benchmark(
     base_url: str,
     model_id: str,
     tokenizer: PreTrainedTokenizerBase,
-    input_requests: List[SampleRequest],
+    input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float,
     disable_tqdm: bool,
     profile: bool,
-    selected_percentile_metrics: List[str],
-    selected_percentiles: List[str],
+    selected_percentile_metrics: list[str],
+    selected_percentiles: list[str],
     ignore_eos: bool,
     max_concurrency: Optional[int],
     guided_decoding_ratio: float,
@@ -434,8 +434,8 @@ async def benchmark(
                                       pbar=pbar)
 
     benchmark_start_time = time.perf_counter()
-    tasks: List[asyncio.Task] = []
-    expected: List[str] = []
+    tasks: list[asyncio.Task] = []
+    expected: list[str] = []
     async for i, request in get_request(input_requests, request_rate,
                                         burstiness):
         extra_body = prepare_extra_body(
@@ -454,7 +454,7 @@ async def benchmark(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
                                      pbar=pbar)))
-    outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
+    outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     if profile:
         print("Stopping profiler...")

@@ -4,7 +4,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, Optional, Tuple, Type
 
 import torch
 import vllm_hpu_extension.ops as ops
@@ -58,8 +58,8 @@ class HPUAttentionBackend(AttentionBackend):
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        kv_caches: list[torch.Tensor],
+        src_to_dists: Dict[int, list[int]],
     ) -> None:
         HPUPagedAttention.copy_blocks(kv_caches, src_to_dists)
 
@@ -97,7 +97,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,

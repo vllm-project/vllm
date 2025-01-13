@@ -3,8 +3,8 @@ import pickle
 from abc import ABC, abstractmethod
 from datetime import datetime
 from functools import wraps
-from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
-                    Optional, Type, TypeVar)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, Optional,
+                    Type, TypeVar)
 
 import torch
 from torch import is_tensor
@@ -104,8 +104,8 @@ def _init_frozen_model_input_from_tensor_dict(
     return tensor_dict
 
 
-def dump_input_when_exception(exclude_args: Optional[List[int]] = None,
-                              exclude_kwargs: Optional[List[str]] = None):
+def dump_input_when_exception(exclude_args: Optional[list[int]] = None,
+                              exclude_kwargs: Optional[list[str]] = None):
 
     def _inner(func):
 
@@ -192,7 +192,6 @@ class ModelRunnerInputBase(BroadcastableModelInput):
     ModelRunnerInputBase subclass, add their required fields, and specify how to
     serialize/deserialize a ModelInput for broadcast between workers.
     """
-    pass
 
 
 class ModelRunnerInputBuilderBase(ABC, Generic[T]):
@@ -253,9 +252,9 @@ class ModelRunnerBase(ABC, Generic[T]):
     @abstractmethod
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None,
+        finished_requests_ids: Optional[list[str]] = None,
     ) -> T:
         """
         Prepare the inputs to ModelRunnerBase.execute_model from an execution
@@ -267,17 +266,17 @@ class ModelRunnerBase(ABC, Generic[T]):
     def execute_model(
         self,
         model_input: T,
-        kv_caches: Optional[List[torch.Tensor]],
+        kv_caches: Optional[list[torch.Tensor]],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         **kwargs,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         """
         Execute the model on the given input.
         """
         raise NotImplementedError
 
-    def get_generators(self, finished_request_ids: Optional[List[str]] = None):
+    def get_generators(self, finished_request_ids: Optional[list[str]] = None):
         """
         Return dict of per-request generators used for random sampling.
         """

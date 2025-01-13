@@ -1,7 +1,7 @@
 import random
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -64,7 +64,7 @@ STAGES = [True, False]
 
 def get_random_id_to_index(num_loras: int,
                            num_slots: int,
-                           log: bool = True) -> List[Optional[int]]:
+                           log: bool = True) -> list[Optional[int]]:
     """Creates a random lora_id_to_index mapping.
 
     Args:
@@ -79,7 +79,7 @@ def get_random_id_to_index(num_loras: int,
             f"num_loras is higher than num_slots: {num_loras} > {num_slots}. "
             "num_loras must be less than or equal to num_slots.")
 
-    slots: List[Optional[int]] = [None] * num_slots
+    slots: list[Optional[int]] = [None] * num_slots
     random_slot_selections = (torch.randperm(num_slots)[:num_loras]).tolist()
     for lora_id, slot_idx in enumerate(random_slot_selections, start=1):
         slots[slot_idx] = lora_id
@@ -91,12 +91,12 @@ def get_random_id_to_index(num_loras: int,
 
 
 def populate_loras(
-    id_to_index: List[Optional[int]],
+    id_to_index: list[Optional[int]],
     layer: BaseLayerWithLoRA,
     layer_weights: torch.Tensor,
     generate_embeddings_tensor: int = 0,
     repeats: int = 1,
-) -> Tuple[Dict[int, LoRALayerWeights], Dict[int, List[LoRALayerWeights]]]:
+) -> Tuple[Dict[int, LoRALayerWeights], Dict[int, list[LoRALayerWeights]]]:
     """This method populates the lora layers with lora weights.
 
     Args:
@@ -119,11 +119,11 @@ def populate_loras(
 
     # Dictionary that maps the lora ID to the
     # corresponding subloras.
-    sublora_dict: Dict[int, List[LoRALayerWeights]] = dict()
+    sublora_dict: Dict[int, list[LoRALayerWeights]] = dict()
 
     for slot_idx, lora_id in enumerate(id_to_index):
         if lora_id is not None:
-            subloras: List[LoRALayerWeights] = []
+            subloras: list[LoRALayerWeights] = []
             sublora_len = layer_weights.shape[0] // repeats
             for i in range(repeats):
                 sublora = DummyLoRAManager(
@@ -154,13 +154,13 @@ def populate_loras(
 
 
 def create_random_inputs(
-    active_lora_ids: List[int],
+    active_lora_ids: list[int],
     num_inputs: int,
     input_size: Tuple[int, ...],
     input_range: Tuple[float, float],
     input_type: torch.dtype = torch.int,
     device: torch.device = "cuda"
-) -> Tuple[List[torch.Tensor], List[int], List[int]]:
+) -> Tuple[list[torch.Tensor], list[int], list[int]]:
     """Creates random inputs.
 
     Args:
@@ -174,9 +174,9 @@ def create_random_inputs(
 
     low, high = input_range
 
-    inputs: List[torch.Tensor] = []
-    index_mapping: List[int] = []
-    prompt_mapping: List[int] = []
+    inputs: list[torch.Tensor] = []
+    index_mapping: list[int] = []
+    prompt_mapping: list[int] = []
 
     for _ in range(num_inputs):
         if input_type == torch.int:
@@ -266,7 +266,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
 
         lora_result = lora_embedding(torch.cat(inputs))
 
-        expected_results: List[torch.Tensor] = []
+        expected_results: list[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             lora = lora_dict[lora_id]
             result = embedding(input_)
@@ -406,7 +406,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
 
         lora_result = lora_embedding(torch.cat(original_inputs))
 
-        expected_results: List[torch.Tensor] = []
+        expected_results: list[torch.Tensor] = []
         for input_, original_input_, lora_id in zip(inputs, original_inputs,
                                                     prompt_mapping):
             lora = lora_dict[lora_id]
@@ -536,7 +536,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
 
         logits_processor.org_vocab_size = (vocab_size +
                                            lora_config.lora_extra_vocab_size)
-        expected_results: List[torch.Tensor] = []
+        expected_results: list[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             lora = lora_dict[lora_id]
             result = logits_processor._get_logits(hidden_states=input_,
@@ -657,7 +657,7 @@ def test_linear_replicated(dist_init, num_loras, device, stage,
 
         lora_result = lora_linear(torch.cat(inputs))[0]
 
-        expected_results: List[torch.Tensor] = []
+        expected_results: list[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             lora = lora_dict[lora_id]
             result = linear(input_)[0]
@@ -782,7 +782,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
 
         lora_result = lora_linear(torch.cat(inputs))[0]
 
-        expected_results: List[torch.Tensor] = []
+        expected_results: list[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             lora = lora_dict[lora_id]
             result = linear(input_)[0]
@@ -931,7 +931,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
 
         lora_result = lora_linear(torch.cat(inputs))[0]
 
-        expected_results: List[torch.Tensor] = []
+        expected_results: list[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             result = linear(input_)[0]
             subloras = sublora_dict[lora_id]
@@ -1091,9 +1091,9 @@ def test_vocab_parallel_embedding_indices(tp_size, seed):
     computed_added_vocab_size = 0
     vocab_size_padded = -1
 
-    all_org_tokens: List[int] = []
-    all_added_tokens: List[int] = []
-    token_ids: List[int] = []
+    all_org_tokens: list[int] = []
+    all_added_tokens: list[int] = []
+    token_ids: list[int] = []
 
     for tp_rank in range(tp_size):
         with patch(

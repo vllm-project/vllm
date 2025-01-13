@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional
 
 import torch
 
@@ -169,11 +169,11 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
     def execute_model(
         self,
         model_input: ModelRunnerInputBase,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         previous_hidden_states: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         """Executes num_steps forward passes with advacement of input tensors 
         on the GPU. Look at supports_gpu_multi_step(..) for pre-conditions.
 
@@ -265,7 +265,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             model_executable = self.model
             hidden_states = previous_hidden_states
 
-        outputs: List[SamplerOutput] = []
+        outputs: list[SamplerOutput] = []
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
 

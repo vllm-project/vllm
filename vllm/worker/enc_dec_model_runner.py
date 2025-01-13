@@ -1,6 +1,6 @@
 import dataclasses
 import itertools
-from typing import Any, Dict, List, Optional, Tuple, Type, cast
+from typing import Any, Dict, Optional, Tuple, Type, cast
 
 import torch
 import torch.distributed
@@ -131,13 +131,13 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
     def _list_to_int32_tensor(
         self,
-        _list: List[int],
+        _list: list[int],
     ) -> torch.Tensor:
         return torch.tensor(_list, dtype=torch.int32, device=self.device)
 
     def _list_to_long_tensor(
         self,
-        _list: List[int],
+        _list: list[int],
     ) -> torch.Tensor:
         return torch.tensor(_list, dtype=torch.long, device=self.device)
 
@@ -151,10 +151,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
     def execute_model(
         self,
         model_input: EncoderDecoderModelInput,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> Optional[List[PoolerOutput]]:
+    ) -> Optional[list[PoolerOutput]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in "
                              "EncoderDecoderModelRunner")
@@ -215,9 +215,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
     def prepare_model_input(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[list[str]] = None
     ) -> EncoderDecoderModelInput:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -270,7 +270,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
-        seqs: List[SequenceGroupMetadata] = []
+        seqs: list[SequenceGroupMetadata] = []
 
         max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
             self.model_config)
@@ -342,7 +342,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
     def _prepare_encoder_model_input_tensors(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: list[SequenceGroupMetadata],
         model_input: EncoderDecoderModelInput,
     ) -> Tuple[AttentionMetadata, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
@@ -389,7 +389,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         is_prompt = seq_group_metadata_list[0].is_prompt
 
         # Build encoder inputs
-        encoder_seq_lens: List[int] = []
+        encoder_seq_lens: list[int] = []
         if is_prompt:
             # Prefill phase.
             cross_block_tables = self._empty_int32_tensor().view(

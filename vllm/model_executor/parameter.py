@@ -181,7 +181,6 @@ class ModelWeightParameter(_ColumnvLLMParameter, RowvLLMParameter):
     Parameter class for linear layer weights. Uses both column and
     row parallelism.
     """
-    pass
 
 
 class GroupQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
@@ -189,7 +188,6 @@ class GroupQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
     Parameter class for weight scales loaded for weights with
     grouped quantization. Uses both column and row parallelism.
     """
-    pass
 
 
 class ChannelQuantScaleParameter(_ColumnvLLMParameter):
@@ -197,7 +195,6 @@ class ChannelQuantScaleParameter(_ColumnvLLMParameter):
     Parameter class for weight scales loaded for weights with
     channel-wise quantization. Equivalent to _ColumnvLLMParameter.
     """
-    pass
 
 
 class PerTensorScaleParameter(BasevLLMParameter):
@@ -347,7 +344,6 @@ class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
     block-wise quantization. Uses both column and row parallelism.
     """
 
-    pass
 
 
 def permute_param_layout_(param: BasevLLMParameter, input_dim: int,

@@ -1,5 +1,5 @@
 from itertools import cycle
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Optional, Sequence, Tuple, Union
 
 import pytest
 
@@ -61,9 +61,9 @@ def maybe_assert_ngram_worker(llm):
 
 def get_output_from_llm_generator(
         llm_generator, prompts,
-        sampling_params) -> Tuple[List[str], List[List[int]], float]:
-    tokens: List[str] = []
-    token_ids: List[List[int]] = []
+        sampling_params) -> Tuple[list[str], list[list[int]], float]:
+    tokens: list[str] = []
+    token_ids: list[list[int]] = []
     acceptance_rate: float = -1.0
     for llm in llm_generator():
         maybe_assert_ngram_worker(llm)

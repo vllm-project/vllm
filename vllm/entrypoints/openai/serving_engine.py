@@ -1,8 +1,8 @@
 import json
 from concurrent.futures.thread import ThreadPoolExecutor
 from http import HTTPStatus
-from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping,
-                    Optional, Sequence, Tuple, TypedDict, Union)
+from typing import (Any, Callable, Dict, Iterable, Iterator, Mapping, Optional,
+                    Sequence, Tuple, TypedDict, Union)
 
 from fastapi import Request
 from pydantic import Field
@@ -59,10 +59,10 @@ AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest]
 
 class TextTokensPrompt(TypedDict):
     prompt: str
-    prompt_token_ids: List[int]
+    prompt_token_ids: list[int]
 
 
-RequestPrompt = Union[List[int], str, TextTokensPrompt]
+RequestPrompt = Union[list[int], str, TextTokensPrompt]
 
 
 class OpenAIServing:
@@ -183,7 +183,7 @@ class OpenAIServing:
         self,
         request: AnyRequest,
         tokenizer: AnyTokenizer,
-        prompt_ids: List[int],
+        prompt_ids: list[int],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
     ) -> TextTokensPrompt:
         if truncate_prompt_tokens is None:
@@ -198,7 +198,7 @@ class OpenAIServing:
     def _validate_input(
         self,
         request: AnyRequest,
-        input_ids: List[int],
+        input_ids: list[int],
         input_text: str,
     ) -> TextTokensPrompt:
         token_num = len(input_ids)
@@ -250,7 +250,7 @@ class OpenAIServing:
         self,
         request: AnyRequest,
         tokenizer: AnyTokenizer,
-        prompt_input: Union[str, List[int]],
+        prompt_input: Union[str, list[int]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
@@ -271,7 +271,7 @@ class OpenAIServing:
         self,
         request: AnyRequest,
         tokenizer: AnyTokenizer,
-        prompt_inputs: Iterable[Union[str, List[int]]],
+        prompt_inputs: Iterable[Union[str, list[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
@@ -300,10 +300,10 @@ class OpenAIServing:
         self,
         request: AnyRequest,
         tokenizer: AnyTokenizer,
-        input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
+        input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
-    ) -> List[TextTokensPrompt]:
+    ) -> list[TextTokensPrompt]:
         """
         Tokenize/detokenize depending on the input format.
 
@@ -335,10 +335,10 @@ class OpenAIServing:
         self,
         request: CompletionLikeRequest,
         tokenizer: AnyTokenizer,
-        input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
+        input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
-    ) -> Tuple[List[TextTokensPrompt], List[TokensPrompt]]:
+    ) -> Tuple[list[TextTokensPrompt], list[TokensPrompt]]:
         request_prompts = await self._tokenize_prompt_input_or_inputs_async(
             request,
             tokenizer,
@@ -358,19 +358,19 @@ class OpenAIServing:
         self,
         request: ChatLikeRequest,
         tokenizer: AnyTokenizer,
-        messages: List[ChatCompletionMessageParam],
+        messages: list[ChatCompletionMessageParam],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
-        tool_dicts: Optional[List[Dict[str, Any]]] = None,
-        documents: Optional[List[Dict[str, str]]] = None,
+        tool_dicts: Optional[list[Dict[str, Any]]] = None,
+        documents: Optional[list[Dict[str, str]]] = None,
         chat_template_kwargs: Optional[Dict[str, Any]] = None,
         tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = False,
-    ) -> Tuple[List[ConversationMessage], Sequence[RequestPrompt],
-               List[TokensPrompt]]:
+    ) -> Tuple[list[ConversationMessage], Sequence[RequestPrompt],
+               list[TokensPrompt]]:
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
             chat_template_content_format,
@@ -392,7 +392,7 @@ class OpenAIServing:
         )
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
-        request_prompt: Union[str, List[int]]
+        request_prompt: Union[str, list[int]]
         is_mistral_tokenizer = isinstance(tokenizer, MistralTokenizer)
         if is_mistral_tokenizer:
             request_prompt = apply_mistral_chat_template(

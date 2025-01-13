@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, Optional
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
@@ -44,7 +44,7 @@ class KVCacheManager:
         self.num_preallocate_blocks = cdiv(num_preallocate_tokens, block_size)
 
         # A Block pool of all kv-cache blocks.
-        self.block_pool: List[KVCacheBlock] = [
+        self.block_pool: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
         ]
         # Free block queue that constructs and manipulates a doubly linked
@@ -67,9 +67,9 @@ class KVCacheManager:
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
-        self.req_to_blocks: Dict[str, List[KVCacheBlock]] = {}
+        self.req_to_blocks: Dict[str, list[KVCacheBlock]] = {}
 
-    def get_computed_blocks(self, request: Request) -> List[KVCacheBlock]:
+    def get_computed_blocks(self, request: Request) -> list[KVCacheBlock]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -107,7 +107,7 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-    ) -> Optional[List[KVCacheBlock]]:
+    ) -> Optional[list[KVCacheBlock]]:
         """Append slots to the block table of the request.
         We first append slots to already allocated blocks. If the allocated
         blocks are not enough, we allocate new blocks.
@@ -183,8 +183,8 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        computed_blocks: List[KVCacheBlock],
-    ) -> Optional[List[KVCacheBlock]]:
+        computed_blocks: list[KVCacheBlock],
+    ) -> Optional[list[KVCacheBlock]]:
         """Allocate slots for a new request.
 
         Args:
@@ -328,7 +328,7 @@ class KVCacheManager:
                 break
         return num_common_blocks
 
-    def _get_new_blocks(self, num_blocks: int) -> List[KVCacheBlock]:
+    def _get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
@@ -343,7 +343,7 @@ class KVCacheManager:
             raise ValueError(
                 f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: List[KVCacheBlock] = []
+        ret: list[KVCacheBlock] = []
         idx = 0
         while idx < num_blocks:
             # First allocate blocks.
@@ -393,7 +393,7 @@ class KVCacheManager:
             return self.cached_block_hash_to_block[block_hash][first_block_id]
         return None
 
-    def _touch(self, blocks: List[KVCacheBlock]) -> None:
+    def _touch(self, blocks: list[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
@@ -412,7 +412,7 @@ class KVCacheManager:
         self,
         request: Request,
         blk_start_idx: int,
-        full_blocks: List[KVCacheBlock],
+        full_blocks: list[KVCacheBlock],
         prev_block: Optional[KVCacheBlock],
     ) -> None:
         """Cache a list of full blocks for prefix caching.

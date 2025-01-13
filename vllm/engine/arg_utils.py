@@ -2,8 +2,8 @@ import argparse
 import dataclasses
 import json
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
-                    Tuple, Type, Union, cast, get_args)
+from typing import (TYPE_CHECKING, Any, Dict, Literal, Mapping, Optional, Tuple,
+                    Type, Union, cast, get_args)
 
 import torch
 
@@ -86,7 +86,7 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
 class EngineArgs:
     """Arguments for vLLM engine."""
     model: str = 'facebook/opt-125m'
-    served_model_name: Optional[Union[str, List[str]]] = None
+    served_model_name: Optional[Union[str, list[str]]] = None
     tokenizer: Optional[str] = None
     task: TaskOption = "auto"
     skip_tokenizer_init: bool = False
@@ -160,7 +160,7 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
     model_loader_extra_config: Optional[dict] = None
-    ignore_patterns: Optional[Union[str, List[str]]] = None
+    ignore_patterns: Optional[Union[str, list[str]]] = None
     preemption_mode: Optional[str] = None
 
     scheduler_delay_factor: float = 0.0

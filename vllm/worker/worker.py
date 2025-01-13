@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Dict, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.distributed
@@ -90,9 +90,9 @@ class Worker(LocalOrDistributedWorkerBase):
 
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: List[CacheEngine]
+        self.cache_engine: list[CacheEngine]
         # Initialize gpu_cache as pooling models don't initialize kv_caches
-        self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
+        self.gpu_cache: Optional[list[list[torch.Tensor]]] = None
         self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
 
         # Torch profiler. Enabled and configured through env vars:
@@ -299,7 +299,7 @@ class Worker(LocalOrDistributedWorkerBase):
         return self.parallel_config.tensor_parallel_size > 1
 
     @property
-    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+    def kv_cache(self) -> Optional[list[list[torch.Tensor]]]:
         return self.gpu_cache
 
     @torch.inference_mode()
@@ -350,9 +350,9 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def _get_cached_seq_group_metadata(
             self,
-            seq_group_metadata_list: List[Union[SequenceGroupMetadata,
+            seq_group_metadata_list: list[Union[SequenceGroupMetadata,
                                                 SequenceGroupMetadataDelta]],
-            finished_request_ids: List[str]) -> List[SequenceGroupMetadata]:
+            finished_request_ids: list[str]) -> list[SequenceGroupMetadata]:
         """Return a list of cached Sequence Group Metadata after updating its
         state.
 
@@ -393,7 +393,7 @@ class Worker(LocalOrDistributedWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         if execute_model_req is not None:
             new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
                 execute_model_req.seq_group_metadata_list,

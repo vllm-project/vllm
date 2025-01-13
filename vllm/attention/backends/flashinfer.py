@@ -1,7 +1,7 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
+from typing import TYPE_CHECKING, Any, Dict, Optional, Set, Tuple, Type
 
 from vllm.multimodal import MultiModalPlaceholderMap
 
@@ -79,13 +79,13 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
+    def get_supported_head_sizes() -> list[int]:
         return [64, 128, 256]
 
     @staticmethod
@@ -468,11 +468,11 @@ class FlashInferMetadata(AttentionMetadata):
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
-        self.slot_mapping: List[int] = []
-        self.prefill_seq_lens: List[int] = []
-        self.context_lens: List[int] = []
-        self.block_tables: List[List[int]] = []
-        self.curr_seq_lens: List[int] = []
+        self.slot_mapping: list[int] = []
+        self.prefill_seq_lens: list[int] = []
+        self.context_lens: list[int] = []
+        self.block_tables: list[list[int]] = []
+        self.curr_seq_lens: list[int] = []
         self.multimodal_placeholder_maps: Dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
@@ -496,12 +496,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # [0, 5, 8, 1, 6, 7, 3, 4]
         # paged_kv_indptr is used to index into paged_kv_indices:
         # [0, 3, 6, 8]
-        self.paged_kv_indices: List[int] = []
+        self.paged_kv_indices: list[int] = []
         # 0 at the beginning of paged_kv_indptr indicates the start of the
         # first request’s page indices in the paged_kv_indices list.
-        self.paged_kv_indptr: List[int] = [0]
+        self.paged_kv_indptr: list[int] = [0]
         # paged_kv_last_page_len is the length of the last page of each request
-        self.paged_kv_last_page_len: List[int] = []
+        self.paged_kv_last_page_len: list[int] = []
         self.total_blocks = 0
         self.is_profile_run: bool = False
 
@@ -572,7 +572,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             block_table = block_tables[seq_id]
             self._update_paged_kv_tensors(block_table, seq_len)
 
-    def _update_paged_kv_tensors(self, block_table: List[int], seq_len: int):
+    def _update_paged_kv_tensors(self, block_table: list[int], seq_len: int):
         # Get the number of valid blocks based on sequence length.
         # If seq_len = 16, block_size = 16,
         # block_table_bound is 1 with 1 valid block.
@@ -591,7 +591,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             last_page_len = self.block_size
         self.paged_kv_last_page_len.append(last_page_len)
 
-    def build(self, seq_lens: List[int], query_lens: List[int],
+    def build(self, seq_lens: list[int], query_lens: list[int],
               cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors.
 
@@ -743,7 +743,7 @@ class FlashInferImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,

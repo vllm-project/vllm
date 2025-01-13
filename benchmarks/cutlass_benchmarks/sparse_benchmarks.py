@@ -3,7 +3,7 @@ import copy
 import itertools
 import pickle as pkl
 import time
-from typing import Callable, Iterable, List, Tuple
+from typing import Callable, Iterable, Tuple
 
 import torch
 import torch.utils.benchmark as TBenchmark
@@ -280,7 +280,7 @@ def run_model_bench(args):
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")
 
-    def model_shapes(model_name: str, tp_size: int) -> List[Tuple[int, int]]:
+    def model_shapes(model_name: str, tp_size: int) -> list[Tuple[int, int]]:
         KNs = []
         for KN, tp_split_dim in copy.deepcopy(WEIGHT_SHAPES[model_name]):
             KN[tp_split_dim] = KN[tp_split_dim] // tp_size

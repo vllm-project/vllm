@@ -1,6 +1,5 @@
 import math
-from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
-                    Union)
+from typing import (Iterable, Mapping, Optional, Set, Tuple, TypedDict, Union)
 
 import numpy as np
 import torch
@@ -408,8 +407,8 @@ class WhisperEncoder(nn.Module):
 
     def forward(
         self,
-        input_features: Union[torch.Tensor, List[torch.Tensor]],
-        kv_caches: List[torch.Tensor],
+        input_features: Union[torch.Tensor, list[torch.Tensor]],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ):
         hidden_states = []
@@ -461,7 +460,7 @@ class WhisperDecoder(nn.Module):
         input_ids,
         positions: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor],
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ):
         inputs_embeds = self.get_input_embeddings(input_ids)
@@ -497,10 +496,10 @@ class WhisperModel(nn.Module):
 
     def forward(
         self,
-        input_features: Optional[Union[torch.Tensor, List[torch.Tensor]]],
+        input_features: Optional[Union[torch.Tensor, list[torch.Tensor]]],
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         encoder_outputs = self.get_encoder_outputs(
@@ -519,8 +518,8 @@ class WhisperModel(nn.Module):
 
     def get_encoder_outputs(
         self,
-        input_features: Optional[Union[torch.Tensor, List[torch.Tensor]]],
-        kv_caches: List[torch.Tensor],
+        input_features: Optional[Union[torch.Tensor, list[torch.Tensor]]],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> Optional[torch.Tensor]:
         if input_features is None:
@@ -606,7 +605,7 @@ def input_processor_for_whisper(ctx: InputContext, inputs):
 
 def input_mapper_for_whisper(
     ctx: InputContext,
-    multi_modal_data: Union[np.ndarray, List[np.ndarray]],
+    multi_modal_data: Union[np.ndarray, list[np.ndarray]],
 ) -> MultiModalKwargs:
     if not isinstance(multi_modal_data, list):
         multi_modal_data = [multi_modal_data]
@@ -660,7 +659,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> torch.Tensor:
@@ -676,7 +675,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def get_multimodal_embeddings(
         self,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> Optional[NestedTensors]:

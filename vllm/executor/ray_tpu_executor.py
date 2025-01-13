@@ -2,8 +2,7 @@ import asyncio
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import (TYPE_CHECKING, Any, Awaitable, Dict, List, Optional, Tuple,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Awaitable, Dict, Optional, Tuple, Union)
 
 import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorAsyncBase
@@ -56,7 +55,7 @@ class RayTPUExecutor(TPUExecutor):
         # It holds the resource for the driver worker.
         self.driver_dummy_worker: Optional[RayWorkerWrapper] = None
         # The remaining workers are the actual ray actors.
-        self.workers: List[RayWorkerWrapper] = []
+        self.workers: list[RayWorkerWrapper] = []
 
         # Create the workers.
         driver_ip = get_ip()
@@ -189,7 +188,7 @@ class RayTPUExecutor(TPUExecutor):
     def _driver_execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution
@@ -203,8 +202,8 @@ class RayTPUExecutor(TPUExecutor):
         method: str,
         *args,
         async_run_remote_workers_only: bool = False,
-        all_args: Optional[List[Tuple[Any, ...]]] = None,
-        all_kwargs: Optional[List[Dict[str, Any]]] = None,
+        all_args: Optional[list[Tuple[Any, ...]]] = None,
+        all_kwargs: Optional[list[Dict[str, Any]]] = None,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
         **kwargs,
@@ -278,7 +277,7 @@ class RayTPUExecutor(TPUExecutor):
     def execute_model(
         self,
         execute_model_req: ExecuteModelRequest,
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
@@ -308,7 +307,7 @@ class RayTPUExecutorAsync(RayTPUExecutor, ExecutorAsyncBase):
 
     async def execute_model_async(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest) -> list[SamplerOutput]:
         if self.parallel_worker_tasks is None:
             # Start model execution loop running in the parallel workers
             self.parallel_worker_tasks = asyncio.create_task(
@@ -331,7 +330,7 @@ class RayTPUExecutorAsync(RayTPUExecutor, ExecutorAsyncBase):
     async def _driver_execute_model_async(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         return await self.driver_exec_method("execute_model",
                                              execute_model_req)
 

@@ -1,6 +1,6 @@
 import json
 from json import JSONDecodeError, JSONDecoder
-from typing import Any, List, Tuple
+from typing import Any, Tuple
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -80,7 +80,7 @@ def extract_intermediate_diff(curr: str, old: str) -> str:
     return diff
 
 
-def find_all_indices(string: str, substring: str) -> List[int]:
+def find_all_indices(string: str, substring: str) -> list[int]:
     """
     Find all (starting) indices of a substring in a given string. Useful for
     tool call extraction

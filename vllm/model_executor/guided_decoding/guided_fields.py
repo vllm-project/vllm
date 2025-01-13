@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, TypedDict, Union
+from typing import Dict, Optional, TypedDict, Union
 
 from pydantic import BaseModel
 
@@ -8,7 +8,7 @@ from pydantic import BaseModel
 class LLMGuidedOptions(TypedDict, total=False):
     guided_json: Union[Dict, BaseModel, str]
     guided_regex: str
-    guided_choice: List[str]
+    guided_choice: list[str]
     guided_grammar: str
     guided_decoding_backend: str
     guided_whitespace_pattern: str
@@ -20,7 +20,7 @@ class GuidedDecodingRequest:
     """One of the fields will be used to retrieve the logit processor."""
     guided_json: Optional[Union[Dict, BaseModel, str]] = None
     guided_regex: Optional[str] = None
-    guided_choice: Optional[List[str]] = None
+    guided_choice: Optional[list[str]] = None
     guided_grammar: Optional[str] = None
     guided_decoding_backend: Optional[str] = None
     guided_whitespace_pattern: Optional[str] = None

@@ -1,5 +1,5 @@
 import json
-from typing import Generator, List, Optional
+from typing import Generator, Optional
 
 import partial_json_parser
 import pytest
@@ -24,8 +24,8 @@ def jamba_tool_parser(jamba_tokenizer):
     return JambaToolParser(jamba_tokenizer)
 
 
-def assert_tool_calls(actual_tool_calls: List[ToolCall],
-                      expected_tool_calls: List[ToolCall]):
+def assert_tool_calls(actual_tool_calls: list[ToolCall],
+                      expected_tool_calls: list[ToolCall]):
     assert len(actual_tool_calls) == len(expected_tool_calls)
 
     for actual_tool_call, expected_tool_call in zip(actual_tool_calls,
@@ -216,10 +216,10 @@ def test_extract_tool_calls_streaming(jamba_tool_parser, jamba_tokenizer,
                                       model_output, expected_tool_calls,
                                       expected_content):
     other_content: str = ''
-    function_names: List[str] = []
-    function_args_strs: List[str] = []
+    function_names: list[str] = []
+    function_args_strs: list[str] = []
     tool_call_idx: int = -1
-    tool_call_ids: List[Optional[str]] = []
+    tool_call_ids: list[Optional[str]] = []
 
     for delta_message in stream_delta_message_generator(
             jamba_tool_parser, jamba_tokenizer, model_output):

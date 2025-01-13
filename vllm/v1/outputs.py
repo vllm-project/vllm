@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import torch
 
@@ -8,7 +8,7 @@ import torch
 class SamplerOutput:
 
     # [num_reqs]
-    sampled_token_ids: List[int]
+    sampled_token_ids: list[int]
 
     # [num_reqs, max_num_logprobs + 1]
     logprob_token_ids: Optional[torch.Tensor]
@@ -26,12 +26,12 @@ class SamplerOutput:
 class ModelRunnerOutput:
 
     # [num_reqs]
-    req_ids: List[str]
+    req_ids: list[str]
     # req_id -> index
     req_id_to_index: Dict[str, int]
 
     # [num_reqs]
-    sampled_token_ids: List[int]
+    sampled_token_ids: list[int]
 
     # [num_reqs, max_num_logprobs + 1]
     logprob_token_ids_cpu: Optional[torch.Tensor]

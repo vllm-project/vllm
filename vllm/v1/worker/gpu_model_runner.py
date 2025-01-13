@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Tuple, cast
+from typing import TYPE_CHECKING, Dict, Tuple, cast
 
 import numpy as np
 import torch
@@ -93,7 +93,7 @@ class GPUModelRunner:
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
-        self.kv_caches: List[torch.Tensor] = []
+        self.kv_caches: list[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
@@ -188,7 +188,7 @@ class GPUModelRunner:
             scheduler_output.preempted_req_ids,
             scheduler_output.finished_req_ids,
         )
-        removed_req_indices: List[int] = []
+        removed_req_indices: list[int] = []
         for req_id in stopped_req_ids:
             req_index = self.input_batch.remove_request(req_id)
             if req_index is not None:
@@ -214,7 +214,7 @@ class GPUModelRunner:
             self.input_batch.block_table.append_row(req_index, start_index,
                                                     req_data.new_block_ids)
 
-        req_ids_to_add: List[str] = []
+        req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
@@ -475,7 +475,7 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
-        req_id_output_token_ids: Dict[str, List[int]] = \
+        req_id_output_token_ids: Dict[str, list[int]] = \
             {req_id: req.output_token_ids \
                 for req_id, req in self.requests.items()}
 
@@ -489,8 +489,8 @@ class GPUModelRunner:
             return
 
         # Batch the multi-modal inputs.
-        mm_inputs: List[MultiModalKwargs] = []
-        req_input_ids: List[Tuple[str, int]] = []
+        mm_inputs: list[MultiModalKwargs] = []
+        req_input_ids: list[Tuple[str, int]] = []
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
             for input_id in encoder_input_ids:
@@ -519,8 +519,8 @@ class GPUModelRunner:
     def _gather_encoder_outputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> List[torch.Tensor]:
-        encoder_outputs: List[torch.Tensor] = []
+    ) -> list[torch.Tensor]:
+        encoder_outputs: list[torch.Tensor] = []
         num_reqs = self.input_batch.num_reqs
         for req_id in self.input_batch.req_ids[:num_reqs]:
             assert req_id is not None
@@ -664,7 +664,7 @@ class GPUModelRunner:
         assert all(
             req_id is not None for req_id in
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
-        req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
+        req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
@@ -689,7 +689,7 @@ class GPUModelRunner:
         self,
         model: nn.Module,
         num_tokens: int,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
     ) -> torch.Tensor:
         if self.is_multimodal_model:
             input_ids = None

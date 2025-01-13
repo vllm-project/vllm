@@ -1,7 +1,7 @@
 import asyncio
 import os
 from functools import partial
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
@@ -40,15 +40,15 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         distributed_init_method = get_distributed_init_method(
             "127.0.0.1", get_open_port())
 
-        self.workers: List[ProcessWorkerWrapper] = []
+        self.workers: list[ProcessWorkerWrapper] = []
         # This is the list of workers that are rank 0 of each TP group EXCEPT
         # global rank 0. These are the workers that will broadcast to the
         # rest of the workers.
-        self.tp_driver_workers: List[ProcessWorkerWrapper] = []
+        self.tp_driver_workers: list[ProcessWorkerWrapper] = []
         # This is the list of workers that are not drivers and not the first
         # worker in a TP group. These are the workers that will be
         # broadcasted to.
-        self.non_driver_workers: List[ProcessWorkerWrapper] = []
+        self.non_driver_workers: list[ProcessWorkerWrapper] = []
 
         if world_size == 1:
             self.worker_monitor = None
@@ -111,7 +111,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution
@@ -179,12 +179,12 @@ class MultiprocessingGPUExecutorAsync(MultiprocessingGPUExecutor,
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.driver_exec_model = make_async(self.driver_worker.execute_model)
-        self.pp_locks: Optional[List[asyncio.Lock]] = None
+        self.pp_locks: Optional[list[asyncio.Lock]] = None
 
     async def _driver_execute_model_async(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         if not self.tp_driver_workers:
             return await self.driver_exec_model(execute_model_req)
 
