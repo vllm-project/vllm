@@ -2,6 +2,7 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
 from argparse import Namespace
+import json
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
@@ -262,6 +263,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=("If specified, the output will follow the JSON schema."),
     )
+    add_response_format_to_messages: Optional[bool] = Field(
+        default=True,
+        description=(
+            "Only used when `guided_json` or `response_format` fields are provided. "
+            "Whether or not add the specified response format to the last user's message."
+        ),
+    )
     guided_regex: Optional[str] = Field(
         default=None,
         description=(
@@ -341,6 +349,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 self.guided_json = json_schema.json_schema
                 if self.guided_decoding_backend is None:
                     self.guided_decoding_backend = "xgrammar"
+        if self.guided_json is not None:
+            if self.add_response_format_to_messages:
+                # Additional check that the format has not been provided by the user
+                possible_formats = [self.guided_json] + [
+                    json.dumps(self.guided_json, indent=indent)
+                    for indent in (None, 2, 4)
+                ]
+                for message in self.messages:
+                    if any(possible_format in message["content"] for possible_format in possible_formats):
+                        break
+                else:
+                    self.messages[-1]["content"] += (
+                        "\n\nGenerate the response in the following JSON format:\n" +
+                        f"{self.guided_json}"
+                    )
 
         guided_decoding = GuidedDecodingParams.from_optional(
             json=self._get_guided_json_from_tool() or self.guided_json,
