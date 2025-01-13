@@ -15,7 +15,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     MarlinWorkspace)
 from vllm.model_executor.layers.quantization.utils.quant_utils import gptq_pack
-from vllm.model_executor.parameter import (Features, add_param_feature,
+from vllm.model_executor.parameter import (add_param_feature,
+                                           vLLMParameterFeatures,
                                            wrap_base_vllm_parameter,
                                            wrap_column_vllm_parameter,
                                            wrap_group_quant_scale_parameter,
@@ -101,7 +102,7 @@ def HQQEmptyParameter(data: torch.Tensor, **kwargs) -> Parameter:
     wrap_base_vllm_parameter(param, **kwargs)
     wrap_column_vllm_parameter(param, **kwargs)
     wrap_row_vllm_parameter(param, **kwargs)
-    add_param_feature(param, Features.HQQEmpty)
+    add_param_feature(param, vLLMParameterFeatures.HQQEmpty)
     return param
 
 
@@ -114,7 +115,7 @@ def HQQweightParameter(data: torch.Tensor, **kwargs) -> Parameter:
     wrap_row_vllm_parameter(param, **kwargs)
     wrap_packed_vllm_parameter(param, **kwargs)
     wrap_hqq_weight_parameter(param, **kwargs)
-    add_param_feature(param, Features.HQQWeight)
+    add_param_feature(param, vLLMParameterFeatures.HQQWeight)
     return param
 
 

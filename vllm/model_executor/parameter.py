@@ -1,6 +1,6 @@
 from enum import Enum
 from fractions import Fraction
-from typing import Callable, Optional, Union
+from typing import Callable, List, Optional, Union
 
 import torch
 from torch.nn import Parameter
@@ -18,9 +18,12 @@ __all__ = [
 logger = init_logger(__name__)
 
 
-class Features(Enum):
+class vLLMParameterFeatures(Enum):
     """
-    Enum for parameter features.
+    Enum for the different features that a vLLM parameter
+    can have. This is used to track what functionality a
+    parameter has and to add functionality to the parameter
+    based on the features it has.
     """
     Base = 0
     ModelWeight = 1
@@ -37,29 +40,29 @@ class Features(Enum):
     HQQZeroScale = 12
 
 
-def add_param_feature(obj, feature_name):
+def add_param_feature(param: Parameter, feature: vLLMParameterFeatures):
     """
-    Add a feature to a parameter object.
+    Add a feature to a parameter.
     """
-    if not hasattr(obj, 'param_features'):
-        obj.param_features = []
-    obj.param_features.append(feature_name)
+    if not hasattr(param, 'param_features'):
+        param.param_features = []
+    param.param_features.append(feature)
 
 
-def has_any_param_feature(obj, feature_name_or_list):
+def has_any_param_feature(param: Parameter,
+                          feature_list: List[vLLMParameterFeatures]):
     """
-    Check if a parameter object has any of the specified features.
+    Check if a parameter paramect has any of the specified features.
     """
-    if not hasattr(obj, 'param_features'):
+    if not hasattr(param, 'param_features'):
         return False
-    if isinstance(feature_name_or_list, Features):
-        return feature_name_or_list in obj.param_features
-    elif isinstance(feature_name_or_list, list):
-        for feature in feature_name_or_list:
-            assert isinstance(feature, Features)
-            if feature in obj.param_features:
-                return True
-        return False
+    assert isinstance(feature_list, list)
+    for feature in feature_list:
+        assert isinstance(feature, vLLMParameterFeatures),\
+            f"feature_list must contain only vLLMParameterFeatures, "\
+            f"got {type(feature)} instead"
+        if feature in param.param_features:
+            return True
     return False
 
 
@@ -72,13 +75,14 @@ def BasevLLMParameter(data: torch.Tensor, **kwargs) -> Parameter:
 def wrap_base_vllm_parameter(param: Parameter, weight_loader: Callable,
                              **kwargs):
     """
-    Add basic functionality for vLLM linear layer parameters.
+    Base parameter for vLLM linear layers. Adds basic functionality
+    by taking in a linear weight loader. Will copy the loaded weight
+    into the parameter when the provided weight loader is called.
     """
 
     def _assert_and_load(param: Parameter, loaded_weight: torch.Tensor):
         assert param.data.shape == loaded_weight.shape
         param.data.copy_(loaded_weight)
-
 
     from vllm.platforms import current_platform
     if current_platform.is_tpu():
@@ -93,7 +97,7 @@ def wrap_base_vllm_parameter(param: Parameter, weight_loader: Callable,
         param, loaded_weight)
     param.load_qkv_weight = lambda loaded_weight, **kwargs: _assert_and_load(
         param, loaded_weight)
-    add_param_feature(param, Features.Base)
+    add_param_feature(param, vLLMParameterFeatures.Base)
 
 
 def wrap_column_vllm_parameter(param: Parameter, output_dim: int,
@@ -119,8 +123,9 @@ def wrap_column_vllm_parameter(param: Parameter, output_dim: int,
                                   loaded_weight: torch.Tensor, **kwargs):
         shard_offset = kwargs.get("shard_offset")
         shard_size = kwargs.get("shard_size")
-        if (has_any_param_feature(param,
-                                  [Features.PackedColumn, Features.Packed])
+        if (has_any_param_feature(
+                param,
+            [vLLMParameterFeatures.PackedColumn, vLLMParameterFeatures.Packed])
                 and param.output_dim == param.packed_dim):
             shard_size, shard_offset = param.adjust_shard_indexes_for_packing(
                 shard_offset=shard_offset, shard_size=shard_size)
@@ -142,8 +147,9 @@ def wrap_column_vllm_parameter(param: Parameter, output_dim: int,
         shard_id = kwargs.get("shard_id")
         num_heads = kwargs.get("num_heads")
 
-        if (has_any_param_feature(param,
-                                  [Features.PackedColumn, Features.Packed])
+        if (has_any_param_feature(
+                param,
+            [vLLMParameterFeatures.PackedColumn, vLLMParameterFeatures.Packed])
                 and output_dim == param.packed_dim):
             shard_size, shard_offset = param.adjust_shard_indexes_for_packing(
                 shard_offset=shard_offset, shard_size=shard_size)
@@ -166,7 +172,7 @@ def wrap_column_vllm_parameter(param: Parameter, output_dim: int,
         load_merged_column_weight(param, loaded_weight, **kwargs))
     param.load_qkv_weight = lambda loaded_weight, **kwargs: (load_qkv_weight(
         param, loaded_weight, **kwargs))
-    add_param_feature(param, Features.Column)
+    add_param_feature(param, vLLMParameterFeatures.Column)
 
 
 def RowvLLMParameter(data: torch.Tensor, **kwargs) -> Parameter:
@@ -198,7 +204,7 @@ def wrap_row_vllm_parameter(param: Parameter, input_dim: int,
     param.input_dim = input_dim
     param.load_row_parallel_weight = lambda loaded_weight: (
         load_row_parallel_weight(param, loaded_weight))
-    add_param_feature(param, Features.Row)
+    add_param_feature(param, vLLMParameterFeatures.Row)
 
 
 def ModelWeightParameter(data: torch.Tensor, **kwargs) -> Parameter:
@@ -211,7 +217,7 @@ def ModelWeightParameter(data: torch.Tensor, **kwargs) -> Parameter:
 
 
 def wrap_model_weight_parameter(param: Parameter, **kwargs) -> None:
-    add_param_feature(param, Features.ModelWeight)
+    add_param_feature(param, vLLMParameterFeatures.ModelWeight)
 
 
 def GroupQuantScaleParameter(data: torch.Tensor, **kwargs) -> Parameter:
@@ -220,23 +226,21 @@ def GroupQuantScaleParameter(data: torch.Tensor, **kwargs) -> Parameter:
     wrap_column_vllm_parameter(param, **kwargs)
     wrap_row_vllm_parameter(param, **kwargs)
     wrap_group_quant_scale_parameter(param, **kwargs)
+    add_param_feature(param, vLLMParameterFeatures.GroupQuantScale)
     return param
 
 
 def wrap_group_quant_scale_parameter(param: Parameter, **kwargs) -> None:
-    add_param_feature(param, Features.GroupQuantScale)
+    add_param_feature(param, vLLMParameterFeatures.GroupQuantScale)
 
 
 def ChannelQuantScaleParameter(data: torch.Tensor, **kwargs) -> Parameter:
     param = Parameter(data, requires_grad=False)
     wrap_base_vllm_parameter(param, **kwargs)
     wrap_column_vllm_parameter(param, **kwargs)
-    wrap_channel_quant_scale_parameter(param, **kwargs)
+    # wrap_channel_quant_scale_parameter(param, **kwargs)
+    add_param_feature(param, vLLMParameterFeatures.ChannelQuantScale)
     return param
-
-
-def wrap_channel_quant_scale_parameter(param: Parameter, **kwargs) -> None:
-    add_param_feature(param, Features.ChannelQuantScale)
 
 
 def PerTensorScaleParameter(data: torch.Tensor, **kwargs) -> Parameter:
@@ -309,7 +313,7 @@ def wrap_per_tensor_scale_parameter(param: Parameter, **kwargs) -> None:
     param.load_qkv_weight = lambda **kwargs: (load_qkv_weight(param, **kwargs))
     param.load_column_parallel_weight = lambda loaded_weight: (
         load_column_parallel_weight(param, loaded_weight))
-    add_param_feature(param, Features.PerTensorScale)
+    add_param_feature(param, vLLMParameterFeatures.PerTensorScale)
 
 
 def PackedColumnParameter(data: torch.Tensor, **kwargs) -> Parameter:
@@ -342,7 +346,7 @@ def wrap_packed_column_parameter(param: Parameter,
     param.packed_dim = packed_dim
     param.marlin_tile_size = marlin_tile_size
     param.adjust_shard_indexes_for_packing = adjust_shard_indexes_for_packing
-    add_param_feature(param, Features.PackedColumn)
+    add_param_feature(param, vLLMParameterFeatures.PackedColumn)
 
 
 def PackedvLLMParameter(data: torch.Tensor, **kwargs) -> Parameter:
@@ -380,7 +384,7 @@ def wrap_packed_vllm_parameter(param: Parameter,
     param.packed_dim = packed_dim
     param.marlin_tile_size = marlin_tile_size
     param.adjust_shard_indexes_for_packing = adjust_shard_indexes_for_packing
-    add_param_feature(param, Features.Packed)
+    add_param_feature(param, vLLMParameterFeatures.Packed)
 
 
 def BlockQuantScaleParameter(data: torch.Tensor, **kwargs) -> Parameter:
@@ -388,7 +392,7 @@ def BlockQuantScaleParameter(data: torch.Tensor, **kwargs) -> Parameter:
     wrap_base_vllm_parameter(param, **kwargs)
     wrap_column_vllm_parameter(param, **kwargs)
     wrap_row_vllm_parameter(param, **kwargs)
-    add_param_feature(param, Features.BlockQuantScale)
+    add_param_feature(param, vLLMParameterFeatures.BlockQuantScale)
     return param
 
 

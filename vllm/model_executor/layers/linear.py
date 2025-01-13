@@ -14,9 +14,8 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-# yapf: disable
-from vllm.model_executor.parameter import Features, has_any_param_feature
-# yapf: enable
+from vllm.model_executor.parameter import (has_any_param_feature,
+                                           vLLMParameterFeatures)
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
@@ -602,7 +601,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # if isinstance(param, (PackedColumnParameter, PackedvLLMParameter
             #                       )) and param.packed_dim == param.output_dim:
             if has_any_param_feature(param,
-                                     [Features.PackedColumn, Features.Packed]) \
+                                     [vLLMParameterFeatures.PackedColumn,
+                                      vLLMParameterFeatures.Packed]) \
                     and param.packed_dim == param.output_dim:
                 shard_size, shard_offset = \
                     param.adjust_shard_indexes_for_packing(
@@ -618,11 +618,14 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                          loaded_weight: torch.Tensor,
                          loaded_shard_id: Optional[int] = None):
         if loaded_shard_id is None:
-            if has_any_param_feature(param, Features.PerTensorScale):
+            if has_any_param_feature(param,
+                                     [vLLMParameterFeatures.PerTensorScale]):
                 param.load_merged_column_weight(loaded_weight=loaded_weight,
                                                 shard_id=0)
                 return
-            elif has_any_param_feature(param, [Features.Row, Features.Base]):
+            elif has_any_param_feature(
+                    param,
+                [vLLMParameterFeatures.Row, vLLMParameterFeatures.Base]):
                 param.load_merged_column_weight(loaded_weight=loaded_weight)
                 return
             # TODO: @dsikka - move to parameter.py
@@ -633,7 +636,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         tp_size = get_tensor_model_parallel_world_size()
 
-        if has_any_param_feature(param, Features.BlockQuantScale):
+        if has_any_param_feature(param,
+                                 [vLLMParameterFeatures.BlockQuantScale]):
             from vllm.model_executor.layers.quantization.fp8 import (
                 Fp8LinearMethod, Fp8MoEMethod)
             assert self.quant_method is not None
@@ -770,7 +774,8 @@ class QKVParallelLinear(ColumnParallelLinear):
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
             if has_any_param_feature(param,
-                                     [Features.PackedColumn, Features.Packed]) \
+                                     [vLLMParameterFeatures.PackedColumn,
+                                      vLLMParameterFeatures.Packed]) \
                     and param.packed_dim == param.output_dim:
                 shard_size, shard_offset = \
                     param.adjust_shard_indexes_for_packing(
@@ -786,10 +791,13 @@ class QKVParallelLinear(ColumnParallelLinear):
                          loaded_weight: torch.Tensor,
                          loaded_shard_id: Optional[str] = None):
         if loaded_shard_id is None:  # special case for certain models
-            if has_any_param_feature(param, Features.PerTensorScale):
+            if has_any_param_feature(param,
+                                     [vLLMParameterFeatures.PerTensorScale]):
                 param.load_qkv_weight(loaded_weight=loaded_weight, shard_id=0)
                 return
-            elif has_any_param_feature(param, [Features.Row, Features.Base]):
+            elif has_any_param_feature(
+                    param,
+                [vLLMParameterFeatures.Row, vLLMParameterFeatures.Base]):
                 param.load_qkv_weight(loaded_weight=loaded_weight)
                 return
             # TODO: @dsikka - move to parameter.py
