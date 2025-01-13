@@ -267,7 +267,7 @@ def test_iteration_stats():
     assert iteration_stats.num_prompt_tokens == 0
     assert iteration_stats.num_generation_tokens == num_active
 
-    # Add a new requrest - prefill and 2 decodes in this step.
+    # Add a new request - prefill and 2 decodes in this step.
     output_processor.add_request(inactive_request)
     num_active += 1
     outputs = engine_core.get_outputs()[:num_active]
