@@ -17,7 +17,7 @@ from http import HTTPStatus
 from typing import AsyncIterator, Dict, Optional, Set, Tuple, Union
 
 import uvloop
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -86,6 +86,25 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: Set[asyncio.Task] = set()
+
+# Global request semaphore for concurrency control
+_request_semaphore: Optional[asyncio.Semaphore] = None
+
+def get_request_semaphore():
+    return _request_semaphore
+
+# Dependency function to limit concurrency
+async def limit_concurrency():
+    if _request_semaphore is not None:
+        if _request_semaphore.locked():
+            raise HTTPException(
+                status_code=503,
+                detail="Server is at maximum capacity. Please try again later."
+            )
+        async with _request_semaphore:
+            yield
+    else:
+        yield
 
 
 @asynccontextmanager
@@ -365,7 +384,7 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
-@router.post("/v1/chat/completions")
+@router.post("/v1/chat/completions", dependencies=[Depends(limit_concurrency)])
 @with_cancellation
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
@@ -386,7 +405,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/v1/completions")
+@router.post("/v1/completions", dependencies=[Depends(limit_concurrency)])
 @with_cancellation
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
@@ -750,6 +769,14 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
     )
     state.task = model_config.task
+
+    # Initialize request semaphore
+    global _request_semaphore
+    if envs.VLLM_API_SERVICE_MAX_CONCURRENT_REQUESTS > 0:
+        _request_semaphore = asyncio.Semaphore(
+            envs.VLLM_API_SERVICE_MAX_CONCURRENT_REQUESTS)
+        logger.info("Request concurrency limited to %d",
+                    envs.VLLM_API_SERVICE_MAX_CONCURRENT_REQUESTS)
 
 
 def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
