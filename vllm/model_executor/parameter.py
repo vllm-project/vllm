@@ -7,6 +7,7 @@ from torch.nn import Parameter
 
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
+from vllm.model_executor.utils import _make_synced_weight_loader
 
 __all__ = [
     "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
@@ -78,6 +79,10 @@ def wrap_base_vllm_parameter(param: Parameter, weight_loader: Callable,
         assert param.data.shape == loaded_weight.shape
         param.data.copy_(loaded_weight)
 
+
+    from vllm.platforms import current_platform
+    if current_platform.is_tpu():
+        weight_loader = _make_synced_weight_loader(weight_loader)
     param.weight_loader = weight_loader
     param.load_column_parallel_weight = lambda loaded_weight: _assert_and_load(
         param, loaded_weight)

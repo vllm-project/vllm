@@ -1,6 +1,6 @@
 # Adapted from
-# https://github.com/THUDM/GLM-4
-"""Inference-only ChatGLM model compatible with THUDM weights."""
+# https://github.com/THUDM/CogAgent
+"""Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
 from array import array
 from typing import (Dict, Iterable, List, Mapping, Optional, Set, Tuple,
@@ -33,7 +33,7 @@ from vllm.model_executor.models.glm4_vision_encoder import EVA2CLIPModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalData, MultiModalKwargs,
+from vllm.multimodal.inputs import (ModalityData, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
@@ -54,7 +54,7 @@ def calculate_image_placeholder(vision_config):
 
 def mm_input_mapper_for_glmv(
     ctx: InputContext,
-    data: MultiModalData[object],
+    data: ModalityData[object],
 ) -> Dict:
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(
@@ -201,7 +201,6 @@ def input_processor_for_glmv(ctx: InputContext, inputs: DecoderOnlyInputs):
 
     new_input_ids = []
     final_processed_position = 0
-    final_processed_position = 0
 
     for boi_position, eoi_position in zip(boi_positions, eoi_positions):
         assert boi_position < eoi_position
@@ -275,12 +274,15 @@ class GLMAttention(nn.Module):
         # https://huggingface.co/THUDM/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
         rope_ratio = getattr(config, "rope_ratio", 1.0)
         max_positions = getattr(config, "seq_length", 8192)
+        # NOTE: THUDM/cogagent-9b-20241220 uses original_rope=False,
+        # which is equivalent to is_neox_style=True
+        is_neox_style = not config.original_rope
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim // 2,
             max_position=max_positions,
             base=10000 * rope_ratio,
-            is_neox_style=False,
+            is_neox_style=is_neox_style,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,

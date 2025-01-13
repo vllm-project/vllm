@@ -18,7 +18,6 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, StoreBoolean
@@ -1094,6 +1093,7 @@ class EngineArgs:
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)
                 use_spec_decode = self.speculative_model is not None
+                from vllm.platforms import current_platform
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
                         and not self.enable_prompt_adapter
@@ -1148,7 +1148,7 @@ class EngineArgs:
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
         )
 
-        # Reminder: Please update docs/source/usage/compatibility_matrix.md
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if self.num_scheduler_steps > 1:
             if speculative_config is not None:
@@ -1157,6 +1157,12 @@ class EngineArgs:
             if self.enable_chunked_prefill and self.pipeline_parallel_size > 1:
                 raise ValueError("Multi-Step Chunked-Prefill is not supported "
                                  "for pipeline-parallel-size > 1")
+            from vllm.platforms import current_platform
+            if current_platform.is_cpu():
+                logger.warning("Multi-Step (--num-scheduler-steps > 1) is "
+                               "currently not supported for CPUs and has been "
+                               "disabled.")
+                self.num_scheduler_steps = 1
 
         # make sure num_lookahead_slots is set the higher value depending on
         # if we are using speculative decoding or multi-step

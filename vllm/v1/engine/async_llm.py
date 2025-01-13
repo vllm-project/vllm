@@ -1,9 +1,9 @@
 import asyncio
+import os
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.metrics_types import StatLoggerBase
 from vllm.engine.protocol import EngineClient
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.inputs.preprocess import InputPreprocessor
@@ -16,10 +16,13 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerBase
+from vllm.v1.metrics.stats import SchedulerStats
 
 logger = init_logger(__name__)
 
@@ -32,17 +35,20 @@ class AsyncLLM(EngineClient):
         executor_class: Type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
+
         assert start_engine_loop
 
         self.log_requests = log_requests
         self.log_stats = log_stats
-        self.stat_loggers = stat_loggers
+        self.stat_loggers: List[StatLoggerBase] = [
+            LoggingStatLogger(),
+            # TODO(rob): PrometheusStatLogger(),
+        ]
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -79,13 +85,9 @@ class AsyncLLM(EngineClient):
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=self.log_stats,
         )
 
         self.output_handler: Optional[asyncio.Task] = None
-
-    def __del__(self):
-        self.shutdown()
 
     @classmethod
     def from_engine_args(
@@ -94,7 +96,6 @@ class AsyncLLM(EngineClient):
         engine_config: Optional[VllmConfig] = None,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
@@ -104,7 +105,7 @@ class AsyncLLM(EngineClient):
         else:
             vllm_config = engine_config
 
-        executor_class = cls._get_executor_cls(vllm_config)
+        executor_class = Executor.get_class(vllm_config)
 
         # Create the AsyncLLM.
         return cls(
@@ -114,7 +115,6 @@ class AsyncLLM(EngineClient):
             log_stats=not engine_args.disable_log_stats,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
-            stat_loggers=stat_loggers,
         )
 
     def shutdown(self):
@@ -125,20 +125,6 @@ class AsyncLLM(EngineClient):
 
         if handler := getattr(self, "output_handler", None):
             handler.cancel()
-
-    @classmethod
-    def _get_executor_cls(cls, vllm_config: VllmConfig) -> Type[Executor]:
-        executor_class: Type[Executor]
-        distributed_executor_backend = (
-            vllm_config.parallel_config.distributed_executor_backend)
-        if distributed_executor_backend == "mp":
-            from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-            executor_class = MultiprocExecutor
-        else:
-            assert (distributed_executor_backend is None)
-            from vllm.v1.executor.uniproc_executor import UniprocExecutor
-            executor_class = UniprocExecutor
-        return executor_class
 
     async def add_request(
         self,
@@ -268,7 +254,8 @@ class AsyncLLM(EngineClient):
                 outputs = await self.engine_core.get_output_async()
 
                 # 2) Detokenize based on the output.
-                request_outputs, reqs_to_abort = self.detokenizer.step(outputs)
+                request_outputs, reqs_to_abort = self.detokenizer.step(
+                    outputs.outputs)
 
                 # 3) Put the RequestOutputs into the per-request queues.
                 self._process_request_outputs(request_outputs)
@@ -276,9 +263,12 @@ class AsyncLLM(EngineClient):
                 # 4) Abort any requests that finished due to stop strings.
                 await self.engine_core.abort_requests_async(reqs_to_abort)
 
-        except BaseException as e:
-            logger.error(e)
-            raise e
+                # 5) Log any stats.
+                await self._log_stats(scheduler_stats=outputs.scheduler_stats)
+
+        except Exception as e:
+            logger.exception("EngineCore output handler hit an error: %s", e)
+            kill_process_tree(os.getpid())
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in self, detokenizer, and engine core."""
@@ -291,6 +281,14 @@ class AsyncLLM(EngineClient):
         # will be removed from the tracked queues before we get here.
         if request_id in self.rid_to_queue:
             del self.rid_to_queue[request_id]
+
+    async def _log_stats(self, scheduler_stats: SchedulerStats):
+        """Log stats to the stat loggers."""
+        if not self.log_stats:
+            return
+
+        for logger in self.stat_loggers:
+            logger.log(scheduler_stats=scheduler_stats)
 
     def encode(
         self,
@@ -353,3 +351,7 @@ class AsyncLLM(EngineClient):
     @property
     def dead_error(self) -> BaseException:
         return Exception()  # TODO: implement
+
+    async def add_lora(self, lora_request: LoRARequest) -> None:
+        """Load a new LoRA adapter into the engine for future requests."""
+        raise NotImplementedError("LoRA not yet supported in V1")

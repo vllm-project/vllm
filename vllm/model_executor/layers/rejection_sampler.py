@@ -9,6 +9,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeStochasticBaseSampler)
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -39,7 +40,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             strict_mode: Whether or not to perform shape/device/dtype checks
             during sampling. This catches correctness issues but adds
             nontrivial latency.
-            use_falshinfer: We will use this parameter to determine whether
+            use_flashinfer: We will use this parameter to determine whether
             to use the FlashInfer rejection sampling kernel or not. If it's
             None, we will use the default value from the environment variable.
             This parameter is only used for testing purposes.
@@ -118,7 +119,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
         # If use Flashinfer chain_speculative_sampling kernel
         # for rejection sampling
-        if self.use_flashinfer:
+        if self.use_flashinfer and chain_speculative_sampling is not None:
             batch_size, k, _ = draft_probs.shape
             uniform_samples = self._create_uniform_samples(
                 seeded_seqs, batch_size, k, draft_probs.device)
@@ -368,7 +369,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 # Note that we always sample with replacement.
 # probs will be modified in place, but this is fine, as we pass
 # in a copy already.
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def _multinomial(
     probs: torch.Tensor,
     num_samples: int,

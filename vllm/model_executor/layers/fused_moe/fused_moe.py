@@ -701,8 +701,14 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
 
-    compute_type = (tl.bfloat16
-                    if hidden_states.dtype == torch.bfloat16 else tl.float16)
+    if hidden_states.dtype == torch.bfloat16:
+        compute_type = tl.bfloat16
+    elif hidden_states.dtype == torch.float16:
+        compute_type = tl.float16
+    elif hidden_states.dtype == torch.float32:
+        compute_type = tl.float32
+    else:
+        raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
     if inplace:
         out_hidden_states = hidden_states
@@ -753,7 +759,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_int8_w8a16=use_int8_w8a16,
                                 block_shape=block_shape)
 
-        ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+        torch.ops._C.silu_and_mul(intermediate_cache2,
+                                  intermediate_cache1.view(-1, N))
 
         invoke_fused_moe_kernel(intermediate_cache2,
                                 w2,
