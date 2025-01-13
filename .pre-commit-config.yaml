@@ -26,6 +26,7 @@ repos:
   hooks:
   - id: clang-format
     exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))'
+    args: [--style=file, --verbose]
 - repo: https://github.com/jackdewinter/pymarkdown
   rev: v0.9.27
   hooks:
