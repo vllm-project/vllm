@@ -463,14 +463,10 @@ def init_vision_tower_for_llava(
                                         info=_build_llava_or_pixtral_hf_info,
                                         dummy_inputs=LlavaDummyInputsBuilder)
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:

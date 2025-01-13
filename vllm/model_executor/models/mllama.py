@@ -1107,14 +1107,9 @@ class MllamaForCausalLM(nn.Module):
 @INPUT_REGISTRY.register_dummy_encoder_data(dummy_encoder_data_for_mllama)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_mllama)
 class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
