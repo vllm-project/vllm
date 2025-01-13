@@ -1,6 +1,6 @@
 repos:
 - repo: https://github.com/google/yapf
-  rev: v0.43.0
+  rev: v0.32.0
   hooks:
   - id: yapf
     args: [--in-place, --verbose]
