@@ -97,6 +97,20 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 :::
 
+:::{tab-item} ROCm
+:sync: rocm
+
+There is no extra information on creating a new Python environment for this device.
+
+:::
+
+:::{tab-item} XPU
+:sync: xpu
+
+There is no extra information on creating a new Python environment for this device.
+
+:::
+
 ::::
 
 ### Pre-built wheels
