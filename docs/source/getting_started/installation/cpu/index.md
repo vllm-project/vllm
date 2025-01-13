@@ -133,7 +133,7 @@ Currently, there are no pre-build CPU images.
 ### Build image from source
 
 ```console
-$ docker build -f Dockerfile.arm -t vllm-cpu-env --shm-size=4g .
+$ docker build -f Dockerfile.cpu -t vllm-cpu-env --shm-size=4g .
 $ docker run -it \
              --rm \
              --network=host \
@@ -141,6 +141,10 @@ $ docker run -it \
              --cpuset-mems=<memory-node, optional> \
              vllm-cpu-env
 ```
+
+:::{tip}
+For ARM or Apple silicon, use `Dockerfile.arm`
+:::
 
 ## Supported features
 
