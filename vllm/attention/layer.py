@@ -146,7 +146,7 @@ class Attention(nn.Module):
         value: torch.Tensor,
         _kv_cache: torch.Tensor,
         _attn_metadata: AttentionMetadata,
-        fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]] = None,
+        fp8_comp_scales: List[Optional[torch.Tensor]] = [],
     ) -> torch.Tensor:
         if self.calculate_kv_scales and \
             _attn_metadata.enable_kv_scales_calculation:
@@ -262,7 +262,7 @@ def unified_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
-    fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]],
+    fp8_comp_scales: List[Optional[torch.Tensor]],
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
@@ -283,7 +283,7 @@ def unified_attention_fake(
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
-    fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]],
+    fp8_comp_scales: List[Optional[torch.Tensor]],
 ) -> torch.Tensor:
     return torch.empty_like(query).contiguous()
 
@@ -303,9 +303,9 @@ def unified_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]],
+    fp8_comp_scales: List[Optional[torch.Tensor]],
 ) -> None:
-    assert fp8_comp_scales is None
+    assert not fp8_comp_scales
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
@@ -326,7 +326,7 @@ def unified_attention_with_output_fake(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]],
+    fp8_comp_scales: List[Optional[torch.Tensor]],
 ) -> None:
     return
 

@@ -551,7 +551,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
         output: Optional[torch.Tensor] = None,
-        fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]] = None,
+        fp8_comp_scales: List[Optional[torch.Tensor]] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -601,8 +601,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        q_scale, prob_scale, fp8_out_scale = fp8_comp_scales or (None, None,
-                                                                 None)
+        q_scale, prob_scale, fp8_out_scale = fp8_comp_scales or [None, None,
+                                                                 None]
 
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:

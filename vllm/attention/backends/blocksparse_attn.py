@@ -369,7 +369,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
         output: Optional[torch.Tensor] = None,
-        fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]] = None,
+        fp8_comp_scales: List[Optional[torch.Tensor]] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 

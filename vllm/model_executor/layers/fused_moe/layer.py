@@ -4,7 +4,6 @@ from typing import Callable, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from torch.nn.modules import Module
 
 import vllm.envs as envs
 from vllm.distributed import (get_tensor_model_parallel_rank,

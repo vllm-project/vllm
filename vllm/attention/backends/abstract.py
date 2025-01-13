@@ -252,6 +252,6 @@ class AttentionImpl(ABC, Generic[T]):
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
         output: Optional[torch.Tensor] = None,
-        fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]] = None,
+        fp8_comp_scales: List[Optional[torch.Tensor]] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
