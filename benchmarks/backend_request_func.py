@@ -12,10 +12,6 @@ from tqdm.asyncio import tqdm
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
-vllm_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(vllm_dir)
-from vllm.transformers_utils.tokenizers import MistralTokenizer
-
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 
@@ -436,6 +432,13 @@ def get_tokenizer(
                 "Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
     if tokenizer_mode == "mistral":
+        try:
+            from vllm.transformers_utils.tokenizer import (
+                MistralTokenizer)
+        except ImportError:
+            raise ImportError(
+                "MistralTokenizer requires vllm package.\n"
+                "Please install it with `pip install vllm` to use mistral tokenizer mode.")
         return MistralTokenizer.from_pretrained(
             str(pretrained_model_name_or_path))
     else:
