@@ -18,8 +18,7 @@ repos:
   rev: v2.3.0
   hooks:
   - id: codespell
-    args: [--toml, pyproject.toml]
-    additional_dependencies: [tomli]
+    exclude: "benchmarks/sonnet.txt|(build|tests/(lora/data|models/fixtures|prompts))/.*"
 - repo: https://github.com/PyCQA/isort
   rev: 5.13.2
   hooks:
