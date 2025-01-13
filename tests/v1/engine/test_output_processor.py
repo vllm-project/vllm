@@ -142,7 +142,7 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind):
 
 @pytest.mark.parametrize("include_stop_str_in_output", [True, False])
 def test_stop_string(include_stop_str_in_output: bool):
-    output_processor = OutputProcessor(TOKENIZER_GROUP, log_stats=True)
+    output_processor = OutputProcessor(TOKENIZER_GROUP, log_stats=False)
     engine_core = MockEngineCore(GENERATION_TOKENS)
 
     # Make N requests.
@@ -223,7 +223,7 @@ def test_stop_string(include_stop_str_in_output: bool):
 
 
 def test_iteration_stats():
-    output_processor = OutputProcessor(TOKENIZER_GROUP, log_stats=False)
+    output_processor = OutputProcessor(TOKENIZER_GROUP, log_stats=True)
     engine_core = MockEngineCore(GENERATION_TOKENS)
 
     # Make N requests.
@@ -238,6 +238,50 @@ def test_iteration_stats():
             mm_placeholders=None,
             eos_token_id=None,
             lora_request=None,
-            sampling_params=SamplingParams()
-        ) for idx, (prompt, prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
+            sampling_params=SamplingParams(),
+        ) for idx, (
+            prompt, prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
     ]
+
+    # Add all requests except one to the OutputProcessor.
+    num_active = len(GENERATION_TOKENS) - 1
+    for request in requests[:num_active]:
+        output_processor.add_request(request)
+    inactive_request = requests[num_active]
+
+    # First iteration has 2 prefills.
+    outputs = engine_core.get_outputs()[:num_active]
+    processed_outputs = output_processor.process_outputs(outputs)
+    iteration_stats = processed_outputs.iteration_stats
+    total_prompt_tokens = sum(
+        [len(prompt_tokens) for prompt_tokens in PROMPT_TOKENS[:num_active]])
+
+    assert iteration_stats.num_prompt_tokens == total_prompt_tokens
+    assert iteration_stats.num_generation_tokens == num_active
+
+    # Just decodes in this step.
+    outputs = engine_core.get_outputs()[:num_active]
+    processed_outputs = output_processor.process_outputs(outputs)
+    iteration_stats = processed_outputs.iteration_stats
+
+    assert iteration_stats.num_prompt_tokens == 0
+    assert iteration_stats.num_generation_tokens == num_active
+
+    # Add a new requrest - prefill and 2 decodes in this step.
+    output_processor.add_request(inactive_request)
+    num_active += 1
+    outputs = engine_core.get_outputs()[:num_active]
+    processed_outputs = output_processor.process_outputs(outputs)
+    iteration_stats = processed_outputs.iteration_stats
+    total_prompt_tokens = len(PROMPT_TOKENS[num_active - 1])
+
+    assert iteration_stats.num_prompt_tokens == total_prompt_tokens
+    assert iteration_stats.num_generation_tokens == num_active
+
+    # Just decodes in this step.
+    outputs = engine_core.get_outputs()[:num_active]
+    processed_outputs = output_processor.process_outputs(outputs)
+    iteration_stats = processed_outputs.iteration_stats
+
+    assert iteration_stats.num_prompt_tokens == 0
+    assert iteration_stats.num_generation_tokens == num_active
