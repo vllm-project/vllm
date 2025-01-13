@@ -404,14 +404,13 @@ async def async_request_openai_chat_completions(
 
 
 def get_model(pretrained_model_name_or_path: str) -> str:
-    if os.getenv("VLLM_USE_MODELSCOPE", "False").lower() == "true":
+    if os.getenv('VLLM_USE_MODELSCOPE', 'False').lower() == 'true':
         from modelscope import snapshot_download
 
         model_path = snapshot_download(
             model_id=pretrained_model_name_or_path,
             local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-            ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"],
-        )
+            ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
 
         return model_path
     return pretrained_model_name_or_path
