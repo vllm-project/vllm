@@ -200,7 +200,6 @@ class Worker(LocalOrDistributedWorkerBase):
                               weights_memory_in_bytes=self.model_runner.
                               model_memory_usage) as result:
             self.model_runner.profile_run()
-            torch.cuda.synchronize()
 
         self._assert_memory_footprint_increased_during_profiling()
 
