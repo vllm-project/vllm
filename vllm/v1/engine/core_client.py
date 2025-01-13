@@ -12,9 +12,9 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         make_zmq_socket)
-from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType, EngineCoreRequestUnion)
+from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
+                            EngineCoreRequest, EngineCoreRequestType,
+                            EngineCoreRequestUnion)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import PickleEncoder
@@ -40,7 +40,6 @@ class EngineCoreClient(ABC):
         asyncio_mode: bool,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
-        log_stats: bool = False,
     ) -> "EngineCoreClient":
 
         # TODO: support this for debugging purposes.
@@ -50,18 +49,18 @@ class EngineCoreClient(ABC):
                 "is not currently supported.")
 
         if multiprocess_mode and asyncio_mode:
-            return AsyncMPClient(vllm_config, executor_class, log_stats)
+            return AsyncMPClient(vllm_config, executor_class)
 
         if multiprocess_mode and not asyncio_mode:
-            return SyncMPClient(vllm_config, executor_class, log_stats)
+            return SyncMPClient(vllm_config, executor_class)
 
-        return InprocClient(vllm_config, executor_class, log_stats)
+        return InprocClient(vllm_config, executor_class)
 
     @abstractmethod
     def shutdown(self):
         ...
 
-    def get_output(self) -> List[EngineCoreOutput]:
+    def get_output(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
     def add_request(self, request: EngineCoreRequest) -> None:
@@ -73,7 +72,7 @@ class EngineCoreClient(ABC):
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
-    async def get_output_async(self) -> List[EngineCoreOutput]:
+    async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
@@ -99,7 +98,7 @@ class InprocClient(EngineCoreClient):
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
 
-    def get_output(self) -> List[EngineCoreOutput]:
+    def get_output(self) -> EngineCoreOutputs:
         return self.engine_core.step()
 
     def add_request(self, request: EngineCoreRequest) -> None:
@@ -133,7 +132,7 @@ class MPClient(EngineCoreClient):
         asyncio_mode: bool,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
-        log_stats: bool = False,
+        log_stats: bool,
     ):
         # The child processes will send SIGUSR1 when unrecoverable
         # errors happen. We kill the process tree here so that the
@@ -194,22 +193,19 @@ class MPClient(EngineCoreClient):
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 executor_class: Type[Executor],
-                 log_stats: bool = False):
+    def __init__(self, vllm_config: VllmConfig,
+                 executor_class: Type[Executor]):
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=log_stats,
+            log_stats=False,
         )
 
-    def get_output(self) -> List[EngineCoreOutput]:
+    def get_output(self) -> EngineCoreOutputs:
 
         (frame, ) = self.output_socket.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frame.buffer).outputs
-        return engine_core_outputs
+        return self.decoder.decode(frame.buffer)
 
     def _send_input(self, request_type: EngineCoreRequestType,
                     request: EngineCoreRequestUnion) -> None:
@@ -235,23 +231,19 @@ class SyncMPClient(MPClient):
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 executor_class: Type[Executor],
-                 log_stats: bool = False):
+    def __init__(self, vllm_config: VllmConfig,
+                 executor_class: Type[Executor]):
         super().__init__(
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=log_stats,
+            log_stats=True,
         )
 
-    async def get_output_async(self) -> List[EngineCoreOutput]:
+    async def get_output_async(self) -> EngineCoreOutputs:
 
         frames = await self.output_socket.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
-
-        return engine_core_outputs
+        return self.decoder.decode(frames[0].buffer)
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: EngineCoreRequestUnion) -> None:
