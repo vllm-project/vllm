@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import msgspec
+from dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.executor.executor_base import (
@@ -19,12 +20,22 @@ from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+    from ray.actor import ActorHandle
+else:
+    ActorHandle = None
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
 
+
+@dataclass
+class RayWorkerMetaData:
+    worker: ActorHandle
+    created_rank: int
+    adjusted_rank: int = -1
+    ip: str = ""
 
 class RayDistributedExecutor(DistributedExecutorBase):
 
@@ -130,10 +141,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # Create the workers.
         driver_ip = get_ip()
         rank = 0
-        worker_initial_ranks = []
-        workers = []
+        worker_metadata: List[RayWorkerMetaData] = []
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-            if not bundle.get(current_platform.device_name, 0):
+            if not bundle.get(current_platform.ray_device_key, 0):
                 continue
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
@@ -147,35 +157,33 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(vllm_config=self.vllm_config, rank=rank)
-            workers.append(worker)
-            worker_initial_ranks.append(rank)
+            worker_metadata.append(
+                RayWorkerMetaData(worker=worker, created_rank=rank))
             rank += 1
 
-        worker_ip_refs = [
-            worker.get_node_ip.remote()  # type: ignore[attr-defined]
-            for worker in workers
-        ]
-        worker_ips = ray.get(worker_ip_refs)
+        worker_ips = ray.get([
+            each.worker.get_node_ip.remote()  # type: ignore[attr-defined]
+            for each in worker_metadata
+        ])
+
+        for each, ip in zip(worker_metadata, worker_ips):
+            each.ip = ip
 
         if not self.use_ray_spmd_worker:
-            for i in range(len(workers)):
-                worker = workers[i]
-                worker_ip = worker_ips[i]
+            for i, each in enumerate(worker_metadata):
+                # find and remove the dummy worker from the list
+                worker = each.worker
+                worker_ip = each.ip
                 if self.driver_dummy_worker is None and worker_ip == driver_ip:
                     # If the worker is on the same node as the driver, we use it
                     # as the resource holder for the driver process.
                     self.driver_dummy_worker = worker
                     self.driver_worker = RayWorkerWrapper(
                         vllm_config=self.vllm_config, rank=0)
-                    workers.pop(i)
-                    worker_ips.pop(i)
-                    worker_initial_ranks.pop(i)
-                    self.workers = workers
+                    worker_metadata.pop(i)
                     break
-        else:
-            self.workers = workers
 
-        logger.debug("workers: %s", self.workers)
+        logger.debug("workers: %s", worker_metadata)
         logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
         if not self.use_ray_spmd_worker and self.driver_dummy_worker is None:
             raise ValueError(
@@ -187,7 +195,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         for ip in worker_ips:
             ip_counts[ip] = ip_counts.get(ip, 0) + 1
 
-        def sort_by_driver_then_worker_ip(data_tuple):
+        def sort_by_driver_then_worker_ip(item: RayWorkerMetaData):
             """
             Sort the workers based on 3 properties:
             1. If the worker is on the same node as the driver (vllm engine),
@@ -197,22 +205,21 @@ class RayDistributedExecutor(DistributedExecutorBase):
             3. Finally, if the work is on a node with smaller IP address, it
                 should be placed first.
             """
-            worker, initial_rank, worker_ip = data_tuple
-            ip = worker_ip
-            return (ip != driver_ip, ip_counts[ip], ip)
+            ip = item.ip
+            return (0 if ip == driver_ip else 1, ip_counts[ip], ip)
 
         # After sorting, the workers on the same node will be
         # close to each other, and the workers on the driver
         # node will be placed first.
-        answer = sorted(zip(self.workers, worker_initial_ranks, worker_ips),
+        sorted_worker_metadata = sorted(worker_metadata,
                         key=sort_by_driver_then_worker_ip)
-        self.workers = [worker for worker, _, __ in answer]
-        sorted_worker_initial_ranks = [rank for _, rank, __ in answer]
-        start = 0 if self.use_ray_spmd_worker else 1
-        adjust_ranks = [i + start for i in range(len(sorted_worker_initial_ranks))]
+        start_rank = 0 if self.use_ray_spmd_worker else 1
+        for i, item in enumerate(sorted_worker_metadata):
+            item.adjusted_rank = i + start_rank
+        self.workers = [item.worker for item in sorted_worker_metadata]
         rerank_mapping = {
-            old_rank: new_rank
-            for old_rank, new_rank in zip(sorted_worker_initial_ranks, adjust_ranks)
+            item.created_rank: item.adjusted_rank
+            for item in sorted_worker_metadata
         }
         self._run_workers("adjust_rank", rerank_mapping)
 
