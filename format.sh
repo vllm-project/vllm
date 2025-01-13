@@ -21,34 +21,6 @@ builtin cd "$(dirname "${BASH_SOURCE:-$0}")"
 ROOT="$(git rev-parse --show-toplevel)"
 builtin cd "$ROOT" || exit 1
 
-check_command() {
-    if ! command -v "$1" &> /dev/null; then
-        echo "❓❓$1 is not installed, please run \`pip install -r requirements-lint.txt\`"
-        exit 1
-    fi
-}
-
-# TODO: run pre-commit here
-check_command mypy
-
-MYPY_VERSION=$(mypy --version | awk '{print $2}')
-
-# # params: tool name, tool version, required version
-tool_version_check() {
-    expected=$(grep "$1" requirements-lint.txt | cut -d'=' -f3)
-    if [[ "$2" != "$expected" ]]; then
-        echo "❓❓Wrong $1 version installed: $expected is required, not $2."
-        exit 1
-    fi
-}
-
-tool_version_check "mypy" "$MYPY_VERSION"
-
-# Run mypy
-echo 'vLLM mypy:'
-tools/mypy.sh
-echo 'vLLM mypy: Done'
-
 echo 'vLLM shellcheck:'
 tools/shellcheck.sh
 echo 'vLLM shellcheck: Done'

@@ -1,10 +1,2 @@
 # formatting
 pre-commit==4.0.1
-toml==0.10.2
-tomli==2.0.2
-
-# type checking
-mypy==1.11.1
-types-PyYAML
-types-requests
-types-setuptools
