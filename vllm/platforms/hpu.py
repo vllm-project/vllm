@@ -16,7 +16,7 @@ logger = init_logger(__name__)
 
 class HpuPlatform(Platform):
     _enum = PlatformEnum.HPU
-    device_name: str = "HPU"
+    device_name: str = "hpu"
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
 

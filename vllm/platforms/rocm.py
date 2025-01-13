@@ -36,7 +36,7 @@ if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) in ["fork", None]:
 
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
-    device_name: str = "GPU"
+    device_name: str = "rocm"
     device_type: str = "cuda"
     dispatch_key: str = "CUDA"
     supported_quantization: list[str] = [

@@ -75,7 +75,7 @@ class DeviceCapability(NamedTuple):
 
 class Platform:
     _enum: PlatformEnum
-    device_name: str  # for printing and for Ray to identify the device
+    device_name: str
     device_type: str
     # available dispatch keys:
     # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134 # noqa

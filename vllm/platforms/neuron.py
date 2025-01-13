@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 
 class NeuronPlatform(Platform):
     _enum = PlatformEnum.NEURON
-    device_name: str = "Neuron"
+    device_name: str = "neuron"
     device_type: str = "neuron"
     supported_quantization: list[str] = ["neuron_quant"]
 
