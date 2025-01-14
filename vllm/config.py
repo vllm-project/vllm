@@ -3508,7 +3508,7 @@ class VllmConfig:
             if self.model_config is not None and \
                 not self.model_config.enforce_eager:
                 batch_size_capture_list = [1, 2, 4
-                                           ] + [i for i in range(8, 513, 8)]
+                                           ] + [i for i in range(8, 33, 8)]
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)

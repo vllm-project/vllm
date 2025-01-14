@@ -1590,6 +1590,10 @@ def weak_ref_tensors(
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
     """
+    # XPU doesn't support weak_ref_tensor yet.
+    from vllm.platforms import current_platform
+    if current_platform.is_xpu():
+        return tensors
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):

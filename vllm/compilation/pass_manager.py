@@ -9,11 +9,15 @@ from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
 from .fix_functionalization import FixFunctionalizationPass
-from .fusion import FusionPass
 from .inductor_pass import InductorPass
 from .reshapes import RedundantReshapesPass
 
 logger = init_logger(__name__)
+
+try:
+    from .fusion import FusionPass
+except AttributeError:
+    logger.warning("import FusionPass error.")
 
 
 class PlaceHolder:
@@ -57,8 +61,8 @@ class PostGradPassManager(Parent):
         if pass_config.enable_reshape:
             self.passes += [RedundantReshapesPass(pass_config)]
 
-        if pass_config.enable_fusion:
-            self.passes += [FusionPass.instance(pass_config)]
+        # if pass_config.enable_fusion:
+        #     self.passes += [FusionPass.instance(pass_config)]
 
         self.fix_functionalization = FixFunctionalizationPass(pass_config)
 
