@@ -8,6 +8,11 @@ set -ex
 docker build -t hpu-test-env -f Dockerfile.hpu .
 
 # Setup cleanup
+# certain versions of HPU software stack have a bug that can
+# override the exit code of the script, so we need to use
+# separate remove_docker_container and remove_docker_container_and_exit
+# functions, while other platforms only need one remove_docker_container
+# function.
 EXITCODE=1
 remove_docker_container() { docker rm -f hpu-test || true; }
 remove_docker_container_and_exit() { remove_docker_container; exit $EXITCODE; }
