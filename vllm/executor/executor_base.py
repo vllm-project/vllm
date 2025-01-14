@@ -170,6 +170,17 @@ class ExecutorBase(ABC):
     def stop_profile(self) -> None:
         self.collective_rpc("stop_profile")
 
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        self.collective_rpc("save_sharded_state",
+                            kwargs=dict(path=path,
+                                        pattern=pattern,
+                                        max_size=max_size))
+
     @abstractmethod
     def check_health(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an
@@ -235,17 +246,6 @@ class DistributedExecutorBase(ExecutorBase):
         # Ensure that workers exit model loop cleanly
         # (this will raise otherwise)
         self._wait_for_tasks_completion(parallel_worker_tasks)
-
-    def save_sharded_state(
-        self,
-        path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
-    ) -> None:
-        self._run_workers("save_sharded_state",
-                          path=path,
-                          pattern=pattern,
-                          max_size=max_size)
 
     @abstractmethod
     def _driver_execute_model(
