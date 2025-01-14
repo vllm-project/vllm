@@ -10,8 +10,8 @@ import vllm.envs as envs
 from vllm.executor.executor_base import (
     DistributedExecutorBase)  # yapf: disable
 from vllm.executor.msgspec_utils import encode_hook
-from vllm.executor.ray_utils import (RayWorkerWrapper, ray,
-                                    initialize_ray_cluster)
+from vllm.executor.ray_utils import (initialize_ray_cluster, RayWorkerWrapper,
+                                     ray)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
@@ -295,8 +295,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
             # some carry-over env vars from the driver
             # TODO: refactor platform-specific env vars
             for name in [
-                    "VLLM_ATTENTION_BACKEND", "TPU_CHIPS_PER_HOST_BOUNDS",
-                    "TPU_HOST_BOUNDS", "VLLM_USE_V1",
+                    "VLLM_ATTENTION_BACKEND",
+                    "TPU_CHIPS_PER_HOST_BOUNDS",
+                    "TPU_HOST_BOUNDS",
+                    "VLLM_USE_V1",
                     "VLLM_TRACE_FUNCTION",
             ]:
                 if name in os.environ:
