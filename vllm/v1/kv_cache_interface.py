@@ -44,7 +44,7 @@ class KVCacheSpecBase:
     def bytes_for_tokens(self, num_tokens: int) -> int:
         """
         The KV cache size for `num_tokens` tokens in bytes. Returns the real
-        memory size after padding `num_tokens` to `block_size`.
+        memory size after padding `num_tokens` to full blocks.
         Returns:
             The KV cache size
         """
