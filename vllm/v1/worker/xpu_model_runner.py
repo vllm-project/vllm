@@ -6,8 +6,8 @@ import torch
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.inputs import INPUT_REGISTRY
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
-                        is_pin_memory_available)
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
+                        bind_kv_cache, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.ipex_attn import IPEXAttentionBackend
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
@@ -306,3 +306,6 @@ class XPUModelRunner(GPUModelRunner):
                 torch.zeros(kv_cache_shape,
                             dtype=self.kv_cache_dtype,
                             device=self.device))
+        bind_kv_cache(
+            self.vllm_config.compilation_config.static_forward_context,
+            [self.kv_caches])

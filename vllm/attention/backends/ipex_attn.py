@@ -24,6 +24,8 @@ _PARTITION_SIZE = 512
 
 class IpexAttnBackend(AttentionBackend):
 
+    accept_output_buffer: bool = True
+
     @staticmethod
     def get_name() -> str:
         return "IPEX"
