@@ -1174,7 +1174,7 @@ class EngineArgs:
             model_impl=self.model_impl,
         )
 
-    def create_load_config(self, load_device=None) -> LoadConfig:
+    def create_load_config(self) -> LoadConfig:
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent
         if (self.quantization == "bitsandbytes" or
@@ -1191,12 +1191,10 @@ class EngineArgs:
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
 
-        if load_device is None:
-            load_device = DeviceConfig(device=self.device).device
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
-            device=load_device,
+            device=self.weights_load_device,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
@@ -1384,9 +1382,7 @@ class EngineArgs:
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
-        load_device = device_config.device if self.weights_load_device is \
-            None else self.weights_load_device
-        load_config = self.create_load_config(load_device)
+        load_config = self.create_load_config()
 
         prompt_adapter_config = PromptAdapterConfig(
             max_prompt_adapters=self.max_prompt_adapters,
