@@ -126,6 +126,15 @@ class DelegateWorkerBase(WorkerBase):
     """
     worker: WorkerBase
 
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+    ) -> None:
+        vllm_config: VllmConfig = kwargs.get("vllm_config")
+        cls = resolve_obj_by_qualname(vllm_config.parallel_config.worker_cls)
+        self.worker = cls(*args, **kwargs)
+
     def init_device(self) -> None:
         self.worker.init_device()
 
