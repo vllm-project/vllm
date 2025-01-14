@@ -340,8 +340,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL", "1"))
                  ),
 
-    # If the env var is set, it enables GPU communication overlap in
-    # Ray's compiled DAG. This flag is ignored if
+    # If the env var is set, it enables GPU communication overlap
+    # (experimental feature) in Ray's compiled DAG. This flag is ignored if
     # VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
