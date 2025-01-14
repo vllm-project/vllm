@@ -732,7 +732,7 @@ class FlashAttentionImpl(AttentionImpl):
                 # normal attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
-                q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = \
+                q_seq_start_loc, q_seq_len, k_seqlens, k_seq_len = \
                     _get_query_key_seq_metadata(prefill_meta, True, attn_type)
 
                 key = key[:num_prefill_kv_tokens]
@@ -743,7 +743,7 @@ class FlashAttentionImpl(AttentionImpl):
                     k=key,
                     v=value,
                     cu_seqlens_q=q_seq_start_loc,
-                    cu_seqlens_k=k_seq_start_loc,
+                    seqused_k=k_seqlens,
                     max_seqlen_q=q_seq_len,
                     max_seqlen_k=k_seq_len,
                     softmax_scale=softmax_scale,
@@ -765,7 +765,7 @@ class FlashAttentionImpl(AttentionImpl):
                     v=value_cache,
                     cu_seqlens_q=prefill_meta.query_start_loc,
                     max_seqlen_q=prefill_meta.max_query_len,
-                    cu_seqlens_k=prefill_meta.seq_start_loc,
+                    seqused_k=prefill_meta.seq_lens_tensor,
                     max_seqlen_k=max_seq_len,
                     softmax_scale=softmax_scale,
                     causal=True,
@@ -793,7 +793,7 @@ class FlashAttentionImpl(AttentionImpl):
                     v=value_cache,
                     cu_seqlens_q=decode_meta.query_start_loc,
                     max_seqlen_q=decode_meta.max_decode_query_len,
-                    cu_seqlens_k=decode_meta.seq_start_loc,
+                    seqused_k=decode_meta.seq_lens_tensor,
                     max_seqlen_k=decode_meta.max_decode_seq_len,
                     softmax_scale=softmax_scale,
                     causal=True,
@@ -847,7 +847,7 @@ def _get_query_key_seq_metadata(
         tuple: A tuple containing four integers:
             - Starting location for the query sequence.
             - Maximum sequence length for the query sequence.
-            - Starting location for the key sequence.
+            - Seqlens for the key sequence.
             - Maximum sequence length for the key sequence.
 
     Raises:
@@ -861,7 +861,7 @@ def _get_query_key_seq_metadata(
         else:
             max_seq_len = attn_metadata.max_decode_seq_len
         return (attn_metadata.seq_start_loc, max_seq_len,
-                attn_metadata.seq_start_loc, max_seq_len)
+                attn_metadata.seq_lens_tensor, max_seq_len)
 
     elif attn_type == AttentionType.ENCODER_DECODER:
         # This is cross attention between the where the key

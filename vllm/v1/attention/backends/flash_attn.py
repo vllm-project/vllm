@@ -63,7 +63,7 @@ class FlashAttentionMetadata:
     max_query_len: int
     query_start_loc: torch.Tensor
     max_seq_len: int
-    seq_start_loc: torch.Tensor
+    seq_lens: torch.Tensor
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
@@ -71,8 +71,8 @@ class FlashAttentionMetadata:
     use_cascade: bool
     common_prefix_len: int
     cu_prefix_query_lens: Optional[torch.Tensor]
-    cu_prefix_kv_lens: Optional[torch.Tensor]
-    cu_suffix_kv_lens: Optional[torch.Tensor]
+    prefix_kv_lens: Optional[torch.Tensor]
+    suffix_kv_lens: Optional[torch.Tensor]
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -196,7 +196,7 @@ class FlashAttentionImpl(AttentionImpl):
                 out=output[:num_actual_tokens],
                 cu_seqlens_q=attn_metadata.query_start_loc,
                 max_seqlen_q=attn_metadata.max_query_len,
-                cu_seqlens_k=attn_metadata.seq_start_loc,
+                seqused_k=attn_metadata.seq_lens,
                 max_seqlen_k=attn_metadata.max_seq_len,
                 softmax_scale=self.scale,
                 causal=True,
@@ -216,8 +216,8 @@ class FlashAttentionImpl(AttentionImpl):
             cu_query_lens=attn_metadata.query_start_loc,
             max_query_len=attn_metadata.max_query_len,
             cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens,
-            cu_prefix_kv_lens=attn_metadata.cu_prefix_kv_lens,
-            cu_suffix_kv_lens=attn_metadata.cu_suffix_kv_lens,
+            prefix_kv_lens=attn_metadata.prefix_kv_lens,
+            suffix_kv_lens=attn_metadata.suffix_kv_lens,
             max_kv_len=attn_metadata.max_seq_len,
             softmax_scale=self.scale,
             alibi_slopes=self.alibi_slopes,
@@ -305,8 +305,8 @@ def cascade_attention(
     cu_query_lens: torch.Tensor,
     max_query_len: int,
     cu_prefix_query_lens: torch.Tensor,
-    cu_prefix_kv_lens: torch.Tensor,
-    cu_suffix_kv_lens: torch.Tensor,
+    prefix_kv_lens: torch.Tensor,
+    suffix_kv_lens: torch.Tensor,
     max_kv_len: int,
     softmax_scale: float,
     alibi_slopes: Optional[torch.Tensor],
@@ -332,7 +332,7 @@ def cascade_attention(
         k=key_cache,
         v=value_cache,
         cu_seqlens_q=cu_prefix_query_lens,
-        cu_seqlens_k=cu_prefix_kv_lens,
+        seqused_k=prefix_kv_lens,
         max_seqlen_q=num_tokens,
         max_seqlen_k=common_prefix_len,
         softmax_scale=softmax_scale,
@@ -349,7 +349,7 @@ def cascade_attention(
         k=key_cache,
         v=value_cache,
         cu_seqlens_q=cu_query_lens,
-        cu_seqlens_k=cu_suffix_kv_lens,
+        seqused_k=suffix_kv_lens,
         max_seqlen_q=max_query_len,
         max_seqlen_k=max_kv_len - common_prefix_len,
         softmax_scale=softmax_scale,
