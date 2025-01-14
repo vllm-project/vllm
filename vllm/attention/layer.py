@@ -134,8 +134,8 @@ class Attention(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        _kv_cache: torch.Tensor,
-        _attn_metadata: AttentionMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         if self.use_output:
             output = torch.empty_like(query)
