@@ -155,8 +155,6 @@ def bind_kv_cache(
         layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
         kv_caches: The allocated kv_caches with layer names as keys.
-    Returns:
-        None
     """
     # bind kv_caches to ModelRunner's kv_caches
     assert len(runner_kv_caches) == 0

@@ -858,7 +858,7 @@ class GPUModelRunner:
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
-        Allocate the KV cache for the model based on the provided configuration.
+        Initialize KV cache based on `kv_cache_config`.
         Args:
             kv_cache_config: Configuration for the KV cache, including the KV 
             cache size of each layer
@@ -891,7 +891,7 @@ class GPUModelRunner:
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
-        Generates the KVCacheSpec by parsing the kv cache format of each 
+        Generates the KVCacheSpec by parsing the kv cache format from each 
         Attention module in the static forward context.
         Returns:
             KVCacheSpec: A dictionary mapping layer names to their KV cache 

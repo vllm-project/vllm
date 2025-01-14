@@ -1,11 +1,10 @@
-import math
 from dataclasses import dataclass
 from typing import Dict, List
 
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils import get_dtype_size
+from vllm.utils import cdiv, get_dtype_size
 
 logger = init_logger(__name__)
 
@@ -67,7 +66,7 @@ class FullAttentionSpec(KVCacheSpecBase):
                 * get_dtype_size(self.dtype)
 
     def bytes_for_tokens(self, num_tokens: int) -> int:
-        return math.ceil(num_tokens / self.block_size) * self.page_size_bytes
+        return cdiv(num_tokens, self.block_size) * self.page_size_bytes
 
 
 KVCacheSpec = Dict[str, KVCacheSpecBase]
@@ -94,7 +93,7 @@ class KVCacheConfig:
     A list of kv-cache groups. Each group includes a set of layers with
     the same kv-cache spec, and the total page_size of layers inside a group
     is same across all groups (as the KVCacheManager only supports allocating
-    one page size). For example:
+    pages of the same size). For example:
     1. A model only uses full attention: one group with all layers in the model.
     2. (not implemented yet) A model with the same number of full attention
     layers and sliding window attention layers: two groups, one for full
