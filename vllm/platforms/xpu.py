@@ -101,7 +101,7 @@ class XPUPlatform(Platform):
                 "Both start methods (spawn and fork) have issue "
                 "on XPU if you use mp backend, Please try ray instead.")
 
-        from vllm.envs import envs
+        import vllm.envs as envs
         mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
         if mp_method != "spawn" and parallel_config.world_size > 1:
             raise RuntimeError(
