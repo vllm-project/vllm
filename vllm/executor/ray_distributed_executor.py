@@ -58,7 +58,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # "driver worker" vs other workers. Also, the rank 0 worker will
         # be executed in a remote Ray worker. Currently this requires
         # USE_RAY_COMPILED_DAG=True.
-        self.use_ray_spmd_worker = envs.VLLM_USE_RAY_SPMD_WORKER
+        self.use_ray_spmd_worker = envs.VLLM_USE_RAY_SPMD_WORKER \
+            or envs.VLLM_USE_V1
         if self.use_ray_compiled_dag:
             assert self.use_ray_spmd_worker, (
                 "VLLM_USE_RAY_COMPILED_DAG=1 requires "
@@ -283,8 +284,6 @@ class RayDistributedExecutor(DistributedExecutorBase):
         all_args_to_update_environment_variables = [{
             current_platform.device_control_env_var:
             ",".join(map(str, node_gpus[node_id])),
-            "VLLM_TRACE_FUNCTION":
-            str(envs.VLLM_TRACE_FUNCTION),
         } for (node_id, _) in worker_node_and_gpu_ids]
 
         for args in all_args_to_update_environment_variables:
@@ -292,7 +291,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
             # TODO: refactor platform-specific env vars
             for name in [
                     "VLLM_ATTENTION_BACKEND", "TPU_CHIPS_PER_HOST_BOUNDS",
-                    "TPU_HOST_BOUNDS"
+                    "TPU_HOST_BOUNDS", "VLLM_USE_V1",
+                    "VLLM_TRACE_FUNCTION",
             ]:
                 if name in os.environ:
                     args[name] = os.environ[name]
