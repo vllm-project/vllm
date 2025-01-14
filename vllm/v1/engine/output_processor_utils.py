@@ -7,6 +7,7 @@ from vllm.transformers_utils.detokenizer_utils import AnyTokenizer
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 
+
 class RequestState:
 
     def __init__(
