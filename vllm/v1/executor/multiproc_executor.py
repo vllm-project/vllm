@@ -247,8 +247,17 @@ class WorkerProc:
     ):
         self.rank = rank
         wrapper = WorkerWrapperBase(vllm_config=vllm_config, rank=rank)
-        wrapper.init_worker(vllm_config, local_rank, rank,
-                            distributed_init_method)
+        # TODO: move `init_worker` to executor level as a collective rpc call
+        all_kwargs: List[Dict] = [
+            {} for _ in range(vllm_config.parallel_config.world_size)
+        ]
+        all_kwargs[rank] = {
+            "vllm_config": vllm_config,
+            "local_rank": local_rank,
+            "rank": rank,
+            "distributed_init_method": distributed_init_method,
+        }
+        wrapper.init_worker(all_kwargs)
         self.worker = wrapper.worker
 
         pid = os.getpid()
