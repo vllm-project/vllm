@@ -19,6 +19,12 @@ if current_platform.is_cuda_alike():
     from .fused_moe import fused_experts
 else:
     fused_experts = None  # type: ignore
+
+if current_platform.is_cpu():
+    from .moe_torch_iterative import fused_moe as fused_moe_iterative
+else:
+    fused_moe_iterative = None  # type: ignore
+
 if current_platform.is_tpu():
     # the iterative moe implementation is used until the moe_pallas is fixed
     from .moe_torch_iterative import fused_moe as fused_moe_pallas
@@ -89,15 +95,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         super().process_weights_after_loading(layer)
 
         if current_platform.is_cpu():
-            if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+            arch = current_platform.get_cpu_architecture()
+            if arch == CpuArchEnum.X86:
                 import intel_extension_for_pytorch as ipex
-                layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+                layer.ipex_fused_moe = ipex.llm.modules.GatedMLPMOE(
                     layer.w13_weight,
                     layer.w2_weight,
                     use_prepack=True,
                 )
             else:
-                raise NotImplementedError("CPU MOE only supports x86 arch.")
+                logger.warning_once(
+                    f"CPU architecture '{arch}' does not have fused_moe "
+                    "implementation, falling back to slow iterative_moe.")
 
     def apply(
         self,
@@ -158,29 +167,45 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                              topk_ids=topk_ids,
                              inplace=True)
 
-    def forward_cpu(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
-        router_logits: torch.Tensor,
-        renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        custom_routing_function: Optional[Callable] = None,
-        **kwargs,
-    ):
+    def forward_cpu(self,
+                    layer: torch.nn.Module,
+                    x: torch.Tensor,
+                    use_grouped_topk: bool,
+                    top_k: int,
+                    router_logits: torch.Tensor,
+                    renormalize: bool,
+                    topk_group: Optional[int] = None,
+                    num_expert_group: Optional[int] = None,
+                    custom_routing_function: Optional[Callable] = None,
+                    scoring_func: str = "softmax",
+                    e_score_correction_bias: Optional[torch.Tensor] = None):
+        assert not use_grouped_topk
+        assert num_expert_group is None
+        assert topk_group is None
         assert custom_routing_function is None
-        return layer.ipex_fusion(
-            x,
-            use_grouped_topk,
-            top_k,
-            router_logits,
-            renormalize,
-            topk_group,
-            num_expert_group,
-        )
+        if scoring_func != "softmax":
+            raise NotImplementedError(
+                "Only softmax scoring function is supported for CPU.")
+        if e_score_correction_bias is not None:
+            raise NotImplementedError(
+                "Expert score correction bias is not supported for CPU.")
+        if hasattr(layer, "ipex_fused_moe"):
+            return layer.ipex_fused_moe(
+                x,
+                use_grouped_topk,
+                top_k,
+                router_logits,
+                renormalize,
+                topk_group,
+                num_expert_group,
+            )
+        else:
+            return fused_moe_iterative(hidden_states=x,
+                                       w1=layer.w13_weight,
+                                       w2=layer.w2_weight,
+                                       topk=top_k,
+                                       gating_output=router_logits,
+                                       renormalize=renormalize)
 
     def forward_tpu(
         self,
