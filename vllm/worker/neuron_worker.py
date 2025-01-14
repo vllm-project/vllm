@@ -123,15 +123,14 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         vLLM still needs the environment initialized when TP/PP > 1
         """
-        # always init the environment with world size=1
         init_distributed_environment(
-            world_size=1,
-            rank=0,
-            local_rank=0,
+            world_size=self.vllm_config.parallel_config.world_size,
+            rank=self.rank,
+            local_rank=self.local_rank,
             distributed_init_method=self.distributed_init_method,
             backend="gloo",
         )
         ensure_model_parallel_initialized(
-            1,
+            self.vllm_config.parallel_config.tensor_parallel_size,
             1,
         )
