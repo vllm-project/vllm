@@ -245,8 +245,7 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
               sorted_token_ids.data_ptr<int32_t>(),
               experts_ids.data_ptr<int32_t>(),
               num_tokens_post_pad.data_ptr<int32_t>(), num_experts, block_size,
-              topk_ids.numel(),
-              token_cnts_buffer.data_ptr<int32_t>(),
+              topk_ids.numel(), token_cnts_buffer.data_ptr<int32_t>(),
               cumsum_buffer.data_ptr<int32_t>());
         });
   } else {
