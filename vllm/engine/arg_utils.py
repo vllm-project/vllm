@@ -1081,12 +1081,10 @@ class EngineArgs:
 
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
-        if load_device is None:
-            load_device = DeviceConfig(device=self.device).device
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
-            device=load_device,
+            device=self.weights_load_device,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
@@ -1286,9 +1284,7 @@ class EngineArgs:
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
-        load_device = device_config.device if self.weights_load_device is \
-            None else self.weights_load_device
-        load_config = self.create_load_config(load_device)
+        load_config = self.create_load_config()
 
         prompt_adapter_config = PromptAdapterConfig(
             max_prompt_adapters=self.max_prompt_adapters,
