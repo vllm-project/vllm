@@ -413,10 +413,6 @@ class MambaMixer2(CustomOp):
         # 3. State Space Model sequence transformation
         if has_prefill:
 
-            # FIXME: we are having problems using mamba_chunk_scan_combined
-            # with chunked prefill. This is because currently
-            # chunked_prefill only works if "attn_metadata.query_start_loc"
-            # is aligned with chunk_size. WIP
 
             initial_states = None
             if has_initial_states is not None and any(has_initial_states):
