@@ -15,9 +15,6 @@ class UniProcExecutor(ExecutorBase):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model.
         """
-        assert self.parallel_config.world_size == 1, (
-            "UniProcExecutor only supports single device.")
-
         self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
                                                rank=0)
         distributed_init_method = get_distributed_init_method(
