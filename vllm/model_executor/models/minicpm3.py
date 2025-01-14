@@ -241,11 +241,5 @@ class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
     # `embedding_modules` and `embedding_padding_modules`
     # are inherited from MiniCPMForCausalLM
 
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
-    }
-
     def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
         return MiniCPM3Model(vllm_config=vllm_config, prefix=prefix)

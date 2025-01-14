@@ -409,9 +409,9 @@ class FalconModel(nn.Module):
 
 
 class FalconForCausalLM(nn.Module, SupportsPP):
-
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {}
+    packed_modules_mapping = {
+        "query_key_value": ["query_key_value"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

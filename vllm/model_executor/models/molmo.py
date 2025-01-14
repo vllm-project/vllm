@@ -1193,12 +1193,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
     embedding_modules = {}
     embedding_padding_modules = []
 
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        "gate_proj": ("merged_linear", 0),
-        "up_proj": ("merged_linear", 1),
-    }
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
