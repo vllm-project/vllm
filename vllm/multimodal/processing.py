@@ -409,6 +409,8 @@ def _iter_modality_placeholders(
     modality: str,
     modality_repls: Sequence[BoundPromptReplacement],
     modal_item_count: int,
+    *,
+    start_idx: int = 0,
 ) -> Iterable[PlaceholderInfo]:
     if modal_item_count == 0:
         return
@@ -416,7 +418,6 @@ def _iter_modality_placeholders(
     prompt_len = len(prompt)
     item_idx = 0
 
-    start_idx = 0
     while start_idx < prompt_len:
         found = False
 
@@ -461,14 +462,45 @@ def _iter_placeholders(
 
     Note that empty matches are ignored.
     """
-    for modality, modal_item_count in mm_item_counts.items():
-        if modality in mm_prompt_repls:
-            yield from _iter_modality_placeholders(
-                prompt,
-                modality,
-                mm_prompt_repls[modality],
-                modal_item_count,
-            )
+    prompt_len = len(prompt)
+    item_idx_by_modality = defaultdict[str, int](lambda: 0)
+
+    start_idx = 0
+    while start_idx < prompt_len:
+        found = False
+
+        for modality, modality_repls in mm_prompt_repls.items():
+            item_idx = item_idx_by_modality[modality]
+            if item_idx >= mm_item_counts.get(modality, 0):
+                continue
+
+            for repl_info in modality_repls:
+                replacement = repl_info.get_replacement(item_idx)
+                repl_tokens = replacement.token_ids
+                repl_len = len(repl_tokens)
+                end_idx = start_idx + repl_len
+    
+                if repl_len == 0 or end_idx > prompt_len:
+                    continue
+    
+                if prompt[start_idx:end_idx] == repl_tokens:
+                    yield PlaceholderInfo(
+                        modality=modality,
+                        item_idx=item_idx,
+                        start_idx=start_idx,
+                        replacement=repl_tokens,
+                    )
+    
+                    # Exclude overlapping matches
+                    start_idx = end_idx
+                    item_idx_by_modality[modality] += 1
+                    found = True
+                    break
+    
+            if found:
+                break  # Go back to the outer while loop
+        if not found:
+            start_idx += 1
 
 
 def find_mm_placeholders(
@@ -899,7 +931,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             modality: 0
             for modality in mm_missing_data_items
         }
-
+        import pudb; pudb.set_trace()
         merged_kw_items = list[MultiModalKwargsItem]()
         for modality, kw_items in mm_maybe_cached_kw_items.items():
             for idx, kw_item in enumerate(kw_items):
@@ -1117,7 +1149,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_items,
             hf_processor_mm_kwargs,
         )
-
+        
         unbound_prompt_repls = self._get_prompt_replacements(
             mm_items,
             hf_processor_mm_kwargs,
@@ -1156,7 +1188,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
-        if all(len(repls) == 0 for repls in mm_missing_repls.items()):
+        if all(len(repls) == 0 for repls in mm_missing_repls.values()):
             tokenizer = self.info.get_tokenizer()
             prompt = decode_tokens(tokenizer, prompt_ids)
             mm_placeholders = hf_mm_placeholders

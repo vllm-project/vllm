@@ -722,7 +722,6 @@ class GPUModelRunner:
 
         # Profile with multimodal encoder & encoder cache.
         if self.is_multimodal_model:
-
             # Create dummy batch of multimodal inputs.
             dummy_request_data = self.input_registry.dummy_data_for_profiling(
                 model_config=self.model_config,
