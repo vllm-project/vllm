@@ -94,20 +94,15 @@ class XPUPlatform(Platform):
             # fork is not supported for xpu start new process.
             logger.error(
                 "Both start methods (spawn and fork) have issue "
-                "on XPU if you use mp backend, Please try ray instead.")
+                "on XPU if you use mp backend, setting it to ray instead.")
             parallel_config.distributed_executor_backend = "ray"
+
         elif parallel_config.distributed_executor_backend != "ray":
             logger.warning(
                 "%s is not supported on XPU, fallback to ray distributed"
                 " executor backend.",
                 parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "ray"
-
-        import vllm.envs as envs
-        mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
-        if mp_method != "spawn" and parallel_config.world_size > 1:
-            raise RuntimeError(
-                "XPU multiprocess executor only support spawn as mp method")
 
     @classmethod
     def is_pin_memory_available(cls):
