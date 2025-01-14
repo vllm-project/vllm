@@ -857,8 +857,16 @@ class GPUModelRunner:
                     elapsed_time, cuda_graph_size / (1 << 30))
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Allocate the KV cache for the model based on the provided configuration.
+        Args:
+            kv_cache_config: Configuration for the KV cache, including the KV 
+            cache size of each layer
+        """
         if len(kv_cache_config.groups) > 1:
-            raise NotImplementedError("Hybrid kv-cache groups are not supported yet.")
+            raise NotImplementedError(
+                "Hybrid models with more than one KV cache type are not "
+                "supported yet.")
 
         kv_caches: Dict[str, torch.Tensor] = {}
 
@@ -882,6 +890,14 @@ class GPUModelRunner:
             self.kv_caches, kv_caches)
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
+        """
+        Generates the KVCacheSpec by parsing the kv cache format of each 
+        Attention module in the static forward context.
+        Returns:
+            KVCacheSpec: A dictionary mapping layer names to their KV cache 
+            format. Layers that do not need KV cache are not included.
+        """
+
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
         kv_cache_spec: KVCacheSpec = {}

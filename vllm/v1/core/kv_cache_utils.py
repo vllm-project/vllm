@@ -313,6 +313,17 @@ def hash_request_tokens(block_size: int,
 def check_enough_kv_cache_memory(vllm_config: VllmConfig,
                                  kv_cache_spec: KVCacheSpec,
                                  available_memory: int):
+    """
+    Checks if there is enough memory available for the KV cache of at least one
+    request with the model's max_model_len.
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_spec: The kv cache spec of the model
+        available_memory (int): Memory available for KV cache in bytes.
+    Raises:
+        ValueError: If there is not enough memory available for the KV cache.
+    """
+
     if available_memory <= 0:
         raise ValueError("No available memory for the cache blocks. "
                          "Try increasing `gpu_memory_utilization` when "
@@ -334,6 +345,14 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
 
 
 def is_same_type(kv_cache_spec: KVCacheSpec) -> bool:
+    """
+    Whether all layers in the given KVCacheSpec have the same type of KV cache.
+    Args:
+        kv_cache_spec (KVCacheSpec): The KVCacheSpec of the model
+    Returns:
+        True if all layers have the same type, False otherwise.
+    """
+
     layer_keys = set(layer.type_key for layer in kv_cache_spec.values())
     return len(layer_keys) == 1
 
@@ -341,6 +360,18 @@ def is_same_type(kv_cache_spec: KVCacheSpec) -> bool:
 def _get_kv_cache_config_same_type(
         vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
         available_memory: int) -> Tuple[KVCacheConfig, int]:
+    """
+    Generates the KV cache configuration for a model with one type of KV cache.
+    Divide the available memory equally among all layers.
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_spec: The kv cache spec of the model
+        available_memory (int): Memory available for KV cache in bytes.
+    Returns:
+        Tuple[KVCacheConfig, int]: The generated KVCacheConfig and the number of
+        GPU blocks.
+    """
+
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
     assert len(page_sizes) == 1
     page_size = page_sizes.pop()
@@ -373,7 +404,16 @@ def _get_kv_cache_config_same_type(
 
 def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
                         available_memory: int) -> Tuple[KVCacheConfig, int]:
-    """ returns the KV cache configuration and the number of GPU blocks
+    """
+    Generates the KV cache configuration for a model
+    TODO: support hybrid models with more than one type of KV cache.
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_spec: The kv cache spec of the model
+        available_memory (int): Memory available for KV cache in bytes.
+    Returns:
+        Tuple[KVCacheConfig, int]: The generated KVCacheConfig and the number of
+        GPU blocks.
     """
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
     if is_same_type(kv_cache_spec):

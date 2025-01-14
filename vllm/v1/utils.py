@@ -3,14 +3,17 @@ import os
 import weakref
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import (Any, Callable, Dict, Generic, List, Optional, TypeVar,
-                    Union, overload)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Generic, List,
+                    Optional, TypeVar, Union, overload)
 
 import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils import get_mp_context, kill_process_tree
+
+if TYPE_CHECKING:
+    from vllm.attention.layer import Attention
 
 logger = init_logger(__name__)
 
@@ -141,10 +144,20 @@ def shutdown(proc: multiprocessing.Process, input_path: str, output_path: str):
 
 
 def bind_kv_cache(
-    ctx: Dict[str, Any],
+    ctx: Dict[str, "Attention"],
     runner_kv_caches: List[torch.Tensor],
     kv_caches: Dict[str, torch.Tensor],
 ) -> None:
+    """
+    Bind kv_caches to the forward context and model_runner's kv_cache.
+    Args:
+        ctx: The global forward context containing all Attention layers with 
+        layer names as keys.
+        runner_kv_caches: The kv_cache declared by ModelRunner.
+        kv_caches: The allocated kv_caches with layer names as keys.
+    Returns:
+        None
+    """
     # bind kv_caches to ModelRunner's kv_caches
     assert len(runner_kv_caches) == 0
     index2name = defaultdict(list)
@@ -154,11 +167,11 @@ def bind_kv_cache(
     for layer_index in sorted(index2name.keys()):
         layer_names = index2name[layer_index]
         layer_name = layer_names[0]
-        assert all(kv_caches[n] is kv_caches[layer_name] for n in layer_names[1:])
+        assert all(kv_caches[n] is kv_caches[layer_name]
+                   for n in layer_names[1:])
         runner_kv_caches.append(kv_caches[layer_name])
 
     # bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
-        # TODO: change [kv_cache] to kv_cache when dropping v0 which uses
-        # virtual engine to support PP.
+        # NOTE: Use list because of v0 PP virtual engine.
         ctx[layer_name].kv_cache = [kv_cache]
