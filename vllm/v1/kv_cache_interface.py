@@ -77,7 +77,7 @@ KVCacheSpec = Dict[str, KVCacheSpecBase]
 class KVCacheTensor:
     """
     A dataclass for specifying how the workers should initialize the KV cache
-    for a layer. Only contains the size of KV cache for that layer for now. Will 
+    for a layer. Only contains the size of KV cache for that layer for now. Will
     be extended to support multiple layers sharing the same memory pool.
     """
     size: int  # The size of KV cache Tensor in bytes
