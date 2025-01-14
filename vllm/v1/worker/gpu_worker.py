@@ -33,6 +33,7 @@ class Worker:
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        is_driver_worker: bool = False,
     ):
 
         # TODO: use WorkerBase.__init__(self, vllm_config=vllm_config)
