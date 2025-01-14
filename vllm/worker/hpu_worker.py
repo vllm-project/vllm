@@ -19,8 +19,9 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.utils import bind_kv_cache
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.hpu_model_runner import HPUModelRunner
