@@ -83,23 +83,25 @@ class XPUPlatform(Platform):
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
-        if (parallel_config.distributed_executor_backend is not None
-                and parallel_config.distributed_executor_backend != "ray"):
-            logger.warning(
-                "%s is not supported on XPU, fallback to ray distributed"
-                " executor backend.",
-                parallel_config.distributed_executor_backend)
-            parallel_config.distributed_executor_backend = "ray"
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
 
-        if parallel_config.distributed_executor_backend == "mp":
+        if parallel_config.distributed_executor_backend is None:
+            parallel_config.distributed_executor_backend = "ray"
+        elif parallel_config.distributed_executor_backend == "mp":
             # FIXME(kunshang):
             # spawn needs calling `if __name__ == '__main__':``
             # fork is not supported for xpu start new process.
             logger.error(
                 "Both start methods (spawn and fork) have issue "
                 "on XPU if you use mp backend, Please try ray instead.")
+            parallel_config.distributed_executor_backend = "ray"
+        elif parallel_config.distributed_executor_backend != "ray":
+            logger.warning(
+                "%s is not supported on XPU, fallback to ray distributed"
+                " executor backend.",
+                parallel_config.distributed_executor_backend)
+            parallel_config.distributed_executor_backend = "ray"
 
         import vllm.envs as envs
         mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
