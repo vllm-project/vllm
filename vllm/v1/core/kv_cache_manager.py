@@ -94,16 +94,6 @@ class KVCacheManager:
                 hash_request_tokens(self.block_size, request))
         block_hashes = request.kv_block_hashes
 
-        if len(block_hashes) * self.block_size == request.num_tokens:
-            # When prompt length is divisible by the block size and all blocks
-            # are cached, we need to recompute the last token. This have to be
-            # achieved by re-computing an entire block because allocate_slots()
-            # assumes num_computed_tokens is always a multiple of the block
-            # size. This limitation can potentially be removed in the future to
-            # slightly improve the performance. To achieve this, the last block
-            # is removed from the computed block_hashes.
-            block_hashes = ConstantList(block_hashes[:-1])
-
         for block_hash in block_hashes:
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are

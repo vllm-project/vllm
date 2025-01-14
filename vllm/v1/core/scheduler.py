@@ -185,11 +185,26 @@ class Scheduler:
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(request)
+                # NOTE(woosuk): Since incomplete blocks are not eligible for
+                # sharing, `num_computed_tokens` is always a multiple of
+                # `block_size`.
+                num_computed_tokens = len(computed_blocks) * self.block_size
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
+                if num_new_tokens == 0:
+                    # The happens when prompt length is divisible by the block
+                    # size and all blocks are cached. Now we force to recompute
+                    # the last block. Note that we have to re-compute an entire
+                    # block because allocate_slots() assumes num_computed_tokens
+                    # is always a multiple of the block size. This limitation
+                    # can potentially be removed in the future to slightly
+                    # improve the performance.
+                    num_computed_tokens -= self.block_size
+                    num_new_tokens = self.block_size
+                    computed_blocks.pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 

@@ -124,21 +124,12 @@ def test_prefill():
 
     manager.free(req2)
 
-    # Cache hit of the whole request. Recompute the last block
-    unique_token_ids = []
-    req3 = make_request("3", common_token_ids + unique_token_ids)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req3)
-    assert len(req3.kv_block_hashes) == 3
-    assert [b.block_id for b in computed_blocks] == [0, 1]
-    assert num_computed_tokens == 2 * 16
-    # not allocate, so does not change the order in the free block queue
-
     # Cache miss and eviction.
-    req4 = make_request("4", [99] * (16 * 9))
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req4)
+    req3 = make_request("3", [99] * (16 * 9))
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req3)
     assert not computed_blocks
     assert num_computed_tokens == 0
-    blocks = manager.allocate_slots(req4, 16 * 9, computed_blocks)
+    blocks = manager.allocate_slots(req3, 16 * 9, computed_blocks)
     # This block ID order also checks the eviction order.
     assert [b.block_id for b in blocks] == [9, 4, 3, 6, 5, 8, 7, 2, 1, 0]
     assert manager.free_block_queue.num_free_blocks == 0
