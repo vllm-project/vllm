@@ -26,6 +26,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        is_driver_worker: bool = True,
     ) -> None:
         WorkerBase.__init__(self, vllm_config=vllm_config)
         self.local_rank = local_rank
@@ -38,7 +39,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         self.model_runner: NeuronModelRunner = NeuronModelRunner(
             vllm_config=vllm_config)
-        self.is_driver_worker = True
+        self.is_driver_worker = is_driver_worker
 
     def execute_model(
         self,
