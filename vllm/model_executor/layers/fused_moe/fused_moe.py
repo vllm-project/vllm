@@ -256,8 +256,21 @@ def moe_align_block_size(
     num_tokens_post_pad = torch.empty((1),
                                       dtype=torch.int32,
                                       device=topk_ids.device)
+    if num_experts >= 256:
+        # For DeepSeek-V3
+        token_cnts_buffer = torch.empty(
+            (num_experts + 1) * num_experts, dtype=torch.int32, device=topk_ids.device
+        )
+        cumsum_buffer = torch.empty(
+            num_experts + 1, dtype=torch.int32, device=topk_ids.device
+        )
+    else:
+        token_cnts_buffer = torch.empty((0,), dtype=torch.int32, device=topk_ids.device)
+        cumsum_buffer = torch.empty((0,), dtype=torch.int32, device=topk_ids.device)
+
     ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
-                             expert_ids, num_tokens_post_pad)
+                             expert_ids, num_tokens_post_pad,
+                             token_cnts_buffer, cumsum_buffer)
     return sorted_ids, expert_ids, num_tokens_post_pad
 
 

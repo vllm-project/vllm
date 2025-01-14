@@ -221,7 +221,9 @@ __global__ void moe_sum_kernel(
 void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
                           int64_t block_size, torch::Tensor sorted_token_ids,
                           torch::Tensor experts_ids,
-                          torch::Tensor num_tokens_post_pad) {
+                          torch::Tensor num_tokens_post_pad,
+                          torch::Tensor token_cnts_buffer,
+                          torch::Tensor cumsum_buffer) {
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // If we have very large number of experts, we can no longer use shared
@@ -229,21 +231,12 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
   // TODO(simon): the right solution should be calculating the exact right
   // amount of shared memory and use that. The num_experts >= 256 is just a
   // temporary solution to unblock Deepseek V3.
-  if (num_experts >= 256) {
+  if (token_cnts_buffer.numel() > 0 && token_cnts_buffer.numel() > 0) {
     VLLM_DISPATCH_INTEGRAL_TYPES(
         topk_ids.scalar_type(), "moe_align_block_size_global_mem_kernel", [&] {
           // calc needed amount of shared mem for `tokens_cnts` and `cumsum`
           // tensors
           const int32_t num_thread = max((int32_t)num_experts, WARP_SIZE);
-
-          const int32_t mem_tokens_cnts =
-              ((num_experts + 1) * num_experts) * sizeof(int32_t);
-          const int32_t mem_cumsum = (num_experts + 1) * sizeof(int32_t);
-          // allocate global memory
-          int32_t* tokens_cnts;
-          int32_t* cumsum;
-          cudaMalloc(&tokens_cnts, mem_tokens_cnts);
-          cudaMalloc(&cumsum, mem_cumsum);
 
           auto kernel =
               vllm::moe::moe_align_block_size_global_mem_kernel<scalar_t>;
@@ -252,9 +245,9 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
               sorted_token_ids.data_ptr<int32_t>(),
               experts_ids.data_ptr<int32_t>(),
               num_tokens_post_pad.data_ptr<int32_t>(), num_experts, block_size,
-              topk_ids.numel(), tokens_cnts, cumsum);
-          cudaFree(tokens_cnts);
-          cudaFree(cumsum);
+              topk_ids.numel(),
+              token_cnts_buffer.data_ptr<int32_t>(),
+              cumsum_buffer.data_ptr<int32_t>());
         });
   } else {
     VLLM_DISPATCH_INTEGRAL_TYPES(

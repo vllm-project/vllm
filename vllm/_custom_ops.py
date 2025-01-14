@@ -917,10 +917,13 @@ def moe_sum(input: torch.Tensor, output: torch.Tensor):
 def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                          block_size: int, sorted_token_ids: torch.Tensor,
                          experts_ids: torch.Tensor,
-                         num_tokens_post_pad: torch.Tensor) -> None:
+                         num_tokens_post_pad: torch.Tensor,
+                         token_cnts_buffer: torch.Tensor,
+                         cumsum_buffer: torch.Tensor) -> None:
     torch.ops._moe_C.moe_align_block_size(topk_ids, num_experts, block_size,
                                           sorted_token_ids, experts_ids,
-                                          num_tokens_post_pad)
+                                          num_tokens_post_pad,
+                                          token_cnts_buffer, cumsum_buffer)
 
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
