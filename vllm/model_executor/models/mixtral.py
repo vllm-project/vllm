@@ -44,7 +44,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -483,6 +482,4 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
-            if current_platform.is_hpu():
-                torch.hpu.synchronize()
         return loaded_params
