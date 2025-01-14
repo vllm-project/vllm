@@ -94,7 +94,8 @@ def test_flash_attn(monkeypatch):
 
 
 def test_invalid_env(monkeypatch):
-    """Throw an exception if the backend name is invalid."""
+    """Ignore the invalid env variable if it is set."""
     override_backend_env_variable(monkeypatch, STR_INVALID_VAL)
-    with pytest.raises(ValueError):
-        get_attn_backend(16, torch.float16, None, 16, False)
+    with patch("vllm.attention.selector.current_platform", CudaPlatform()):
+        backend = get_attn_backend(16, torch.float16, None, 16, False)
+        assert backend.get_name() == "FLASH_ATTN"
