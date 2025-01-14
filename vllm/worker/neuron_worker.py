@@ -121,12 +121,13 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def init_distributed_environment(self):
         """Neuron uses transformers-neuronx for tensor parallelism.
 
-        vLLM still needs the environment inited when TP/PP > 1
+        vLLM still needs the environment initialized when TP/PP > 1
         """
+        # always init the environment with world size=1
         init_distributed_environment(
             world_size=1,
-            rank=self.rank,
-            local_rank=self.local_rank,
+            rank=0,
+            local_rank=0,
             distributed_init_method=self.distributed_init_method,
             backend="gloo",
         )
