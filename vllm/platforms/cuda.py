@@ -240,6 +240,10 @@ class CudaPlatformBase(Platform):
         logger.info("Using Flash Attention backend.")
         return "vllm.attention.backends.flash_attn.FlashAttentionBackend"
 
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
