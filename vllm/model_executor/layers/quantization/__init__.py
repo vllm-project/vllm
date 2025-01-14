@@ -97,6 +97,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .gptq_marlin import GPTQMarlinConfig
     from .gptq_marlin_24 import GPTQMarlin24Config
     from .hqq_marlin import HQQMarlinConfig
+    from .inc import INCConfig
     from .ipex_quant import IPEXConfig
     from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
@@ -105,7 +106,6 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .ptpc_fp8 import PTPCFp8Config
     from .qqq import QQQConfig
     from .tpu_int8 import Int8TpuConfig
-    from .inc import INCConfig
 
     method_to_config: Dict[str, Type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,
