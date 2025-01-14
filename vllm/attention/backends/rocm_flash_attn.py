@@ -29,8 +29,6 @@ _ON_MI250_MI300 = any(arch in _GPU_ARCH
 
 class ROCmFlashAttentionBackend(AttentionBackend):
 
-    use_output: bool = False
-
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASH"

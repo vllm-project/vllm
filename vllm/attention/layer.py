@@ -110,7 +110,7 @@ class Attention(nn.Module):
         self.use_direct_call = not current_platform.is_cuda_alike(
         ) and not current_platform.is_cpu()
 
-        self.use_output = attn_backend.use_output
+        self.use_output = attn_backend.accept_output_buffer
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")

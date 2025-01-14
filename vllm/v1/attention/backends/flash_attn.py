@@ -15,6 +15,8 @@ from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 class FlashAttentionBackend(AttentionBackend):
 
+    accept_output_buffer: bool = True
+
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
@@ -45,10 +47,6 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)
-
-    @staticmethod
-    def use_output():
-        return True
 
 
 @dataclass

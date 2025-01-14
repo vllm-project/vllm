@@ -21,8 +21,6 @@ if TYPE_CHECKING:
 class PlaceholderAttentionBackend(AttentionBackend):
     """Placeholder backend for when no attention is needed."""
 
-    use_output: bool = False
-
     @staticmethod
     def get_name() -> str:
         return "NO_ATTENTION"

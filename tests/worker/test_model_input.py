@@ -16,8 +16,6 @@ from vllm.worker.pooling_model_runner import (
 
 class MockAttentionBackend(AttentionBackend):
 
-    use_output: bool = False
-
     @staticmethod
     def get_name() -> str:
         raise NotImplementedError

@@ -22,8 +22,6 @@ logger = init_logger(__name__)
 
 class TorchSDPABackend(AttentionBackend):
 
-    use_output: bool = False
-
     @staticmethod
     def get_name() -> str:
         return "TORCH_SDPA"

@@ -34,7 +34,7 @@ class AttentionBackend(ABC):
     # For some attention backends, we allocate an output tensor before
     # calling the custom op. When piecewise cudagraph is enabled, this
     # makes sure the output tensor is allocated inside the cudagraph.
-    use_output: bool
+    accept_output_buffer: bool = False
 
     @staticmethod
     @abstractmethod

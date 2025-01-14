@@ -40,8 +40,6 @@ if TYPE_CHECKING:
 
 class FlashInferBackend(AttentionBackend):
 
-    use_output: bool = False
-
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER"

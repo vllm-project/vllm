@@ -11,8 +11,6 @@ from vllm.attention.backends.utils import CommonAttentionState
 
 class PallasAttentionBackend(AttentionBackend):
 
-    use_output: bool = False
-
     @staticmethod
     def get_name() -> str:
         return "PALLAS"
