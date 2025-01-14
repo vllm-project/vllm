@@ -1,11 +1,10 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Optional, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
 
 import numpy as np
 import numpy.typing as npt
-import torch
 from PIL import Image
 
 import vllm.envs as envs
@@ -24,6 +23,10 @@ logger = init_logger(__name__)
 cached_get_tokenizer = lru_cache(get_tokenizer)
 
 _M = TypeVar("_M")
+
+if TYPE_CHECKING:
+    from .hasher import MultiModalHashDict
+    from .inputs import MultiModalPlaceholderDict
 
 
 class MediaConnector:
@@ -281,49 +284,6 @@ def encode_video_base64(frames: npt.NDArray) -> str:
     return video_io.encode_base64(frames)
 
 
-def resolve_visual_encoder_outputs(
-    encoder_outputs: Union[torch.Tensor, list[torch.Tensor]],
-    feature_sample_layers: Optional[list[int]],
-    post_layer_norm: Optional[torch.nn.LayerNorm],
-    max_possible_layers: int,
-) -> torch.Tensor:
-    """Given the outputs a visual encoder module that may correspond to the
-    output of the last layer, or a list of hidden states to be stacked,
-    handle post normalization and resolve it into a single output tensor.
-
-    Args:
-        encoder_outputs: Output of encoder's last layer or all hidden states.
-        feature_sample_layers: Optional layer indices to grab from the encoder
-            outputs; if provided, encoder outputs must be a list.
-        post_layer_norm: Post norm to apply to the output of the encoder.
-        max_possible_layers: Total layers in the fully loaded visual encoder.
-
-    """
-    if feature_sample_layers is None:
-        if post_layer_norm is not None:
-            return post_layer_norm(encoder_outputs)
-        return encoder_outputs
-
-    # Get the hidden states corresponding to the layer indices.
-    # Negative values are relative to the full visual encoder,
-    # so offset them depending on how many layers were loaded.
-    # NOTE: this assumes that encoder_outputs contains a list
-    # of hidden states in the same order as the encoder layers
-    # that produced them.
-    offset = max_possible_layers - len(encoder_outputs)
-    hs_pool = [
-        encoder_outputs[layer_idx]
-        if layer_idx >= 0 else encoder_outputs[layer_idx + offset]
-        for layer_idx in feature_sample_layers
-    ]
-
-    # Apply post-norm on the final hidden state if we are using it
-    uses_last_layer = feature_sample_layers[-1] in (len(hs_pool) - 1, -1)
-    if post_layer_norm is not None and uses_last_layer:
-        hs_pool[-1] = post_layer_norm(encoder_outputs)
-    return torch.cat(hs_pool, dim=-1)
-
-
 # Utilities for input processors
 _T = TypeVar("_T", str, int)
 
@@ -437,3 +397,83 @@ def consecutive_placeholder_ranges(
         PlaceholderRange(offset=initial_offset + i * item_size,
                          length=item_size) for i in range(num_items)
     ]
+
+
+def merge_and_sort_multimodal_metadata(
+    mm_positions: "MultiModalPlaceholderDict",
+    mm_hashes: Optional["MultiModalHashDict"],
+) -> tuple[list[str], list[PlaceholderRange], Optional[list[str]]]:
+    """Given a MultiModalPlaceholderDict, merge all PlaceholderRange
+    objects from all available modalities into a single list of 
+    PlaceholderRange, sorted by their offset (starting index in the input 
+    sequence) in the ascending order.
+
+    Optionally if a MultiModalHashDict is given, same operation will be 
+    applied to the object and the sorted list of hashes will be returned.
+
+    Raises:
+        ValueError: If the input prompt has interleaved placeholders from
+            different modalities (e.g, "<image><audio><image> Describe the 
+            content.")
+    
+    Returns:
+        list[str]: Sorted list of involved modalities.
+        list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from 
+            mm_positions.
+        Optional[list[str]]: Sorted list of all hashes from mm_hashes if 
+            given, None otherwise.
+    """
+
+    modalities = list(mm_positions.keys())
+
+    assert len(modalities) > 0, "No modalities found in the mm_positions."
+
+    # For single modality, placeholder ranges and hashes are already sorted
+    # so we can return the list directly.
+    if len(modalities) == 1:
+        if mm_hashes is None:
+            return modalities, list(mm_positions[modalities[0]]), None
+        else:
+            return modalities, list(mm_positions[modalities[0]]), list(
+                mm_hashes[modalities[0]])
+
+    placeholder_lists_with_modality = [(modality, mm_positions[modality])
+                                       for modality in modalities]
+
+    if mm_hashes is None:
+        sorted_placeholder_lists = sorted(placeholder_lists_with_modality,
+                                          key=lambda x: x[1][0]['offset'])
+        sorted_hash_lists = None
+    else:
+        hashes_lists = [
+            mm_hashes[modality] for modality in modalities
+            if modality in mm_hashes
+        ]
+        sorted_pairs = sorted(zip(placeholder_lists_with_modality,
+                                  hashes_lists),
+                              key=lambda x: x[0][1][0]['offset'])
+        sorted_placeholder_tuple, sorted_hash_tuple = zip(*sorted_pairs)
+        sorted_placeholder_lists = list(sorted_placeholder_tuple)
+        sorted_hash_lists = list(sorted_hash_tuple)
+
+    sorted_modalities = [modality for modality, _ in sorted_placeholder_lists]
+
+    # Flatten sorted list of lists to a single list and verify there is no
+    # interleaving of placeholders from different modalities.
+    merged_placeholders: list[PlaceholderRange] = []
+    for modality, placeholder_list in sorted_placeholder_lists:
+        if merged_placeholders and placeholder_list[0][
+                'offset'] < merged_placeholders[-1]['offset']:
+            raise ValueError(
+                "Interleaved mixed-modality inference is currently not "
+                "supported.")
+        merged_placeholders.extend(placeholder_list)
+
+    if sorted_hash_lists is not None:
+        merged_hashes = []
+        for hash_list in sorted_hash_lists:
+            merged_hashes.extend(hash_list)
+    else:
+        merged_hashes = None
+
+    return sorted_modalities, merged_placeholders, merged_hashes

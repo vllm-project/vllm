@@ -4,7 +4,6 @@ from typing import Callable, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from torch.nn.modules import Module
 
 import vllm.envs as envs
 from vllm.distributed import (get_tensor_model_parallel_rank,
@@ -16,13 +15,15 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.platforms.interface import CpuArchEnum
 
 if current_platform.is_cuda_alike():
     from .fused_moe import fused_experts
 else:
     fused_experts = None  # type: ignore
 if current_platform.is_tpu():
-    from .moe_pallas import fused_moe as fused_moe_pallas
+    # the iterative moe implementation is used until the moe_pallas is fixed
+    from .moe_torch_iterative import fused_moe as fused_moe_pallas
 else:
     fused_moe_pallas = None  # type: ignore
 logger = init_logger(__name__)
@@ -86,6 +87,31 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+
+        if envs.VLLM_MOE_PADDING:
+            layer.w13_weight = torch.nn.Parameter(F.pad(
+                layer.w13_weight.data, (0, 128), "constant", 0),
+                                                  requires_grad=False)
+            torch.cuda.empty_cache()
+            layer.w2_weight = torch.nn.Parameter(F.pad(layer.w2_weight.data,
+                                                       (0, 128), "constant",
+                                                       0),
+                                                 requires_grad=False)
+            torch.cuda.empty_cache()
+
+        if current_platform.is_cpu():
+            if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+                import intel_extension_for_pytorch as ipex
+                layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+                    layer.w13_weight,
+                    layer.w2_weight,
+                    use_prepack=True,
+                )
+            else:
+                raise NotImplementedError("CPU MOE only supports x86 arch.")
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -145,9 +171,29 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                              topk_ids=topk_ids,
                              inplace=True)
 
-    def forward_cpu(self, *args, **kwargs):
-        raise NotImplementedError(
-            "The CPU backend currently does not support MoE.")
+    def forward_cpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        **kwargs,
+    ):
+        assert custom_routing_function is None
+        return layer.ipex_fusion(
+            x,
+            use_grouped_topk,
+            top_k,
+            router_logits,
+            renormalize,
+            topk_group,
+            num_expert_group,
+        )
 
     def forward_tpu(
         self,
@@ -181,18 +227,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                 renormalize=renormalize)
 
     forward_native = forward_cuda
-
-    def process_weights_after_loading(self, layer: Module) -> None:
-        if envs.VLLM_MOE_PADDING:
-            layer.w13_weight = torch.nn.Parameter(F.pad(
-                layer.w13_weight.data, (0, 128), "constant", 0),
-                                                  requires_grad=False)
-            torch.cuda.empty_cache()
-            layer.w2_weight = torch.nn.Parameter(F.pad(layer.w2_weight.data,
-                                                       (0, 128), "constant",
-                                                       0),
-                                                 requires_grad=False)
-            torch.cuda.empty_cache()
 
 
 class FusedMoE(torch.nn.Module):

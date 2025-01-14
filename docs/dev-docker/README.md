@@ -1,6 +1,6 @@
 # vllm FP8 Latency and Throughput benchmarks on AMD MI300x
 
-Documentation for vLLM Inferencing on AMD Instinct platforms. 
+Documentation for vLLM Inferencing on AMD Instinct platforms.
 
 ## Overview
 
@@ -10,11 +10,9 @@ This documentation shows some reference performance numbers and the steps to rep
 
 It includes:
 
-   -  ROCm™ 6.3
-
-   - vLLM 0.6.3
-
-   - PyTorch 2.6dev (nightly)
+- ROCm™ 6.3
+- vLLM 0.6.3
+- PyTorch 2.6dev (nightly)
 
 ## System configuration
 
@@ -39,16 +37,15 @@ The performance data below was measured on a server with MI300X accelerators wit
 | Power cap | 750 W |
 | SCLK/MCLK | 2100 Mhz / 1300 Mhz |
 
-## Pull latest 
+## Pull latest
 
 You can pull the image with `docker pull rocm/vllm-dev:main`
 
 ### What is New
 
-   - ROCm 6.3 support
-   - Potential bug with Tunable Ops not saving due to a PyTorch issue
-      
-     
+- ROCm 6.3 support
+- Potential bug with Tunable Ops not saving due to a PyTorch issue
+
 Gemms are tuned using PyTorch's Tunable Ops  feature (https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/cuda/tunable/README.md)
 The  gemms are automatically enabled in the docker image, and all stored gemm configs are kept in /app/_gemm_csv in the same image
 
@@ -56,23 +53,24 @@ The  gemms are automatically enabled in the docker image, and all stored gemm co
 
 ### Use pre-quantized models
 
-To make it easier to run fp8 Llama 3.1 models on MI300X, the quantized checkpoints are available on AMD Huggingface space as follows 
+To make it easier to run fp8 Llama 3.1 models on MI300X, the quantized checkpoints are available on AMD Huggingface space as follows
 
-- https://huggingface.co/amd/Llama-3.1-8B-Instruct-FP8-KV 
-- https://huggingface.co/amd/Llama-3.1-70B-Instruct-FP8-KV 
-- https://huggingface.co/amd/Llama-3.1-405B-Instruct-FP8-KV
-- https://huggingface.co/amd/grok-1-FP8-KV
+- <https://huggingface.co/amd/Llama-3.1-8B-Instruct-FP8-KV>
+- <https://huggingface.co/amd/Llama-3.1-70B-Instruct-FP8-KV>
+- <https://huggingface.co/amd/Llama-3.1-405B-Instruct-FP8-KV>
+- <https://huggingface.co/amd/grok-1-FP8-KV>
 
-Currently these models are private. Please join https://huggingface.co/amd to access. 
+Currently these models are private. Please join <https://huggingface.co/amd> to access.
 
 Download the model you want to run.  
 
-These FP8 quantized checkpoints were generated with AMD’s Quark Quantizer. For more information about Quark, please refer to https://quark.docs.amd.com/latest/quark_example_torch_llm_gen.html
+These FP8 quantized checkpoints were generated with AMD’s Quark Quantizer. For more information about Quark, please refer to <https://quark.docs.amd.com/latest/quark_example_torch_llm_gen.html>
 
 ### Quantize your own models
-This step is optional for you to use quantized models on your own. Take Llama 3.1 405B as an example. 
 
-Download the Model View the Llama-3.1-405B model at https://huggingface.co/meta-llama/Llama-3.1-405B. Ensure that you have been granted access, and apply for it if you do not have access.
+This step is optional for you to use quantized models on your own. Take Llama 3.1 405B as an example.
+
+Download the Model View the Llama-3.1-405B model at <https://huggingface.co/meta-llama/Llama-3.1-405B>. Ensure that you have been granted access, and apply for it if you do not have access.
 
 If you do not already have a HuggingFace token, open your user profile (https://huggingface.co/settings/profile), select "Access Tokens", press "+ Create New Token", and create a new Read token.
 
@@ -100,27 +98,29 @@ Similarly, you can download Llama-3.1-70B and Llama-3.1-8B.
 
 Run the quantization script in the example folder using the following command line:
 export MODEL_DIR = [local model checkpoint folder] or meta-llama/Llama-3.1-405B-Instruct
+
 #### single GPU
-        python3 quantize_quark.py \ 
-        --model_dir $MODEL_DIR \
-        --output_dir Llama-3.1-405B-Instruct-FP8-KV \                           
-        --quant_scheme w_fp8_a_fp8 \
-        --kv_cache_dtype fp8 \
-        --num_calib_data 128 \
-        --model_export quark_safetensors \
-        --no_weight_matrix_merge
 
-#### If model size is too large for single GPU, please use multi GPU instead.
-        python3 quantize_quark.py \ 
-        --model_dir $MODEL_DIR \
-        --output_dir Llama-3.1-405B-Instruct-FP8-KV \                           
-        --quant_scheme w_fp8_a_fp8 \
-        --kv_cache_dtype fp8 \
-        --num_calib_data 128 \
-        --model_export quark_safetensors \
-        --no_weight_matrix_merge \
-        --multi_gpu
+    python3 quantize_quark.py \
+    --model_dir $MODEL_DIR \
+    --output_dir Llama-3.1-405B-Instruct-FP8-KV \                           
+    --quant_scheme w_fp8_a_fp8 \
+    --kv_cache_dtype fp8 \
+    --num_calib_data 128 \
+    --model_export quark_safetensors \
+    --no_weight_matrix_merge
 
+#### If model size is too large for single GPU, please use multi GPU instead
+
+    python3 quantize_quark.py \
+    --model_dir $MODEL_DIR \
+    --output_dir Llama-3.1-405B-Instruct-FP8-KV \                           
+    --quant_scheme w_fp8_a_fp8 \
+    --kv_cache_dtype fp8 \
+    --num_calib_data 128 \
+    --model_export quark_safetensors \
+    --no_weight_matrix_merge \
+    --multi_gpu
 
 ### Launch AMD vLLM Docker
 
@@ -135,7 +135,7 @@ Download and launch the docker,
 
 ### Benchmark with AMD vLLM Docker
 
-There are some system settings to be configured for optimum performance on MI300X. 
+There are some system settings to be configured for optimum performance on MI300X.
 
 #### NUMA balancing setting
 
@@ -160,15 +160,16 @@ Some environment variables enhance the performance of the vLLM kernels and PyTor
     export NCCL_MIN_NCHANNELS=112
     export VLLM_FP8_PADDING=1
 
-You can set both PYTORCH_TUNABLEOP_ENABLED and PYTORCH_TUNABLEOP_TUNING to 1 to performance GEMM tuning for the 1st benchmark run. 
-It will take some time to complete the tuning during the benchmark. After tuning, it will generate several csv files as the performance lookup database. For the subsequent benchmark runs, you can keep 
+You can set both PYTORCH_TUNABLEOP_ENABLED and PYTORCH_TUNABLEOP_TUNING to 1 to performance GEMM tuning for the 1st benchmark run.
+It will take some time to complete the tuning during the benchmark. After tuning, it will generate several csv files as the performance lookup database. For the subsequent benchmark runs, you can keep
 
-PYTORCH_TUNABLEOP_ENABLED as 1 and set 
-PYTORCH_TUNABLEOP_TUNING to 0 to use the selected kernels. 
+PYTORCH_TUNABLEOP_ENABLED as 1 and set
+PYTORCH_TUNABLEOP_TUNING to 0 to use the selected kernels.
 
 ##### vLLM engine performance settings
-vLLM provides a number of engine options which can be changed to improve performance. 
-Refer https://docs.vllm.ai/en/stable/models/engine_args.html for the complete list of vLLM engine options.
+
+vLLM provides a number of engine options which can be changed to improve performance.
+Refer <https://docs.vllm.ai/en/stable/models/engine_args.html> for the complete list of vLLM engine options.
 Below is a list of options which are useful:
 - **--max-model-len** : Maximum context length supported by the model instance. Can be set to a lower value than model configuration value to improve performance and gpu memory utilization.
 - **--max-num-batched-tokens** : The maximum prefill size, i.e., how many prompt tokens can be packed together in a single prefill. Set to a higher value to improve prefill performance at the cost of higher gpu memory utilization. 65536 works well for LLama models.
@@ -179,6 +180,7 @@ Below is a list of options which are useful:
 Note: vLLM's server creation command line (vllm serve) supports the above parameters as command line arguments.
   
 ##### Online Gemm Tuning
+
 Online Gemm tuning for small decode batch sizes can improve performance in some cases. e.g. Llama 70B upto Batch size 8
 
 If you want to do limited online tuning use --enforce-eager and tune for particular batch sizes. See example below.
@@ -239,8 +241,8 @@ If you want to run Meta-Llama-3.1-405B FP16, please run
     --input-len 128 \
     --output-len 128
 
-You can change various input-len, output-len, batch size and run the benchmark as well. When output-len is 1, it measures prefill latency (TTFT). 
-Decoding latency (TPOT) can be calculated based on the measured latency. 
+You can change various input-len, output-len, batch size and run the benchmark as well. When output-len is 1, it measures prefill latency (TTFT).
+Decoding latency (TPOT) can be calculated based on the measured latency.
 
 For more information about the parameters, please run
 
@@ -261,7 +263,7 @@ Benchmark Meta-Llama-3.1-405B FP8 with input 128 tokens, output 128 tokens and t
     --num-scheduler-steps 10 \
     --tensor-parallel-size 8 \
     --input-len 128 \
-    --output-len 128 
+    --output-len 128
 
 If you want to run Meta-Llama-3.1-405B FP16, please run
 
@@ -294,23 +296,23 @@ For more information about the parameters, please run
 
     /app/vllm/benchmarks/benchmark_throughput.py -h
 
-Tensor parallelism (TP) parameters depends on the model size. For Llama 3.1 70B and 8B model, TP 1 can be used as well for MI300X. In general, TP 8 and 1 is recommended to achieve the optimum performance. 
+Tensor parallelism (TP) parameters depends on the model size. For Llama 3.1 70B and 8B model, TP 1 can be used as well for MI300X. In general, TP 8 and 1 is recommended to achieve the optimum performance.
 
 ##### Online Server Benchmark
- 
+
 Make the following changes if required
- 
+
 /app/vllm/benchmarks/backend_request_func.py
- 
+
 line 242 + "ignore_eos": True,
- 
+
 /app/vllm/benchmarks/benchmark_serving.py
 line 245 -         interval = np.random.exponential(1.0 / request_rate)
 line 245 +         ## interval = np.random.exponential(1.0 / request_rate)
 line 246 +         interval = 1.0 / request_rate
- 
+
 Benchmark Meta-Llama-3.1-70B with input 4096 tokens, output 512 tokens and tensor parallelism 8 as an example,
- 
+
     vllm serve /data/llm/Meta-Llama-3.1-70B-Instruct-FP8-KV \
     --swap-space 16 \
     --disable-log-requests \
@@ -322,11 +324,11 @@ Benchmark Meta-Llama-3.1-70B with input 4096 tokens, output 512 tokens and tenso
     --max-num-batched-tokens 65536 \
     --gpu-memory-utilization 0.99 \
     --num_scheduler-steps 10
- 
+
 Change port (for example --port 8005) if port=8000 is currently being used by other processes.
- 
+
 run client in a separate terminal. Use port_id from previous step else port-id=8000.
- 
+
     python /app/vllm/benchmarks/benchmark_serving.py \
     --port 8000 \
     --model /data/llm/Meta-Llama-3.1-70B-Instruct-FP8-KV \
@@ -336,18 +338,18 @@ run client in a separate terminal. Use port_id from previous step else port-id=8
     --request-rate 1 \
     --num-prompts 500 \
     --percentile-metrics ttft,tpot,itl,e2el
- 
+
 Once all prompts are processed, terminate the server gracefully (ctrl+c).
- 
+
 ##### CPX mode
- 
+
 Currently only CPX-NPS1 mode is supported. So ONLY tp=1 is supported in CPX mode.
 But multiple instances can be started simultaneously (if needed) in CPX-NPS1 mode.
- 
+
 Set GPUs in CPX mode
- 
+
     rocm-smi --setcomputepartition cpx
- 
+
 Example of running Llama3.1-8B on 1 CPX-NPS1 GPU with input 4096 and output 512. As mentioned above, tp=1.
 
     HIP_VISIBLE_DEVICES=0 \
@@ -363,41 +365,42 @@ Example of running Llama3.1-8B on 1 CPX-NPS1 GPU with input 4096 and output 512.
     --output-json <path/to/output.json> \
     --quantization fp8 \
     --gpu-memory-utilization 0.99
- 
+
 Set GPU to SPX mode.
 
     rocm-smi --setcomputepartition spx
 
 ### Speculative Decoding
 
-Speculative decoding is one of the key features in vLLM. It has been supported on MI300. Here below is an example of the performance benchmark w/wo speculative decoding for Llama 3.1 405B with Llama 3.1 8B as the draft model. 
+Speculative decoding is one of the key features in vLLM. It has been supported on MI300. Here below is an example of the performance benchmark w/wo speculative decoding for Llama 3.1 405B with Llama 3.1 8B as the draft model.
 
-Without Speculative Decoding - 
+Without Speculative Decoding -
 
      python benchmark_latency.py --model /models/models--amd--Meta-Llama-3.1-405B-Instruct-FP8-KV/ --max-model-len 26720 -tp 8 --batch-size 1 --use-v2-block-manager --input-len 1024 --output-len 128
 
-With Speculative Decoding - 
+With Speculative Decoding -
 
      python benchmark_latency.py --model /models/models--amd--Meta-Llama-3.1-405B-Instruct-FP8-KV/ --max-model-len 26720 -tp 8 --batch-size 1 --use-v2-block-manager --input-len 1024 --output-len 128 --speculative-model /models/models--amd--Meta-Llama-3.1-8B-Instruct-FP8-KV/ --num-speculative-tokens 5
 
-You should see some performance improvement about the e2e latency. 
+You should see some performance improvement about the e2e latency.
 
 ### MMLU_PRO_Biology Accuracy Eval
- 
+
 ### fp16
+
 vllm (pretrained=models--meta-llama--Meta-Llama-3.1-405B-Instruct/snapshots/069992c75aed59df00ec06c17177e76c63296a26,dtype=float16,tensor_parallel_size=8), gen_kwargs: (None), limit: None, num_fewshot: None, batch_size: 64
- 
+
 | Tasks |Version|    Filter    |n-shot|  Metric   |   |Value |   |Stderr|
 |-------|------:|--------------|-----:|-----------|---|-----:|---|-----:|
 |biology|      0|custom-extract|     5|exact_match|↑  |0.8466|±  |0.0135|
- 
+
 ### fp8
+
 vllm (pretrained=models--meta-llama--Meta-Llama-3.1-405B-Instruct/snapshots/069992c75aed59df00ec06c17177e76c63296a26,dtype=float16,quantization=fp8,quantized_weights_path=/llama.safetensors,tensor_parallel_size=8), gen_kwargs: (None), limit: None, num_fewshot: None, batch_size: 32
- 
+
 | Tasks |Version|    Filter    |n-shot|  Metric   |   |Value|   |Stderr|
 |-------|------:|--------------|-----:|-----------|---|----:|---|-----:|
 |biology|      0|custom-extract|     5|exact_match|↑  |0.848|±  |0.0134|
-
 
 ## Performance
 
@@ -408,18 +411,18 @@ Please refer to the MLPerf instructions for recreating the MLPerf numbers.
 ## Version
 
 ### Release Notes
+
 20240906a: Legacy quantization formats required `--quantization fp8_rocm` as a flag instead of `--quantization fp8`
 
 Updated:
 
-vLLM: https://github.com/ROCm/vllm/commit/2c60adc83981ada77a77b2adda78ef109d2e2e2b
+vLLM: <https://github.com/ROCm/vllm/commit/2c60adc83981ada77a77b2adda78ef109d2e2e2b>
+
 ### Docker Manifest
 
 To reproduce the release docker:
 
-```
-git clone https://github.com/ROCm/vllm.git
-cd vllm
-git checkout 2c60adc83981ada77a77b2adda78ef109d2e2e2b
-docker build -f Dockerfile.rocm -t <your_tag> --build-arg BUILD_HIPBLASLT=1 --build-arg USE_CYTHON=1 .
-```
+    git clone https://github.com/ROCm/vllm.git
+    cd vllm
+    git checkout 2c60adc83981ada77a77b2adda78ef109d2e2e2b
+    docker build -f Dockerfile.rocm -t <your_tag> --build-arg BUILD_HIPBLASLT=1 --build-arg USE_CYTHON=1 .

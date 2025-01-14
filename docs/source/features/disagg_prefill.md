@@ -1,8 +1,12 @@
 (disagg-prefill)=
 
-# Disaggregated prefilling (experimental)
+# Disaggregated Prefilling (experimental)
 
-This page introduces you the disaggregated prefilling feature in vLLM. This feature is experimental and subject to change.
+This page introduces you the disaggregated prefilling feature in vLLM.
+
+```{note}
+This feature is experimental and subject to change.
+```
 
 ## Why disaggregated prefilling?
 
@@ -17,7 +21,7 @@ Disaggregated prefill DOES NOT improve throughput.
 
 ## Usage example
 
-Please refer to `examples/disaggregated_prefill.sh` for the example usage of disaggregated prefilling.
+Please refer to `examples/online_serving/disaggregated_prefill.sh` for the example usage of disaggregated prefilling.
 
 ## Benchmarks
 

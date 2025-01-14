@@ -29,7 +29,7 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            PerTensorScaleParameter)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import is_navi, print_warning_once
+from vllm.utils import is_navi
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -556,10 +556,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                         "activation scales are None.")
                 if (not all_close_1d(layer.w13_input_scale)
                         or not all_close_1d(layer.w2_input_scale)):
-                    print_warning_once(
+                    logger.warning_once(
                         "Found input_scales that are not equal for "
                         "fp8 MoE layer. Using the maximum across experts "
-                        "for each layer. ")
+                        "for each layer.")
                 layer.w13_input_scale = torch.nn.Parameter(
                     layer.w13_input_scale.max(), requires_grad=False)
                 layer.w2_input_scale = torch.nn.Parameter(

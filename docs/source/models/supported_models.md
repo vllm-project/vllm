@@ -1,9 +1,9 @@
 (supported-models)=
 
-# Supported Models
+# List of Supported Models
 
 vLLM supports generative and pooling models across various tasks.
-If a model supports more than one task, you can set the task via the {code}`--task` argument.
+If a model supports more than one task, you can set the task via the `--task` argument.
 
 For each task, we list the model architectures that have been implemented in vLLM.
 Alongside each architecture, we include some popular models that use it.
@@ -14,8 +14,8 @@ Alongside each architecture, we include some popular models that use it.
 
 By default, vLLM loads models from [HuggingFace (HF) Hub](https://huggingface.co/models).
 
-To determine whether a given model is supported, you can check the {code}`config.json` file inside the HF repository.
-If the {code}`"architectures"` field contains a model architecture listed below, then it should be supported in theory.
+To determine whether a given model is supported, you can check the `config.json` file inside the HF repository.
+If the `"architectures"` field contains a model architecture listed below, then it should be supported in theory.
 
 ````{tip}
 The easiest way to check if your model is really supported at runtime is to run the program below:
@@ -45,10 +45,10 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 To use models from [ModelScope](https://www.modelscope.cn) instead of HuggingFace Hub, set an environment variable:
 
 ```shell
-$ export VLLM_USE_MODELSCOPE=True
+export VLLM_USE_MODELSCOPE=True
 ```
 
-And use with {code}`trust_remote_code=True`.
+And use with `trust_remote_code=True`.
 
 ```python
 from vllm import LLM
@@ -322,7 +322,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - ✅︎
   - ✅︎
 * - `Qwen2ForCausalLM`
-  - Qwen2
+  - QwQ, Qwen2
   - `Qwen/QwQ-32B-Preview`, `Qwen/Qwen2-7B-Instruct`, `Qwen/Qwen2-7B`, etc.
   - ✅︎
   - ✅︎
@@ -420,20 +420,23 @@ you should explicitly specify the task type to ensure that the model is used in 
 ```
 
 ```{note}
-{code}`ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
-You should manually set mean pooling by passing {code}`--override-pooler-config '{"pooling_type": "MEAN"}'`.
+`ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
+You should manually set mean pooling by passing `--override-pooler-config '{"pooling_type": "MEAN"}'`.
 ```
 
 ```{note}
-Unlike base Qwen2, {code}`Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
-You can set {code}`--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
+Unlike base Qwen2, `Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
+You can set `--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
 
-On the other hand, its 1.5B variant ({code}`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
+On the other hand, its 1.5B variant (`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
 despite being described otherwise on its model card.
+
+Regardless of the variant, you need to enable `--trust-remote-code` for the correct tokenizer to be
+loaded. See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
-{func}`vllm.model_executor.models.adapters.as_embedding_model`. By default, the embeddings
+{func}`~vllm.model_executor.models.adapters.as_embedding_model`. By default, the embeddings
 of the whole prompt are extracted from the normalized hidden state corresponding to the last token.
 
 #### Reward Modeling (`--task reward`)
@@ -465,11 +468,11 @@ of the whole prompt are extracted from the normalized hidden state corresponding
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
-{func}`vllm.model_executor.models.adapters.as_reward_model`. By default, we return the hidden states of each token directly.
+{func}`~vllm.model_executor.models.adapters.as_reward_model`. By default, we return the hidden states of each token directly.
 
 ```{important}
-For process-supervised reward models such as {code}`peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
-e.g.: {code}`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
+For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
+e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 ```
 
 #### Classification (`--task classify`)
@@ -496,7 +499,7 @@ e.g.: {code}`--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 1
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
-{func}`vllm.model_executor.models.adapters.as_classification_model`. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
+{func}`~vllm.model_executor.models.adapters.as_classification_model`. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
 #### Sentence Pair Scoring (`--task score`)
 
@@ -537,15 +540,37 @@ The following modalities are supported depending on the model:
 - **V**ideo
 - **A**udio
 
-Any combination of modalities joined by {code}`+` are supported.
+Any combination of modalities joined by `+` are supported.
 
-- e.g.: {code}`T + I` means that the model supports text-only, image-only, and text-with-image inputs.
+- e.g.: `T + I` means that the model supports text-only, image-only, and text-with-image inputs.
 
-On the other hand, modalities separated by {code}`/` are mutually exclusive.
+On the other hand, modalities separated by `/` are mutually exclusive.
 
-- e.g.: {code}`T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
+- e.g.: `T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
 
 See [this page](#multimodal-inputs) on how to pass multi-modal inputs to the model.
+
+````{important}
+To enable multiple multi-modal items per text prompt, you have to set `limit_mm_per_prompt` (offline inference)
+or `--limit-mm-per-prompt` (online serving). For example, to enable passing up to 4 images per text prompt:
+
+Offline inference:
+```python
+llm = LLM(
+    model="Qwen/Qwen2-VL-7B-Instruct",
+    limit_mm_per_prompt={"image": 4},
+)
+```
+
+Online serving:
+```bash
+vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
+```
+````
+
+```{note}
+vLLM currently only supports adding LoRA to the language backbone of multimodal models.
+```
 
 ### Generative Models
 
@@ -582,6 +607,13 @@ See [this page](#generative-models) for more information on how to use generativ
   - Chameleon
   - T + I
   - `facebook/chameleon-7b` etc.
+  -
+  - ✅︎
+  - ✅︎
+* - `DeepseekVLV2ForCausalLM`
+  - DeepSeek-VL2
+  - T + I<sup>+</sup>
+  - `deepseek-ai/deepseek-vl2-tiny`(WIP), `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2` etc. (see note)
   -
   - ✅︎
   - ✅︎
@@ -640,14 +672,14 @@ See [this page](#generative-models) for more information on how to use generativ
   - `llava-hf/LLaVA-NeXT-Video-7B-hf`, etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `LlavaOnevisionForConditionalGeneration`
   - LLaVA-Onevision
   - T + I<sup>+</sup> + V<sup>+</sup>
   - `llava-hf/llava-onevision-qwen2-7b-ov-hf`, `llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc.
   -
   - ✅︎
-  -
+  - ✅︎
 * - `MiniCPMV`
   - MiniCPM-V
   - T + I<sup>E+</sup>
@@ -686,14 +718,14 @@ See [this page](#generative-models) for more information on how to use generativ
 * - `Phi3VForCausalLM`
   - Phi-3-Vision, Phi-3.5-Vision
   - T + I<sup>E+</sup>
-  - `microsoft/Phi-3-vision-128k-instruct`, `microsoft/Phi-3.5-vision-instruct` etc.
+  - `microsoft/Phi-3-vision-128k-instruct`, `microsoft/Phi-3.5-vision-instruct`, etc.
   -
   - ✅︎
   - ✅︎
 * - `PixtralForConditionalGeneration`
   - Pixtral
   - T + I<sup>+</sup>
-  - `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b` etc.
+  - `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b` (see note), etc.
   -
   - ✅︎
   - ✅︎
@@ -710,9 +742,9 @@ See [this page](#generative-models) for more information on how to use generativ
   - `Qwen/Qwen2-Audio-7B-Instruct`
   -
   - ✅︎
-  -
+  - ✅︎
 * - `Qwen2VLForConditionalGeneration`
-  - Qwen2-VL
+  - QVQ, Qwen2-VL
   - T + I<sup>E+</sup> + V<sup>E+</sup>
   - `Qwen/QVQ-72B-Preview`, `Qwen/Qwen2-VL-7B-Instruct`, `Qwen/Qwen2-VL-72B-Instruct`, etc.
   - ✅︎
@@ -724,39 +756,35 @@ See [this page](#generative-models) for more information on how to use generativ
   - `fixie-ai/ultravox-v0_3`
   -
   - ✅︎
-  -
+  - ✅︎
 ```
 
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
-````{important}
-To enable multiple multi-modal items per text prompt, you have to set {code}`limit_mm_per_prompt` (offline inference)
-or {code}`--limit-mm-per-prompt` (online inference). For example, to enable passing up to 4 images per text prompt:
+````{note}
+The `deepseek-ai/deepseek-vl2-tiny` is not supported yet.
 
-```python
-llm = LLM(
-    model="Qwen/Qwen2-VL-7B-Instruct",
-    limit_mm_per_prompt={"image": 4},
-)
+To use `DeepSeek-VL2` series models, you need to install a fork version `deepseek_vl2` package:
+```shell
+pip install git+https://github.com/Isotr0py/DeepSeek-VL2.git
 ```
 
-```bash
-vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
-```
+Besides, to run `DeepSeek-VL2` series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
 ````
 
 ```{note}
-vLLM currently only supports adding LoRA to the language backbone of multimodal models.
+To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
 ```
 
 ```{note}
-To use {code}`TIGER-Lab/Mantis-8B-siglip-llama3`, you have pass {code}`--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
-```
-
-```{note}
-The official {code}`openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork ({code}`HwwwH/MiniCPM-V-2`) for now.
+The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
 For more details, please see: <gh-pr:4087#issuecomment-2250397630>
+```
+
+```{note}
+The chat template for Pixtral-HF is incorrect (see [discussion](https://huggingface.co/mistral-community/pixtral-12b/discussions/22)).
+A corrected version is available at <gh-file:examples/template_pixtral_hf.jinja>.
 ```
 
 ### Pooling Models
@@ -770,7 +798,7 @@ you should explicitly specify the task type to ensure that the model is used in 
 
 #### Text Embedding (`--task embed`)
 
-Any text generation model can be converted into an embedding model by passing {code}`--task embed`.
+Any text generation model can be converted into an embedding model by passing `--task embed`.
 
 ```{note}
 To get the best results, you should use pooling models that are specifically trained as such.
@@ -810,19 +838,22 @@ The following table lists those that are tested in vLLM.
 
 _________________
 
-# Model Support Policy
+## Model Support Policy
 
 At vLLM, we are committed to facilitating the integration and support of third-party models within our ecosystem. Our approach is designed to balance the need for robustness and the practical limitations of supporting a wide range of models. Here’s how we manage third-party model support:
 
 1. **Community-Driven Support**: We encourage community contributions for adding new models. When a user requests support for a new model, we welcome pull requests (PRs) from the community. These contributions are evaluated primarily on the sensibility of the output they generate, rather than strict consistency with existing implementations such as those in transformers. **Call for contribution:** PRs coming directly from model vendors are greatly appreciated!
+
 2. **Best-Effort Consistency**: While we aim to maintain a level of consistency between the models implemented in vLLM and other frameworks like transformers, complete alignment is not always feasible. Factors like acceleration techniques and the use of low-precision computations can introduce discrepancies. Our commitment is to ensure that the implemented models are functional and produce sensible results.
 
-```{tip}
-When comparing the output of {code}`model.generate` from HuggingFace Transformers with the output of {code}`llm.generate` from vLLM, note that the former reads the model's generation config file (i.e., [generation_config.json](https://github.com/huggingface/transformers/blob/19dabe96362803fb0a9ae7073d03533966598b17/src/transformers/generation/utils.py#L1945)) and applies the default parameters for generation, while the latter only uses the parameters passed to the function. Ensure all sampling parameters are identical when comparing outputs.
-```
+    ```{tip}
+    When comparing the output of `model.generate` from HuggingFace Transformers with the output of `llm.generate` from vLLM, note that the former reads the model's generation config file (i.e., [generation_config.json](https://github.com/huggingface/transformers/blob/19dabe96362803fb0a9ae7073d03533966598b17/src/transformers/generation/utils.py#L1945)) and applies the default parameters for generation, while the latter only uses the parameters passed to the function. Ensure all sampling parameters are identical when comparing outputs.
+    ```
 
 3. **Issue Resolution and Model Updates**: Users are encouraged to report any bugs or issues they encounter with third-party models. Proposed fixes should be submitted via PRs, with a clear explanation of the problem and the rationale behind the proposed solution. If a fix for one model impacts another, we rely on the community to highlight and address these cross-model dependencies. Note: for bugfix PRs, it is good etiquette to inform the original author to seek their feedback.
+
 4. **Monitoring and Updates**: Users interested in specific models should monitor the commit history for those models (e.g., by tracking changes in the main/vllm/model_executor/models directory). This proactive approach helps users stay informed about updates and changes that may affect the models they use.
+
 5. **Selective Focus**: Our resources are primarily directed towards models with significant user interest and impact. Models that are less frequently used may receive less attention, and we rely on the community to play a more active role in their upkeep and improvement.
 
 Through this approach, vLLM fosters a collaborative environment where both the core development team and the broader community contribute to the robustness and diversity of the third-party models supported in our ecosystem.

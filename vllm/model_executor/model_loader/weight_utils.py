@@ -23,11 +23,13 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.platforms import current_platform
-from vllm.utils import PlaceholderModule, print_warning_once
+from vllm.utils import PlaceholderModule
 
 try:
     from runai_model_streamer import SafetensorsStreamer
-except ImportError:
+except (ImportError, OSError):
+    # see https://github.com/run-ai/runai-model-streamer/issues/26
+    # OSError will be raised on arm64 platform
     runai_model_streamer = PlaceholderModule(
         "runai_model_streamer")  # type: ignore[assignment]
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
@@ -630,7 +632,7 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
         None: If the remapped name is not found in params_dict.
     """
     if name.endswith(".kv_scale"):
-        print_warning_once(
+        logger.warning_once(
             "DEPRECATED. Found kv_scale in the checkpoint. "
             "This format is deprecated in favor of separate k_scale and "
             "v_scale tensors and will be removed in a future release. "
@@ -639,7 +641,7 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
         # NOTE: we remap the deprecated kv_scale to k_scale
         remapped_name = name.replace(".kv_scale", ".attn.k_scale")
         if remapped_name not in params_dict:
-            print_warning_once(
+            logger.warning_once(
                 f"Found kv_scale in the checkpoint (e.g. {name}), "
                 "but not found the expected name in the model "
                 f"(e.g. {remapped_name}). kv_scale is "
@@ -652,7 +654,7 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
         if name.endswith(scale_name):
             remapped_name = name.replace(scale_name, f".attn{scale_name}")
             if remapped_name not in params_dict:
-                print_warning_once(
+                logger.warning_once(
                     f"Found {scale_name} in the checkpoint (e.g. {name}), "
                     "but not found the expected name in the model "
                     f"(e.g. {remapped_name}). {scale_name} is "

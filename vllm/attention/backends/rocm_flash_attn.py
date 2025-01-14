@@ -457,6 +457,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
@@ -467,7 +468,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             self.logits_soft_cap = 0.0
         else:
             self.logits_soft_cap = logits_soft_cap
-
+        self.attn_type = attn_type
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -549,9 +550,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         attn_metadata: ROCmFlashAttentionMetadata,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
-        attn_type: str = AttentionType.DECODER,
+        q_scale: Optional[torch.Tensor] = None,
+        prob_scale: Optional[torch.Tensor] = None,
+        fp8_out_scale: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
-        fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -601,9 +603,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        q_scale, prob_scale, fp8_out_scale = fp8_comp_scales or (None, None,
-                                                                 None)
-
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
             assert value is not None
@@ -612,7 +611,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         else:
             assert value is None
 
-        if attn_type != AttentionType.ENCODER and kv_cache.numel() > 0:
+        if self.attn_type != AttentionType.ENCODER and kv_cache.numel() > 0:
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
@@ -627,14 +626,14 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     key_cache,
                     value_cache,
                     attn_metadata.slot_mapping
-                    if attn_type != AttentionType.ENCODER_DECODER else
+                    if self.attn_type != AttentionType.ENCODER_DECODER else
                     attn_metadata.cross_slot_mapping,
                     self.kv_cache_dtype,
                     k_scale,
                     v_scale,
                 )
 
-        if attn_type != AttentionType.ENCODER:
+        if self.attn_type != AttentionType.ENCODER:
             num_prefill_tokens = attn_metadata.num_prefill_tokens
         else:
             assert attn_metadata.num_encoder_tokens is not None
@@ -647,14 +646,14 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         query = query[:num_prefill_tokens]
 
         if key is not None and value is not None \
-            and attn_type != AttentionType.ENCODER_DECODER:
+            and self.attn_type != AttentionType.ENCODER_DECODER:
             key = key[:num_prefill_tokens]
             value = value[:num_prefill_tokens]
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
             # normal attention and DECODER
-            if attn_type == AttentionType.DECODER and (
+            if self.attn_type == AttentionType.DECODER and (
                     kv_cache.numel() == 0 or prefill_meta.block_tables is None
                     or prefill_meta.block_tables.numel() == 0):
                 (query_seq_start_loc, query_max_seq_len, key_seq_start_loc,
@@ -669,7 +668,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 (query_seq_start_loc, query_max_seq_len, key_seq_start_loc,
                  key_max_seq_len, seq_lens,
                  causal_mask) = _get_seq_len_block_table_args(
-                     prefill_meta, attn_type)
+                     prefill_meta, self.attn_type)
             # Prompt run.
             if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0:
                 # triton attention
@@ -687,7 +686,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         1.0 / q_scale.item(), 1.0 / k_scale.item(),
                         1.0 / v_scale.item(), 1.0 / prob_scale.item(),
                         fp8_out_scale.item()) if (
-                            fp8_out_scale
+                            fp8_out_scale and q_scale and prob_scale
                             and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN) else None
                     out, _ = self.attn_func(
                         query,
@@ -783,8 +782,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 decode_query.dtype, head_size, block_size, gqa_ratio,
                 decode_meta.max_decode_seq_len)
             if use_custom:
-                max_seq_len = (decode_meta.max_decode_seq_len
-                               if attn_type != AttentionType.ENCODER_DECODER
+                max_seq_len = (decode_meta.max_decode_seq_len if
+                               self.attn_type != AttentionType.ENCODER_DECODER
                                else decode_meta.max_encoder_seq_len)
                 assert max_seq_len is not None
                 max_num_partitions = (
@@ -823,10 +822,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.num_kv_heads,
                     self.scale,
                     decode_meta.block_tables
-                    if attn_type != AttentionType.ENCODER_DECODER else
+                    if self.attn_type != AttentionType.ENCODER_DECODER else
                     decode_meta.cross_block_tables,
                     decode_meta.seq_lens_tensor
-                    if attn_type != AttentionType.ENCODER_DECODER else
+                    if self.attn_type != AttentionType.ENCODER_DECODER else
                     decode_meta.encoder_seq_lens_tensor,
                     block_size,
                     max_seq_len,
@@ -845,13 +844,13 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     key_cache,
                     value_cache,
                     decode_meta.block_tables
-                    if attn_type != AttentionType.ENCODER_DECODER else
+                    if self.attn_type != AttentionType.ENCODER_DECODER else
                     decode_meta.cross_block_tables,
                     decode_meta.seq_lens_tensor
-                    if attn_type != AttentionType.ENCODER_DECODER else
+                    if self.attn_type != AttentionType.ENCODER_DECODER else
                     decode_meta.encoder_seq_lens_tensor,
                     decode_meta.max_decode_seq_len
-                    if attn_type != AttentionType.ENCODER_DECODER else
+                    if self.attn_type != AttentionType.ENCODER_DECODER else
                     decode_meta.max_encoder_seq_len,
                     self.kv_cache_dtype,
                     self.num_kv_heads,
