@@ -279,12 +279,12 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 " each node.")
 
         # Set environment variables for the driver and workers.
-        all_args_to_update_environment_variables = [({
+        all_args_to_update_environment_variables = [{
             current_platform.device_control_env_var:
             ",".join(map(str, node_gpus[node_id])),
             "VLLM_TRACE_FUNCTION":
             str(envs.VLLM_TRACE_FUNCTION),
-        }, ) for (node_id, _) in worker_node_and_gpu_ids]
+        } for (node_id, _) in worker_node_and_gpu_ids]
 
         for args in all_args_to_update_environment_variables:
             # some carry-over env vars from the driver
@@ -294,7 +294,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     "TPU_HOST_BOUNDS"
             ]:
                 if name in os.environ:
-                    args[0][name] = os.environ[name]
+                    args[name] = os.environ[name]
 
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
