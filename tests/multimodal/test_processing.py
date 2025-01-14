@@ -421,6 +421,8 @@ def test_find_replace_tokens(
             "pattern_1": [32000, 32000],
             "pattern_2": [],
             "pattern_3": [1550, 918, 1550],
+            # Test different modalities having the same tokens (32000)
+            "pattern_4": [32000],
         },
     ],
 )
@@ -436,6 +438,14 @@ def test_find_replace_tokens(
                         item_idx=0,
                         start_idx=6,
                         replacement=[32000, 32000],
+                    ),
+                ],
+                "pattern_4": [
+                    PlaceholderInfo(
+                        modality="pattern_4",
+                        item_idx=0,
+                        start_idx=3,
+                        replacement=[32000],
                     ),
                 ],
             }
@@ -466,6 +476,7 @@ def test_find_replace_tokens(
                         replacement=[1550, 918, 1550],
                     ),
                 ],
+                # No match for pattern_4 as it has lower priority than pattern_1
             }
         ),
         (
@@ -483,6 +494,14 @@ def test_find_replace_tokens(
                         item_idx=1,
                         start_idx=3,
                         replacement=[32000, 32000],
+                    ),
+                ],
+                "pattern_4": [
+                    PlaceholderInfo(
+                        modality="pattern_4",
+                        item_idx=0,
+                        start_idx=5,
+                        replacement=[32000],
                     ),
                 ],
                 "pattern_3": [

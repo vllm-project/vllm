@@ -404,71 +404,60 @@ def replace_text_matches(
     return "".join(texts)
 
 
-def _iter_modality_placeholders(
-    prompt: list[int],
-    modality: str,
-    modality_repls: Sequence[BoundPromptReplacement],
-    modal_item_count: int,
-) -> Iterable[PlaceholderInfo]:
-    if modal_item_count == 0:
-        return
-
-    prompt_len = len(prompt)
-    item_idx = 0
-
-    start_idx = 0
-    while start_idx < prompt_len:
-        found = False
-
-        for repl_info in modality_repls:
-            replacement = repl_info.get_replacement(item_idx)
-            repl_tokens = replacement.token_ids
-            repl_len = len(repl_tokens)
-            end_idx = start_idx + repl_len
-
-            if repl_len == 0 or end_idx > prompt_len:
-                continue
-
-            if prompt[start_idx:end_idx] == repl_tokens:
-                yield PlaceholderInfo(
-                    modality=modality,
-                    item_idx=item_idx,
-                    start_idx=start_idx,
-                    replacement=repl_tokens,
-                )
-
-                item_idx += 1
-                if item_idx >= modal_item_count:
-                    return
-
-                # Exclude overlapping matches
-                start_idx = end_idx
-                found = True
-                break
-
-        if not found:
-            start_idx += 1
-
-
 def _iter_placeholders(
     mm_prompt_repls: Mapping[str, Sequence[BoundPromptReplacement]],
     prompt: list[int],
     mm_item_counts: Mapping[str, int],
 ) -> Iterable[PlaceholderInfo]:
     """
-    For each modality, yield each set of placeholder tokens found in
-    :code:`prompt`.
+    Yield each set of placeholder tokens found in :code:`prompt`.
+
+    Matches are exclusive even when multiple modalities share
+    the same placeholder tokens. In that case, the modality that
+    appears earlier in `mm_prompt_repls` takes priority.
 
     Note that empty matches are ignored.
     """
-    for modality, modal_item_count in mm_item_counts.items():
-        if modality in mm_prompt_repls:
-            yield from _iter_modality_placeholders(
-                prompt,
-                modality,
-                mm_prompt_repls[modality],
-                modal_item_count,
-            )
+    prompt_len = len(prompt)
+    item_idx_by_modality = defaultdict[str, int](lambda: 0)
+
+    start_idx = 0
+    while start_idx < prompt_len:
+        found = False
+
+        for modality, modality_repls in mm_prompt_repls.items():
+            item_idx = item_idx_by_modality[modality]
+            if item_idx >= mm_item_counts.get(modality, 0):
+                continue
+
+            for repl_info in modality_repls:
+                replacement = repl_info.get_replacement(item_idx)
+                repl_tokens = replacement.token_ids
+                repl_len = len(repl_tokens)
+                end_idx = start_idx + repl_len
+
+                if repl_len == 0 or end_idx > prompt_len:
+                    continue
+
+                if prompt[start_idx:end_idx] == repl_tokens:
+                    yield PlaceholderInfo(
+                        modality=modality,
+                        item_idx=item_idx,
+                        start_idx=start_idx,
+                        replacement=repl_tokens,
+                    )
+
+                    # Exclude overlapping matches
+                    start_idx = end_idx
+                    item_idx_by_modality[modality] += 1
+                    found = True
+                    break
+
+            if found:
+                break  # Go back to the outer while loop
+
+        if not found:
+            start_idx += 1
 
 
 def find_mm_placeholders(
@@ -1156,7 +1145,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         # If HF processor already inserts placeholder tokens,
         # there is no need for us to insert them
-        if all(len(repls) == 0 for repls in mm_missing_repls.items()):
+        if all(len(repls) == 0 for repls in mm_missing_repls.values()):
             tokenizer = self.info.get_tokenizer()
             prompt = decode_tokens(tokenizer, prompt_ids)
             mm_placeholders = hf_mm_placeholders
