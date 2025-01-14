@@ -67,14 +67,18 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 def dist_init():
     import habana_frameworks.torch.hpu  # noqa: F401
     temp_file = tempfile.mkstemp()[1]
-    backend_type = "hccl" if current_platform.is_hpu() else "nccl"
-    init_distributed_environment(
-        world_size=1,
-        rank=0,
-        distributed_init_method=f"file://{temp_file}",
-        local_rank=0,
-        backend=backend_type,
-    )
+
+    backend = "nccl"
+    if current_platform.is_cpu():
+        backend = "gloo"
+    elif current_platform.is_hpu():
+        backend = "hccl"
+
+    init_distributed_environment(world_size=1,
+                                 rank=0,
+                                 distributed_init_method=f"file://{temp_file}",
+                                 local_rank=0,
+                                 backend=backend)
     initialize_model_parallel(1, 1)
     yield
     cleanup_dist_env_and_memory(shutdown_ray=True)
@@ -84,13 +88,15 @@ def dist_init():
 def dist_init_torch_only():
     if torch.distributed.is_initialized():
         return
+    backend = "nccl"
+    if current_platform.is_cpu():
+        backend = "gloo"
+
     temp_file = tempfile.mkstemp()[1]
-    torch.distributed.init_process_group(
-        backend="nccl",
-        world_size=1,
-        rank=0,
-        init_method=f"file://{temp_file}",
-    )
+    torch.distributed.init_process_group(world_size=1,
+                                         rank=0,
+                                         init_method=f"file://{temp_file}",
+                                         backend=backend)
 
 
 @pytest.fixture

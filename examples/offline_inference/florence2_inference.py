@@ -3,7 +3,7 @@ Demonstrate prompting of text-to-text
 encoder/decoder models, specifically Florence-2
 '''
 # TODO(Isotr0py):
-# Move to offline_inference/offline_inference_vision_language.py
+# Move to offline_inference/vision_language.py
 # after porting vision backbone
 from vllm import LLM, SamplingParams
 

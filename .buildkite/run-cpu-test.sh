@@ -30,7 +30,7 @@ function cpu_tests() {
   # offline inference
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2-"$NUMA_NODE" bash -c "
     set -e
-    python3 examples/offline_inference/offline_inference.py"
+    python3 examples/offline_inference/basic.py"
 
   # Run basic model test
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" bash -c "
@@ -75,6 +75,12 @@ function cpu_tests() {
       --num-prompts 20 \
       --endpoint /v1/completions \
       --tokenizer facebook/opt-125m"
+
+  # Run multi-lora tests
+  docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" bash -c "
+    set -e
+    pytest -s -v \
+    tests/lora/test_qwen2vl.py"
 }
 
 # All of CPU tests are expected to be finished less than 25 mins.

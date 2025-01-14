@@ -465,7 +465,7 @@ def get_ip() -> str:
         logger.warning(
             "The environment variable HOST_IP is deprecated and ignored, as"
             " it is often used by Docker and other software to"
-            "interact with the container's network stack. Please"
+            "interact with the container's network stack. Please "
             "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
             " to communicate with each other.")
     if host_ip:
@@ -2268,5 +2268,4 @@ def bind_kv_cache(
         forward_ctx = ctx[layer_name]
         assert len(forward_ctx.kv_cache) == len(kv_cache)
         for ve, ve_kv_cache in enumerate(kv_cache):
-            assert forward_ctx.kv_cache[ve].numel() == 0
             forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]

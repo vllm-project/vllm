@@ -2,6 +2,8 @@
 
 # Using Docker
 
+(deployment-docker-pre-built-image)=
+
 ## Use vLLM's Official Docker Image
 
 vLLM offers an official Docker image for deployment.
@@ -23,13 +25,15 @@ container to access the host's shared memory. vLLM uses PyTorch, which uses shar
 memory to share data between processes under the hood, particularly for tensor parallel inference.
 ```
 
+(deployment-docker-build-image-from-source)=
+
 ## Building vLLM's Docker Image from Source
 
 You can build and run vLLM from source via the provided <gh-file:Dockerfile>. To build vLLM:
 
 ```console
-$ # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
-$ DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai
+# optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
+DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai
 ```
 
 ```{note}
