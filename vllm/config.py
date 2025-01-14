@@ -1294,7 +1294,10 @@ class ParallelConfig:
             from vllm.executor import ray_utils
             backend = "mp"
             ray_found = ray_utils.ray_is_available()
-            if (current_platform.is_cuda()
+            if current_platform.is_neuron():
+                # neuron uses single process to control multiple devices
+                backend = "uni"
+            elif (current_platform.is_cuda()
                     and cuda_device_count_stateless() < self.world_size):
                 if not ray_found:
                     raise ValueError("Unable to load Ray which is "
