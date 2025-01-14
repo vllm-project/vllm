@@ -53,13 +53,6 @@ class IncrementalDetokenizer:
     # Tokenizer for this request
     tokenizer: AnyTokenizer
 
-    # Logprobs for this request
-    logprobs: Optional[SampleLogprobs]
-    prompt_logprobs: Optional[PromptLogprobs]
-    cumulative_logprob: Optional[float]
-    num_logprobs: int
-    num_prompt_logprobs: int
-
     # Accounting for stop string buffering
     stop_buffer_length: int
     _last_output_text_offset: int = 0
