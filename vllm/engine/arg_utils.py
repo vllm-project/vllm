@@ -342,7 +342,7 @@ class EngineArgs:
                             default=EngineArgs.weights_load_device,
                             choices=DEVICE_OPTIONS,
                             help='Device to which model weights '
-                                 'will be loaded.')
+                            'will be loaded.')
         parser.add_argument(
             '--config-format',
             default=EngineArgs.config_format,
