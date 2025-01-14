@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_gather)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -44,8 +45,10 @@ class LogitsProcessor(nn.Module):
         self.soft_cap = soft_cap
         # Whether to use gather or all-gather to gather the logits.
 
-        self.use_gather = not current_platform.is_tpu(
-        ) and not envs.VLLM_USE_V1
+        parallel_config = get_current_vllm_config().parallel_config
+        self.use_gather = not current_platform.is_tpu() and \
+            not envs.VLLM_USE_V1 and \
+                parallel_config.distributed_executor_backend != "uni"
 
     def forward(
         self,

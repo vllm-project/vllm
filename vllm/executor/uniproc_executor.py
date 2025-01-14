@@ -1,3 +1,4 @@
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from vllm.executor.executor_base import ExecutorBase
@@ -17,17 +18,25 @@ class UniProcExecutor(ExecutorBase):
         """
         self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
                                                rank=0)
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
-        local_rank = 0
-        rank = 0
+        if "RANK" in os.environ and "MASTER_ADDR" in os.environ:
+            # engines are launched by torchrun
+            distributed_init_method = "env://"
+            rank = int(os.environ["RANK"])
+            local_rank = rank
+            is_driver_worker = True
+        else:
+            distributed_init_method = get_distributed_init_method(
+                get_ip(), get_open_port())
+            local_rank = 0
+            rank = 0
+            is_driver_worker = (not self.parallel_config) \
+            or (rank % self.parallel_config.tensor_parallel_size == 0)
         kwargs = dict(
             vllm_config=self.vllm_config,
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=distributed_init_method,
-            is_driver_worker=(not self.parallel_config)
-            or (rank % self.parallel_config.tensor_parallel_size == 0),
+            is_driver_worker=is_driver_worker,
         )
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
