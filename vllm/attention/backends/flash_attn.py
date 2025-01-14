@@ -400,6 +400,7 @@ class FlashAttentionMetadataBuilder(
         """
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
+        slot_mappings = inter_data.slot_mappings
 
         for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
              curr_sliding_window_block) in zip(
@@ -448,7 +449,7 @@ class FlashAttentionMetadataBuilder(
                                                        self.sliding_window)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
-                                 self.block_size, inter_data.block_tables)
+                                 self.block_size, slot_mappings)
 
     def _get_graph_runner_block_tables(
             self, num_seqs: int,
