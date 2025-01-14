@@ -27,7 +27,7 @@ class UniprocExecutor(Executor):
         self.observability_config = vllm_config.observability_config
 
         self.worker: Worker = self._create_worker()
-        self.worker.initialize()
+        self.worker.init_device()
         self.worker.load_model()
 
     def _create_worker(

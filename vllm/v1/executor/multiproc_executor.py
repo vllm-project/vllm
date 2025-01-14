@@ -279,7 +279,7 @@ class WorkerProc:
             ready_socket.send_string(WorkerProc.READY_STR)
             ready_socket.send(payload)
 
-        self.worker.initialize()
+        self.worker.init_device()
         self.worker.load_model()
 
     @staticmethod
