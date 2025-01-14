@@ -29,8 +29,8 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import get_world_group
-from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.forward_context import set_forward_context
+from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -49,8 +49,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceData, SequenceGroupMetadata,
                            SequenceOutput)
-from vllm.utils import (is_fake_hpu, is_pin_memory_available,
-                        make_tensor_with_pad, bind_kv_cache)
+from vllm.utils import (bind_kv_cache, is_fake_hpu, is_pin_memory_available,
+                        make_tensor_with_pad)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -215,6 +215,8 @@ class HpuModelAdapter:
         self.model = model
         self.prefill_use_fusedsdpa = os.getenv('VLLM_PROMPT_USE_FUSEDSDPA',
                                                '0').lower() in ['1', 'true']
+        self.recompute_cos_sin = os.getenv('VLLM_COS_SIN_RECOMPUTE',
+                                           'false').lower() in ['1', 'true']
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.dtype = vllm_config.model_config.dtype
@@ -775,7 +777,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             torch.hpu.synchronize()
 
             with HabanaMemoryProfiler() as m_wrap:
-                self.model = _maybe_wrap_in_hpu_graph(
+                self.model = self._maybe_wrap_in_hpu_graph(
                     self.model,
                     vllm_config=self.vllm_config,
                     layer_names=path_to_rope)

@@ -174,7 +174,7 @@ Bucketing helps significantly reduce the number of required graphs, but it does 
 
 Bucketing ranges are determined with 3 parameters - `min`, `step` and `max`. They can be set separately for prompt and decode phase, and for batch size and sequence length dimension. These parameters can be observed in logs during vLLM startup:
 
-```
+```text
 INFO 08-01 21:37:59 hpu_model_runner.py:493] Prompt bucket config (min, step, max_warmup) bs:[1, 32, 4], seq:[128, 128, 1024]
 INFO 08-01 21:37:59 hpu_model_runner.py:499] Generated 24 prompt buckets: [(1, 128), (1, 256), (1, 384), (1, 512), (1, 640), (1, 768), (1, 896), (1, 1024), (2, 128), (2, 256), (2, 384), (2, 512), (2, 640), (2, 768), (2, 896), (2, 1024), (4, 128), (4, 256), (4, 384), (4, 512), (4, 640), (4, 768), (4, 896), (4, 1024)]
 INFO 08-01 21:37:59 hpu_model_runner.py:504] Decode bucket config (min, step, max_warmup) bs:[1, 128, 4], seq:[128, 128, 2048]
@@ -183,18 +183,18 @@ INFO 08-01 21:37:59 hpu_model_runner.py:509] Generated 48 decode buckets: [(1, 1
 
 `min` determines the lowest value of the bucket. `step` determines the interval between buckets, and `max` determines the upper bound of the bucket. Furthermore, interval between `min` and `step` has special handling - `min` gets multiplied by consecutive powers of two, until `step` gets reached. We call this the ramp-up phase and it is used for handling lower batch sizes with minimum wastage, while allowing larger padding on larger batch sizes.
 
-**Example with ramp-up**
+#### Example with ramp-up
 
-```
+```text
 min = 2, step = 32, max = 64
 => ramp_up = (2, 4, 8, 16)
 => stable = (32, 64)
 => buckets = ramp_up + stable => (2, 4, 8, 16, 32, 64)
 ```
 
-**Example without ramp-up**
+#### Example without ramp-up
 
-```
+```text
 min = 128, step = 128, max = 512
 => ramp_up = ()
 => stable = (128, 256, 384, 512)
@@ -219,7 +219,7 @@ Warmup is an optional but highly recommended step that occurs before the vLLM se
 
 This example uses the same buckets as those in the Bucketing Mechanism section. Each output line corresponds to the execution of a single bucket. When a bucket is executed for the first time, its graph is compiled and can be reused later, avoiding further graph compilations.
 
-```
+```text
 INFO 08-01 22:26:47 hpu_model_runner.py:1066] [Warmup][Prompt][1/24] batch_size:4 seq_len:1024 free_mem:79.16 GiB
 INFO 08-01 22:26:47 hpu_model_runner.py:1066] [Warmup][Prompt][2/24] batch_size:4 seq_len:896 free_mem:55.43 GiB
 INFO 08-01 22:26:48 hpu_model_runner.py:1066] [Warmup][Prompt][3/24] batch_size:4 seq_len:768 free_mem:55.43 GiB
@@ -261,7 +261,7 @@ When a large number of requests are pending, the vLLM scheduler attempts to fill
 
 Each step outlined is logged by the vLLM server, with negative values indicating memory release:
 
-```
+```text
 INFO 08-02 17:37:44 hpu_model_runner.py:493] Prompt bucket config (min, step, max_warmup) bs:[1, 32, 4], seq:[128, 128, 1024]
 INFO 08-02 17:37:44 hpu_model_runner.py:499] Generated 24 prompt buckets: [(1, 128), (1, 256), (1, 384), (1, 512), (1, 640), (1, 768), (1, 896), (1, 1024), (2, 128), (2, 256), (2, 384), (2, 512), (2, 640), (2, 768), (2, 896), (2, 1024), (4, 128), (4, 256), (4, 384), (4, 512), (4, 640), (4, 768), (4, 896), (4, 1024)]
 INFO 08-02 17:37:44 hpu_model_runner.py:504] Decode bucket config (min, step, max_warmup) bs:[1, 128, 4], seq:[128, 128, 2048]
@@ -392,7 +392,6 @@ If you encounter device out-of-memory issues or want to attempt inference with h
 
 ## Changelog
 
-
 ### 1.19.0
 
 #### New features
@@ -497,7 +496,7 @@ If you encounter device out-of-memory issues or want to attempt inference with h
 ### Bugfixes
 
 - HPU Buckets now don't exceed token budget ([#206](https://github.com/HabanaAI/vllm-fork/pull/206))
-- Fixed bug causing incorrect lower bucket bounadry calculation ([#239](https://github.com/HabanaAI/vllm-fork/pull/239))
+- Fixed bug causing incorrect lower bucket boundary calculation ([#239](https://github.com/HabanaAI/vllm-fork/pull/239))
 - Fixed ALiBi support ([#254](https://github.com/HabanaAI/vllm-fork/pull/254))
 - Fixed HPU guided decoding crashes ([#236](https://github.com/HabanaAI/vllm-fork/pull/236))
 - Fixed incorrect handlign of large bucket minimums ([#235](https://github.com/HabanaAI/vllm-fork/pull/235))

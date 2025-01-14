@@ -24,7 +24,8 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import hpu_backend_string, hpu_device_string, is_fake_hpu, bind_kv_cache
+from vllm.utils import (bind_kv_cache, hpu_backend_string, hpu_device_string,
+                        is_fake_hpu)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.hpu_enc_dec_model_runner import HPUEncoderDecoderModelRunner
 from vllm.worker.hpu_model_runner import HPUModelRunner, HPUModelRunnerBase
