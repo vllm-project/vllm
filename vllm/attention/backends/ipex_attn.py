@@ -342,8 +342,10 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         # NOTE(woosuk): IPEXAttention does not support FP8 KV cache.
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in IPEXAttention.")
-        #assert output is not None, "Output tensor must be provided."
-        output = torch.empty_like(query)
+        assert output is not None, "Output tensor must be provided."
+        if attn_metadata is None or attn_metadata.seq_start_loc is None:
+            # Profiling run.
+            return output
         attn_type = self.attn_type
         if (attn_type == AttentionType.ENCODER
                 and (not attn_metadata.is_all_encoder_attn_metadata_set)):
