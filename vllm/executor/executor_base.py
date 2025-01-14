@@ -78,6 +78,16 @@ class ExecutorBase(ABC):
         b = min([r[1] for r in results])
         return a, b
 
+    def initialize(self, num_gpu_blocks: int) -> None:
+        """
+        Initialize the KV caches and begin the model execution loop of the
+        underlying workers.
+        For V1 compatibility.
+        """
+        logger.info("# GPU blocks: %d", num_gpu_blocks)
+        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, ))
+        self.collective_rpc("compile_or_warm_up_model")
+
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
