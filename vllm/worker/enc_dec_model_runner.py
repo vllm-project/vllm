@@ -312,6 +312,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 seq_data={group_id: decoder_dummy_data.seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
+                slot_mappings=None,
                 encoder_seq_data=encoder_dummy_data.seq_data,
                 cross_block_table=None,
                 multi_modal_data=decoder_dummy_data.multi_modal_data

@@ -93,7 +93,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         )
 
         self.cache_policies: Dict[SeqId, CachePolicy] = {}
-        self.cross_block_tables: Dict[EncoderSeqId, CachePolicy] = {}
+        self.cross_cache_policies: Dict[EncoderSeqId, CachePolicy] = {}
 
         self._computed_blocks_tracker = ComputedBlocksTracker(
             self.block_allocator, self.block_size, self.enable_caching)
@@ -185,7 +185,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         request_id = seq_group.request_id
 
         assert (request_id
-                not in self.cross_block_tables), \
+                not in self.cross_cache_policies), \
             "block table already exists"
 
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
@@ -194,7 +194,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             encoder_seq = seq_group.get_encoder_seq()
             assert encoder_seq is not None
             cache_policy = self._allocate_sequence(encoder_seq)
-            self.cross_block_tables[request_id] = cache_policy
+            self.cross_cache_policies[request_id] = cache_policy
 
     def can_add_slots(self, seq_group: SequenceGroup,
                       num_lookahead_slots: int) -> bool:
@@ -264,11 +264,11 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
     def free_cross(self, seq_group: SequenceGroup) -> None:
         request_id = seq_group.request_id
-        if request_id not in self.cross_block_tables:
+        if request_id not in self.cross_cache_policies:
             # Already freed or hasn't been scheduled yet.
             return
-        self.cross_block_tables[request_id].free()
-        del self.cross_block_tables[request_id]
+        self.cross_cache_policies[request_id].free()
+        del self.cross_cache_policies[request_id]
 
     def get_block_table(self, seq: Sequence) -> List[int]:
         block_ids = self.cache_policies[seq.seq_id].physical_block_ids
@@ -280,8 +280,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
     def get_cross_block_table(self, seq_group: SequenceGroup) -> List[int]:
         request_id = seq_group.request_id
-        assert request_id in self.cross_block_tables
-        block_ids = self.cross_block_tables[request_id].physical_block_ids
+        assert request_id in self.cross_cache_policies
+        block_ids = self.cross_cache_policies[request_id].physical_block_ids
         assert all(b is not None for b in block_ids)
         return block_ids  # type: ignore
 
