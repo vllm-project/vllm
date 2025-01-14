@@ -947,12 +947,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                               token_id_logprob=-float('inf'),
                               topk_token_ids=[-1] * num_logprobs,
                               topk_logprobs=[-float('inf')] * num_logprobs,
-                              seq_id=int(sg.request_id))
+                              seq_id=seq_ids[i])
             # Terminal chunk, has token.
             if sg.do_sample:
                 seq_kwargs.update(
                     dict(
-                        token_id=accepted_token_ids[i][0],
+                        token_id=accepted_token_ids[i][0].item(),
                         token_id_logprob_rank=accepted_token_id_ranks_by_step[
                             0][i],
                         token_id_logprob=accepted_token_id_logprobs_by_step[0]
@@ -1010,7 +1010,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             step_output_token_ids: List[CompletionSequenceGroupOutput] = []
             for sequence_index in range(batch_size):
                 seq_meta = seq_group_metadata_list[sequence_index]
-                # TODO unsure if we should bother filtering indices sooner.
+                # Prompts already processed above.
                 if seq_meta.is_prompt:
                     continue
 
