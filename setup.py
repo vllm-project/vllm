@@ -229,7 +229,7 @@ class cmake_build_ext(build_ext):
             # CMake appends the extension prefix to the install path,
             # and outdir already contains that prefix, so we need to remove it.
             prefix = outdir
-            for i in range(ext.name.count('.')):
+            if '.' in ext.name:
                 prefix = prefix.parent
 
             # prefix here should actually be the same for all components
@@ -594,7 +594,9 @@ if _is_hip():
 
 if _is_cuda():
     ext_modules.append(
-        CMakeExtension(name="vllm.vllm_flash_attn.vllm_flash_attn_c"))
+        CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
+    ext_modules.append(
+        CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():

@@ -24,9 +24,6 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 # Suppress potential warnings about unused manually-specified variables
 set(ignoreMe "${VLLM_PYTHON_PATH}")
 
-# Prevent installation of dependencies (cutlass) by default.
-install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
-
 #
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
@@ -570,42 +567,32 @@ if (DEFINED ENV{VLLM_FLASH_ATTN_SRC_DIR})
 endif()
 
 if(VLLM_FLASH_ATTN_SRC_DIR)
-  FetchContent_Declare(vllm-flash-attn SOURCE_DIR ${VLLM_FLASH_ATTN_SRC_DIR})
+  FetchContent_Declare(
+          vllm-flash-attn SOURCE_DIR 
+          ${VLLM_FLASH_ATTN_SRC_DIR}
+          BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
+  )
 else()
   FetchContent_Declare(
           vllm-flash-attn
-          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG 96266b1111111f3d11aabefaf3bacbab6a89d03c
+          GIT_REPOSITORY https://github.com/neuralmagic/vllm-flash-attention.git
+          GIT_TAG lwilkinson/fa3-build
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
   )
 endif()
 
-# Set the parent build flag so that the vllm-flash-attn library does not redo compile flag and arch initialization.
-set(VLLM_PARENT_BUILD ON)
-
-# Ensure the vllm/vllm_flash_attn directory exists before installation
-install(CODE "file(MAKE_DIRECTORY \"\${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn\")" COMPONENT vllm_flash_attn_c)
-
-# Make sure vllm-flash-attn install rules are nested under vllm/
-install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY FALSE)" COMPONENT vllm_flash_attn_c)
-install(CODE "set(OLD_CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}\")" COMPONENT vllm_flash_attn_c)
-install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/vllm/\")" COMPONENT vllm_flash_attn_c)
 
 # Fetch the vllm-flash-attn library
 FetchContent_MakeAvailable(vllm-flash-attn)
 message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
 
-# Restore the install prefix
-install(CODE "set(CMAKE_INSTALL_PREFIX \"\${OLD_CMAKE_INSTALL_PREFIX}\")" COMPONENT vllm_flash_attn_c)
-install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" COMPONENT vllm_flash_attn_c)
-
 # Copy over the vllm-flash-attn python files
 install(
         DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
-        DESTINATION vllm/vllm_flash_attn
-        COMPONENT vllm_flash_attn_c
+        DESTINATION vllm_flash_attn
+        COMPONENT _vllm_fa3_C
         FILES_MATCHING PATTERN "*.py"
 )
 
