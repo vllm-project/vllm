@@ -421,6 +421,7 @@ def test_find_replace_tokens(
             "pattern_1": [32000, 32000],
             "pattern_2": [],
             "pattern_3": [1550, 918, 1550],
+            # Test different modalities having the same tokens (32000)
             "pattern_4": [32000],
         },
     ],

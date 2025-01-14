@@ -412,7 +412,7 @@ def _iter_placeholders(
     """
     Yield each set of placeholder tokens found in :code:`prompt`.
 
-    Matches are exclusive even when multiple modalities specify
+    Matches are exclusive even when multiple modalities share
     the same placeholder tokens. In that case, the modality that
     appears earlier in `mm_prompt_repls` takes priority.
 
