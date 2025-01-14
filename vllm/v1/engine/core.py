@@ -72,7 +72,7 @@ class EngineCore:
                               vllm_config: VllmConfig) -> Tuple[int, int]:
         start = time.time()
 
-        # Get all kv cache tensor needed by the model
+        # Get all kv cache needed by the model
         kv_cache_spec = self.model_executor.get_kv_cache_spec()
 
         # Profiles the peak memory usage of the model to determine how much

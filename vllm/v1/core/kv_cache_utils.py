@@ -314,7 +314,7 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
                                  kv_cache_spec: KVCacheSpec,
                                  available_memory: int):
     """
-    Checks if there is enough memory available for the KV cache of at least one
+    Checks whether `available_memory` is enough for the KV cache of at least one
     request with the model's max_model_len.
     Args:
         vllm_config: The global VllmConfig

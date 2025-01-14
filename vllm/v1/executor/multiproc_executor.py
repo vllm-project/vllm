@@ -113,8 +113,7 @@ class MultiprocExecutor(Executor):
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
-        Get all kv cache tensor needed by the model by invoking the
-        underlying worker.
+        Get all kv cache needed by the model by invoking the underlying worker.
         """
         kv_cache_specs = self.collective_rpc("get_kv_cache_spec")
         assert all(lc == kv_cache_specs[0] for lc in kv_cache_specs)

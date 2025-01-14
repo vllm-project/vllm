@@ -57,7 +57,7 @@ class UniprocExecutor(Executor):
         return self.worker.determine_available_memory()
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
-        """Get all kv cache tensor needed by the model by invoking the
+        """Get all kv cache needed by the model by invoking the
         underlying worker.
         """
         return self.worker.get_kv_cache_spec()
