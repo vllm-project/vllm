@@ -11,6 +11,7 @@ from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally,
     detokenize_non_incrementally)
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.engine.output_processor_utils import RequestState
 
 logger = init_logger(__name__)
 
@@ -337,7 +338,7 @@ class IncrementalDetokenizer:
     def update_from_output(
         self,
         output: EngineCoreOutput,
-        request_state: "RequestState",
+        request_state: RequestState,
     ) -> Optional[DetokenizerOutput]:
         """
         Update RequestState for the request_id by:
