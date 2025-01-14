@@ -858,7 +858,7 @@ class GPUModelRunner:
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         if len(kv_cache_config.groups) > 1:
-            raise NotImplementedError("Multiple groups are not supported yet.")
+            raise NotImplementedError("Hybrid kv-cache groups are not supported yet.")
 
         kv_caches: Dict[str, torch.Tensor] = {}
 
