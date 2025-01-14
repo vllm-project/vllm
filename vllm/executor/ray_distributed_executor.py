@@ -157,7 +157,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 placement_group_bundle_index=bundle_id,
             )
 
-            if current_platform.is_cuda_alike():
+            if current_platform.ray_device_key == "GPU":
+                # NV+AMD GPUs, and Intel XPUs
                 worker = ray.remote(
                     num_cpus=0,
                     num_gpus=num_gpus,
