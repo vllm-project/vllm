@@ -161,7 +161,9 @@ def precompute_indices_and_offsets(block_size, slot_mapping, is_prompt):
     return indices, offsets
 
 
-def modify_decoder_layer(module: torch.nn.Module, name="", suffix="DecoderLayer"):
+def modify_decoder_layer(module: torch.nn.Module,
+                         name="",
+                         suffix="DecoderLayer"):
     if module.__class__.__name__.endswith(suffix):
 
         def forward_hook(module, args, output):

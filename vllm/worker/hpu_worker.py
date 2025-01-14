@@ -473,9 +473,7 @@ class HPUCacheEngine(CacheEngine):
         if device != 'hpu' and self.dtype == torch.float8_e4m3fn:
             dtype = torch.uint8
         for _ in range(self.num_attention_layers):
-            key_cache = torch.zeros(kv_cache_shape,
-                                    dtype=dtype,
-                                    device=device)
+            key_cache = torch.zeros(kv_cache_shape, dtype=dtype, device=device)
             value_cache = torch.zeros(kv_cache_shape,
                                       dtype=dtype,
                                       device=device)
