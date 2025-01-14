@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.executor.executor_base import (
     DistributedExecutorBase)  # yapf: disable
 from vllm.executor.msgspec_utils import encode_hook
-from vllm.executor.ray_utils import RayWorkerWrapper, ray
+from vllm.executor.ray_utils import RayWorkerWrapper, ray, initialize_ray_cluster
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
@@ -74,6 +74,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 "VLLM_USE_RAY_COMPILED_DAG=1")
 
         assert self.uses_ray
+        initialize_ray_cluster(self.parallel_config)
         placement_group = self.parallel_config.placement_group
 
         # Disable Ray usage stats collection.

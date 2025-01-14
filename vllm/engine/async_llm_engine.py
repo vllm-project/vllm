@@ -19,7 +19,6 @@ from vllm.engine.llm_engine import LLMEngine, SchedulerOutputState
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.engine.protocol import EngineClient
 from vllm.executor.executor_base import ExecutorBase
-from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -638,9 +637,6 @@ class AsyncLLMEngine(EngineClient):
             engine_config = engine_args.create_engine_config(usage_context)
 
         executor_class = cls._get_executor_cls(engine_config)
-
-        if executor_class.uses_ray:
-            initialize_ray_cluster(engine_config.parallel_config)
 
         # Create the async LLM engine.
         engine = cls(
