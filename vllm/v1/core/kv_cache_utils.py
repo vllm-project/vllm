@@ -353,7 +353,7 @@ def is_same_type(kv_cache_spec: KVCacheSpec) -> bool:
         True if all layers have the same type, False otherwise.
     """
 
-    layer_keys = set(layer.type_key for layer in kv_cache_spec.values())
+    layer_keys = set(layer.type_id for layer in kv_cache_spec.values())
     return len(layer_keys) == 1
 
 
