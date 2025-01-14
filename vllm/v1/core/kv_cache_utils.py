@@ -310,21 +310,35 @@ def hash_request_tokens(block_size: int,
     return ret
 
 
-def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
-                        available_memory: int) -> Tuple[KVCacheConfig, int]:
-    """ returns the KV cache configuration and the number of GPU blocks
-    """
-    check_enough_memory(vllm_config, kv_cache_spec, available_memory)
-    if is_same_key(kv_cache_spec):
-        # kv cache of all layers are the same, which is true for most models.
-        # Allocate the same amount of memory for each layer.
-        return _get_kv_cache_config_same_key(vllm_config, kv_cache_spec,
-                                             available_memory)
-    else:
-        raise NotImplementedError
+def check_enough_kv_cache_memory(vllm_config: VllmConfig,
+                                 kv_cache_spec: KVCacheSpec,
+                                 available_memory: int):
+    if available_memory <= 0:
+        raise ValueError("No available memory for the cache blocks. "
+                         "Try increasing `gpu_memory_utilization` when "
+                         "initializing the engine.")
+
+    max_model_len = vllm_config.model_config.max_model_len
+    needed_memory = 0
+    for layer_spec in kv_cache_spec.values():
+        needed_memory += layer_spec.bytes_for_tokens(max_model_len)
+
+    if needed_memory > available_memory:
+        raise ValueError(
+            f"To serve at least one request with the models's max seq len "
+            f"({max_model_len}), ({needed_memory/1024/1024/1024} GB KV cache is"
+            f"needed, which is larger than the available KV Cache memory "
+            f"({available_memory/1024/1024/1024} GB). Try increasing "
+            f"`gpu_memory_utilization` or decreasing `max_model_len` when "
+            f"initializing the engine.")
 
 
-def _get_kv_cache_config_same_key(
+def is_same_type(kv_cache_spec: KVCacheSpec) -> bool:
+    layer_keys = set(layer.type_key for layer in kv_cache_spec.values())
+    return len(layer_keys) == 1
+
+
+def _get_kv_cache_config_same_type(
         vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
         available_memory: int) -> Tuple[KVCacheConfig, int]:
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
@@ -357,28 +371,15 @@ def _get_kv_cache_config_same_key(
     return kv_cache_config, num_gpu_blocks
 
 
-def is_same_key(kv_cache_spec: KVCacheSpec) -> bool:
-    layer_keys = set(layer.key for layer in kv_cache_spec.values())
-    return len(layer_keys) == 1
-
-
-def check_enough_memory(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
-                        available_memory: int):
-    if available_memory <= 0:
-        raise ValueError("No available memory for the cache blocks. "
-                         "Try increasing `gpu_memory_utilization` when "
-                         "initializing the engine.")
-
-    max_model_len = vllm_config.model_config.max_model_len
-    needed_memory = 0
-    for layer_spec in kv_cache_spec.values():
-        needed_memory += layer_spec.bytes_for_tokens(max_model_len)
-
-    if needed_memory > available_memory:
-        raise ValueError(
-            f"To serve at least one request with the models's max seq len "
-            f"({max_model_len}), ({needed_memory/1024/1024/1024} GB KV cache is"
-            f"needed, which is larger than the available KV Cache memory "
-            f"({available_memory/1024/1024/1024} GB). Try increasing "
-            f"`gpu_memory_utilization` or decreasing `max_model_len` when "
-            f"initializing the engine.")
+def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
+                        available_memory: int) -> Tuple[KVCacheConfig, int]:
+    """ returns the KV cache configuration and the number of GPU blocks
+    """
+    check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
+    if is_same_type(kv_cache_spec):
+        # kv cache of all layers are the same, which is true for most models.
+        # Allocate the same amount of memory for each layer.
+        return _get_kv_cache_config_same_type(vllm_config, kv_cache_spec,
+                                              available_memory)
+    else:
+        raise NotImplementedError

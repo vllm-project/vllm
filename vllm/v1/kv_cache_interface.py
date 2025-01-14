@@ -15,7 +15,8 @@ class KVCacheSpecBase:
     block_size: int
 
     @property
-    def key(self) -> str:
+    def type_key(self) -> str:
+        # TODO: add docstring
         raise NotImplementedError
 
     @property
@@ -33,7 +34,7 @@ class FullAttentionSpec(KVCacheSpecBase):
     dtype: torch.dtype
 
     @property
-    def key(self) -> str:
+    def type_key(self) -> str:
         return f"full_attention_{self.block_size}_{self.bytes_for_tokens(1)}"
 
     @property
