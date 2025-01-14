@@ -153,9 +153,9 @@ def bind_kv_cache(
 
     for layer_index in sorted(index2name.keys()):
         layer_names = index2name[layer_index]
-        for layer_name in layer_names[1:]:
-            assert kv_caches[layer_name] is kv_caches[layer_names[0]]
-        runner_kv_caches.append(kv_caches[layer_names[0]])
+        layer_name = layer_names[0]
+        assert all(kv_caches[n] is kv_caches[layer_name] for n in layer_names[1:])
+        runner_kv_caches.append(kv_caches[layer_name])
 
     # bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
