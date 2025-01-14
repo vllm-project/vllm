@@ -794,6 +794,9 @@ class PrefixCachingBlock(Block):
         if self.content_hash is not None:
             self.block_id = self._allocator.promote_to_immutable_block(self)
 
+    def insert_token_ids(self, slot_start: int, token_ids: List[int]) -> None:
+        raise ValueError("Block should not be modified in prefix caching")
+
     @property
     def block_id(self) -> Optional[int]:
         return self._block.block_id
