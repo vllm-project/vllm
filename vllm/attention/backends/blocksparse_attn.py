@@ -89,8 +89,7 @@ class BlocksparseFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        # For attention layer compatibility
-        return "FLASH_ATTN"
+        return "BLOCK_SPARSE_FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> Type["BlocksparseFlashAttentionImpl"]:
