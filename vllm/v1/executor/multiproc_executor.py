@@ -99,12 +99,12 @@ class MultiprocExecutor(Executor):
         self.collective_rpc("initialize_cache", args=(kv_cache_config, ))
         self.collective_rpc("compile_or_warm_up_model")
 
-    def get_available_memory(self) -> int:
+    def determine_available_memory(self) -> int:
         """
         Determine the available memory for KV cache by invoking the
         underlying worker.
         """
-        memory_sizes = self.collective_rpc("get_available_memory")
+        memory_sizes = self.collective_rpc("determine_available_memory")
 
         # Since we use a shared centralized controller, we take the minimum
         # memory size across all workers to make sure all the memory

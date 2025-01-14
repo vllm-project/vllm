@@ -212,16 +212,16 @@ class RayExecutor(Executor):
             distributed_init_method=distributed_init_method,
         )
 
-    def get_available_memory(self) -> int:
+    def determine_available_memory(self) -> int:
         """
         Determine the available GPU memory in bytes.
         
-        This invokes `get_available_memory` on each worker and takes
+        This invokes `determine_available_memory` on each worker and takes
         the min of the results, guaranteeing that the selected cache sizes are
         compatible with all workers.
         """
 
-        memory_sizes = self._run_workers("get_available_memory")
+        memory_sizes = self._run_workers("determine_available_memory")
 
         # Since we use a shared centralized controller, we take the minimum
         # memory size across all workers to make sure all the memory

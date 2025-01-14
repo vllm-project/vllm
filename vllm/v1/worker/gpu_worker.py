@@ -112,7 +112,7 @@ class Worker:
         self.model_runner.load_model()
 
     @torch.inference_mode()
-    def get_available_memory(self) -> int:
+    def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much 
         memory can be used for KV cache without OOMs.
 

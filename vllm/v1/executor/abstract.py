@@ -35,7 +35,7 @@ class Executor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_available_memory(self) -> int:  # in bytes
+    def determine_available_memory(self) -> int:  # in bytes
         raise NotImplementedError
 
     @abstractmethod
