@@ -238,7 +238,9 @@ class ReplicatedLinear(LinearBase):
         assert param.size() == loaded_weight.size()
         param.data.copy_(loaded_weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
         output = self.quant_method.apply(self, x, bias)
@@ -445,8 +447,14 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
         if is_gguf_weight_type:
-            param.data[loaded_shard_id].copy_(loaded_weight)
-            param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
+            if loaded_shard_id is not None:
+                param.data[loaded_shard_id].copy_(loaded_weight)
+                param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
+            else:
+                param.shard_weight_type = {
+                    i: loaded_weight.item()
+                    for i, _ in enumerate(self.output_sizes)
+                }
             return
 
         if is_gguf_weight:
@@ -457,15 +465,15 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             shard_size = loaded_weight.size(output_dim) // tp_size
             start_idx = tp_rank * shard_size
 
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                 shard_size)
-
-            param.shard_id.append(loaded_shard_id)
-            param.shard_id_map[loaded_shard_id] = len(param.data_container)
-            param.data_container.append(loaded_weight)
-            if len(param.data_container) == 2:
-                self.qweight = param.materialize_nested()
-            return
+            if loaded_shard_id is not None:
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx,
+                                                     shard_size)
+                param.shard_id.append(loaded_shard_id)
+                param.shard_id_map[loaded_shard_id] = len(param.data_container)
+                param.data_container.append(loaded_weight)
+                if len(param.data_container) == 2:
+                    self.qweight = param.materialize_nested()
+                return
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
@@ -809,10 +817,16 @@ class QKVParallelLinear(ColumnParallelLinear):
         # initialize GGUF param after we know the quantize type
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type and loaded_shard_id is not None:
+        if is_gguf_weight_type:
             idx_map = {"q": 0, "k": 1, "v": 2}
-            param.data[idx_map[loaded_shard_id]].copy_(loaded_weight)
-            param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
+            if loaded_shard_id is not None:
+                param.data[idx_map[loaded_shard_id]].copy_(loaded_weight)
+                param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
+            else:
+                param.shard_weight_type = {
+                    k: loaded_weight.item()
+                    for k in idx_map
+                }
             return
 
         if is_gguf_weight:
@@ -823,15 +837,15 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_size = loaded_weight.size(output_dim) // tp_size
             start_idx = tp_rank * shard_size
 
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                 shard_size)
-
-            param.shard_id.append(loaded_shard_id)
-            param.shard_id_map[loaded_shard_id] = len(param.data_container)
-            param.data_container.append(loaded_weight)
-            if len(param.data_container) == 3:
-                self.qweight = param.materialize_nested()
-            return
+            if loaded_shard_id is not None:
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx,
+                                                     shard_size)
+                param.shard_id.append(loaded_shard_id)
+                param.shard_id_map[loaded_shard_id] = len(param.data_container)
+                param.data_container.append(loaded_weight)
+                if len(param.data_container) == 3:
+                    self.qweight = param.materialize_nested()
+                return
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)

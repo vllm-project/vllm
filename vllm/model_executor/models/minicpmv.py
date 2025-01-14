@@ -141,8 +141,6 @@ class Resampler2_5(BaseResampler):
         self.max_size = max_size
         self._set_2d_pos_cache(self.max_size)
 
-        self.apply(self._init_weights)
-
     def _set_2d_pos_cache(self,
                           max_size: Tuple[int, int],
                           device: torch.types.Device = "cpu") -> None:
@@ -659,7 +657,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
         quant_config: Optional[QuantizationConfig],
         prefix: str = "",
     ) -> nn.Module:
-        # TODO: refactor this vision model
+        # TODO: refactor vision model through timm wrapper from transformers
         try:
             import timm
         except ImportError:

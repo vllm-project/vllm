@@ -19,10 +19,15 @@ class HpuPlatform(Platform):
     device_name: str = "hpu"
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
+    ray_device_key: str = "HPU"
+    device_control_env_var: str = "HABANA_VISIBLE_MODULES"
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
-        return _Backend.HPU_ATTN
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool) -> str:
+        logger.info("Using HPUAttention backend.")
+        return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
@@ -58,3 +63,7 @@ class HpuPlatform(Platform):
     def is_pin_memory_available(cls):
         logger.warning("Pin memory is not supported on HPU.")
         return False
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_hpu.PunicaWrapperHPU"
