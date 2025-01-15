@@ -38,8 +38,6 @@ from itertools import accumulate
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import (BaseResampler, Resampler2,
                                                   get_2d_sincos_pos_embed)
@@ -51,8 +49,6 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.image import cached_get_image_processor
-from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.multimodal.inputs import (MultiModalFieldConfig, 
                                     MultiModalDataDict, 
                                     PlaceholderRange,
@@ -75,17 +71,6 @@ from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import AutoWeightsLoader, maybe_prefix
 
 RawImageType = Union[Image.Image, torch.Tensor]
-
-
-class MiniCPMVRawImageInput(TypedDict):
-    """Input mapper input with auxiliary data for computing image bounds."""
-    image: RawImageType
-
-    # Image bounds token ids in 0-dim scaler tensor.
-    im_start_id: torch.Tensor
-    im_end_id: torch.Tensor
-    slice_start_id: NotRequired[torch.Tensor]
-    slice_end_id: NotRequired[torch.Tensor]
 
 
 class MiniCPMVImagePixelInputs(TypedDict):
@@ -575,7 +560,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[MiniCPMVProcessingInfo
 
     @staticmethod
     def repack_processor_outputs(outputs: Any) -> BatchFeature:
-        outputs = {key: value[0] for key, value in outputs.items() if key != "input_ids"}
+        valid_keys = ["pixel_values", "image_sizes", "tgt_sizes"]
+        outputs = {key: outputs[key][0] for key in valid_keys}
         return outputs
 
     def process_images(
@@ -1066,7 +1052,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self,
+                skip_prefixes=["apm", "tts", "audio_projection_layer"])
         return loader.load_weights(weights)
 
     def get_mm_mapping(self) -> MultiModelKeys:
