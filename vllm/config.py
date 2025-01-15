@@ -1379,6 +1379,16 @@ class SchedulerConfig:
 
     is_multimodal_model: bool = False
 
+    # NOTE: The following multimodal encoder budget will be initialized to
+    # max_num_batched_tokens and overridden in case max multimodal embedding
+    # size is larger.
+    # TODO (ywang96): Make these configurable.
+    # Multimodal encoder compute budget, only used in V1
+    max_num_encoder_input_tokens: int = field(default=None)  # type: ignore
+
+    # Multimodal encoder cache size, only used in V1
+    encoder_cache_size: int = field(default=None)  # type: ignore
+
     # Whether to perform preemption by swapping or
     # recomputation. If not specified, we determine the mode as follows:
     # We use recomputation by default since it incurs lower overhead than
@@ -1450,6 +1460,9 @@ class SchedulerConfig:
                     self.max_num_batched_tokens,
                     _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
+
+        self.max_num_encoder_input_tokens = self.max_num_batched_tokens
+        self.encoder_cache_size = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
             logger.info(

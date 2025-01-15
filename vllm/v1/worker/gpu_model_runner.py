@@ -20,8 +20,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
-from vllm.v1.core.encoder_cache_manager import (
-    compute_encoder_cache_budget, compute_encoder_cache_budget_multimodal)
+from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -90,8 +89,12 @@ class GPUModelRunner:
         self.mm_input_mapper_profiling = MMInputMapperClient(self.model_config)
         self.mm_input_mapper_profiling.use_cache = False
 
-        self.encoder_cache_budget = compute_encoder_cache_budget(
-            self.model_config, self.scheduler_config)
+        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
+            model_config=model_config,
+            scheduler_config=scheduler_config,
+        )
+        self.max_num_encoder_input_tokens = encoder_compute_budget
+        self.encoder_cache_size = encoder_cache_size
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
@@ -724,15 +727,44 @@ class GPUModelRunner:
 
         # Profile with multimodal encoder & encoder cache.
         # TODO: handle encoder-decoder models once we support them.
-        if self.is_multimodal_model and self.encoder_cache_budget > 0:
+        if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
+                and self.encoder_cache_size > 0):
 
             # NOTE: Currently model is profiled with a single non-text
             # modality with the max possible input tokens even when
             # it supports multiple.
-            _, dummy_data_modality, max_num_mm_items = compute_encoder_cache_budget_multimodal(  # noqa: E501
-                self.model_config,
-                self.scheduler_config,
-            )
+            max_tokens_by_modality_dict = MULTIMODAL_REGISTRY.get_max_tokens_per_item_by_nonzero_modality(  # noqa: E501
+                self.model_config)
+            dummy_data_modality, max_tokens_per_mm_item = max(
+                max_tokens_by_modality_dict.items(), key=lambda item: item[1])
+
+            # Check how many items of this modality can be supported by
+            # the encoder budget.
+            encoder_cache_budget = min(self.max_num_encoder_input_tokens,
+                                       self.encoder_cache_size)
+
+            max_num_mm_items_encoder_budget = cdiv(encoder_cache_budget,
+                                                   max_tokens_per_mm_item)
+
+            # Check how many items of this modality can be supported by
+            # the decoder budget.
+            max_mm_items_per_req = max(
+                self.mm_registry.get_mm_limits_per_prompt(
+                    self.model_config).values())
+
+            # NOTE: We do not consider max_num_batched_tokens on purpose
+            # because the multimodal embeddings can be generated in advance
+            # and chunked prefilled.
+            max_num_mm_items_decoder_budget = self.max_num_reqs * \
+                max_mm_items_per_req
+
+            max_num_mm_items = min(max_num_mm_items_encoder_budget,
+                                   max_num_mm_items_decoder_budget)
+
+            logger.info(
+                "Encoder cache will be initialized with a budget of %s tokens,"
+                " and profiled with %s %s items of the maximum feature size.",
+                encoder_cache_budget, max_num_mm_items, dummy_data_modality)
 
             # Create dummy batch of multimodal inputs.
             dummy_request_data = self.input_registry.dummy_data_for_profiling(
