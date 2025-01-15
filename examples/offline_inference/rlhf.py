@@ -66,7 +66,8 @@ class MyLLM(LLM):
 # important: set some common environment variables the same as vLLM workers.
 configure_as_vllm_process()
 
-train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m").to("cuda:0")
+train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
+train_model.to("cuda:0")
 
 # start ray with 2 GPUs
 os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
