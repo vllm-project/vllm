@@ -172,7 +172,8 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--root-path",
         type=nullable_str,
         default=None,
-        help="FastAPI root_path when app is behind a path based routing proxy.")
+        help="FastAPI root_path when app is behind a path based routing proxy."
+    )
     parser.add_argument(
         "--middleware",
         type=nullable_str,
