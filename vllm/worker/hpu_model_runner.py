@@ -22,6 +22,7 @@ import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
 import torch
 from vllm_hpu_extension.ops import LoraMask as LoraMask
+from vllm_hpu_extension.ops import batch2block, block2batch
 from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
                                          HabanaMemoryProfiler, format_bytes)
 
@@ -340,11 +341,21 @@ class HpuModelAdapter:
         mask = mask >= metadata.block_usage.unsqueeze(-1)
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(
             mask, -math.inf))
-        block_mapping = torch.nn.functional.one_hot(metadata.block_mapping,
+        block_mapping = torch.nn.functional.one_hot(metadata.block_groups,
                                                     num_classes=batch_size)
         block_mapping = block_mapping.to(dtype)
         metadata = metadata._replace(block_mapping=block_mapping,
                                      attn_bias=attn_bias)
+        return metadata
+    
+    def _set_block_scales(self, metadata, device):
+        block_mapping = metadata.block_mapping
+        ones = torch.ones((block_mapping.size(0), ),
+                          device=device,
+                          dtype=block_mapping.dtype)
+        sums = batch2block(block2batch(ones, block_mapping), block_mapping)
+        block_scales = torch.reciprocal(torch.maximum(ones, sums))
+        metadata = metadata._replace(block_scales=block_scales)
         return metadata
 
     def _update_metadata(self, attn_metadata, batch_size, seq_len, device,
@@ -357,6 +368,7 @@ class HpuModelAdapter:
             meta = attn_metadata
             attn_metadata = self._set_block_mapping(meta, batch_size, device,
                                                     dtype)
+            attn_metadata = self._set_block_scales(attn_metadata, device)
         return attn_metadata
 
     def forward(self, *args, **kwargs):
@@ -1000,66 +1012,68 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         num_decode_tokens = sum(seq_lens)
 
-        blocks_used = [len(bt) for bt in block_tables if bt]
-        block_list = []
-        block_scales = []
-        for i, bt in enumerate(block_tables):
-            block_list.extend(bt)
-            blocks_in_group = len(bt)
-            if blocks_in_group > 0:
-                scale = 1.0 / blocks_in_group
-                block_scales.extend([scale] * blocks_in_group)
-
-        block_mapping_nested: List[List[int]] = [
-            [i] * b_u for i, b_u in enumerate(blocks_used)
+        last_block_usage = [
+            slot[0] % self.block_size + 1 for slot in slot_mapping
         ]
-        block_mapping: List[int] = list(
-            itertools.chain.from_iterable(block_mapping_nested))
+        block_groups = [[i] * len(bt) for i, bt in enumerate(block_tables)]
+        block_usage = [[self.block_size] * (len(bt) - 1) + [lbu]
+                       for bt, lbu in zip(block_tables, last_block_usage)
+                       if bt]
 
-        last_block = [
-            sl % self.block_size + 1 for sl in itertools.chain(*slot_mapping)
-        ]
-        block_usage = [[self.block_size] * (b_u - 1) + [lb]
-                       for b_u, lb in zip(blocks_used, last_block)]
-        block_usage = list(itertools.chain(*block_usage))
+        block_list = flatten(block_tables)
+        block_groups = flatten(block_groups)
+        block_usage = flatten(block_usage)
 
-        block_bucket_size = find_bucket(
-            len(block_list),
-            self.bucketing_global_state.decode_block_bucket_cfg)
-        block_list = pad_list(block_list, block_bucket_size, _PAD_BLOCK_ID)
-        block_mapping = pad_list(block_mapping, block_bucket_size, -1)
-        block_usage = pad_list(block_usage, block_bucket_size, 1)
-        block_scales = pad_list(block_scales, block_bucket_size, 0.0)
+        assert len(block_list) == len(block_groups)
+        assert len(block_list) == len(block_usage)
+
+        padding_fn = None
+        if self.use_contiguous_pa:
+            block_bucket_size = find_bucket(
+                block_bucket_size,
+                self.bucketing_global_state.decode_block_bucket_cfg)
+            indices: List[Any]
+            indices = [None] * block_bucket_size
+            for i, bid in enumerate(block_list):
+                indices[bid] = i
+            padding_fn = lambda tensor, pad_value: gather_list(
+                tensor, indices, pad_value)
+        else:
+            block_bucket_size = find_bucket(
+                len(block_list),
+                self.bucketing_global_state.decode_block_bucket_cfg)
+            padding_fn = lambda tensor, pad_value: pad_list(
+                tensor, block_bucket_size, pad_value)
+
+        block_list = padding_fn(block_list, _PAD_BLOCK_ID)
+        block_groups = padding_fn(block_groups, -1)
+        block_usage = padding_fn(block_usage, 1)
 
         block_list = torch.tensor(block_list,
                                   dtype=torch.int,
                                   device=self.device)
-        block_mapping = torch.tensor(block_mapping,
-                                     dtype=torch.long,
-                                     device=self.device)
+        block_groups = torch.tensor(block_groups,
+                                    dtype=torch.int,
+                                    device=self.device)
         block_usage = torch.tensor(block_usage,
                                    dtype=self.model_config.dtype,
                                    device=self.device)
-
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)
 
         block_indices, block_offsets = precompute_indices_and_offsets(
             self.block_size, slot_mapping, False)
-        block_scales = torch.tensor(block_scales,
-                                    dtype=self.model_config.dtype,
-                                    device=self.device)
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             block_list=block_list,
-            block_mapping=block_mapping,
+            block_mapping=None,
             block_usage=block_usage,
             block_indices=block_indices,
             block_offsets=block_offsets,
-            block_scales=block_scales,
-            block_groups=None,
+            block_scales=None,
+            block_groups=block_groups,
             attn_bias=None,
             seq_lens_tensor=None,
             num_prefills=0,
