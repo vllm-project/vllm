@@ -54,6 +54,7 @@ class BlockTable:
             self.num_blocks_per_row[i, row_idx] = num_blocks + num_new_blocks
 
     def add_row(self, row_idx: int, block_ids: List[List[int]]) -> None:
+        self.num_blocks_per_row[:, row_idx] = 0
         self.append_row(row_idx, block_ids)
 
     def move_row(self, src: int, tgt: int) -> None:
