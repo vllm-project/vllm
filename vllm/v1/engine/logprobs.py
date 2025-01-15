@@ -291,18 +291,16 @@ class LogprobsProcessor:
         new_prompt_logprobs = output.new_prompt_logprobs
 
         # 1) Make Sample Logprobs, if requested
-        logprobs = (None if self.num_logprobs == 0 else
-                    self._update_sample_logprobs(
-                        new_token_ids,
-                        new_logprobs_token_ids,
-                        new_logprobs,
-                    ))
+        logprobs = self._update_sample_logprobs(
+            new_token_ids,
+            new_logprobs_token_ids,
+            new_logprobs,
+        )
 
         # 4) Make Prompt Logprobs.
-        prompt_logprobs = (None if self.num_prompt_logprobs else
-                           self._update_prompt_logprobs(
-                               new_prompt_logprobs_token_ids,
-                               new_prompt_logprobs, self.prompt_token_ids))
+        prompt_logprobs = self._update_prompt_logprobs(
+            new_prompt_logprobs_token_ids, new_prompt_logprobs,
+            self.prompt_token_ids)
 
         # 5) Makes the LogprobsOutput object with the new text.
         finished = bool(output.finish_reason)
