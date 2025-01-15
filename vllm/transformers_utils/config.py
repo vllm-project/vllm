@@ -493,19 +493,13 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         "hidden_dim": "intermediate_size",
     }
 
-    def pretrained_or_mixtral_config(elem: dict, **config_dict):
-        if elem.get("moe") is not None:
-            from transformers import MixtralConfig
-            return MixtralConfig(**config_dict)
-        return PretrainedConfig(**config_dict)
-
     def recurse_elems(elem: Any):
         if isinstance(elem, dict):
             config_dict = {}
             for key, value in elem.items():
                 key = config_mapping.get(key, key)
                 config_dict[key] = recurse_elems(value)
-            return pretrained_or_mixtral_config(elem, **config_dict)
+            return PretrainedConfig(**config_dict)
         else:
             return elem
 
@@ -519,6 +513,17 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     if config_dict.get("moe") is not None:
         config_dict["architectures"] = ["MixtralForCausalLM"]
+        config_dict["model_type"] = "mixtral"
+        moe_hf_config_keys = [
+            "num_experts_per_tok", "num_local_experts", "output_router_logits",
+            "router_aux_loss_coef", "router_jitter_noise"
+        ]
+        moe_dict = config_dict.pop("moe")
+        moe_config = {
+            k: moe_dict[k]
+            for k in moe_hf_config_keys if k in moe_dict
+        }
+        config_dict.update(moe_config)
     else:
         config_dict["architectures"] = ["MistralForCausalLM"]
 
