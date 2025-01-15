@@ -88,7 +88,6 @@ class WorkerBase(ABC):
                 if output is None:
                     return None
 
-    @abstractmethod
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
@@ -117,6 +116,58 @@ class WorkerBase(ABC):
     @abstractmethod
     def list_loras(self) -> Set[int]:
         raise NotImplementedError
+
+
+class DelegateWorkerBase(WorkerBase):
+    """
+    A class that delegates all methods to another WorkerBase instance. This is
+    useful for creating a WorkerBase that wraps another WorkerBase instance,
+    e.g. speculative decoding.
+    """
+    worker: WorkerBase
+
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+    ) -> None:
+        vllm_config: VllmConfig = kwargs.get("vllm_config")
+        cls = resolve_obj_by_qualname(vllm_config.parallel_config.worker_cls)
+        self.worker = cls(*args, **kwargs)
+
+    def init_device(self) -> None:
+        self.worker.init_device()
+
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        return self.worker.determine_num_available_blocks()
+
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[List[SamplerOutput]]:
+        return self.worker.execute_model(execute_model_req)
+
+    def get_cache_block_size_bytes(self) -> int:
+        return self.worker.get_cache_block_size_bytes()
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.worker.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.worker.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.worker.pin_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self.worker.list_loras()
+
+    def __getattr__(self, attr):
+        return getattr(self.worker, attr)
 
 
 class LoraNotSupportedWorkerBase(WorkerBase):
@@ -419,17 +470,31 @@ class WorkerWrapperBase:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        rank: int = 0,
     ) -> None:
+        self.rank = rank
         self.vllm_config = vllm_config
-        trust_remote_code = vllm_config.model_config.trust_remote_code
         self.worker: Optional[WorkerBase] = None
-        if trust_remote_code:
-            # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
-            init_cached_hf_modules()
+        if vllm_config.model_config is not None:
+            # it can be None in tests
+            trust_remote_code = vllm_config.model_config.trust_remote_code
+            if trust_remote_code:
+                # note: lazy import to avoid importing torch before initializing
+                from vllm.utils import init_cached_hf_modules
+                init_cached_hf_modules()
 
-    @staticmethod
-    def update_environment_variables(envs: Dict[str, str]) -> None:
+    def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
+        """
+        Adjust the rank based on the given mapping.
+        It is only used during the initialization of the executor,
+        to adjust the rank of workers after we create all workers.
+        """
+        if self.rank in rank_mapping:
+            self.rank = rank_mapping[self.rank]
+
+    def update_environment_variables(self, envs_list: List[Dict[str,
+                                                                str]]) -> None:
+        envs = envs_list[self.rank]
         key = 'CUDA_VISIBLE_DEVICES'
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
@@ -437,11 +502,12 @@ class WorkerWrapperBase:
             del os.environ[key]
         update_environment_variables(envs)
 
-    def init_worker(self, *args, **kwargs):
+    def init_worker(self, all_kwargs: List[Dict[str, Any]]) -> None:
         """
         Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
+        kwargs = all_kwargs[self.rank]
         enable_trace_function_call_for_thread(self.vllm_config)
 
         # see https://github.com/NVIDIA/nccl/issues/1234
@@ -452,7 +518,7 @@ class WorkerWrapperBase:
 
         worker_class = resolve_obj_by_qualname(
             self.vllm_config.parallel_config.worker_cls)
-        self.worker = worker_class(*args, **kwargs)
+        self.worker = worker_class(**kwargs)
         assert self.worker is not None
 
     def execute_method(self, method: str, *args, **kwargs):
