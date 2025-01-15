@@ -46,9 +46,9 @@ class LogitsProcessor(nn.Module):
         # Whether to use gather or all-gather to gather the logits.
 
         parallel_config = get_current_vllm_config().parallel_config
-        self.use_gather = not current_platform.is_tpu() and \
-            not envs.VLLM_USE_V1 and \
-                parallel_config.distributed_executor_backend != "uni"
+        self.use_all_gather = current_platform.is_tpu() \
+            or envs.VLLM_USE_V1 \
+            or parallel_config.distributed_executor_backend != "external_launcher" # noqa
 
     def forward(
         self,
@@ -91,16 +91,17 @@ class LogitsProcessor(nn.Module):
         logits = lm_head.linear_method.apply(lm_head,
                                              hidden_states,
                                              bias=embedding_bias)
-        if self.use_gather:
-            # None may be returned for rank > 0
-            logits = tensor_model_parallel_gather(logits)
-        else:
+
+        if self.use_all_gather:
             # Gather is not supported for some devices such as TPUs.
             # Use all-gather instead.
             # NOTE(woosuk): Here, the outputs of every device should not be None
             # because XLA requires strict SPMD among all devices. Every device
             # should execute the same operations after gathering the logits.
             logits = tensor_model_parallel_all_gather(logits)
+        else:
+            # None may be returned for rank > 0
+            logits = tensor_model_parallel_gather(logits)
         # Remove paddings in vocab (if any).
         if logits is not None:
             logits = logits[..., :self.org_vocab_size]

@@ -938,7 +938,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
 
     @property
     def use_gather(self):
-        return self.base_layer.use_gather
+        return not self.base_layer.use_all_gather
 
     @property
     def org_vocab_size(self):
