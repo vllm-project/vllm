@@ -54,9 +54,12 @@ class EngineCore:
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
         # Setup scheduler.
-        self.scheduler = Scheduler(vllm_config.scheduler_config,
-                                   vllm_config.cache_config,
-                                   vllm_config.lora_config)
+        self.scheduler = Scheduler(
+            scheduler_config=vllm_config.scheduler_config,
+            model_config=vllm_config.model_config,
+            cache_config=vllm_config.cache_config,
+            lora_config=vllm_config.lora_config,
+        )
 
         self.mm_input_mapper_server = MMInputMapperServer(
             vllm_config.model_config)
