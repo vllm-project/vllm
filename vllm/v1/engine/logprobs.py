@@ -1,18 +1,14 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.detokenizer_utils import (
-    AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally,
-    detokenize_non_incrementally)
+    AnyTokenizer, detokenize_non_incrementally)
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
-from vllm.v1.engine.output_processor_utils import RequestState
-from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 
 logger = init_logger(__name__)
 
@@ -30,6 +26,12 @@ class LogprobsProcessor:
     # Tokenizer for this request
     tokenizer: AnyTokenizer
 
+    # Request output kind
+    output_kind: RequestOutputKind
+
+    # Prompt tokens
+    prompt_token_ids: List[int]
+
     # Logprobs for this request
     logprobs: Optional[SampleLogprobs]
     prompt_logprobs: Optional[PromptLogprobs]
@@ -42,47 +44,18 @@ class LogprobsProcessor:
         cls,
         tokenizer: AnyTokenizer,
         request: EngineCoreRequest,
-    ) -> "IncrementalDetokenizer":
-
-        tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
-            tokenizer=tokenizer,
-            prompt_ids=request.prompt_token_ids,
-            skip_special_tokens=request.sampling_params.skip_special_tokens,
-        )
-
-        stops = request.sampling_params.stop
-        # Number of chars to hold back when stop strings are to be excluded
-        # from streamed output.
-        if stops and not request.sampling_params.include_stop_str_in_output:
-            stop_buffer_length = max(len(s) for s in stops) - 1
-        else:
-            stop_buffer_length = 0
-
-        logprobs = request.sampling_params.logprobs
-        prompt_logprobs = request.sampling_params.prompt_logprobs
+    ) -> "LogprobsProcessor":
+        num_logprobs = request.sampling_params.logprobs
+        num_prompt_logprobs = request.sampling_params.prompt_logprobs
         return cls(
-            output_text="",
-            tokens=tokens,
-            # Detokenizer mutates this list, so need a unique copy.
-            # NOTE(Nick): could we take ownership of it though?
-            token_ids=request.prompt_token_ids.copy(),
-            stop=stops,
-            include_stop_str_in_output=request.sampling_params.
-            include_stop_str_in_output,
-            prefix_offset=prefix_offset,
-            read_offset=read_offset,
-            skip_special_tokens=request.sampling_params.skip_special_tokens,
-            spaces_between_special_tokens=request.sampling_params.
-            spaces_between_special_tokens,
-            output_kind=request.sampling_params.output_kind,
-            prompt_len=len(request.prompt_token_ids),
             tokenizer=tokenizer,
-            stop_buffer_length=stop_buffer_length,
-            cumulative_logprob=(0. if logprobs else None),
-            logprobs=([] if logprobs else None),
-            prompt_logprobs=([] if prompt_logprobs else None),
-            num_prompt_logprobs=(prompt_logprobs or 0),
-            num_logprobs=(logprobs or 0),
+            output_kind=request.sampling_params.output_kind,
+            prompt_token_ids=request.prompt_token_ids,
+            cumulative_logprob=(0. if num_logprobs else None),
+            logprobs=([] if num_logprobs else None),
+            prompt_logprobs=([] if num_prompt_logprobs else None),
+            num_prompt_logprobs=(num_prompt_logprobs or 0),
+            num_logprobs=(num_logprobs or 0),
         )
 
     def _update_sample_logprobs(
@@ -301,19 +274,15 @@ class LogprobsProcessor:
     def update_from_output(
         self,
         output: EngineCoreOutput,
-        request_state: RequestState,
     ) -> Optional[LogprobsOutput]:
         """
         Update RequestState for the request_id by:
         """
-
-        # new_token_ids = output.new_token_ids
-        # finish_reason = output.finish_reason
-        # stop_reason = output.stop_reason
-        new_logprobs_token_ids = output.logprobs_token_ids
-        new_logprobs = output.logprobs
-        new_prompt_logprobs_token_ids = output.prompt_logprobs_token_ids
-        new_prompt_logprobs = output.prompt_logprobs
+        new_token_ids = output.new_token_ids
+        new_logprobs_token_ids = output.new_logprobs_token_ids
+        new_logprobs = output.new_logprobs
+        new_prompt_logprobs_token_ids = output.new_prompt_logprobs_token_ids
+        new_prompt_logprobs = output.new_prompt_logprobs
 
         # 1) Make Sample Logprobs, if requested
         logprobs = (None if self.num_logprobs == 0 else
@@ -324,29 +293,21 @@ class LogprobsProcessor:
                     ))
 
         # 4) Make Prompt Logprobs.
-        prompt_logprobs = (
-            None if self.num_prompt_logprobs else self._update_prompt_logprobs(
-                new_prompt_logprobs_token_ids, new_prompt_logprobs,
-                request_state.prompt_token_ids))
+        prompt_logprobs = (None if self.num_prompt_logprobs else
+                           self._update_prompt_logprobs(
+                               new_prompt_logprobs_token_ids,
+                               new_prompt_logprobs, self.prompt_token_ids))
 
-        # 5) Makes the RequestOutput object with the new text.
-        finished = bool(finish_reason)
+        # 5) Makes the LogprobsOutput object with the new text.
+        finished = bool(output.finish_reason)
         if self.output_kind == RequestOutputKind.FINAL_ONLY \
             and not finished:
             return None
-
         delta = self.output_kind == RequestOutputKind.DELTA
-        output_text = self._get_next_output_text(finished, delta)
-        token_ids = new_token_ids if delta else self.output_token_ids
         logprobs = logprobs if delta else self.logprobs
         prompt_logprobs = prompt_logprobs if delta else self.prompt_logprobs
 
         return LogprobsOutput(
-            output_text=output_text,
-            token_ids=token_ids,
-            finished=finished,
-            finish_reason=finish_reason,
-            stop_reason=stop_reason,
             logprobs=logprobs,
             prompt_logprobs=prompt_logprobs,
             cumulative_logprob=self.cumulative_logprob,

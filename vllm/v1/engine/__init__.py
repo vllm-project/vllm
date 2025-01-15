@@ -43,10 +43,10 @@ class EngineCoreOutput(
 
     request_id: str
     new_token_ids: List[int]
-    logprobs: List[torch.Tensor]
-    logprobs_token_ids: List[torch.Tensor]
-    prompt_logprobs: Optional[torch.Tensor]
-    prompt_logprobs_token_ids: Optional[torch.Tensor]
+    new_logprobs: List[torch.Tensor]
+    new_logprobs_token_ids: List[torch.Tensor]
+    new_prompt_logprobs: Optional[torch.Tensor]
+    new_prompt_logprobs_token_ids: Optional[torch.Tensor]
     finished: bool
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None

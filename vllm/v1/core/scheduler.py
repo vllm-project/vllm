@@ -461,10 +461,10 @@ class Scheduler:
                     new_token_ids=request.output_token_ids[-num_new_tokens:],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
-                    logprobs_token_ids=logprobs_token_ids,
-                    logprobs=logprobs,
-                    prompt_logprobs_token_ids=prompt_logprobs_token_ids,
-                    prompt_logprobs=prompt_logprobs,
+                    new_logprobs_token_ids=logprobs_token_ids,
+                    new_logprobs=logprobs,
+                    new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
+                    new_prompt_logprobs=prompt_logprobs,
                     stop_reason=request.stop_reason)
                 outputs.append(output)
 
@@ -481,10 +481,10 @@ class Scheduler:
                     new_token_ids=[],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
-                    logprobs_token_ids=[],
-                    logprobs=[],
-                    prompt_logprobs_token_ids=prompt_logprobs_token_ids,
-                    prompt_logprobs=prompt_logprobs,
+                    new_logprobs_token_ids=[],
+                    new_logprobs=[],
+                    new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
+                    new_prompt_logprobs=prompt_logprobs,
                     stop_reason=request.stop_reason)
                 outputs.append(output)
 

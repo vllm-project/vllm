@@ -6,6 +6,7 @@ from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.engine.detokenizer import DetokenizerOutput
+from vllm.v1.engine.logprobs import LogprobsOutput
 from vllm.v1.engine.output_processor_utils import RequestState
 from vllm.v1.metrics.stats import IterationStats
 
@@ -110,12 +111,20 @@ class OutputProcessor:
             req_state.is_prefilling = False
 
             # 2) Detokenize the token ids into text.
-            detokenizer_output = req_state.detokenizer.update_from_output(
-                engine_core_output, req_state)
+            if detokenizer_output := req_state.detokenizer.update_from_output(
+                    engine_core_output):
+                # Detect if detokenizer updated `finish_reason`
+                engine_core_output.finish_reason = (
+                    detokenizer_output.finish_reason)
 
-            # 3) Create and handle RequestOutput objects.
+            # 3) Compute sample and prompt logprobs for request,
+            #    if required.
+            logprobs_output = req_state.logprobs_processor.update_from_output(
+                engine_core_output)
+
+            # 4) Create and handle RequestOutput objects.
             if request_output := self._make_request_output(
-                    req_state, detokenizer_output):
+                    req_state, logprobs_output, detokenizer_output):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put_nowait(request_output)
@@ -140,16 +149,23 @@ class OutputProcessor:
     def _make_request_output(
         self,
         request_state: RequestState,
+        logprobs_output: Optional[LogprobsOutput],
         detokenizer_output: Optional[DetokenizerOutput],
     ) -> Optional[RequestOutput]:
 
         if detokenizer_output is None:
+            # Only happens with FINAL request output kind when
+            # we are not on the final step
             return None
+        assert logprobs_output is not None
 
         request_output = RequestOutput.new(
             request_state.request_id,
             request_state.prompt,
             request_state.prompt_token_ids,
+            logprobs_output.logprobs,
+            logprobs_output.prompt_logprobs,
+            logprobs_output.cumulative_logprob,
             detokenizer_output.output_text,
             detokenizer_output.token_ids,
             detokenizer_output.finished,

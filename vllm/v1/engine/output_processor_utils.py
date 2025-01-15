@@ -6,6 +6,7 @@ from vllm.outputs import RequestOutput
 from vllm.transformers_utils.detokenizer_utils import AnyTokenizer
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.logprobs import LogprobsProcessor
 
 
 class RequestState:
@@ -15,6 +16,7 @@ class RequestState:
         request_id: str,
         prompt: Optional[str],
         prompt_token_ids: List[int],
+        logprobs_processor: LogprobsProcessor,
         detokenizer: IncrementalDetokenizer,
         queue: Optional[asyncio.Queue[RequestOutput]],
     ):
@@ -22,6 +24,7 @@ class RequestState:
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.prompt_len = len(prompt_token_ids)
+        self.logprobs_processor = logprobs_processor
         self.detokenizer = detokenizer
         self.is_prefilling = True
         self.queue = queue
@@ -37,6 +40,10 @@ class RequestState:
             request_id=request.request_id,
             prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
+            logprobs_processor=LogprobsProcessor.from_new_request(
+                tokenizer=tokenizer,
+                request=request,
+            ),
             detokenizer=IncrementalDetokenizer.from_new_request(
                 tokenizer=tokenizer,
                 request=request,
