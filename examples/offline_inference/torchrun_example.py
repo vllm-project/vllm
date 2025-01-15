@@ -22,11 +22,12 @@ llm = LLM(model="facebook/opt-125m",
           tensor_parallel_size=2,
           distributed_executor_backend="uni")
 
-# Generate texts from the prompts.
-# The output is a list of RequestOutput objects
-# that contain the prompt, generated text, and other information.
+# important: prompts should be the same across all ranks
+# important: scheduling decisions should be deterministic
+# and should be the same across all ranks
 outputs = llm.generate(prompts, sampling_params)
-# Print the outputs.
+
+# all ranks should have the same outputs
 for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
@@ -39,3 +40,6 @@ for output in outputs:
         assert container[1] == generated_text
     print(f"Rank {torch_rank}, Prompt: {prompt!r}, "
           f"Generated text: {generated_text!r}")
+
+# all ranks can access the model directly
+# via `llm.llm_engine.model_executor.driver_worker.worker.model_runner.model`
