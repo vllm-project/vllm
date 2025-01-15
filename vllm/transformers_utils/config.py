@@ -493,13 +493,19 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         "hidden_dim": "intermediate_size",
     }
 
+    def pretrained_or_mixtral_config(elem: dict, **config_dict):
+        if elem.get("moe") is not None:
+            from transformers import MixtralConfig
+            return MixtralConfig(**config_dict)
+        return PretrainedConfig(**config_dict)
+
     def recurse_elems(elem: Any):
         if isinstance(elem, dict):
             config_dict = {}
             for key, value in elem.items():
                 key = config_mapping.get(key, key)
                 config_dict[key] = recurse_elems(value)
-            return PretrainedConfig(**config_dict)
+            return pretrained_or_mixtral_config(elem, **config_dict)
         else:
             return elem
 
