@@ -413,7 +413,6 @@ class MambaMixer2(CustomOp):
         # 3. State Space Model sequence transformation
         if has_prefill:
 
-
             initial_states = None
             if has_initial_states is not None and any(has_initial_states):
                 for idx in mamba_cache_params.state_indices_tensor[
