@@ -1,5 +1,6 @@
 # a simple demonstration of RLHF with VLLM.
 import os
+
 import ray
 import torch
 from ray.util.placement_group import placement_group
@@ -27,6 +28,7 @@ def stateless_init_process_group(master_address, master_port, rank, world_size,
 
 # inference code, inherit from Worker to provide custom functions
 class MyWorker(Worker):
+
     def init_weight_update_group(self, master_address, master_port,
                                  rank_offset, world_size):
         from vllm.distributed.parallel_state import get_world_group
@@ -55,12 +57,15 @@ class MyWorker(Worker):
             sum_value += p.square().sum().item()
         return sum_value
 
+
 class MyLLM(LLM):
+
     def __init__(self, *args, **kwargs):
         # stop ray from manipulating CUDA_VISIBLE_DEVICES
         # at the top-level
         del os.environ["CUDA_VISIBLE_DEVICES"]
         super().__init__(*args, **kwargs)
+
 
 # current process is a training process, and it takes 1 GPU.
 # important: set some common environment variables the same as vLLM workers.
@@ -78,7 +83,8 @@ ray.get(pg_inference.ready())
 scheduling_inference = PlacementGroupSchedulingStrategy(
     placement_group=pg_inference,
     placement_group_capture_child_tasks=True,
-    placement_group_bundle_index=0,)
+    placement_group_bundle_index=0,
+)
 
 # inferencing engine, it takes 2 GPUs.
 # for simplicity, we define the MyWorker class in this self-contained script.

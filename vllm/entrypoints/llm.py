@@ -1,10 +1,10 @@
 import itertools
 import warnings
 from contextlib import contextmanager
-import cloudpickle
 from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
                     Union, cast, overload)
 
+import cloudpickle
 from tqdm import tqdm
 from typing_extensions import deprecated
 

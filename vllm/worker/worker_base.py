@@ -1,10 +1,10 @@
-import cloudpickle
 import dataclasses
 import os
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
+import cloudpickle
 import torch
 
 from vllm.config import ObservabilityConfig, VllmConfig
