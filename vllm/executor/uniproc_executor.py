@@ -20,7 +20,7 @@ class UniProcExecutor(ExecutorBase):
         """Initialize the worker and load the model.
         """
         self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
-                                               rank=0)
+                                               rpc_rank=0)
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
         local_rank = 0

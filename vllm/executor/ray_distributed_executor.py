@@ -172,7 +172,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
                 )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
-                                           rank=rank)
+                                           rpc_rank=rank)
             else:
                 worker = ray.remote(
                     num_cpus=0,
@@ -181,7 +181,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
                 )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
-                                           rank=rank)
+                                           rpc_rank=rank)
             worker_metadata.append(
                 RayWorkerMetaData(worker=worker, created_rank=rank))
             rank += 1
