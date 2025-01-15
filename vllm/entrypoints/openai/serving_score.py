@@ -101,6 +101,13 @@ class OpenAIServingScores(OpenAIServing):
             if not self.model_config.is_cross_encoder:
                 raise ValueError("Model is not cross encoder.")
 
+            if truncate_prompt_tokens is not None and \
+                truncate_prompt_tokens > self.max_model_len:
+                raise ValueError(
+                    f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
+                    f"is greater than max_model_len ({self.max_model_len})."
+                    f" Please, select a smaller truncation size.")
+
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
@@ -123,8 +130,19 @@ class OpenAIServingScores(OpenAIServing):
             prompt_inputs = await tokenize_async(text=q,
                                                  text_pair=t,
                                                  **tokenization_kwargs)
+
+            input_ids = prompt_inputs["input_ids"]
+            token_num = len(input_ids)
+            if len(input_ids) > self.max_model_len:
+                err_msg = (
+                    f"This model's maximum context length is "
+                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{token_num} tokens in the input for score. "
+                    f"Please reduce the length of the input.")
+                logger.error(err_msg)
+                return self.create_error_response(err_msg)
             engine_prompt = TokensPrompt(
-                prompt_token_ids=prompt_inputs["input_ids"],
+                prompt_token_ids=input_ids,
                 token_type_ids=prompt_inputs.get("token_type_ids"))
 
             request_prompts.append(request_prompt)
