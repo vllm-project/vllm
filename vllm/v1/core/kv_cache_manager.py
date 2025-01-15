@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
@@ -69,7 +69,8 @@ class KVCacheManager:
         # is finished.
         self.req_to_blocks: Dict[str, List[KVCacheBlock]] = {}
 
-    def get_computed_blocks(self, request: Request) -> List[KVCacheBlock]:
+    def get_computed_blocks(
+            self, request: Request) -> Tuple[List[KVCacheBlock], int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -77,11 +78,13 @@ class KVCacheManager:
             request: The request to get the computed blocks.
 
         Returns:
-            A list of blocks that are computed for the request.
+            A tuple containing:
+                - A list of blocks that are computed for the request.
+                - The number of computed tokens.
         """
         if not self.enable_caching:
             # Prefix caching is disabled.
-            return []
+            return [], 0
 
         computed_blocks = []
 
@@ -101,7 +104,11 @@ class KVCacheManager:
             else:
                 break
 
-        return computed_blocks
+        # NOTE(woosuk): Since incomplete blocks are not eligible for
+        # sharing, `num_computed_tokens` is always a multiple of
+        # `block_size`.
+        num_computed_tokens = len(computed_blocks) * self.block_size
+        return computed_blocks, num_computed_tokens
 
     def append_slots(
         self,
