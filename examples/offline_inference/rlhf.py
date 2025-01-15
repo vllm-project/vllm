@@ -61,15 +61,9 @@ configure_as_vllm_process()
 
 train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
 
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
 ray.init()
-
-
-class PlaceHolder:
-    pass
-
-
-# a place holder to reserve 1 GPU for the training process.
-place_holder = ray.remote(num_cpus=0, num_gpus=1)(PlaceHolder).remote()
 
 # inferencing engine, and it takes 2 GPUs.
 # for simplicity, we define the MyWorker class in this self-contained script,
