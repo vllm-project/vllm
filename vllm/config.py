@@ -604,6 +604,7 @@ class ModelConfig:
                                           self.max_model_len)
 
         if (self.hf_config.model_type == 'deepseek_v3'
+                and self.quantization == "fp8"
                 and not self.enforce_eager):
             logger.warning("CUDA graph is not supported for Deepseek V3 yet, "
                            "fallback to the eager mode.")

@@ -918,17 +918,11 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                          block_size: int, sorted_token_ids: torch.Tensor,
                          experts_ids: torch.Tensor,
                          num_tokens_post_pad: torch.Tensor,
-                         token_cnts_buffer: Optional[torch.Tensor] = None,
-                         cumsum_buffer: Optional[torch.Tensor] = None,
-                         ) -> None:
-    if token_cnts_buffer is None:
-        token_cnts_buffer = torch.empty((0,), device=topk_ids.device)
-    if cumsum_buffer is None:
-        cumsum_buffer = torch.empty((0,), device=topk_ids.device)
+                         use_global_memory: bool = False) -> None:
     torch.ops._moe_C.moe_align_block_size(topk_ids, num_experts, block_size,
                                           sorted_token_ids, experts_ids,
                                           num_tokens_post_pad,
-                                          token_cnts_buffer, cumsum_buffer)
+                                          use_global_memory)
 
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,

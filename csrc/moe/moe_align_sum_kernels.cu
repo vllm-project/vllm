@@ -222,8 +222,7 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
                           int64_t block_size, torch::Tensor sorted_token_ids,
                           torch::Tensor experts_ids,
                           torch::Tensor num_tokens_post_pad,
-                          torch::Tensor token_cnts_buffer,
-                          torch::Tensor cumsum_buffer) {
+                          bool use_global_memory) {
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // If we have very large number of experts, we can no longer use shared
@@ -231,12 +230,19 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
   // TODO(simon): the right solution should be calculating the exact right
   // amount of shared memory and use that. The num_experts >= 256 is just a
   // temporary solution to unblock Deepseek V3.
-  if (token_cnts_buffer.numel() > 0 && token_cnts_buffer.numel() > 0) {
+  if (use_global_memory) {
     VLLM_DISPATCH_INTEGRAL_TYPES(
         topk_ids.scalar_type(), "moe_align_block_size_global_mem_kernel", [&] {
           // calc needed amount of shared mem for `tokens_cnts` and `cumsum`
           // tensors
           const int32_t num_thread = max((int32_t)num_experts, WARP_SIZE);
+
+          auto options_int =
+              torch::TensorOptions().dtype(torch::kInt).device(topk_ids.device());
+          torch::Tensor token_cnts_buffer =
+              torch::empty({(num_experts + 1) * num_experts}, options_int);
+          torch::Tensor cumsum_buffer =
+              torch::empty({num_experts + 1}, options_int);
 
           auto kernel =
               vllm::moe::moe_align_block_size_global_mem_kernel<scalar_t>;
