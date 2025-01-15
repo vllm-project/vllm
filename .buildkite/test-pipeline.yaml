@@ -126,7 +126,9 @@ steps:
   - tests/distributed
   - tests/spec_decode/e2e/test_integration_dist_tp4
   - tests/compile
+  - examples/offline_inference/rlhf.py
   commands:
+  - pytest -v -s ../examples/offline_inference/rlhf.py
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
