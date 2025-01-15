@@ -17,7 +17,7 @@ class UniProcExecutor(ExecutorBase):
         """Initialize the worker and load the model.
         """
         self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
-                                               rank=0)
+                                               rpc_rank=0)
         if "RANK" in os.environ and "MASTER_ADDR" in os.environ:
             # engines are launched by torchrun
             distributed_init_method = "env://"

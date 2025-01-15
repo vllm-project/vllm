@@ -461,7 +461,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
 class WorkerWrapperBase:
     """
-    The whole point of this class is to lazily initialize the worker.
+    This class represents one process in an executor/engine. It is responsible
+    for lazily initializing the worker and handling the worker's lifecycle.
     We first instantiate the WorkerWrapper, which remembers the worker module
     and class name. Then, when we call `update_environment_variables`, and the
     real initialization happens in `init_worker`.
@@ -470,9 +471,18 @@ class WorkerWrapperBase:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        rank: int = 0,
+        rpc_rank: int = 0,
     ) -> None:
-        self.rank = rank
+        """
+        Initialize the worker wrapper with the given vllm_config and rpc_rank.
+        Note: rpc_rank is the rank of the worker in the executor. In most cases,
+        it is also the rank of the worker in the distributed group. However, when
+        multiple executors work together, they can be different.
+        e.g. in the case of SPMD-style offline inference with TP=2,
+        users can launch 2 engines/executors, each with only 1 worker.
+        All workers have rpc_rank=0, but they have different ranks in the TP group.
+        """
+        self.rpc_rank = rpc_rank
         self.vllm_config = vllm_config
         self.worker: Optional[WorkerBase] = None
         if vllm_config.model_config is not None:
@@ -485,16 +495,16 @@ class WorkerWrapperBase:
 
     def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
         """
-        Adjust the rank based on the given mapping.
+        Adjust the rpc_rank based on the given mapping.
         It is only used during the initialization of the executor,
-        to adjust the rank of workers after we create all workers.
+        to adjust the rpc_rank of workers after we create all workers.
         """
-        if self.rank in rank_mapping:
-            self.rank = rank_mapping[self.rank]
+        if self.rpc_rank in rank_mapping:
+            self.rpc_rank = rank_mapping[self.rpc_rank]
 
     def update_environment_variables(self, envs_list: List[Dict[str,
                                                                 str]]) -> None:
-        envs = envs_list[self.rank]
+        envs = envs_list[self.rpc_rank]
         key = 'CUDA_VISIBLE_DEVICES'
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
@@ -507,7 +517,7 @@ class WorkerWrapperBase:
         Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
-        kwargs = all_kwargs[self.rank]
+        kwargs = all_kwargs[self.rpc_rank]
         enable_trace_function_call_for_thread(self.vllm_config)
 
         # see https://github.com/NVIDIA/nccl/issues/1234

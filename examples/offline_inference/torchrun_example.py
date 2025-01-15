@@ -15,7 +15,9 @@ prompts = [
 
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-llm = LLM(model="facebook/opt-125m", tensor_parallel_size=2, distributed_executor_backend="uni")
+llm = LLM(model="facebook/opt-125m",
+          tensor_parallel_size=2,
+          distributed_executor_backend="uni")
 
 # Generate texts from the prompts.
 # The output is a list of RequestOutput objects
@@ -32,4 +34,7 @@ for output in outputs:
         dist.broadcast_object_list(container, src=0)
         assert container[0] == prompt
         assert container[1] == generated_text
-    print(f"Rank {torch_rank}, Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    print(
+        f"Rank {torch_rank}, Prompt: {prompt!r}, "
+        f"Generated text: {generated_text!r}"
+    )
