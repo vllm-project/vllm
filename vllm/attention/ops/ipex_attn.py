@@ -105,6 +105,7 @@ class _PagedAttention:
             block_size,
             max_context_len,
             alibi_slopes,
+            None,  # TODO add custom bias
             kv_cache_dtype,
             k_scale,
             v_scale,
