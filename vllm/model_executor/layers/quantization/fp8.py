@@ -276,7 +276,7 @@ class Fp8LinearMethod(LinearMethodBase):
             input_scale=layer.input_scale,
             bias=bias,
             cutlass_fp8_supported=self.cutlass_fp8_supported,
-            # Default to using per_token quantization if cutalss fp8 is supported.
+            # Default to using per_token quantization if cutlass fp8 is supported.
             use_per_token_if_dynamic=self.cutlass_fp8_supported)
 
 
