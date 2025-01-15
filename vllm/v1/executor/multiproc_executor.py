@@ -246,9 +246,18 @@ class WorkerProc:
         ready_path: str,
     ):
         self.rank = rank
-        wrapper = WorkerWrapperBase(vllm_config=vllm_config)
-        wrapper.init_worker(vllm_config, local_rank, rank,
-                            distributed_init_method)
+        wrapper = WorkerWrapperBase(vllm_config=vllm_config, rank=rank)
+        # TODO: move `init_worker` to executor level as a collective rpc call
+        all_kwargs: List[Dict] = [
+            {} for _ in range(vllm_config.parallel_config.world_size)
+        ]
+        all_kwargs[rank] = {
+            "vllm_config": vllm_config,
+            "local_rank": local_rank,
+            "rank": rank,
+            "distributed_init_method": distributed_init_method,
+        }
+        wrapper.init_worker(all_kwargs)
         self.worker = wrapper.worker
 
         pid = os.getpid()
@@ -270,7 +279,7 @@ class WorkerProc:
             ready_socket.send_string(WorkerProc.READY_STR)
             ready_socket.send(payload)
 
-        self.worker.initialize()
+        self.worker.init_device()
         self.worker.load_model()
 
     @staticmethod

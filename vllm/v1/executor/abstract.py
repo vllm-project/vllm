@@ -14,8 +14,9 @@ class Executor(ABC):
         distributed_executor_backend = (
             vllm_config.parallel_config.distributed_executor_backend)
         if distributed_executor_backend == "ray":
-            from vllm.v1.executor.ray_executor import RayExecutor
-            executor_class = RayExecutor
+            from vllm.executor.ray_distributed_executor import (  # noqa
+                RayDistributedExecutor)
+            executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
             executor_class = MultiprocExecutor

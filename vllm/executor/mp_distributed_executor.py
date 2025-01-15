@@ -1,32 +1,26 @@
 import asyncio
-import os
-from functools import partial
 from typing import Any, List, Optional
 
-from vllm.executor.distributed_gpu_executor import (  # yapf: disable
-    DistributedGPUExecutor, DistributedGPUExecutorAsync)
-from vllm.executor.gpu_executor import create_worker
+from vllm.executor.executor_base import DistributedExecutorBase
 from vllm.executor.multiproc_worker_utils import (
     ProcessWorkerWrapper, ResultHandler, WorkerMonitor,
     set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (_run_task_with_lock, cuda_device_count_stateless,
-                        get_distributed_init_method, get_open_port, make_async,
-                        update_environment_variables)
+from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
+                        get_ip, get_open_port, make_async)
+from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
 
-class MultiprocessingGPUExecutor(DistributedGPUExecutor):
-    """Python multiprocessing-based multi-GPU executor"""
+class MultiprocessingDistributedExecutor(DistributedExecutorBase):
+    """Python multiprocessing-based distributed executor"""
 
     uses_ray: bool = False
 
     def _init_executor(self) -> None:
-        self._check_executor_parameters()
-
         # Create the parallel GPU workers.
         world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -55,15 +49,9 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         else:
             result_handler = ResultHandler()
             for rank in range(1, world_size):
-                worker = ProcessWorkerWrapper(
-                    result_handler,
-                    partial(
-                        create_worker,
-                        **self._get_worker_kwargs(
-                            rank=rank,
-                            local_rank=rank,
-                            distributed_init_method=distributed_init_method,
-                        )))
+                worker = ProcessWorkerWrapper(result_handler,
+                                              WorkerWrapperBase,
+                                              self.vllm_config, rank)
                 self.workers.append(worker)
                 if rank % tensor_parallel_size == 0:
                     self.tp_driver_workers.append(worker)
@@ -77,32 +65,30 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         # Set up signal handlers to shutdown the executor cleanly
         # sometimes gc does not work well
 
-        self.driver_worker = self._create_worker(
-            distributed_init_method=distributed_init_method)
+        self.driver_worker = WorkerWrapperBase(self.vllm_config, 0)
+
+        all_kwargs = []
+        distributed_init_method = get_distributed_init_method(
+            get_ip(), get_open_port())
+        for i in range(world_size):
+            local_rank = i
+            rank = i
+            kwargs = dict(
+                vllm_config=self.vllm_config,
+                local_rank=local_rank,
+                rank=rank,
+                distributed_init_method=distributed_init_method,
+                is_driver_worker=(not self.parallel_config)
+                or (rank % self.parallel_config.tensor_parallel_size == 0),
+            )
+            all_kwargs.append(kwargs)
+        self._run_workers("init_worker", all_kwargs)
         self._run_workers("init_device")
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
-
-    def _check_executor_parameters(self):
-        world_size = self.parallel_config.world_size
-        tensor_parallel_size = self.parallel_config.tensor_parallel_size
-
-        # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
-        if "CUDA_VISIBLE_DEVICES" not in os.environ:
-            update_environment_variables({
-                "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
-            })
-
-        cuda_device_count = cuda_device_count_stateless()
-        # Use confusing message for more common TP-only case.
-        assert tensor_parallel_size <= cuda_device_count, (
-            f"please set tensor_parallel_size ({tensor_parallel_size}) "
-            f"to less than max local gpu count ({cuda_device_count})")
-
-        assert world_size <= cuda_device_count, (
-            f"please ensure that world_size ({world_size}) "
-            f"is less than than max local gpu count ({cuda_device_count})")
+        self.driver_exec_model = make_async(self.driver_worker.execute_model)
+        self.pp_locks: Optional[List[asyncio.Lock]] = None
 
     def shutdown(self):
         if (worker_monitor := getattr(self, "worker_monitor",
@@ -171,15 +157,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         async_run_remote_workers_only to complete."""
         for result in parallel_worker_tasks:
             result.get()
-
-
-class MultiprocessingGPUExecutorAsync(MultiprocessingGPUExecutor,
-                                      DistributedGPUExecutorAsync):
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.driver_exec_model = make_async(self.driver_worker.execute_model)
-        self.pp_locks: Optional[List[asyncio.Lock]] = None
 
     async def _driver_execute_model_async(
         self,
