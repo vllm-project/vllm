@@ -466,6 +466,7 @@ def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
 
 
+import traceback
 def cutlass_scaled_mm(a: torch.Tensor,
                       b: torch.Tensor,
                       scale_a: torch.Tensor,
@@ -480,12 +481,21 @@ def cutlass_scaled_mm(a: torch.Tensor,
     m = a.shape[0]
     n = b.shape[1]
 
+    # traceback.print_stack() 
+
     if current_platform.is_rocm():
         triton_scaled_mm_module = importlib.import_module(
             "vllm.model_executor.layers.quantization.compressed_tensors."
             "triton_scaled_mm")
         triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
-        return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+        out = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+        # print(f"SCALED_MM:a.shape = {a.shape},"
+              # f"a.dtype = {a.dtype},"
+              # f"b.shape = {b.shape},"
+              # f"b.dtype = {b.dtype},"
+              # f"out.shape = {out.shape},"
+              # f"out.dtype = {out.dtype}")
+        return out
 
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 

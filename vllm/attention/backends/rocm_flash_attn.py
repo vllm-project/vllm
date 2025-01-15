@@ -370,10 +370,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         # NOTE: Allow for switching between Triton and CK. Defaulting to triton.
         self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
         if self.use_triton_flash_attn:
-            from vllm.attention.ops.triton_flash_attention import (  # noqa: F401
-                triton_attention)
-            # from vllm.attention.ops.rocm_triton_flash_attention import (  # noqa: F401
+            # from vllm.attention.ops.triton_flash_attention import (  noqa: F401
                 # triton_attention)
+            from vllm.attention.ops.rocm_triton_flash_attention import (  # noqa: F401
+                triton_attention)
             self.attn_func = triton_attention
             logger.debug("Using Triton FA in ROCmBackend")
             if self.sliding_window != (-1, -1):

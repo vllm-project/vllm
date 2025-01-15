@@ -1485,6 +1485,8 @@ def get_strides_from_layout(q, k, v, o, metadata):
     return q_strides, k_strides, v_strides, o_strides
 
 
+import traceback
+
 class _attention(torch.autograd.Function):
 
     @staticmethod
@@ -1586,6 +1588,14 @@ class _attention(torch.autograd.Function):
 
         atomic_counter = torch.zeros([1], device=q.device, dtype=torch.int32)
 
+        traceback.print_stack() 
+        print(f"FLASH_ATTN_V2:q.shape = {q.shape},"
+              f"q.dtype = {q.dtype},"
+              f"k.shape = {k.shape},"
+              f"k.dtype = {k.dtype},"
+              f"v.shape = {v.shape},"
+              f"v.dtype = {v.dtype},"
+              f"metadata.int8 = {metadata.int8}")
         attn_fwd[grid](
             q,
             k,
