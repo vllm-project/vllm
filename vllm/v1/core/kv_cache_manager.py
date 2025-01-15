@@ -4,7 +4,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock,
+                                         KVCacheBlock, KVCacheBlocks,
+                                         ReqKVCacheBlocks,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens)
@@ -66,11 +67,12 @@ class KVCacheManager:
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
-        # is finished.
-        self.req_to_blocks: Dict[str, List[KVCacheBlock]] = {}
+        # is finished. KVCacheManager only supports models with one layer type,
+        # so the blocks can be stored by KVCacheBlocks type.
+        self.req_to_blocks: Dict[str, KVCacheBlocks] = {}
 
-    def get_computed_blocks(
-            self, request: Request) -> Tuple[List[KVCacheBlock], int]:
+    def get_computed_blocks(self,
+                            request: Request) -> Tuple[ReqKVCacheBlocks, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -78,13 +80,14 @@ class KVCacheManager:
             request: The request to get the computed blocks.
 
         Returns:
+            # TODO: update docstring
             A tuple containing:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
         if not self.enable_caching:
             # Prefix caching is disabled.
-            return [], 0
+            return [[]], 0
 
         computed_blocks = []
 
@@ -92,8 +95,8 @@ class KVCacheManager:
         # if the request was preempted and resumed.
         if not request.kv_block_hashes:
             request.set_kv_block_hashes(
-                hash_request_tokens(self.block_size, request))
-        block_hashes = request.kv_block_hashes
+                [hash_request_tokens(self.block_size, request)])
+        block_hashes = request.kv_block_hashes[0]
 
         for block_hash in block_hashes:
             # block_hashes is a chain of block hashes. If a block hash is not
@@ -108,13 +111,13 @@ class KVCacheManager:
         # sharing, `num_computed_tokens` is always a multiple of
         # `block_size`.
         num_computed_tokens = len(computed_blocks) * self.block_size
-        return computed_blocks, num_computed_tokens
+        return [computed_blocks], num_computed_tokens
 
     def append_slots(
         self,
         request: Request,
         num_tokens: int,
-    ) -> Optional[List[KVCacheBlock]]:
+    ) -> Optional[ReqKVCacheBlocks]:
         """Append slots to the block table of the request.
         We first append slots to already allocated blocks. If the allocated
         blocks are not enough, we allocate new blocks.
@@ -126,6 +129,7 @@ class KVCacheManager:
         Returns:
             A list of new blocks if new blocks are allocated, or None
             if new blocks are required but cannot be allocated.
+            # TODO: update docstring
         """
         num_required_blocks = cdiv(request.num_computed_tokens + num_tokens,
                                    self.block_size)
@@ -159,7 +163,7 @@ class KVCacheManager:
             req_blocks.extend(new_blocks)
 
         if not self.enable_caching:
-            return new_blocks
+            return [new_blocks]
 
         num_computed_full_blocks = (request.num_computed_tokens //
                                     self.block_size)
@@ -182,16 +186,17 @@ class KVCacheManager:
                 full_blocks=new_full_blocks,
                 prev_block=req_blocks[num_computed_full_blocks - 1]
                 if num_computed_full_blocks >= 1 else None,
+                kv_cache_group_id=0,
             )
 
-        return new_blocks
+        return [new_blocks]
 
     def allocate_slots(
         self,
         request: Request,
         num_tokens: int,
-        computed_blocks: List[KVCacheBlock],
-    ) -> Optional[List[KVCacheBlock]]:
+        computed_blocks_of_groups: ReqKVCacheBlocks,
+    ) -> Optional[ReqKVCacheBlocks]:
         """Allocate slots for a new request.
 
         Args:
@@ -201,12 +206,14 @@ class KVCacheManager:
             computed_blocks: A list of computed blocks.
 
         Returns:
+            # TODO: update docstring
             A list of new allocated blocks.
         """
         if num_tokens == 0:
             raise ValueError(
                 f"num_tokens must be greater than 0, got {num_tokens}")
 
+        computed_blocks = computed_blocks_of_groups[0]  # only one group
         # If a computed block of a request is an eviction candidate (in the
         # free queue and ref_cnt == 0), it cannot be counted as a free block
         # when allocating this request.
@@ -260,9 +267,10 @@ class KVCacheManager:
                 # The new full blocks are the full blocks that are not computed.
                 full_blocks=new_full_blocks,
                 prev_block=computed_blocks[-1] if computed_blocks else None,
+                kv_cache_group_id=0,
             )
 
-        return new_blocks
+        return [new_blocks]
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -333,7 +341,7 @@ class KVCacheManager:
                 num_common_blocks += 1
             else:
                 break
-        return num_common_blocks
+        return [num_common_blocks]
 
     def _get_new_blocks(self, num_blocks: int) -> List[KVCacheBlock]:
         """Get new blocks from the free block pool.
@@ -421,6 +429,7 @@ class KVCacheManager:
         blk_start_idx: int,
         full_blocks: List[KVCacheBlock],
         prev_block: Optional[KVCacheBlock],
+        kv_cache_group_id: int,
     ) -> None:
         """Cache a list of full blocks for prefix caching.
 
@@ -437,7 +446,8 @@ class KVCacheManager:
             full_blocks: The list of blocks to update hash metadata.
             prev_block: The previous block in the chain.
         """
-        num_cached_block_hashes = len(request.kv_block_hashes)
+        num_cached_block_hashes = len(
+            request.kv_block_hashes[kv_cache_group_id])
 
         # Update the new blocks with the block hashes through the chain.
         prev_block_hash_value = None
@@ -456,7 +466,8 @@ class KVCacheManager:
                 # this request (either the prompt tokens or the previously
                 # generated tokens with preemption). In this case we simply
                 # reuse the block hash.
-                block_hash = request.kv_block_hashes[blk_idx]
+                block_hash = request.kv_block_hashes[kv_cache_group_id][
+                    blk_idx]
             else:
                 # Otherwise compute the block hash and cache it in the request
                 # in case it will be preempted in the future.
@@ -478,7 +489,7 @@ class KVCacheManager:
                 # Compute the hash of the current block.
                 block_hash = hash_block_tokens(prev_block_hash_value,
                                                block_tokens, extra_keys)
-                request.append_kv_block_hashes(block_hash)
+                request.append_kv_block_hashes(kv_cache_group_id, block_hash)
 
             # Update and added the full block to the cache.
             blk.block_hash = block_hash

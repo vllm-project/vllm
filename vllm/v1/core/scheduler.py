@@ -95,7 +95,7 @@ class Scheduler:
         scheduled_running_reqs: List[Request] = []
         preempted_reqs: List[Request] = []
 
-        req_to_new_block_ids: Dict[str, List[int]] = {}
+        req_to_new_block_ids: Dict[str, List[List[int]]] = {}
         num_scheduled_tokens: Dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -154,9 +154,9 @@ class Scheduler:
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
-            req_to_new_block_ids[request.request_id] = [
-                b.block_id for b in new_blocks
-            ]
+            req_to_new_block_ids[request.request_id] = [[
+                b.block_id for b in new_blocks_of_group
+            ] for new_blocks_of_group in new_blocks]
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
@@ -230,9 +230,11 @@ class Scheduler:
                     raise RuntimeError(
                         f"Invalid request status: {request.status}")
 
-                req_to_new_block_ids[request.request_id] = [
-                    b.block_id for b in computed_blocks + new_blocks
-                ]
+                req_to_new_block_ids[request.request_id] = [[
+                    b.block_id
+                    for b in computed_blocks_of_group + new_blocks_of_group
+                ] for computed_blocks_of_group, new_blocks_of_group in zip(
+                    computed_blocks, new_blocks)]
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -536,14 +538,16 @@ class NewRequestData:
     mm_hashes: List[str]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
-    block_ids: List[int]
+    # List of block IDs for each group.
+    # Refer to KVCacheConfig class for the meaning of "group"
+    block_ids: List[List[int]]
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        block_ids: List[int],
+        block_ids: List[List[int]],
         num_computed_tokens: int,
     ) -> "NewRequestData":
         return cls(
@@ -563,14 +567,16 @@ class NewRequestData:
 class ResumedRequestData:
 
     req_id: str
-    block_ids: List[int]
+    # List of block IDs for each kv cache group.
+    # Refer to KVCacheConfig class for the meaning of "group"
+    block_ids: List[List[int]]
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        block_ids: List[int],
+        block_ids: List[List[int]],
         num_computed_tokens: int,
     ) -> "ResumedRequestData":
         return cls(
@@ -584,14 +590,16 @@ class ResumedRequestData:
 class RunningRequestData:
 
     req_id: str
-    new_block_ids: List[int]
+    # List of block IDs for each kv cache group.
+    # Refer to KVCacheConfig class for the meaning of "group"
+    new_block_ids: List[List[int]]
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
-        new_block_ids: List[int],
+        new_block_ids: List[List[int]],
         num_computed_tokens: int,
     ) -> "RunningRequestData":
         return cls(
@@ -611,7 +619,9 @@ class SchedulerOutput:
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int
     scheduled_encoder_inputs: Dict[str, List[int]]
-    num_common_prefix_blocks: int
+    # Number of common prefix blocks per kv cache group
+    # Refer to KVCacheConfig class for the meaning of "group"
+    num_common_prefix_blocks: List[int]
 
     preempted_req_ids: Set[str]
     finished_req_ids: Set[str]

@@ -17,49 +17,59 @@ class BlockTable:
         max_num_blocks_per_req: int,
         pin_memory: bool,
         device: torch.device,
+        num_kv_cache_groups: int,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.pin_memory = pin_memory
         self.device = device
+        self.num_kv_cache_groups = num_kv_cache_groups
 
         self.block_table = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req),
+            (num_kv_cache_groups, max_num_reqs, max_num_blocks_per_req),
             device=self.device,
             dtype=torch.int32,
         )
         self.block_table_cpu = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req),
+            (num_kv_cache_groups, max_num_reqs, max_num_blocks_per_req),
             device="cpu",
             dtype=torch.int32,
             pin_memory=pin_memory,
         )
         self.block_table_np = self.block_table_cpu.numpy()
-        self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_blocks_per_row = np.zeros((num_kv_cache_groups, max_num_reqs),
+                                           dtype=np.int32)
 
     def append_row(
         self,
         row_idx: int,
-        start: int,
-        block_ids: List[int],
+        block_ids: List[List[int]],
     ) -> None:
-        num_blocks = len(block_ids)
-        self.block_table_np[row_idx, start:start + num_blocks] = block_ids
-        self.num_blocks_per_row[row_idx] = start + num_blocks
+        for i, (num_blocks, block_ids_of_group) in enumerate(
+                zip(self.num_blocks_per_row[:, row_idx], block_ids)):
+            num_new_blocks = len(block_ids_of_group)
+            self.block_table_np[i, row_idx, num_blocks:num_blocks +
+                                num_new_blocks] = block_ids_of_group
+            self.num_blocks_per_row[i, row_idx] = num_blocks + num_new_blocks
 
-    def add_row(self, row_idx: int, block_ids: List[int]) -> None:
-        self.append_row(row_idx, 0, block_ids)
+    def add_row(self, row_idx: int, block_ids: List[List[int]]) -> None:
+        self.append_row(row_idx, block_ids)
 
     def move_row(self, src: int, tgt: int) -> None:
-        num_blocks = self.num_blocks_per_row[src]
-        self.block_table_np[tgt, :num_blocks] = self.block_table_np[
-            src, :num_blocks]
-        self.num_blocks_per_row[tgt] = num_blocks
+        num_blocks = self.num_blocks_per_row[:, src]
+        self.block_table_np[:, tgt, :max(num_blocks)] = \
+            self.block_table_np[:, src, :max(num_blocks)]
+        self.num_blocks_per_row[:, tgt] = num_blocks
 
     def commit(self, num_reqs: int) -> None:
-        self.block_table[:num_reqs].copy_(self.block_table_cpu[:num_reqs],
-                                          non_blocking=True)
+        # NOTE: an alternative is
+        # self.block_table[:, :num_reqs].copy_(
+        #   self.block_table_cpu[:, :num_reqs], non_blocking=True)
+        # but it will be a blocking copy when num_kv_cache_groups>1.
+        for i in range(self.num_kv_cache_groups):
+            self.block_table[i, :num_reqs].copy_(
+                self.block_table_cpu[i, :num_reqs], non_blocking=True)
 
     def clear(self) -> None:
         self.block_table.fill_(0)

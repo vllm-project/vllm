@@ -26,7 +26,7 @@ class CachedRequestState:
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: List[int]
+    block_ids: List[List[int]]
     num_computed_tokens: int
     output_token_ids: List[int]
 
@@ -45,6 +45,7 @@ class InputBatch:
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
+        num_kv_cache_groups: int,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -78,6 +79,7 @@ class InputBatch:
             max_num_blocks_per_req=max_num_blocks_per_req,
             pin_memory=pin_memory,
             device=device,
+            num_kv_cache_groups=num_kv_cache_groups,
         )
 
         # Sampling-related.

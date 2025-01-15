@@ -93,7 +93,7 @@ class GPUModelRunner:
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
-        self.kv_caches: List[torch.Tensor] = []
+        self.kv_caches: List[List[torch.Tensor]] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
@@ -107,6 +107,7 @@ class GPUModelRunner:
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=model_config.get_vocab_size(),
+            num_kv_cache_groups=1,  # TODO: update after PR #11960
         )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
@@ -152,10 +153,12 @@ class GPUModelRunner:
                                          device="cpu",
                                          pin_memory=self.pin_memory)
         self.positions_np = self.positions_cpu.numpy()
-        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
-                                            dtype=torch.int32,
-                                            device="cpu",
-                                            pin_memory=self.pin_memory)
+        self.slot_mapping_cpu = torch.zeros(
+            1,  # TODO: update after PR #11960
+            self.max_num_tokens,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=self.pin_memory)
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
         self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
                                                dtype=torch.int32,
@@ -206,13 +209,13 @@ class GPUModelRunner:
                 req_data.num_computed_tokens)
 
             # Update the block table.
-            num_new_blocks = len(req_data.new_block_ids)
-            if num_new_blocks == 0:
+            max_num_new_blocks = max(len(b) for b in req_data.new_block_ids)
+            if max_num_new_blocks == 0:
                 continue
-            start_index = len(req_state.block_ids)
-            req_state.block_ids.extend(req_data.new_block_ids)
-            self.input_batch.block_table.append_row(req_index, start_index,
+            self.input_batch.block_table.append_row(req_index,
                                                     req_data.new_block_ids)
+            for group_id, new_block_ids in enumerate(new_block_ids):
+                req_state.block_ids[group_id].extend(new_block_ids)
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
@@ -319,22 +322,30 @@ class GPUModelRunner:
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
 
         # Calculate the slot mapping.
-        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
-        # where K is the max_num_blocks_per_req and the block size is 2.
-        # NOTE(woosuk): We can't simply use `token_indices // block_size` here
-        # because M (max_model_len) is not necessarily divisible by block_size.
-        block_table_indices = (req_indices * self.max_num_blocks_per_req +
-                               positions_np // self.block_size)
-        # NOTE(woosuk): We use torch.index_select instead of np.take here
-        # because torch.index_select is much faster than np.take for large
-        # tensors.
-        block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
-        block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
-        block_offsets = positions_np % self.block_size
-        np.add(block_numbers * self.block_size,
-               block_offsets,
-               out=self.slot_mapping_np[:total_num_scheduled_tokens])
+        # for i in range(len(self.kv_cache_config.groups)):
+        for i in range(1):  # TODO: update after PR #11960
+            # group_spec = self.kv_cache_config.kv_cache_spec[
+            #     self.kv_cache_config.groups[i][0]]
+            # block_size = group_spec.block_size
+            block_size = self.block_size
+            # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+            # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
+            # where K is the max_num_blocks_per_req and the block size is 2.
+            # NOTE(woosuk): We can't simply use `token_indices // block_size`
+            # here because M (max_model_len) is not necessarily divisible by
+            # block_size.
+            block_table_indices = (req_indices * self.max_num_blocks_per_req +
+                                   positions_np // block_size)
+            # NOTE(woosuk): We use torch.index_select instead of np.take here
+            # because torch.index_select is much faster than np.take for large
+            # tensors.
+            block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
+            block_numbers = block_table_cpu[i].flatten()[block_table_indices]\
+                                              .numpy()
+            block_offsets = positions_np % block_size
+            np.add(block_numbers * block_size,
+                   block_offsets,
+                   out=self.slot_mapping_np[i, :total_num_scheduled_tokens])
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
@@ -356,105 +367,115 @@ class GPUModelRunner:
             self.device, non_blocking=True)
         seq_start_loc = self.seq_start_loc_cpu[:num_reqs + 1].to(
             self.device, non_blocking=True)
-        slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
-            self.device, non_blocking=True).long()
+        # layer_name -> AttentionMetadata
+        attn_metadata: Dict[str, FlashAttentionMetadata] = {}
+        # for i, layer_ids in enumerate(self.kv_cache_config.groups):
+        for i in range(1):
+            layer_ids = list(self.vllm_config.compilation_config.
+                             static_forward_context.keys())
+            slot_mapping = self.slot_mapping_cpu[
+                i, :total_num_scheduled_tokens].to(self.device,
+                                                   non_blocking=True).long()
 
-        # Prepare for cascade attention if needed.
-        common_prefix_len = (scheduler_output.num_common_prefix_blocks *
-                             self.block_size)
-        if common_prefix_len == 0:
-            # Common case.
-            use_cascade = False
-        else:
-            # NOTE(woosuk): Cascade attention uses two attention kernels: one
-            # for the common prefix and the other for the rest. For the first
-            # kernel, we concatenate all the query tokens (possibly from
-            # different requests) and treat them as if they are from the same
-            # request. Then, we use bi-directional attention to process the
-            # common prefix in the KV cache. Importantly, this means that the
-            # first kernel does not do any masking.
-
-            # Consider the following example:
-            # Request 1's input query: [D, E, X]
-            # Request 1's kv cache: [A, B, C, D, E, X]
-            # Request 1's num_computed_tokens: 3 (i.e., [A, B, C])
-            # Request 2's input query: [E, Y]
-            # Request 2's kv cache: [A, B, C, D, E, Y]
-            # Request 2's num_computed_tokens: 4 (i.e., [A, B, C, D])
-
-            # If we use [A, B, C, D, E] as the common prefix, then the
-            # first kernel will compute the bi-directional attention between
-            # input query [D, E, X, E, Y] and common prefix [A, B, C, D, E].
-            # However, this is wrong because D in Request 1 should not attend to
-            # E in the common prefix (i.e., we need masking).
-            # To avoid this, [A, B, C, D] should be the common prefix.
-            # That is, the common prefix should be capped by the minimum
-            # num_computed_tokens among the requests, and plus one to include
-            # the first token of the query.
-
-            # In practice, we use [A, B, C] as the common prefix, instead of
-            # [A, B, C, D] (i.e., the common prefix is capped by the minimum
-            # num_computed_tokens, without plus one).
-            # This is because of an implementation detail: We want to always
-            # use two kernels for cascade attention. Let's imagine:
-            # Request 3's input query: [D]
-            # Request 3's kv cache: [A, B, C, D]
-            # Request 3's num_computed_tokens: 4 (i.e., [A, B, C, D])
-            # If we use [A, B, C, D] as the common prefix for Request 1-3,
-            # then Request 3 will be processed only by the first kernel,
-            # and the second kernel will get an empty input. While this is not
-            # a fundamental problem, our current implementation does not support
-            # this case.
-            common_prefix_len = min(
-                common_prefix_len,
-                self.input_batch.num_computed_tokens_cpu[:num_reqs].min())
-            # common_prefix_len should be a multiple of the block size.
-            common_prefix_len = (common_prefix_len // self.block_size *
+            # Prepare for cascade attention if needed.
+            common_prefix_len = (scheduler_output.num_common_prefix_blocks[i] *
                                  self.block_size)
-            use_cascade = FlashAttentionBackend.use_cascade_attention(
+            if common_prefix_len == 0:
+                # Common case.
+                use_cascade = False
+            else:
+                # NOTE(woosuk): Cascade attention uses two attention kernels:
+                # one for the common prefix and the other for the rest. For the
+                # first kernel, we concatenate all the query tokens (possibly
+                # from different requests) and treat them as if they are from
+                # the same request. Then, we use bi-directional attention to
+                # process the common prefix in the KV cache. Importantly, this
+                # means that the first kernel does not do any masking.
+
+                # Consider the following example:
+                # Request 1's input query: [D, E, X]
+                # Request 1's kv cache: [A, B, C, D, E, X]
+                # Request 1's num_computed_tokens: 3 (i.e., [A, B, C])
+                # Request 2's input query: [E, Y]
+                # Request 2's kv cache: [A, B, C, D, E, Y]
+                # Request 2's num_computed_tokens: 4 (i.e., [A, B, C, D])
+
+                # If we use [A, B, C, D, E] as the common prefix, then the
+                # first kernel will compute the bi-directional attention between
+                # input query [D, E, X, E, Y] and common prefix [A, B, C, D, E].
+                # However, this is wrong because D in Request 1 should not
+                # attend to E in the common prefix (i.e., we need masking).
+                # To avoid this, [A, B, C, D] should be the common prefix.
+                # That is, the common prefix should be capped by the minimum
+                # num_computed_tokens among the requests, and plus one to
+                # include the first token of the query.
+
+                # In practice, we use [A, B, C] as the common prefix, instead of
+                # [A, B, C, D] (i.e., the common prefix is capped by the minimum
+                # num_computed_tokens, without plus one).
+                # This is because of an implementation detail: We want to always
+                # use two kernels for cascade attention. Let's imagine:
+                # Request 3's input query: [D]
+                # Request 3's kv cache: [A, B, C, D]
+                # Request 3's num_computed_tokens: 4 (i.e., [A, B, C, D])
+                # If we use [A, B, C, D] as the common prefix for Request 1-3,
+                # then Request 3 will be processed only by the first kernel,
+                # and the second kernel will get an empty input. While this is
+                # not a fundamental problem, our current implementation does not
+                # support this case.
+                common_prefix_len = min(
+                    common_prefix_len,
+                    self.input_batch.num_computed_tokens_cpu[:num_reqs].min())
+                # common_prefix_len should be a multiple of the block size.
+                common_prefix_len = (common_prefix_len // self.block_size *
+                                     self.block_size)
+                use_cascade = FlashAttentionBackend.use_cascade_attention(
+                    common_prefix_len=common_prefix_len,
+                    query_lens=num_scheduled_tokens,
+                    num_query_heads=self.num_query_heads,
+                    num_kv_heads=self.num_kv_heads,
+                    use_alibi=False,  # FIXME
+                    use_sliding_window=self.sliding_window is not None,
+                    num_sms=self.num_sms,
+                )
+
+            if use_cascade:
+                # TODO: Optimize.
+                cu_prefix_query_lens = torch.tensor(
+                    [0, total_num_scheduled_tokens],
+                    dtype=torch.int32,
+                    device=self.device)
+                cu_prefix_kv_lens = torch.tensor([0, common_prefix_len],
+                                                 dtype=torch.int32,
+                                                 device=self.device)
+                cu_suffix_kv_lens = (
+                    self.seq_start_loc_np[:num_reqs + 1] -
+                    self.arange_np[:num_reqs + 1] * common_prefix_len)
+                cu_suffix_kv_lens = torch.from_numpy(cu_suffix_kv_lens).to(
+                    self.device)
+            else:
+                cu_prefix_query_lens = None
+                cu_prefix_kv_lens = None
+                cu_suffix_kv_lens = None
+
+            attn_metadata_of_group = FlashAttentionMetadata(
+                num_actual_tokens=total_num_scheduled_tokens,
+                max_query_len=max_num_scheduled_tokens,
+                query_start_loc=query_start_loc,
+                max_seq_len=max_seq_len,
+                seq_start_loc=seq_start_loc,
+                block_table=(self.input_batch.block_table.get_device_tensor()[
+                    i, :num_reqs]),
+                slot_mapping=slot_mapping,
+                use_cascade=use_cascade,
                 common_prefix_len=common_prefix_len,
-                query_lens=num_scheduled_tokens,
-                num_query_heads=self.num_query_heads,
-                num_kv_heads=self.num_kv_heads,
-                use_alibi=False,  # FIXME
-                use_sliding_window=self.sliding_window is not None,
-                num_sms=self.num_sms,
+                cu_prefix_query_lens=cu_prefix_query_lens,
+                cu_prefix_kv_lens=cu_prefix_kv_lens,
+                cu_suffix_kv_lens=cu_suffix_kv_lens,
             )
 
-        if use_cascade:
-            # TODO: Optimize.
-            cu_prefix_query_lens = torch.tensor(
-                [0, total_num_scheduled_tokens],
-                dtype=torch.int32,
-                device=self.device)
-            cu_prefix_kv_lens = torch.tensor([0, common_prefix_len],
-                                             dtype=torch.int32,
-                                             device=self.device)
-            cu_suffix_kv_lens = (
-                self.seq_start_loc_np[:num_reqs + 1] -
-                self.arange_np[:num_reqs + 1] * common_prefix_len)
-            cu_suffix_kv_lens = torch.from_numpy(cu_suffix_kv_lens).to(
-                self.device)
-        else:
-            cu_prefix_query_lens = None
-            cu_prefix_kv_lens = None
-            cu_suffix_kv_lens = None
-
-        attn_metadata = FlashAttentionMetadata(
-            num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len=max_num_scheduled_tokens,
-            query_start_loc=query_start_loc,
-            max_seq_len=max_seq_len,
-            seq_start_loc=seq_start_loc,
-            block_table=(
-                self.input_batch.block_table.get_device_tensor()[:num_reqs]),
-            slot_mapping=slot_mapping,
-            use_cascade=use_cascade,
-            common_prefix_len=common_prefix_len,
-            cu_prefix_query_lens=cu_prefix_query_lens,
-            cu_prefix_kv_lens=cu_prefix_kv_lens,
-            cu_suffix_kv_lens=cu_suffix_kv_lens,
-        )
+            for layer_id in layer_ids:
+                attn_metadata[layer_id] = attn_metadata_of_group
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
         # partial request, we do so for simplicity. We will ignore the sampled
@@ -582,7 +603,10 @@ class GPUModelRunner:
         else:
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
-        attn_metadata.num_input_tokens = num_input_tokens
+
+        # TODO: update after PR #11960
+        attn_metadata[next(iter(
+            attn_metadata.keys()))].num_input_tokens = num_input_tokens
 
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision

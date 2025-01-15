@@ -62,7 +62,11 @@ class Request:
 
         # Cache the computed kv block hashes of the request to avoid
         # recomputing.
-        self._kv_block_hashes: List[BlockHashType] = []
+        # Different kv cache groups may have different block_size, so save their
+        # hash seperately. Each outer list represents a group, and each inner
+        # list contains the hashes of blocks with that group's block_size.
+        # Refer to KVCacheConfig class for the meaning of "group".
+        self._kv_block_hashes: List[List[BlockHashType]] = []
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -127,15 +131,19 @@ class Request:
         return num_tokens
 
     @property
-    def kv_block_hashes(self) -> ConstantList["BlockHashType"]:
+    def kv_block_hashes(self) -> List[ConstantList["BlockHashType"]]:
         # Prevent directly appending to the kv_block_hashes.
-        return ConstantList(self._kv_block_hashes)
+        return ConstantList([
+            ConstantList(kv_block_hashes_one_group)
+            for kv_block_hashes_one_group in self._kv_block_hashes
+        ])
 
-    def set_kv_block_hashes(self, value: List["BlockHashType"]) -> None:
+    def set_kv_block_hashes(self, value: List[List["BlockHashType"]]) -> None:
         self._kv_block_hashes = value
 
-    def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:
-        self._kv_block_hashes.append(block_hash)
+    def append_kv_block_hashes(self, group_id: int,
+                               block_hash: "BlockHashType") -> None:
+        self._kv_block_hashes[group_id].append(block_hash)
 
 
 class RequestStatus(enum.IntEnum):
