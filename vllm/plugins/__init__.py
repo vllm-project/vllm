@@ -1,15 +1,48 @@
 import logging
 import os
+from typing import Callable, Dict
 
 import torch
 
 import vllm.envs as envs
-from vllm.platforms import current_platform
 
 logger = logging.getLogger(__name__)
 
 # make sure one process only loads plugins once
 plugins_loaded = False
+
+
+def load_plugins_by_group(group: str) -> Dict[str, Callable]:
+    import sys
+    if sys.version_info < (3, 10):
+        from importlib_metadata import entry_points
+    else:
+        from importlib.metadata import entry_points
+
+    allowed_plugins = envs.VLLM_PLUGINS
+
+    discovered_plugins = entry_points(group=group)
+    if len(discovered_plugins) == 0:
+        logger.debug("No plugins for group %s found.", group)
+        return {}
+    logger.info("Available plugins for group %s:", group)
+    for plugin in discovered_plugins:
+        logger.info("name=%s, value=%s", plugin.name, plugin.value)
+    if allowed_plugins is None:
+        logger.info("all available plugins for group %s will be loaded.",
+                    group)
+        logger.info("set environment variable VLLM_PLUGINS to control"
+                    " which plugins to load.")
+    plugins = {}
+    for plugin in discovered_plugins:
+        if allowed_plugins is None or plugin.name in allowed_plugins:
+            try:
+                func = plugin.load()
+                plugins[plugin.name] = func
+                logger.info("plugin %s loaded.", plugin.name)
+            except Exception:
+                logger.exception("Failed to load plugin %s", plugin.name)
+    return plugins
 
 
 def load_general_plugins():
@@ -26,9 +59,12 @@ def load_general_plugins():
     os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
     # see https://github.com/vllm-project/vllm/issues/10619
     torch._inductor.config.compile_threads = 1
+
+    from vllm.platforms import current_platform
+
     if current_platform.is_xpu():
-        # see https://github.com/pytorch/pytorch/blob/8cada5cbe5450e17c26fb8b358116785324537b2/torch/_dynamo/config.py#L158  # noqa
-        os.environ['TORCH_COMPILE_DISABLE'] = 'True'
+        # see https://github.com/pytorch/pytorch/blob/43c5f59/torch/_dynamo/config.py#L158
+        torch._dynamo.config.disable = True
     if current_platform.is_hpu():
         # NOTE(kzawora): PT HPU lazy backend (PT_HPU_LAZY_MODE = 1)
         # does not support torch.compile
@@ -36,7 +72,6 @@ def load_general_plugins():
         # torch.compile support
         is_lazy = os.environ.get('PT_HPU_LAZY_MODE', '1') == '1'
         if is_lazy:
-            # see https://github.com/pytorch/pytorch/blob/43c5f59/torch/_dynamo/config.py#L158
             torch._dynamo.config.disable = True
             # NOTE(kzawora) multi-HPU inference with HPUGraphs (lazy-only)
             # requires enabling lazy collectives
@@ -47,33 +82,7 @@ def load_general_plugins():
     if plugins_loaded:
         return
     plugins_loaded = True
-    import sys
-    if sys.version_info < (3, 10):
-        from importlib_metadata import entry_points
-    else:
-        from importlib.metadata import entry_points
-
-    allowed_plugins = envs.VLLM_PLUGINS
-
-    discovered_plugins = entry_points(group='vllm.general_plugins')
-    if len(discovered_plugins) == 0:
-        logger.debug("No plugins found.")
-        return
-    logger.info("Available plugins:")
-    for plugin in discovered_plugins:
-        logger.info("name=%s, value=%s, group=%s", plugin.name, plugin.value,
-                    plugin.group)
-    if allowed_plugins is None:
-        logger.info("all available plugins will be loaded.")
-        logger.info("set environment variable VLLM_PLUGINS to control"
-                    " which plugins to load.")
-    else:
-        logger.info("plugins to load: %s", allowed_plugins)
-    for plugin in discovered_plugins:
-        if allowed_plugins is None or plugin.name in allowed_plugins:
-            try:
-                func = plugin.load()
-                func()
-                logger.info("plugin %s loaded.", plugin.name)
-            except Exception:
-                logger.exception("Failed to load plugin %s", plugin.name)
+    plugins = load_plugins_by_group(group='vllm.general_plugins')
+    # general plugins, we only need to execute the loaded functions
+    for func in plugins.values():
+        func()

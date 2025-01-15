@@ -25,8 +25,10 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCError, RPCProcessRequest,
-                                         RPCStartupRequest, RPCStartupResponse,
+                                         RPCAdapterLoadedResponse, RPCError,
+                                         RPCLoadAdapterRequest,
+                                         RPCProcessRequest, RPCStartupRequest,
+                                         RPCStartupResponse,
                                          RPCUProfileRequest)
 from vllm.engine.protocol import EngineClient
 # yapf: enable
@@ -240,16 +242,21 @@ class MQLLMEngineClient(EngineClient):
                         queue = self.output_queues.get(request_id)
                         if queue is not None:
                             queue.put_nowait(exception)
+                # Put each output into the appropriate queue.
+                elif isinstance(request_outputs, RPCAdapterLoadedResponse):
+                    self._add_output(request_outputs)
                 else:
-                    # Put each output into the appropriate steam.
                     for request_output in request_outputs:
-                        queue = self.output_queues.get(
-                            request_output.request_id)
-                        if queue is not None:
-                            queue.put_nowait(request_output)
+                        self._add_output(request_output)
 
         except asyncio.CancelledError:
             logger.debug("Shutting down MQLLMEngineClient output handler.")
+
+    def _add_output(self, request_output: Union[RequestOutput,
+                                                RPCAdapterLoadedResponse]):
+        queue = self.output_queues.get(request_output.request_id)
+        if queue is not None:
+            queue.put_nowait(request_output)
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
@@ -527,7 +534,7 @@ class MQLLMEngineClient(EngineClient):
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        """Generate outputs for a request from an embedding model.
+        """Generate outputs for a request from a pooling model.
 
         Generate outputs for a request. This method is a coroutine. It adds the
         request into the waiting queue of the LLMEngine and streams the outputs
@@ -575,6 +582,10 @@ class MQLLMEngineClient(EngineClient):
         # If already dead, error out.
         if self._errored_with is not None:
             raise ENGINE_DEAD_ERROR(self._errored_with)
+
+        # Ensure the request id is unique among running requests
+        if request_id in self.output_queues:
+            raise ValueError(f"Request {request_id} already exists")
 
         # Constructing guided decoding logits processors is expensive, so we do
         # it here to avoid contending with cpu resources and the GIL on the
@@ -655,3 +666,24 @@ class MQLLMEngineClient(EngineClient):
 
         await self._send_one_way_rpc_request(
             request=RPCUProfileRequest.STOP_PROFILE, socket=self.input_socket)
+
+    async def add_lora(self, lora_request: LoRARequest) -> None:
+        """Load a new LoRA adapter into the engine for future requests."""
+        # Uses the same I/O as generate requests
+        request = RPCLoadAdapterRequest(lora_request)
+
+        # Create output queue for this requests.
+        queue: asyncio.Queue[Union[None, BaseException]] = asyncio.Queue()
+        self.output_queues[request.request_id] = queue
+
+        # Send the request
+        request_bytes = pickle.dumps(request)
+        await self.input_socket.send_multipart((request_bytes, ), copy=False)
+
+        # Wait for the response
+        request_output = await queue.get()
+        self.output_queues.pop(request.request_id)
+
+        # Raise on error, otherwise happily return None
+        if isinstance(request_output, BaseException):
+            raise request_output

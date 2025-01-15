@@ -53,7 +53,8 @@ def test_chatglm3_lora(chatglm3_lora_files):
                    max_loras=4,
                    max_lora_rank=64,
                    tensor_parallel_size=1,
-                   trust_remote_code=True)
+                   trust_remote_code=True,
+                   enable_chunked_prefill=True)
 
     output1 = do_sample(llm, chatglm3_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
@@ -73,7 +74,8 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
                    max_lora_rank=64,
                    tensor_parallel_size=4,
                    trust_remote_code=True,
-                   fully_sharded_loras=False)
+                   fully_sharded_loras=False,
+                   enable_chunked_prefill=True)
 
     output1 = do_sample(llm, chatglm3_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
@@ -93,7 +95,8 @@ def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
                    max_lora_rank=64,
                    tensor_parallel_size=4,
                    trust_remote_code=True,
-                   fully_sharded_loras=True)
+                   fully_sharded_loras=True,
+                   enable_chunked_prefill=True)
     output1 = do_sample(llm, chatglm3_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert output1[i] == EXPECTED_LORA_OUTPUT[i]

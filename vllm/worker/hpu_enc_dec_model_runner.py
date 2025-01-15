@@ -11,6 +11,7 @@ import torch
 from vllm_hpu_extension.ops import batch2block, block2batch
 
 from vllm.attention import AttentionMetadata
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sampling_params import SamplingParams
@@ -37,8 +38,8 @@ _PAD_BLOCK_ID = 0
 
 class HpuModelAdapterEncoderDecoder(HpuModelAdapter):
 
-    def __init__(self, model, block_size, dtype, enforce_eager, layer_names):
-        super().__init__(model, block_size, dtype, enforce_eager, layer_names)
+    def __init__(self, model, vllm_config, layer_names):
+        super().__init__(model, vllm_config, layer_names)
 
         # We only wrap the language model in HPU graph because some Ops in
         # vision model will fallback to CPU and cause the graph building fail.
@@ -150,9 +151,15 @@ class HpuModelAdapterEncoderDecoder(HpuModelAdapter):
         # models(i.e. Mllama). But currently this will cause graph
         # building error.
         # kwargs['input_ids'] = input_ids.flatten()
-        hidden_states = self.model(*args, **kwargs)
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        hidden_states = hidden_states.index_select(0, selected_token_indices)
+        virtual_engine = 0
+        if 'virtual_engine' in kwargs:
+            virtual_engine = kwargs.pop('virtual_engine')
+        with set_forward_context(kwargs['attn_metadata'], self.vllm_config,
+                                 virtual_engine):
+            hidden_states = self.model(*args, **kwargs)
+            hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+            hidden_states = hidden_states.index_select(0,
+                                                       selected_token_indices)
         return hidden_states
 
 

@@ -15,6 +15,7 @@ from ..utils import check_embeddings_close
         # [Encoder-only]
         pytest.param("BAAI/bge-base-en-v1.5",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
         pytest.param("intfloat/multilingual-e5-large"),
         # [Encoder-decoder]
         pytest.param("intfloat/e5-mistral-7b-instruct",
@@ -24,6 +25,7 @@ from ..utils import check_embeddings_close
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
         pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
         pytest.param("Alibaba-NLP/gte-Qwen2-7B-instruct"),
+        pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
@@ -54,7 +56,7 @@ def test_models(
         hf_outputs = hf_model.encode(example_prompts)
 
     with vllm_runner(model,
-                     task="embedding",
+                     task="embed",
                      dtype=dtype,
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:

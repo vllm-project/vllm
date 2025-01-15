@@ -6,13 +6,14 @@ from typing import Dict, List
 import pytest
 from transformers import AutoTokenizer
 
+from tests.utils import fork_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.executor.abstract import Executor
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -30,6 +31,7 @@ def make_request(params: SamplingParams) -> EngineCoreRequest:
         prompt=PROMPT,
         prompt_token_ids=PROMPT_TOKENS,
         mm_inputs=None,
+        mm_hashes=None,
         mm_placeholders=None,
         sampling_params=params,
         eos_token_id=None,
@@ -41,7 +43,7 @@ def make_request(params: SamplingParams) -> EngineCoreRequest:
 def loop_until_done(client: EngineCoreClient, outputs: Dict):
 
     while True:
-        engine_core_outputs = client.get_output()
+        engine_core_outputs = client.get_output().outputs
 
         if len(engine_core_outputs) == 0:
             break
@@ -59,7 +61,7 @@ def loop_until_done(client: EngineCoreClient, outputs: Dict):
 async def loop_until_done_async(client: EngineCoreClient, outputs: Dict):
 
     while True:
-        engine_core_outputs = await client.get_output_async()
+        engine_core_outputs = await client.get_output_async().outputs
 
         if len(engine_core_outputs) == 0:
             break
@@ -74,6 +76,7 @@ async def loop_until_done_async(client: EngineCoreClient, outputs: Dict):
             break
 
 
+@fork_new_process_for_each_test
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
 def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
@@ -83,13 +86,12 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
         engine_args = EngineArgs(model=MODEL_NAME, compilation_config=3)
         vllm_config = engine_args.create_engine_config(
             UsageContext.UNKNOWN_CONTEXT)
-        executor_class = AsyncLLM._get_executor_cls(vllm_config)
+        executor_class = Executor.get_class(vllm_config)
         client = EngineCoreClient.make_client(
-            vllm_config,
-            executor_class,
-            UsageContext.UNKNOWN_CONTEXT,
             multiprocess_mode=multiprocessing_mode,
             asyncio_mode=False,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
         )
 
         MAX_TOKENS = 20
@@ -142,10 +144,8 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
         client.abort_requests([request.request_id])
 
-        # Shutdown the client.
-        client.shutdown()
 
-
+@fork_new_process_for_each_test
 @pytest.mark.asyncio
 async def test_engine_core_client_asyncio(monkeypatch):
 
@@ -155,13 +155,12 @@ async def test_engine_core_client_asyncio(monkeypatch):
         engine_args = EngineArgs(model=MODEL_NAME)
         vllm_config = engine_args.create_engine_config(
             usage_context=UsageContext.UNKNOWN_CONTEXT)
-        executor_class = AsyncLLM._get_executor_cls(vllm_config)
+        executor_class = Executor.get_class(vllm_config)
         client = EngineCoreClient.make_client(
-            vllm_config,
-            executor_class,
-            UsageContext.UNKNOWN_CONTEXT,
             multiprocess_mode=True,
             asyncio_mode=True,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
         )
 
         MAX_TOKENS = 20
@@ -201,6 +200,3 @@ async def test_engine_core_client_asyncio(monkeypatch):
             else:
                 assert len(outputs[req_id]) == MAX_TOKENS, (
                     f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
-
-        # Shutdown the client.
-        client.shutdown()

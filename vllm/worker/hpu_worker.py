@@ -24,7 +24,8 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import hpu_backend_string, hpu_device_string, is_fake_hpu
+from vllm.utils import (bind_kv_cache, hpu_backend_string, hpu_device_string,
+                        is_fake_hpu)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.hpu_enc_dec_model_runner import HPUEncoderDecoderModelRunner
 from vllm.worker.hpu_model_runner import HPUModelRunner, HPUModelRunnerBase
@@ -91,8 +92,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[HPUCacheEngine]
-        # Initialize gpu_cache as embedding models don't initialize kv_caches
-        self.hpu_cache: Optional[List[List[torch.tensor]]] = None
+        # Initialize gpu_cache as pooling models don't initialize kv_caches
+        self.hpu_cache: Optional[List[List[torch.Tensor]]] = None
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
@@ -315,6 +316,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
+        bind_kv_cache(self.compilation_config.static_forward_context,
+                      self.hpu_cache)
 
     def _warm_up_model(self) -> None:
         # NOTE(kzawora): We should use virtual engine index here
