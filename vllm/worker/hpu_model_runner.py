@@ -1671,16 +1671,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.warmup_scenario(int(bs), int(seq_len), is_prompt, kv_caches,
                                  True)
             raise AssertionError("Finished profiling")
-        if self.skip_warmup:
-            logger.info("Skipping warmup...")
-            return
-        self.profiler.start('internal', 'warmup')
         max_blocks = kv_caches[0][0].size(0)
         self.bucketing_ctx.generate_prompt_buckets()
         self.bucketing_ctx.generate_decode_buckets(max_blocks)
-
         if not htorch.utils.internal.is_lazy() and not self.enforce_eager:
-            cache_size_limit = 1 + 3 * (
+            multiplier = 3 if os.getenv('VLLM_REGIONAL_COMPILATION',
+                                        'true').lower() == 'true' else 1
+            cache_size_limit = 1 + multiplier * (
                 len(self.bucketing_ctx.prompt_buckets) +
                 len(self.bucketing_ctx.decode_buckets))
             torch._dynamo.config.cache_size_limit = max(
@@ -1690,7 +1687,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             torch._dynamo.config.accumulated_cache_size_limit = max(
                 cache_size_limit * 8,
                 torch._dynamo.config.accumulated_cache_size_limit)
-
+        if self.skip_warmup:
+            logger.info("Skipping warmup...")
+            return
+        self.profiler.start('internal', 'warmup')
         start_mem = HabanaMemoryProfiler.current_device_memory_usage()
         start_time = time.perf_counter()
 
