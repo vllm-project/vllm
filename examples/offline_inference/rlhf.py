@@ -69,7 +69,7 @@ class PlaceHolder:
 
 
 # a place holder to reserve 1 GPU for the training process.
-place_holder = ray.remote(num_gpus=1)(PlaceHolder).remote()
+place_holder = ray.remote(num_cpus=0, num_gpus=1)(PlaceHolder).remote()
 
 # inferencing engine, and it takes 2 GPUs.
 # for simplicity, we define the MyWorker class in this self-contained script,
@@ -78,12 +78,13 @@ place_holder = ray.remote(num_gpus=1)(PlaceHolder).remote()
 # normally, we should define the MyWorker class in a separate file and pass
 # the qualified name of the class to the worker_cls parameter.
 # here we use `enforce_eager` to reduce test time.
-llm = ray.remote(num_gpus=2)(LLM).remote(
+llm = ray.remote(num_cpus=0, num_gpus=2)(LLM).remote(
     model="facebook/opt-125m",
     enforce_eager=True,
     worker_cls=cloudpickle.dumps(MyWorker),
     tensor_parallel_size=2,
-    distributed_executor_backend="ray",)
+    distributed_executor_backend="ray",
+)
 
 # Generate texts from the prompts.
 prompts = [
