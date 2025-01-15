@@ -24,7 +24,7 @@ import math
 import re
 from functools import cached_property, partial
 from typing import (Any, Callable, Iterable, List, Literal, Mapping, Optional,
-                    Set, Tuple, TypedDict, Union)
+                    Set, Tuple, TypedDict, Union, Dict)
 
 import torch
 import torch.types
@@ -57,7 +57,13 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig,
                                     MultiModalDataDict, 
                                     PlaceholderRange,
                                     MultiModalInputsV2)
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import (ImageSize, 
+                                   ImageItem,
+                                   VideoItem,
+                                   ModalityData,
+                                   ModalityDataItems,
+                                   MultiModalDataItems, 
+                                   MultiModalDataParser)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, 
@@ -123,6 +129,41 @@ class MiniCPMVImageEmbeddingInputs(TypedDict):
 
     This should be in `(start, stop)` format.
     """
+
+
+class MiniCPMVEmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
+                                            dict[str, torch.Tensor]]):
+    def __init__(self, data: Dict, modality: str) -> None:
+        super().__init__(data, modality)
+
+
+class MiniCPMVImageEmbeddingItems(MiniCPMVEmbeddingItems):
+    def __init__(self, data: Dict) -> None:
+        super().__init__(data, "image")
+    
+    def get_count(self) -> int:
+        return len(self.data["image_embeds"])
+
+    def get(self, index: int) -> Dict[str, torch.Tensor]:
+        out = {}
+        for k, v in self.data.items():
+            out[k] = v[index]
+        return out
+    
+    def get_image_size(self, index: int) -> ImageSize:
+        image_size = self.data["image_size_list"][index]
+        return ImageSize(width=image_size[0], height=image_size[1])
+
+    def get_processor_data(self) -> Mapping[str, object]:
+        return self.data
+    
+    def get_passthrough_data(self) -> Mapping[str, object]:
+        return {}
+    
+
+class MiniCPMVVideoEmbeddingItems(MiniCPMVEmbeddingItems):
+    def __init__(self, data: Dict) -> None:
+        super().__init__(data, "video")
 
 
 MiniCPMVImageInputs = Union[MiniCPMVImagePixelInputs,
@@ -238,6 +279,27 @@ def get_version_by_config(config: PretrainedConfig) -> Tuple[int, ...]:
     return tuple(int(x) for x in version_str.split("."))
 
 
+class MiniCPMVMultiModalDataParser(MultiModalDataParser):
+
+    def _parse_image_data(
+        self,
+        data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
+    ) -> ModalityDataItems[Any, Any]:
+        if isinstance(data, dict):
+            return MiniCPMVImageEmbeddingItems(data)
+        
+        return super()._parse_image_data(data)
+
+    def _parse_video_data(
+        self,
+        data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
+    ) -> ModalityDataItems[Any, Any]:
+        if isinstance(data, dict):
+            return MiniCPMVVideoEmbeddingItems(data)
+
+        return super()._parse_video_data(data)
+
+
 class MiniCPMVProcessingInfo(BaseProcessingInfo):
     image_pattern = "(<image>./</image>)"
     video_pattern = "(<video>./</video>)"
@@ -260,15 +322,32 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         image_processor = hf_processor.image_processor  # type: ignore
         return image_processor
     
+    def get_model_version(self):
+        return get_version_by_config(self.get_hf_config())
+
+    def get_supported_mm_modalities(self) -> List[str]:
+        if self.get_model_version() == (2, 6):
+            return ["image", "video"]
+        else:
+            return ["image"]
+
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None, "video": None}
+        if self.get_model_version() == (2, 6):
+            return {"image": None, "video": None}
+        else:
+            return {"image": None}
     
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        return {
-            "image": self.get_max_image_tokens(),
-            "video": self.get_max_video_tokens(seq_len),
-            # "audio": self.get_max_audio_tokens()
-        }
+        if self.get_model_version() == (2, 6):
+            return {
+                "image": self.get_max_image_tokens(),
+                "video": self.get_max_video_tokens(seq_len),
+                # "audio": self.get_max_audio_tokens()
+            }
+        else:
+            return {
+                "image": self.get_max_image_tokens()
+            }
     
     def get_slice_query_num(self) -> int:
         hf_config = self.get_hf_config()
@@ -280,16 +359,27 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         max_slice_num = getattr(hf_config, "max_slice_num", 9)
         return max_slice_num
 
+    def get_sliced_grid(self, image_size, max_slice_num) -> Tuple[int, int]:
+        if self.get_model_version() == (2, 6):
+            slice_grid = self.get_image_processor().get_sliced_grid(image_size, max_slice_num)
+        else:
+            slice_grid = self.get_image_processor().get_sliced_grid(image_size)
+        return slice_grid
+
     def get_num_image_tokens(self, image_size: ImageSize, max_slice_num: int) -> int:
-        slice_grid = self.get_image_processor().get_sliced_grid(image_size, max_slice_num)
-        num_tokens = self.get_slice_query_num() + 2 # <image / slice>(<unk> * query_num)</image / slice>
+        slice_grid = self.get_sliced_grid(image_size, max_slice_num)
+        num_tokens = self.get_slice_query_num() + 2 # <image>(<unk> * query_num)</image>
         if slice_grid is not None:
+            if self.get_model_version() == (2, 6):
+                num_additional_tokens = 0 # <slice>(<unk> * query_num)</slice>
+            else:
+                num_additional_tokens = 2 # <slice><image>(<unk> * query_num)</image></slice>
             num_tokens += (self.get_slice_query_num() + 2) * slice_grid[0] * slice_grid[1] \
-                            + slice_grid[1] - 1
+                            + slice_grid[1] - 1 + num_additional_tokens
         return num_tokens
 
     def get_image_slice_nums(self, image_size: torch.Tensor, max_slice_nums):
-        grid = self.get_image_processor().get_sliced_grid(image_size, max_slice_nums)
+        grid = self.get_sliced_grid(image_size, max_slice_nums)
         return 1 if grid is None else grid[0] * grid[1] + 1
 
     def get_max_image_tokens(self) -> int:
@@ -341,6 +431,10 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
         return num_frames
 
+    def get_defaul_image_sizes(self, num_slices: int) -> ImageSize:
+        image_size = getattr(self.get_hf_config(), "image_size", 448)
+        return ImageSize(image_size, image_size * num_slices)
+
 
 class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[MiniCPMVProcessingInfo]):
     def get_dummy_processor_inputs(
@@ -387,13 +481,16 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[MiniCPMVProcessingInfo])
 
 
 class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[MiniCPMVProcessingInfo]):
+    def _get_data_parser(self) -> MultiModalDataParser:
+        return MiniCPMVMultiModalDataParser()
+
     def get_slice_image_placeholder(
             self,
             image_size: ImageSize,
             **kwargs
         ) -> str:
         image_processor = self.info.get_image_processor()
-        version = get_version_by_config(self.info.get_hf_config())
+        version = self.info.get_model_version()
         if version == (2, 0) or version == (2, 5):
             return image_processor.get_slice_image_placeholder(image_size)
         return image_processor.get_slice_image_placeholder(
@@ -428,6 +525,70 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[MiniCPMVProcessingInfo
             special_tokens["slice_end_id"] = torch.tensor(tokenizer.slice_end_id)
         return special_tokens
 
+    @staticmethod
+    def repack_processor_outputs(outputs: Any) -> BatchFeature:
+        outputs = {key: value[0] for key, value in outputs.items() if key != "input_ids"}
+        return outputs
+
+    def process_images(
+            self, 
+            prompt: str, 
+            mm_data: Mapping[str, object],
+            mm_kwargs: Mapping[str, object]
+        ) -> Dict[str, object]:
+        images = mm_data.pop("images", [])
+        image_embeds = mm_data.pop("image_embeds", [])
+        if isinstance(images, (list, torch.Tensor)) and len(images) > 0:
+            image_outputs = super()._call_hf_processor(
+                prompt=prompt,
+                mm_data={"images": images},
+                mm_kwargs=mm_kwargs
+            )
+            image_outputs = MiniCPMVMultiModalProcessor.repack_processor_outputs(image_outputs)
+        elif len(image_embeds) > 0:
+            image_sizes = mm_data.pop("image_size_list", None)
+            if image_sizes is None:
+                # without input image_sizes, set default image sizes
+                image_sizes = torch.tensor([
+                    self.info.get_defaul_image_sizes(image_embeds[i].shape[0])
+                    for i in range(image_embeds.shape[0])
+                ])
+            image_outputs = {
+                "image_embeds": image_embeds,
+                "image_sizes": image_sizes
+            }
+        else:
+            image_outputs = {}
+        return image_outputs
+    
+    def process_videos(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object]
+    ):
+        videos = mm_data.pop("videos", [])
+        if len(videos) > 0 and isinstance(videos[0], Image.Image):
+            videos = [videos]
+        if isinstance(videos, (list)) and len(videos) > 0:
+            video_outputs = {
+                "video_pixel_values": [],
+                "video_image_sizes": [],
+                "video_tgt_sizes": []
+            }
+            for video in videos:
+                single_video_outputs = super()._call_hf_processor(
+                    prompt=self.info.image_pattern * len(video),
+                    mm_data={"images": video},
+                    mm_kwargs=mm_kwargs
+                )
+                for key in single_video_outputs:
+                    if "video_" + key in video_outputs:
+                        video_outputs["video_" + key] += single_video_outputs[key]
+        else:
+            video_outputs = {}
+        return video_outputs
+        
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -435,35 +596,14 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[MiniCPMVProcessingInfo
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Do not support combination inputs of images and videos for now
-        # Try to handle interleave multimodal data
+        # Try to handle interleaved multimodal data
         tokenizer = self.info.get_tokenizer()
-        def repack_processor_outputs(outputs: Any) -> BatchFeature:
-            outputs = {key: value[0] for key, value in outputs.items() if key != "input_ids"}
-            return outputs
         
-        images = mm_data.pop("images", [])
-        videos = mm_data.pop("videos", [])
-        image_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data={"images": images},
-            mm_kwargs=mm_kwargs
-        )
-        image_outputs = repack_processor_outputs(image_outputs)
-
-        video_outputs = {
-            "video_pixel_values": [],
-            "video_image_sizes": [],
-            "video_tgt_sizes": []
-        }
-        for video in videos:
-            single_video_outputs = super()._call_hf_processor(
-                prompt=self.info.image_pattern * len(video),
-                mm_data={"images": video},
-                mm_kwargs=mm_kwargs
-            )
-            for key in single_video_outputs:
-                if "video_" + key in video_outputs:
-                    video_outputs["video_" + key] += single_video_outputs[key]
+        audios = mm_data.pop("audios", [])
+        
+        image_outputs = self.process_images(prompt, mm_data, mm_kwargs)
+        video_outputs = self.process_videos(mm_data, mm_kwargs)
+        audio_outputs = {}
 
         counts = {
             "image": 0,
@@ -480,18 +620,20 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[MiniCPMVProcessingInfo
             if item == "image":
                 image_orders_in_mm_data.append(idx)
                 num_image_slices.append(self.info.get_image_slice_nums(
-                    images[counts[item]].size,
+                    image_outputs["image_sizes"][counts[item]],
                     self.info.get_max_slice_num()
                 ))
                 new_prompt += self.get_image_prompt_texts(
-                    images[counts[item]].size,
+                    # images[counts[item]].size,
+                    image_outputs["image_sizes"][counts[item]],
                     counts[item]
                 )
             else:
                 video_orders_in_mm_data.append(idx)
                 new_prompt += self.get_video_prompt_texts(
-                    videos[counts[item]][0].size,
-                    len(videos[counts[item]])
+                    video_outputs["video_image_sizes"][counts[item]][0],
+                    # videos[counts[item]][0].size,
+                    len(video_outputs["video_image_sizes"][counts[item]])
                 )
             counts[item] += 1
             new_prompt += chunks[idx + 1]
@@ -561,10 +703,12 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[MiniCPMVProcessingInfo
             tgt_sizes=MultiModalFieldConfig.flat("image", image_slices),
             image_slices=MultiModalFieldConfig.batched("image"),
             image_orders_in_mm_data=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.flat("image", image_slices),
             video_pixel_values=MultiModalFieldConfig.batched("video"),
             video_image_sizes=MultiModalFieldConfig.batched("video"),
             video_tgt_sizes=MultiModalFieldConfig.batched("video"),
             video_orders_in_mm_data=MultiModalFieldConfig.batched("video"),
+            video_image_embeds=MultiModalFieldConfig.batched("video")
         )
 
     def apply(
@@ -576,17 +720,19 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[MiniCPMVProcessingInfo
         result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
 
         # Exclude <image_id>x</image_id> from placeholders
-        result["mm_placeholders"]["image"] = [
-            PlaceholderRange(
-                offset=p["offset"] + 3 + idx // 10, 
-                length=p["length"] - 3 - idx // 10
-            )
-            for idx, p in enumerate(result["mm_placeholders"]["image"])
-        ]
+        if "image" in result["mm_placeholders"] and self.info.get_model_version() == (2, 6):
+            result["mm_placeholders"]["image"] = [
+                PlaceholderRange(
+                    offset=p["offset"] + 3 + idx // 10, 
+                    length=p["length"] - 3 - idx // 10
+                )
+                for idx, p in enumerate(result["mm_placeholders"]["image"])
+            ]
         result["mm_kwargs"].update(
             **self.get_special_tokens()
         )
         return result
+
 
 class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     """
@@ -703,16 +849,13 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             "image": {
                 "pixel_values": kwargs.pop("pixel_values", []),
                 "tgt_sizes": kwargs.pop("tgt_sizes", []),
-                "image_embeds": kwargs.pop("image_embeds", None),
-                "image_slices": kwargs.pop("image_slices", [])
+                "image_slices": kwargs.pop("image_slices", []),
             },
             "video": {
                 "pixel_values": kwargs.pop("video_pixel_values", []),
                 "tgt_sizes": kwargs.pop("video_tgt_sizes", []),
-                "image_embeds": kwargs.pop("video_image_embeds", None)
-            }            
+            }
         }
-
         im_start_id = kwargs.pop("im_start_id", None)
         im_end_id = kwargs.pop("im_end_id", None)
         slice_start_id = kwargs.pop("slice_start_id", None)
@@ -723,20 +866,28 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         }
         batch_size = max(len(mm_data["image"]["pixel_values"]), 
                          len(mm_data["video"]["pixel_values"]))
-        # if image_embeds is not None:
-        #     if not isinstance(image_embeds, (torch.Tensor, list)):
-        #         raise ValueError(f"Incorrect type of image embeds. "
-        #                          f"Got type: {type(image_embeds)}")
-        #     if isinstance(image_embeds, list):
-        #         image_embeds = torch.concat(image_embeds)
+        image_embeds = kwargs.pop("image_embeds", None)
+        video_embeds = kwargs.pop("video_image_embeds", None)
+        if image_embeds is not None and video_embeds is not None:
+            raise ValueError("Incorrect inputs for vision embeddings. "
+                             "Image embeds and video embeds can not exist simultaneously.")
+        if video_embeds is not None:
+            image_embeds = video_embeds
+        if image_embeds is not None:
+            if not isinstance(image_embeds, (torch.Tensor, list)):
+                raise ValueError(f"Incorrect type of image embeds. "
+                                 f"Got type: {type(image_embeds)}")
+            if isinstance(image_embeds, list):
+                image_embeds = torch.concat(image_embeds)
 
-        #     return MiniCPMVImageEmbeddingInputs(
-        #         image_bounds=self._get_image_bounds(input_ids, im_start_id,
-        #                                             im_end_id, slice_start_id,
-        #                                             slice_end_id),
-        #         data=image_embeds,
-        #         type="image_embeds",
-        #     )
+            return MiniCPMVImageEmbeddingInputs(
+                image_bounds=self._get_image_bounds(input_ids, im_start_id,
+                                                    im_end_id, slice_start_id,
+                                                    slice_end_id),
+                data=image_embeds,
+                type="image_embeds",
+            )
+
         for modality, modality_mm_data in mm_data.items():
             if not isinstance(modality_mm_data["pixel_values"], (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
