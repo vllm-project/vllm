@@ -1,5 +1,6 @@
-from vllm import LLM, SamplingParams
 import torch.distributed as dist
+
+from vllm import LLM, SamplingParams
 
 dist.init_process_group(backend="nccl")
 
@@ -34,7 +35,5 @@ for output in outputs:
         dist.broadcast_object_list(container, src=0)
         assert container[0] == prompt
         assert container[1] == generated_text
-    print(
-        f"Rank {torch_rank}, Prompt: {prompt!r}, "
-        f"Generated text: {generated_text!r}"
-    )
+    print(f"Rank {torch_rank}, Prompt: {prompt!r}, "
+          f"Generated text: {generated_text!r}")

@@ -476,11 +476,12 @@ class WorkerWrapperBase:
         """
         Initialize the worker wrapper with the given vllm_config and rpc_rank.
         Note: rpc_rank is the rank of the worker in the executor. In most cases,
-        it is also the rank of the worker in the distributed group. However, when
-        multiple executors work together, they can be different.
+        it is also the rank of the worker in the distributed group. However,
+        when multiple executors work together, they can be different.
         e.g. in the case of SPMD-style offline inference with TP=2,
         users can launch 2 engines/executors, each with only 1 worker.
-        All workers have rpc_rank=0, but they have different ranks in the TP group.
+        All workers have rpc_rank=0, but they have different ranks in the TP
+        group.
         """
         self.rpc_rank = rpc_rank
         self.vllm_config = vllm_config
