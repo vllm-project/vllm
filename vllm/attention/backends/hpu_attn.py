@@ -114,12 +114,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.matmul_av = Matmul()
         self.batch2block_matmul = Matmul()
         self.block2batch_matmul = Matmul()
-        # NOTE(kzawora): Contiguous PA is off until model runner supports it
         self.k_cache = VLLMKVCache()
-        self.k_cache.use_contiguous_pa = False
         self.v_cache = VLLMKVCache()
-        self.v_cache.use_contiguous_pa = False
-        # NOTE(kzawora): Pipelined PA is off until model runner supports it
         ops.pa_impl = ops.pa
 
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads

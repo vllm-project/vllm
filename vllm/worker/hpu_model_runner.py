@@ -257,10 +257,19 @@ def setup_profiler():
     return profiler
 
 
-def pad_list(list, k, v):
-    target_len = round_up(len(list), k)
-    padding = target_len - len(list)
-    return list + [v] * padding
+def pad_list(input, k, v):
+    input_len = len(input)
+    target_len = round_up(input_len, k)
+    padding = target_len - input_len
+    return input + [v] * padding
+
+
+def gather_list(input, indices, v):
+    return [input[i] if i is not None else v for i in indices]
+
+
+def flatten(in_list):
+    return list(itertools.chain(*in_list))
 
 
 def precompute_indices_and_offsets(block_size, slot_mapping, is_prompt):
@@ -583,6 +592,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.bucketing_global_state = HPUBucketingGlobalState()
         self._setup_buckets()
         self._set_gc_threshold()
+        self.use_contiguous_pa = os.environ.get('VLLM_CONTIGUOUS_PA',
+                                                'true').lower() == 'true'
 
     def _set_gc_threshold(self) -> None:
         # Read https://docs.python.org/3/library/gc.html#gc.set_threshold
