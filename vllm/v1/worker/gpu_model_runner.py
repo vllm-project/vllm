@@ -740,10 +740,10 @@ class GPUModelRunner:
 
             # Check how many items of this modality can be supported by
             # the encoder budget.
-            encoder_cache_budget = min(self.max_num_encoder_input_tokens,
+            encoder_budget = min(self.max_num_encoder_input_tokens,
                                        self.encoder_cache_size)
 
-            max_num_mm_items_encoder_budget = cdiv(encoder_cache_budget,
+            max_num_mm_items_encoder_budget = cdiv(encoder_budget,
                                                    max_tokens_per_mm_item)
 
             # Check how many items of this modality can be supported by
@@ -764,7 +764,7 @@ class GPUModelRunner:
             logger.info(
                 "Encoder cache will be initialized with a budget of %s tokens,"
                 " and profiled with %s %s items of the maximum feature size.",
-                encoder_cache_budget, max_num_mm_items, dummy_data_modality)
+                encoder_budget, max_num_mm_items, dummy_data_modality)
 
             # Create dummy batch of multimodal inputs.
             dummy_request_data = self.input_registry.dummy_data_for_profiling(
