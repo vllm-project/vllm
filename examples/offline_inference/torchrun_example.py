@@ -1,7 +1,14 @@
+# see https://github.com/vllm-project/vllm/issues/11400 for
+# the motivation and use case for this example.
+
 import torch.distributed as dist
 
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import get_world_group
+
+dist.init_process_group(backend="nccl")
+
+torch_rank = dist.get_rank()
 
 # Create prompts
 prompts = [
@@ -15,9 +22,13 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # important: use `distributed_executor_backend="external_launcher"` so that
 # this llm engine/instance only creates one worker.
+# set different `gpu_memory_utilization` and `swap_space` for different ranks,
+# to test if all ranks agree on the same kv cache configuration.
 llm = LLM(model="facebook/opt-125m",
           tensor_parallel_size=2,
-          distributed_executor_backend="external_launcher")
+          distributed_executor_backend="external_launcher",
+          gpu_memory_utilization=0.9 if torch_rank == 0 else 0.7,
+          swap_space=3 if torch_rank == 0 else 4)
 
 # important: prompts should be the same across all ranks
 # important: scheduling decisions should be deterministic
@@ -28,7 +39,6 @@ outputs = llm.generate(prompts, sampling_params)
 # control messages across all ranks, to avoid interference
 # with the model's device group communication.
 cpu_group = get_world_group().cpu_group
-torch_rank = get_world_group().rank
 
 # all ranks should have the same outputs
 for output in outputs:
