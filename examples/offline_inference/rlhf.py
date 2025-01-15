@@ -82,7 +82,8 @@ llm = ray.remote(num_gpus=2)(LLM).remote(
     model="facebook/opt-125m",
     enforce_eager=True,
     worker_cls=cloudpickle.dumps(MyWorker),
-    tensor_parallel_size=2)
+    tensor_parallel_size=2,
+    distributed_executor_backend="ray",)
 
 # Generate texts from the prompts.
 prompts = [
