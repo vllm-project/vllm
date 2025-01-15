@@ -52,8 +52,8 @@ class LogprobsProcessor:
             output_kind=request.sampling_params.output_kind,
             prompt_token_ids=request.prompt_token_ids,
             cumulative_logprob=(0. if num_logprobs else None),
-            logprobs=([] if num_logprobs else None),
-            prompt_logprobs=([] if num_prompt_logprobs else None),
+            logprobs=(None if num_logprobs is None else []),
+            prompt_logprobs=(None if num_prompt_logprobs is None else []),
             num_prompt_logprobs=(num_prompt_logprobs or 0),
             num_logprobs=(num_logprobs or 0),
         )
