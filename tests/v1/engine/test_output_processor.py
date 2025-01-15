@@ -21,8 +21,10 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
                                        log_stats=False)
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
-        generated_logprobs_raw=dummy_test_vectors.generation_logprobs,
-        prompt_logprobs_raw=dummy_test_vectors.prompt_logprobs)
+        generated_logprobs_raw=dummy_test_vectors.generation_logprobs
+        if num_sample_logprobs else None,
+        prompt_logprobs_raw=dummy_test_vectors.prompt_logprobs
+        if num_prompt_logprobs else None)
 
     # Make N requests.
     requests = [
@@ -102,8 +104,10 @@ def test_stop_string(include_stop_str_in_output: bool,
                                        log_stats=False)
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
-        generated_logprobs_raw=dummy_test_vectors.generation_logprobs,
-        prompt_logprobs_raw=dummy_test_vectors.prompt_logprobs)
+        generated_logprobs_raw=dummy_test_vectors.generation_logprobs
+        if num_sample_logprobs else None,
+        prompt_logprobs_raw=dummy_test_vectors.prompt_logprobs
+        if num_prompt_logprobs else None)
 
     # Make N requests.
     requests = [
