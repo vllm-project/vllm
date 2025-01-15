@@ -100,5 +100,5 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         a_tensor = torch.tensor([a], device="cpu", dtype=torch.int64)
         b_tensor = torch.tensor([b], device="cpu", dtype=torch.int64)
         dist.all_reduce(a_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
-        dist.all_reduce(b_tensor, group=cpu_group, op=dist.ReduceOp.MAX)
+        dist.all_reduce(b_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
         return a_tensor.item(), b_tensor.item()
