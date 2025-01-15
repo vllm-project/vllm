@@ -1331,14 +1331,15 @@ class ParallelConfig:
         from vllm.executor.executor_base import ExecutorBase
         from vllm.platforms import current_platform
         if self.distributed_executor_backend not in (
-                "ray", "mp", "uni", None) and not (isinstance(
+                "ray", "mp", "uni",
+                "external_launcher", None) and not (isinstance(
                     self.distributed_executor_backend, type) and issubclass(
                         self.distributed_executor_backend, ExecutorBase)):
             raise ValueError(
                 "Unrecognized distributed executor backend "
                 f"{self.distributed_executor_backend}. Supported "
-                "values are 'ray', 'mp' 'uni', or custom ExecutorBase"
-                " subclass.")
+                "values are 'ray', 'mp' 'uni', 'external_launcher' or"
+                " custom ExecutorBase subclass.")
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
