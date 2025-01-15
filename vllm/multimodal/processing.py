@@ -446,6 +446,7 @@ def _iter_placeholders(
                         start_idx=start_idx,
                         replacement=repl_tokens,
                     )
+
                     # Exclude overlapping matches
                     start_idx = end_idx
                     item_idx_by_modality[modality] += 1
@@ -887,7 +888,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             modality: 0
             for modality in mm_missing_data_items
         }
-        import pudb; pudb.set_trace()
+
         merged_kw_items = list[MultiModalKwargsItem]()
         for modality, kw_items in mm_maybe_cached_kw_items.items():
             for idx, kw_item in enumerate(kw_items):
@@ -1105,7 +1106,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_items,
             hf_processor_mm_kwargs,
         )
-        
+
         unbound_prompt_repls = self._get_prompt_replacements(
             mm_items,
             hf_processor_mm_kwargs,

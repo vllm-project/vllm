@@ -145,7 +145,7 @@ class MultiModalProfiler(Generic[_I]):
     def get_dummy_data(self, seq_len: int) -> DummyData:
         # Avoid circular import
         from vllm.sequence import SequenceData
-        import pudb; pudb.set_trace()
+
         mm_counts = self._get_mm_limits()
 
         info = self.processing_info
