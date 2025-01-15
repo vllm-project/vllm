@@ -46,7 +46,7 @@ elif not (sys.platform.startswith("linux")
         "so vLLM may not be able to run correctly", sys.platform)
     VLLM_TARGET_DEVICE = "empty"
 
-MAIN_CUDA_VERSION = "12.1"
+MAIN_CUDA_VERSION = "12.4"
 
 
 def is_sccache_available() -> bool:
@@ -559,9 +559,8 @@ def get_requirements() -> List[str]:
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
-            if ("vllm-flash-attn" in req
-                    and not (cuda_major == "12" and cuda_minor == "1")):
-                # vllm-flash-attn is built only for CUDA 12.1.
+            if ("vllm-flash-attn" in req and cuda_major != "12"):
+                # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
             modified_requirements.append(req)
