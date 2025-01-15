@@ -1,7 +1,7 @@
 """Engine test utils"""
 import random
 from dataclasses import dataclass
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -315,20 +315,58 @@ class DummyOutputProcessorTestVectors:
 class MockEngineCore:
     """Mock engine core outputs form premade tokens lists."""
 
-    def __init__(self, tokens_list: List[List[int]]):
+    def __init__(
+        self,
+        tokens_list: List[List[int]],
+        generated_logprobs_raw: Optional[List[List[Tuple[torch.Tensor,
+                                                         torch.Tensor]]]],
+        prompt_logprobs_raw: Optional[List[Tuple[torch.Tensor, torch.Tensor]]],
+    ) -> None:
         self.tokens_list = tokens_list
         self.current_idx = 0
+        self.generated_logprobs_raw = generated_logprobs_raw
+        self.do_logprobs = generated_logprobs_raw is not None
+        self.prompt_logprobs_raw = prompt_logprobs_raw
+        self.do_prompt_logprobs = prompt_logprobs_raw is not None
 
     def get_outputs(self) -> List[EngineCoreOutput]:
+        do_logprobs = self.do_logprobs
+        do_prompt_logprobs = self.do_prompt_logprobs
         token_idx = self.current_idx
         self.current_idx += 1
 
         outputs = []
         for req_idx, token_ids in enumerate(self.tokens_list):
             if len(token_ids) > token_idx:
-                output = EngineCoreOutput(request_id=f"request-{req_idx}",
-                                          new_token_ids=[token_ids[token_idx]],
-                                          finished=False)
+                if do_logprobs:
+                    assert self.generated_logprobs_raw is not None
+                    (logprobs, logprobs_token_ids) = (
+                        self.generated_logprobs_raw[req_idx][token_idx])
+                    logprobs = [logprobs]
+                    logprobs_token_ids = [logprobs_token_ids]
+                else:
+                    logprobs = None
+                    logprobs_token_ids = None
+                if do_prompt_logprobs:
+                    if self.current_idx == 0:
+                        assert self.prompt_logprobs_raw is not None
+                        prompt_logprobs = self.prompt_logprobs_raw[req_idx][0]
+                        prompt_logprobs_token_ids = self.prompt_logprobs_raw[
+                            req_idx][1]
+                    else:
+                        (prompt_logprobs,
+                         prompt_logprobs_token_ids) = (torch.empty(0, 0),
+                                                       torch.empty(0, 0))
+                else:
+                    (prompt_logprobs, prompt_logprobs_token_ids) = (None, None)
+                output = EngineCoreOutput(
+                    request_id=f"request-{req_idx}",
+                    new_token_ids=[token_ids[token_idx]],
+                    new_logprobs=logprobs,
+                    new_logprobs_token_ids=logprobs_token_ids,
+                    new_prompt_logprobs=prompt_logprobs,
+                    new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
+                    finished=False)
                 if token_idx == len(token_ids) - 1:
                     output.finished = True
                     output.finish_reason = "stopped"
