@@ -260,7 +260,9 @@ def test_max_logprobs(monkeypatch):
     """
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
-    runner = VllmRunner("facebook/opt-125m", max_logprobs=1,enable_prefix_caching=False)
+    runner = VllmRunner("facebook/opt-125m",
+                        max_logprobs=1,
+                        enable_prefix_caching=False)
     vllm_sampling_params = SamplingParams(logprobs=1)
     # should pass
     runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
