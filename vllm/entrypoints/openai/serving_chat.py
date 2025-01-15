@@ -147,6 +147,7 @@ class OpenAIServingChat(OpenAIServing):
             tool_dicts = None if request.tools is None else [
                 tool.model_dump() for tool in request.tools
             ]
+            request.maybe_handle_structured_output()
 
             (
                 conversation,
