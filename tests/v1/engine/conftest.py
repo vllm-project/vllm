@@ -1,5 +1,8 @@
 """Engine test fixtures"""
+from typing import List, Tuple
+
 import pytest
+import torch
 from transformers import AutoTokenizer
 
 from tests.v1.engine.utils import (FULL_STRINGS, NUM_PROMPT_LOGPROBS,
@@ -11,9 +14,12 @@ from tests.v1.engine.utils import (FULL_STRINGS, NUM_PROMPT_LOGPROBS,
 from vllm.engine.arg_utils import EngineArgs
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
+EngineCoreSampleLogprobsType = List[Tuple[torch.Tensor, torch.Tensor]]
+EngineCorePromptLogprobsType = Tuple[torch.Tensor, torch.Tensor]
+
 
 def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
-    """Generate dummy test vectors for detokenizer tests.
+    """Generate output processor dummy test vectors, without logprobs
     
     Returns:
       DummyOutputProcessorTestVectors instance with no logprobs
@@ -57,25 +63,15 @@ def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
 
 @pytest.fixture
 def dummy_test_vectors() -> DummyOutputProcessorTestVectors:
-    """Generate dummy test vectors for detokenizer tests.
-    
-    Returns:
-      DummyOutputProcessorTestVectors instance with no
-      logprobs.
-    """
-    return _build_test_vectors_no_logprobs()
-
-
-@pytest.fixture
-def dummy_test_vectors_w_lp() -> DummyOutputProcessorTestVectors:
-    """Generate dummy test vectors for logprob processor tests.
+    """Generate output processor dummy test vectors, with logprobs
     
     Returns:
       DummyOutputProcessorTestVectors instance with logprobs
     """
+    # Build dummy test vectors without logprobs
     dtv = _build_test_vectors_no_logprobs()
-    # Add sample and prompt logprobs to the dummy test vectors
-    # data structure.
+    # Inject logprobs into dummy test vectors
+    # data structure
     dtv.generation_logprobs = [
         generate_dummy_sample_logprobs(sampled_tokens_list=tokens_list,
                                        num_logprobs=NUM_SAMPLE_LOGPROBS,

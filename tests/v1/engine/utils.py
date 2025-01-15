@@ -12,6 +12,8 @@ from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 
+GeneralTokenizerType = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+
 # Number of sample logprobs to request when testing sample logprobs
 NUM_SAMPLE_LOGPROBS = 5
 # Number of prompt logprobs to request when testing prompt logprobs
@@ -294,7 +296,7 @@ def validate_requests_logprobs(
 @dataclass
 class DummyOutputProcessorTestVectors:
     """Dummy test vectors for output processor tests"""
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+    tokenizer: GeneralTokenizerType
     tokenizer_group: BaseTokenizerGroup
     vllm_config: EngineArgs
     full_tokens: List[List[int]]  # Prompt + generated tokens
