@@ -95,6 +95,7 @@ class Scheduler:
         scheduled_running_reqs: List[Request] = []
         preempted_reqs: List[Request] = []
 
+        # Request id -> List of block IDs for each kv cache group.
         req_to_new_block_ids: Dict[str, List[List[int]]] = {}
         num_scheduled_tokens: Dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
@@ -538,8 +539,8 @@ class NewRequestData:
     mm_hashes: List[str]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
-    # List of block IDs for each group.
-    # See KVCacheConfig class for the meaning of "group".
+    # List of block IDs for each KV cache group.
+    # See KVCacheConfig class for the meaning of "KV cache group".
     block_ids: List[List[int]]
     num_computed_tokens: int
 
@@ -568,7 +569,7 @@ class ResumedRequestData:
 
     req_id: str
     # List of block IDs for each kv cache group.
-    # See KVCacheConfig class for the meaning of "group".
+    # See KVCacheConfig class for the meaning of "KV cache group".
     block_ids: List[List[int]]
     num_computed_tokens: int
 
@@ -591,7 +592,7 @@ class RunningRequestData:
 
     req_id: str
     # List of block IDs for each kv cache group.
-    # See KVCacheConfig class for the meaning of "group".
+    # See KVCacheConfig class for the meaning of "KV cache group".
     new_block_ids: List[List[int]]
     num_computed_tokens: int
 

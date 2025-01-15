@@ -93,7 +93,7 @@ class GPUModelRunner:
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
-        self.kv_caches: List[List[torch.Tensor]] = []
+        self.kv_caches: List[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
@@ -369,6 +369,7 @@ class GPUModelRunner:
             self.device, non_blocking=True)
         # layer_name -> AttentionMetadata
         attn_metadata: Dict[str, FlashAttentionMetadata] = {}
+        # TODO: update after PR #11960
         # for i, layer_ids in enumerate(self.kv_cache_config.groups):
         for i in range(1):
             layer_ids = list(self.vllm_config.compilation_config.

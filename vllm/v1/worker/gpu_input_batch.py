@@ -26,7 +26,7 @@ class CachedRequestState:
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: List[List[int]]
+    block_ids: List[List[int]]  # List of block ids for each kv cache group
     num_computed_tokens: int
     output_token_ids: List[int]
 
@@ -45,6 +45,7 @@ class InputBatch:
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
+        # NOTE: See KVCacheConfig class for the meaning of "KV cache group".
         num_kv_cache_groups: int,
     ):
         self.max_num_reqs = max_num_reqs

@@ -38,6 +38,7 @@ class ForwardContext:
     attn_metadata: Union["AttentionMetadata", Dict[str, "AttentionMetadata"]]
     """
     The virtual_engine for v0 pipeline parallelism
+    set dynamically for each forward pass
     """
     virtual_engine: int  # set dynamically for each forward pass
 

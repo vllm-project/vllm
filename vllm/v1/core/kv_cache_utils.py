@@ -61,12 +61,14 @@ class KVCacheBlock:
         self._block_hash = None
 
 
-"""When the model contains different types of layers (e.g., full attention + 
-sliding window attention), the layers will be split to multiple groups, where 
-layers in the same group has the same type and with the same KVCacheBlock.
-See KVCacheConfig class for more details of "group".
-KVCacheBlocks: the blocks in one (group) of layer in one request
-ReqKVCacheBlocks: the blocks in all groups of layers in one request.
+"""When a model needs different types of kv_caches (e.g., full attention + 
+sliding window attention), the attention layers will be split to multiple 
+"KV cache groups", where layers in the same group has the same kv cache type and 
+can use the same KVCacheBlock. There will be only one group if all layers use 
+the same type of KV cache.
+See KVCacheConfig class for more examples of "KV cache group".
+KVCacheBlocks: the blocks of one group of layer in one request
+ReqKVCacheBlocks: the blocks of all groups of layers in one request.
 """
 KVCacheBlocks = List[KVCacheBlock]
 ReqKVCacheBlocks = List[KVCacheBlocks]

@@ -16,7 +16,9 @@ logger = init_logger(__name__)
 
 class KVCacheManager:
     """
-    TODO: add notes about num_group=1
+    The KVCacheManager for models with one KV cache type (e.g., Llama) and
+    thus one kv cache group (Refer to class `KVCacheConfig` for the meaning of 
+    kv cache group).
     """
 
     def __init__(
@@ -70,8 +72,10 @@ class KVCacheManager:
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
-        # is finished. KVCacheManager only supports models with one layer type,
-        # so the blocks can be stored by KVCacheBlocks type.
+        # is finished.
+        # KVCacheManager only supports models with one kv cache group, so we
+        # save KVCachedBlocks of that group instead of ReqKVCacheBlocks for
+        # simplicity.
         self.req_to_blocks: Dict[str, KVCacheBlocks] = {}
 
     def get_computed_blocks(self,
@@ -83,9 +87,8 @@ class KVCacheManager:
             request: The request to get the computed blocks.
 
         Returns:
-            # TODO: update docstring
             A tuple containing:
-                - A list of blocks that are computed for the request.
+                - The blocks that are computed for the request
                 - The number of computed tokens.
         """
         if not self.enable_caching:
@@ -130,9 +133,8 @@ class KVCacheManager:
             num_tokens: The number of tokens to append.
 
         Returns:
-            A list of new blocks if new blocks are allocated, or None
-            if new blocks are required but cannot be allocated.
-            # TODO: update docstring
+            The new blocks if new blocks are allocated, or None if new blocks
+            are required but cannot be allocated.
         """
         num_required_blocks = cdiv(request.num_computed_tokens + num_tokens,
                                    self.block_size)
@@ -206,17 +208,19 @@ class KVCacheManager:
             request: The request to allocate slots.
             num_tokens: The number of tokens to allocate. Note that this does
                 not include the tokens that have already been computed.
-            computed_blocks: A list of computed blocks.
+            computed_blocks_all_groups: The computed blocks. Should contain
+            only one KV cache group.
 
         Returns:
-            # TODO: update docstring
-            A list of new allocated blocks.
+           The new blocks if new blocks are allocated, or None if new blocks
+            are required but cannot be allocated.
         """
         if num_tokens == 0:
             raise ValueError(
                 f"num_tokens must be greater than 0, got {num_tokens}")
 
-        computed_blocks = computed_blocks_all_groups[0]  # only one group
+        assert len(computed_blocks_all_groups) == 1
+        computed_blocks = computed_blocks_all_groups[0]
         # If a computed block of a request is an eviction candidate (in the
         # free queue and ref_cnt == 0), it cannot be counted as a free block
         # when allocating this request.
@@ -334,7 +338,7 @@ class KVCacheManager:
                 requests in the current step.
 
         Returns:
-            int: The number of common prefix blocks.
+            List[int]: The number of common prefix blocks per KV cache group.
         """
         assert request.status == RequestStatus.RUNNING
         blocks = self.req_to_blocks[request.request_id]
@@ -448,6 +452,7 @@ class KVCacheManager:
                 to cache.
             full_blocks: The list of blocks to update hash metadata.
             prev_block: The previous block in the chain.
+            kv_cache_group_id: The KV cache group ID that the blocks belong to
         """
         num_cached_block_hashes = len(
             request.kv_block_hashes[kv_cache_group_id])

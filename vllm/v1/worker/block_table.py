@@ -17,6 +17,7 @@ class BlockTable:
         max_num_blocks_per_req: int,
         pin_memory: bool,
         device: torch.device,
+        # NOTE: See KVCacheConfig class for the meaning of "KV cache group".
         num_kv_cache_groups: int,
     ):
         self.max_num_reqs = max_num_reqs
@@ -67,7 +68,9 @@ class BlockTable:
         # NOTE: an alternative is
         # self.block_table[:, :num_reqs].copy_(
         #   self.block_table_cpu[:, :num_reqs], non_blocking=True)
-        # but it will be a blocking copy when num_kv_cache_groups>1.
+        # but it will be a blocking copy when num_kv_cache_groups > 1.
+        # Can be verified by the following code:
+        # https://gist.github.com/heheda12345/74c7f7a68e45c242a5c901b5fb77d000
         for i in range(self.num_kv_cache_groups):
             self.block_table[i, :num_reqs].copy_(
                 self.block_table_cpu[i, :num_reqs], non_blocking=True)
