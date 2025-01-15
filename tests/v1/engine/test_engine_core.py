@@ -80,7 +80,7 @@ def test_engine_core(monkeypatch):
         assert len(engine_core.scheduler.running) == 4
 
         # Loop through until they are all done.
-        while len(engine_core.step()) > 0:
+        while len(engine_core.step().outputs) > 0:
             pass
 
         assert len(engine_core.scheduler.waiting) == 0
@@ -170,7 +170,7 @@ def test_engine_core_advanced_sampling(monkeypatch):
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 0
         # Loop through until they are all done.
-        while len(engine_core.step()) > 0:
+        while len(engine_core.step().outputs) > 0:
             pass
 
         assert len(engine_core.scheduler.waiting) == 0

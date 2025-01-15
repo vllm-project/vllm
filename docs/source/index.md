@@ -1,4 +1,4 @@
-# Welcome to vLLM!
+# Welcome to vLLM
 
 ```{figure} ./assets/logos/vllm-logo-text-light.png
 :align: center
@@ -22,6 +22,8 @@
 ```
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.
+
+Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evloved into a community-driven project with contributions from both academia and industry.
 
 vLLM is fast with:
 
@@ -186,7 +188,7 @@ community/meetups
 community/sponsors
 ```
 
-# Indices and tables
+## Indices and tables
 
 - {ref}`genindex`
 - {ref}`modindex`

@@ -43,7 +43,7 @@ def make_request(params: SamplingParams) -> EngineCoreRequest:
 def loop_until_done(client: EngineCoreClient, outputs: Dict):
 
     while True:
-        engine_core_outputs = client.get_output()
+        engine_core_outputs = client.get_output().outputs
 
         if len(engine_core_outputs) == 0:
             break
@@ -61,7 +61,7 @@ def loop_until_done(client: EngineCoreClient, outputs: Dict):
 async def loop_until_done_async(client: EngineCoreClient, outputs: Dict):
 
     while True:
-        engine_core_outputs = await client.get_output_async()
+        engine_core_outputs = await client.get_output_async().outputs
 
         if len(engine_core_outputs) == 0:
             break

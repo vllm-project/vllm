@@ -256,7 +256,10 @@ class MultiModalRegistry:
         on underlying model configuration.
         """
         if self.has_processor(model_config):
-            tokenizer = cached_get_tokenizer(model_config.tokenizer)
+            tokenizer = cached_get_tokenizer(
+                model_config.tokenizer,
+                trust_remote_code=model_config.trust_remote_code,
+            )
             processor = self.create_processor(model_config, tokenizer)
             seq_len = model_config.max_model_len
             return processor.info.get_mm_max_tokens_per_item(seq_len)
