@@ -1,3 +1,5 @@
+from typing import Optional
+
 import pytest
 
 from tests.v1.engine.utils import STOP_STRINGS, MockEngineCore
@@ -13,7 +15,8 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
                                     dummy_test_vectors):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
                                        log_stats=False)
-    engine_core = MockEngineCore(dummy_test_vectors.generation_tokens)
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens)
 
     # Make N requests.
     requests = [
@@ -31,10 +34,10 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
                               spaces_between_special_tokens=False,
                               output_kind=request_output_kind,
                               stop=[],
-                              include_stop_str_in_output=False))
-        for idx, (prompt, prompt_tokens) in enumerate(
-            zip(dummy_test_vectors.prompt_strings,
-                dummy_test_vectors.prompt_tokens))
+                              include_stop_str_in_output=False,
+                          )) for idx, (prompt, prompt_tokens) in enumerate(
+                              zip(dummy_test_vectors.prompt_strings,
+                                  dummy_test_vectors.prompt_tokens))
     ]
 
     # Add requests to the detokenizer.
@@ -50,7 +53,93 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
             break
 
         # Step the Detokenizer.
-        processed_outputs = output_processor.process_outputs(outputs, )
+        processed_outputs = output_processor.process_outputs(outputs)
+        request_outputs = processed_outputs.request_outputs
+        requests_to_abort = processed_outputs.reqs_to_abort
+        assert len(requests_to_abort) == 0
+
+        # Update tracking.
+        for request_output in request_outputs:
+            request_id = request_output.request_id
+            new_text = request_output.outputs[0].text
+            new_tokens = request_output.outputs[0].token_ids
+            if request_id not in gen_strings:
+                gen_strings[request_id] = new_text
+                gen_tokens[request_id] = new_tokens
+            else:
+                gen_strings[request_id] += new_text
+                gen_tokens[request_id].extend(new_tokens)
+
+    # Confirmed tracked values matches what we expected.
+    for idx, (ref_gen_str, ref_gen_toks) in enumerate(
+            zip(dummy_test_vectors.generation_strings,
+                dummy_test_vectors.generation_tokens)):
+        gen_str = gen_strings[f"request-{idx}"]
+        gen_toks = gen_tokens[f"request-{idx}"]
+
+        assert gen_str == ref_gen_str, f"{gen_str=}, {ref_gen_str=}"
+        assert gen_toks == ref_gen_toks, f"{gen_toks=}, {ref_gen_toks=}"
+
+    assert output_processor.get_num_unfinished_requests() == 0
+    assert not output_processor.has_unfinished_requests()
+
+
+@pytest.mark.parametrize(
+    "request_output_kind",
+    [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+@pytest.mark.parametrize("num_sample_logprobs", [None, 5])
+@pytest.mark.parametrize("num_prompt_logprobs", [None, 5])
+def test_logprobs_processor(request_output_kind: RequestOutputKind,
+                            num_sample_logprobs: Optional[int],
+                            num_prompt_logprobs: Optional[int],
+                            dummy_test_vectors):
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
+                                       log_stats=False)
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        generated_logprobs_raw=dummy_test_vectors.generation_logprobs
+        if num_sample_logprobs else None,
+        prompt_logprobs_raw=dummy_test_vectors.prompt_logprobs
+        if num_prompt_logprobs else None)
+
+    # Make N requests.
+    requests = [
+        EngineCoreRequest(request_id=f"request-{idx}",
+                          prompt=prompt,
+                          prompt_token_ids=prompt_tokens,
+                          arrival_time=0,
+                          mm_inputs=None,
+                          mm_hashes=None,
+                          mm_placeholders=None,
+                          eos_token_id=None,
+                          lora_request=None,
+                          sampling_params=SamplingParams(
+                              skip_special_tokens=False,
+                              spaces_between_special_tokens=False,
+                              output_kind=request_output_kind,
+                              stop=[],
+                              include_stop_str_in_output=False,
+                              logprobs=num_sample_logprobs,
+                              prompt_logprobs=num_prompt_logprobs,
+                          )) for idx, (prompt, prompt_tokens) in enumerate(
+                              zip(dummy_test_vectors.prompt_strings,
+                                  dummy_test_vectors.prompt_tokens))
+    ]
+
+    # Add requests to the detokenizer.
+    for request in requests:
+        output_processor.add_request(request)
+
+    gen_strings = {}
+    gen_tokens = {}
+    while True:
+        # Mock output from the EngineCore.
+        outputs = engine_core.get_outputs()
+        if len(outputs) == 0:
+            break
+
+        # Step the Detokenizer.
+        processed_outputs = output_processor.process_outputs(outputs)
         request_outputs = processed_outputs.request_outputs
         requests_to_abort = processed_outputs.reqs_to_abort
         assert len(requests_to_abort) == 0
@@ -82,10 +171,19 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
 
 
 @pytest.mark.parametrize("include_stop_str_in_output", [True, False])
-def test_stop_string(include_stop_str_in_output: bool, dummy_test_vectors):
+@pytest.mark.parametrize("num_sample_logprobs", [None, 5])
+@pytest.mark.parametrize("num_prompt_logprobs", [None, 5])
+def test_stop_string(include_stop_str_in_output: bool,
+                     num_sample_logprobs: Optional[int],
+                     num_prompt_logprobs: Optional[int], dummy_test_vectors):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
                                        log_stats=False)
-    engine_core = MockEngineCore(dummy_test_vectors.generation_tokens)
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        generated_logprobs_raw=dummy_test_vectors.generation_logprobs
+        if num_sample_logprobs else None,
+        prompt_logprobs_raw=dummy_test_vectors.prompt_logprobs
+        if num_prompt_logprobs else None)
 
     # Make N requests.
     requests = [
@@ -105,6 +203,8 @@ def test_stop_string(include_stop_str_in_output: bool, dummy_test_vectors):
                 output_kind=RequestOutputKind.DELTA,
                 stop=STOP_STRINGS,
                 include_stop_str_in_output=include_stop_str_in_output,
+                logprobs=num_sample_logprobs,
+                prompt_logprobs=num_prompt_logprobs,
             )) for idx, (prompt, prompt_tokens) in enumerate(
                 zip(dummy_test_vectors.prompt_strings,
                     dummy_test_vectors.prompt_tokens))
