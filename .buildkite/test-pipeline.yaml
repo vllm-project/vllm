@@ -463,7 +463,7 @@ steps:
   - vllm/worker/worker.py
   - vllm/worker/model_runner.py
   commands:
-  - torchrun --nproc-per-node=2 examples/offline_inference/torchrun_example.py
+  - torchrun --nproc-per-node=2 ../examples/offline_inference/torchrun_example.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
