@@ -63,9 +63,9 @@ class Request:
         # Cache the computed kv block hashes of the request to avoid
         # recomputing.
         # Different kv cache groups may have different block_size, so save their
-        # hash seperately. Each outer list represents a group, and each inner
+        # hash separately. Each outer list represents a group, and each inner
         # list contains the hashes of blocks with that group's block_size.
-        # Refer to KVCacheConfig class for the meaning of "group".
+        # See KVCacheConfig class for the meaning of "group".
         self._kv_block_hashes: List[List[BlockHashType]] = []
 
     @classmethod
@@ -131,7 +131,7 @@ class Request:
         return num_tokens
 
     @property
-    def kv_block_hashes(self) -> List[ConstantList["BlockHashType"]]:
+    def kv_block_hashes(self) -> ConstantList[ConstantList["BlockHashType"]]:
         # Prevent directly appending to the kv_block_hashes.
         return ConstantList([
             ConstantList(kv_block_hashes_one_group)

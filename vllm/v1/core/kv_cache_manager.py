@@ -15,6 +15,9 @@ logger = init_logger(__name__)
 
 
 class KVCacheManager:
+    """
+    TODO: add notes about num_group=1
+    """
 
     def __init__(
         self,
@@ -297,7 +300,7 @@ class KVCacheManager:
         self,
         request: Request,
         num_running_requests: int,
-    ) -> int:
+    ) -> List[int]:
         """Calculate the number of common prefix blocks shared by all requests
         in the RUNNING state.
 

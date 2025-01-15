@@ -308,7 +308,7 @@ class Scheduler:
     def _make_running_request_data(
         self,
         request: Request,
-        new_block_ids: List[int],
+        new_block_ids: List[List[int]],
         num_computed_tokens: int,
     ) -> "RunningRequestData":
         # OPTIMIZATION: Cache the RunningRequestData objects to avoid creating
@@ -539,7 +539,7 @@ class NewRequestData:
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
     # List of block IDs for each group.
-    # Refer to KVCacheConfig class for the meaning of "group"
+    # See KVCacheConfig class for the meaning of "group".
     block_ids: List[List[int]]
     num_computed_tokens: int
 
@@ -568,7 +568,7 @@ class ResumedRequestData:
 
     req_id: str
     # List of block IDs for each kv cache group.
-    # Refer to KVCacheConfig class for the meaning of "group"
+    # See KVCacheConfig class for the meaning of "group".
     block_ids: List[List[int]]
     num_computed_tokens: int
 
@@ -591,7 +591,7 @@ class RunningRequestData:
 
     req_id: str
     # List of block IDs for each kv cache group.
-    # Refer to KVCacheConfig class for the meaning of "group"
+    # See KVCacheConfig class for the meaning of "group".
     new_block_ids: List[List[int]]
     num_computed_tokens: int
 
@@ -620,7 +620,7 @@ class SchedulerOutput:
     total_num_scheduled_tokens: int
     scheduled_encoder_inputs: Dict[str, List[int]]
     # Number of common prefix blocks per kv cache group
-    # Refer to KVCacheConfig class for the meaning of "group"
+    # See KVCacheConfig class for the meaning of "group"
     num_common_prefix_blocks: List[int]
 
     preempted_req_ids: Set[str]

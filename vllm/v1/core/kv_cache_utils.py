@@ -2,6 +2,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, List, NamedTuple, Optional, Tuple
+
 from vllm.logger import init_logger
 from vllm.v1.request import Request
 
@@ -61,11 +62,11 @@ class KVCacheBlock:
 
 
 """When the model contains different types of layers (e.g., full attention + 
-sliding window attention), the layers will be splited to multiple groups, where 
-layers in the same group has the same type and with the same KVCacheBlock. 
+sliding window attention), the layers will be split to multiple groups, where 
+layers in the same group has the same type and with the same KVCacheBlock.
+See KVCacheConfig class for more details of "group".
 KVCacheBlocks: the blocks in one (group) of layer in one request
 ReqKVCacheBlocks: the blocks in all groups of layers in one request.
-Refer to KVCacheConfig class for the meaning of "group"
 """
 KVCacheBlocks = List[KVCacheBlock]
 ReqKVCacheBlocks = List[KVCacheBlocks]
