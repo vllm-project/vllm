@@ -1,7 +1,7 @@
 import os
 import time
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import msgspec
 
@@ -10,17 +10,26 @@ from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
-from vllm.utils import get_ip, is_hip, is_xpu
+from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
+
+if TYPE_CHECKING:
+    from vllm.v1.core.scheduler import SchedulerOutput
+    from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
 PG_WAIT_TIMEOUT = 1800
 
 try:
     import ray
-    from ray._private.state import available_resources_per_node
     from ray.util import placement_group_table
     from ray.util.placement_group import PlacementGroup
+    try:
+        from ray._private.state import available_resources_per_node
+    except ImportError:
+        # Ray 2.9.x doesn't expose `available_resources_per_node`
+        from ray._private.state import state as _state
+        available_resources_per_node = _state._available_resources_per_node
 
     class RayWorkerWrapper(WorkerWrapperBase):
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
@@ -43,7 +52,12 @@ try:
 
         def get_node_and_gpu_ids(self) -> Tuple[str, List[int]]:
             node_id = ray.get_runtime_context().get_node_id()
-            gpu_ids = ray.get_gpu_ids()
+            device_key = current_platform.ray_device_key
+            if not device_key:
+                raise RuntimeError("current platform %s does not support ray.",
+                                   current_platform.device_name)
+            gpu_ids = ray.get_runtime_context().get_accelerator_ids(
+            )[device_key]
             return node_id, gpu_ids
 
         def execute_model_spmd(
@@ -83,6 +97,26 @@ try:
             else:
                 output = self.output_encoder.encode(output)
 
+            return output
+
+        def setup_device_if_necessary(self):
+            # TODO(swang): This is needed right now because Ray CG executes
+            # on a background thread, so we need to reset torch's current
+            # device.
+            # We can remove this API after it is fixed in compiled graph.
+            import torch
+            assert self.worker is not None, "Worker is not initialized"
+            if not self.compiled_dag_cuda_device_set:
+                torch.cuda.set_device(self.worker.device)
+                self.compiled_dag_cuda_device_set = True
+
+        def execute_model(
+            self,
+            scheduler_output: "SchedulerOutput",
+        ) -> "ModelRunnerOutput":
+            self.setup_device_if_necessary()
+            assert self.worker is not None, "Worker is not initialized"
+            output = self.worker.model_runner.execute_model(scheduler_output)
             return output
 
         def override_env_vars(self, vars: Dict[str, str]):
@@ -224,12 +258,20 @@ def initialize_ray_cluster(
             the default Ray cluster address.
     """
     assert_ray_available()
+    from vllm.platforms import current_platform
 
     # Connect to a ray cluster.
-    if is_hip() or is_xpu():
-        ray.init(address=ray_address,
-                 ignore_reinit_error=True,
-                 num_gpus=parallel_config.world_size)
+    if current_platform.is_rocm() or current_platform.is_xpu():
+        # Try to connect existing ray instance and create a new one if not found
+        try:
+            ray.init("auto", ignore_reinit_error=True)
+        except ConnectionError:
+            logger.warning(
+                "No existing RAY instance detected. "
+                "A new instance will be launched with current node resources.")
+            ray.init(address=ray_address,
+                     ignore_reinit_error=True,
+                     num_gpus=parallel_config.world_size)
     else:
         ray.init(address=ray_address, ignore_reinit_error=True)
 
@@ -237,7 +279,12 @@ def initialize_ray_cluster(
         # Placement group is already set.
         return
 
-    device_str = "GPU" if not current_platform.is_tpu() else "TPU"
+    device_str = current_platform.ray_device_key
+    if not device_str:
+        raise ValueError(
+            f"current platform {current_platform.device_name} does not "
+            "support ray.")
+
     # Create placement group for worker processes
     current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:
@@ -261,10 +308,14 @@ def initialize_ray_cluster(
                 f"Total number of devices: {device_bundles}.")
     else:
         num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
+        # Log a warning message and delay resource allocation failure response.
+        # Avoid immediate rejection to allow user-initiated placement group
+        # created and wait cluster to be ready
         if parallel_config.world_size > num_devices_in_cluster:
-            raise ValueError(
-                f"The number of required {device_str}s exceeds the total "
-                f"number of available {device_str}s in the placement group.")
+            logger.warning(
+                "The number of required %ss exceeds the total "
+                "number of available %ss in the placement group.", device_str,
+                device_str)
         # Create a new placement group
         placement_group_specs: List[Dict[str, float]] = ([{
             device_str: 1.0

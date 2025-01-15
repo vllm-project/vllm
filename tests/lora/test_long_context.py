@@ -28,9 +28,15 @@ sampling_params = SamplingParams(
 def _create_lora_request(lora_id, long_context_infos):
     context_len = long_context_infos[lora_id]["context_length"]
     scaling_factor = context_len_to_scaling_factor[context_len]
-    return LoRARequest(context_len, lora_id,
-                       long_context_infos[lora_id]["lora"], None,
-                       4096 * scaling_factor)
+    return LoRARequest(
+        # There are 2 LoRAs for 16K, we need to add lora_id to indicate
+        # they are different LoRAs.
+        context_len + str(lora_id),
+        lora_id,
+        long_context_infos[lora_id]["lora"],
+        None,
+        4096 * scaling_factor,
+    )
 
 
 def evaluate_json_response(model_response, golden_response):
@@ -108,14 +114,18 @@ def lora_llm(long_context_infos):
         for info in long_context_infos.values()
     ]
 
-    llm = vllm.LLM("meta-llama/Llama-2-13b-chat-hf",
-                   enable_lora=True,
-                   max_num_seqs=16,
-                   max_loras=2,
-                   long_lora_scaling_factors=tuple(scaling_factors),
-                   max_num_batched_tokens=4096 * 8,
-                   tensor_parallel_size=4,
-                   distributed_executor_backend="mp")
+    llm = vllm.LLM(
+        "meta-llama/Llama-2-13b-chat-hf",
+        enable_lora=True,
+        max_num_seqs=16,
+        max_loras=2,
+        long_lora_scaling_factors=tuple(scaling_factors),
+        max_num_batched_tokens=4096 * 8,
+        tensor_parallel_size=4,
+        # FIXME enable async output processor
+        disable_async_output_proc=True,
+        distributed_executor_backend="mp",
+        enable_chunked_prefill=True)
     yield llm
     del llm
 
@@ -129,13 +139,7 @@ def test_rotary_emb_replaced(dist_init):
                              enable_lora=True)
     engine_config = engine_args.create_engine_config()
     model_runner = ModelRunner(
-        model_config=engine_config.model_config,
-        parallel_config=engine_config.parallel_config,
-        scheduler_config=engine_config.scheduler_config,
-        device_config=engine_config.device_config,
-        cache_config=engine_config.cache_config,
-        load_config=engine_config.load_config,
-        lora_config=engine_config.lora_config,
+        vllm_config=engine_config,
         is_driver_worker=True,
     )
     model_runner.load_model()

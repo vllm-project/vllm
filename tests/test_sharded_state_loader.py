@@ -46,9 +46,10 @@ def test_filter_subtensors():
 @pytest.fixture(scope="module")
 def llama_2_7b_files():
     with TemporaryDirectory() as cache_dir:
-        input_dir = snapshot_download("meta-llama/Llama-2-7b-hf",
+        input_dir = snapshot_download("meta-llama/Llama-3.2-1B",
                                       cache_dir=cache_dir,
-                                      ignore_patterns="*.bin*")
+                                      ignore_patterns=["*.bin*", "original/*"])
+
         yield input_dir
 
 
@@ -58,9 +59,12 @@ def _run_writer(input_dir, output_dir, weights_patterns, **kwargs):
     # Dump worker states to output directory
     llm_sharded_writer.llm_engine.model_executor.save_sharded_state(
         path=output_dir)
+
     # Copy metadata files to output directory
     for file in os.listdir(input_dir):
-        if not any(file.endswith(ext) for ext in weights_patterns):
+        if not any(
+                file.endswith(ext) and not os.path.isdir(file)
+                for ext in weights_patterns):
             shutil.copy(f"{input_dir}/{file}", output_dir)
 
 

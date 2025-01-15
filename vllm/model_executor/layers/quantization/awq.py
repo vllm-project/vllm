@@ -3,7 +3,8 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
@@ -21,10 +22,12 @@ class AWQConfig(QuantizationConfig):
         weight_bits: int,
         group_size: int,
         zero_point: bool,
+        modules_to_not_convert: Optional[List[str]] = None,
     ) -> None:
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.zero_point = zero_point
+        self.modules_to_not_convert = modules_to_not_convert or []
 
         if self.weight_bits != 4:
             raise ValueError(
@@ -35,7 +38,8 @@ class AWQConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return (f"AWQConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
-                f"zero_point={self.zero_point})")
+                f"zero_point={self.zero_point}, "
+                f"modules_to_not_convert={self.modules_to_not_convert})")
 
     def get_name(self) -> str:
         return "awq"
@@ -61,16 +65,21 @@ class AWQConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
         group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
-        return cls(weight_bits, group_size, zero_point)
+        modules_to_not_convert = cls.get_from_keys_or(
+            config, ["modules_to_not_convert"], None)
+        return cls(weight_bits, group_size, zero_point, modules_to_not_convert)
 
     def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["AWQLinearMethod"]:
+                         prefix: str) -> Optional["LinearMethodBase"]:
         if isinstance(layer, LinearBase):
+            if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
+                return UnquantizedLinearMethod()
             return AWQLinearMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
+
+def is_layer_skipped_awq(prefix: str, modules_to_not_convert: List[str]):
+    return any(module_name in prefix for module_name in modules_to_not_convert)
 
 
 class AWQLinearMethod(LinearMethodBase):

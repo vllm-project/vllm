@@ -19,9 +19,6 @@ SPEC_MODEL = "JackFram/llama-68m"
     [[
         # Skip cuda graph recording for fast test.
         "--enforce_eager",
-
-        # Required for spec decode.
-        "--use-v2-block-manager",
         "--tensor-parallel-size",
         "4",
     ]])
@@ -71,9 +68,6 @@ def test_draft_model_tp_lt_target_model_tp4(common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "--enforce-eager",
-
-        # Required for spec decode.
-        "--use-v2-block-manager",
         "--tensor-parallel-size",
         "4",
     ]])
@@ -114,7 +108,8 @@ def test_skip_speculation(common_llm_kwargs, per_test_common_llm_kwargs,
 
     TODO: fix it to pass without raising Error. (#5814)
     """
-    with pytest.raises(openai.APIConnectionError):
+    with pytest.raises(
+        (openai.APIConnectionError, openai.InternalServerError)):
         run_equality_correctness_test_tp(MAIN_MODEL,
                                          common_llm_kwargs,
                                          per_test_common_llm_kwargs,

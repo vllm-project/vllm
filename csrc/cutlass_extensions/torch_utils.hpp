@@ -68,7 +68,13 @@ static inline auto make_cute_layout(torch::Tensor const& tensor,
                         name, ".stride(", idx, ") to be ", StrideEle::value);
             return StrideEle{};
           } else {
-            return tensor.stride(idx);
+            if (tensor.size(idx) == 1) {
+              // use 0 stride for dim with size 1, this is easier for
+              // cute/cutlass to optimize (helps the TMA code flatten dims)
+              return StrideEle{0};
+            } else {
+              return tensor.stride(idx);
+            }
           }
         } else {
           // Extra strides are assumed to be 0 or 1
@@ -91,7 +97,7 @@ static inline auto make_cute_layout(torch::Tensor const& tensor,
 
 template <typename Stride>
 static inline auto maybe_make_cute_layout(
-    c10::optional<torch::Tensor> const& tensor,
+    std::optional<torch::Tensor> const& tensor,
     std::string_view name = "tensor") {
   using Layout = decltype(make_cute_layout<Stride>(*tensor));
 

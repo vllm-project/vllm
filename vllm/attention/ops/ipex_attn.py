@@ -1,16 +1,21 @@
 from typing import Dict, List, Optional, Tuple
 
-import intel_extension_for_pytorch.llm.modules as ipex_modules
+try:
+    import intel_extension_for_pytorch.llm.modules as ipex_modules
+    _use_ipex = True
+except ImportError:
+    _use_ipex = False
+
 import torch
 
 from vllm import _custom_ops as ops
 
 
-class PagedAttention:
+class _PagedAttention:
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
-        return [64, 80, 96, 112, 128, 256]
+        return [32, 64, 80, 96, 112, 128, 256]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -21,6 +26,105 @@ class PagedAttention:
         *args,
     ) -> Tuple[int, ...]:
         return (2, num_blocks, block_size * num_kv_heads * head_size)
+
+    @staticmethod
+    def split_kv_cache(
+        kv_cache: torch.Tensor,
+        num_kv_heads: int,
+        head_size: int,
+        *args,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = 16 // kv_cache.element_size()
+        num_blocks = kv_cache.shape[1]
+
+        key_cache = kv_cache[0]
+        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
+                                   -1, x)
+        value_cache = kv_cache[1]
+        value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
+        return key_cache, value_cache
+
+    @staticmethod
+    def write_to_paged_cache(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: float,
+        v_scale: float,
+        *args,
+    ) -> None:
+        ops.reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping.flatten(),
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+        )
+
+    @staticmethod
+    def forward_decode(
+        output: torch.Tensor,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_tables: torch.Tensor,
+        context_lens: torch.Tensor,
+        max_context_len: int,
+        kv_cache_dtype: str,
+        num_kv_heads: int,
+        scale: float,
+        alibi_slopes: Optional[torch.Tensor],
+        k_scale: float,
+        v_scale: float,
+        *args,
+    ) -> None:
+        tp_rank: int = 0
+        blocksparse_local_blocks: int = 0
+        blocksparse_vert_stride: int = 0
+        blocksparse_block_size: int = 64
+        blocksparse_head_sliding_step: int = 0
+        block_size = value_cache.shape[3]
+
+        ops.paged_attention_v1(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            scale,
+            block_tables,
+            context_lens,
+            block_size,
+            max_context_len,
+            alibi_slopes,
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+            tp_rank,
+            blocksparse_local_blocks,
+            blocksparse_vert_stride,
+            blocksparse_block_size,
+            blocksparse_head_sliding_step,
+        )
+
+    @staticmethod
+    def copy_blocks(
+        kv_caches: List[torch.Tensor],
+        src_to_dists: Dict[int, List[int]],
+        *args,
+    ) -> None:
+        key_caches = [kv_cache[0] for kv_cache in kv_caches]
+        value_caches = [kv_cache[1] for kv_cache in kv_caches]
+        ops.copy_blocks(key_caches, value_caches, src_to_dists)
+
+
+class _IPEXPagedAttention(_PagedAttention):
 
     @staticmethod
     def split_kv_cache(
@@ -55,6 +159,7 @@ class PagedAttention:
 
     @staticmethod
     def forward_decode(
+        output: torch.Tensor,
         query: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
@@ -68,8 +173,7 @@ class PagedAttention:
         k_scale: float,
         v_scale: float,
         *args,
-    ) -> torch.Tensor:
-        output = torch.empty_like(query)
+    ) -> None:
         block_size = value_cache.shape[2]
         head_mapping = torch.arange(
             0,
@@ -83,41 +187,5 @@ class PagedAttention:
             scale, block_tables, context_lens, block_size, max_context_len,
             alibi_slopes)
 
-        return output
 
-    @staticmethod
-    def forward_prefix(
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache_dtype: str,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        block_tables: torch.Tensor,
-        subquery_start_loc: torch.Tensor,
-        prompt_lens_tensor: torch.Tensor,
-        context_lens: torch.Tensor,
-        max_subquery_len: int,
-        alibi_slopes: Optional[torch.Tensor],
-        *args,
-    ) -> torch.Tensor:
-        raise NotImplementedError
-
-    @staticmethod
-    def swap_blocks(
-        src_kv_cache: torch.Tensor,
-        dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
-        *args,
-    ) -> None:
-        raise NotImplementedError
-
-    @staticmethod
-    def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
-        *args,
-    ) -> None:
-        key_caches = [kv_cache[0] for kv_cache in kv_caches]
-        value_caches = [kv_cache[1] for kv_cache in kv_caches]
-        ops.copy_blocks(key_caches, value_caches, src_to_dists)
+PagedAttention = _IPEXPagedAttention if _use_ipex else _PagedAttention

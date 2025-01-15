@@ -3,11 +3,12 @@ import sys
 from abc import abstractmethod
 from contextlib import contextmanager
 from types import CodeType
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 import torch
 
 import vllm.envs as envs
+from vllm.config import CompilationLevel, get_current_vllm_config
 
 
 class TorchCompileWrapperWithCustomDispatcher:
@@ -23,7 +24,23 @@ class TorchCompileWrapperWithCustomDispatcher:
         `torch.compile` over the forward method.
     """
 
-    def __init__(self, compiled_callable: Callable):
+    def __init__(self,
+                 compiled_callable: Optional[Callable] = None,
+                 compilation_level: int = 0):
+
+        vllm_config = get_current_vllm_config()
+        self.vllm_config = vllm_config
+        if compiled_callable is None:
+            # default compilation settings
+            # compiling the forward method
+
+            backend = vllm_config.compilation_config.init_backend(vllm_config)
+
+            compiled_callable = torch.compile(
+                self.forward,
+                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                backend=backend)
+
         self.compiled_callable = compiled_callable
         self.original_code_object = self.__class__.forward.__code__
         self.compiled_codes: List[CodeType] = []
@@ -33,7 +50,7 @@ class TorchCompileWrapperWithCustomDispatcher:
         # subclasses can use this to switch between the custom dispatcher
         # and the default Dynamo guard mechanism.
         self.use_custom_dispatcher: bool = \
-            envs.VLLM_DYNAMO_USE_CUSTOM_DISPATCHER
+            compilation_level >= CompilationLevel.DYNAMO_ONCE
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.
@@ -52,7 +69,7 @@ class TorchCompileWrapperWithCustomDispatcher:
             return
         # code borrowed from https://github.com/thuml/depyf/blob/f4ad79fadee27ea113b4c75202db1eb1a11c0dbc/depyf/explain/enable_debugging.py#L25
         frame = sys._getframe()
-        while True:
+        while frame and frame.f_back:
             frame = frame.f_back
             code_name = frame.f_code.co_name
             file_name = frame.f_code.co_filename.split(os.path.sep)[-1]
@@ -65,6 +82,13 @@ class TorchCompileWrapperWithCustomDispatcher:
             return
 
         self.compiled_codes.append(new_code)
+
+        if self.vllm_config.compilation_config.use_cudagraph and \
+            "update" in new_code.co_names:
+            import depyf
+            src = depyf.decompile(new_code)
+            msg = "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler because it will cause silent errors. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified (please search for the usage of the function `update`):\n" + src  # noqa
+            raise RuntimeError(msg)
 
     @contextmanager
     def dispatch_to_code(self, index: int):

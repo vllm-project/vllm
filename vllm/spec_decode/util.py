@@ -5,8 +5,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
-                           SequenceGroupMetadata, SequenceOutput)
+                           PromptLogprobs, SequenceGroupMetadata,
+                           SequenceOutput)
 
 SeqId = int
 
@@ -49,21 +51,19 @@ def get_sampled_token_logprobs(
     return sampled_token_ids_ranks, selected_logprobs
 
 
-def create_sequence_group_output(
+def create_logprobs_output(
     token_id: int,
     token_id_logprob_rank: int,
     token_id_logprob: float,
-    seq_id: SeqId,
     topk_token_ids: List[Optional[int]],
     topk_logprobs: List[Optional[float]],
-) -> CompletionSequenceGroupOutput:
-    """Create a SequenceGroupOutput given the sampling results.
+) -> Dict[int, Logprob]:
+    """Create a Logprob Dict for a token given the sampling results.
 
     Args:
         token_id (int): The sampled token for the sequence.
         token_id_logprob_rank (int): The logprob rank of the sampled token.
         token_id_logprob (float): The logprob value of the sampled token.
-        seq_id (int): The sequence id.
         topk_token_ids (List[Optional[int]]): The list of top-k token ids.
         topk_logprobs (List[Optional[float]]): The list of top-k logprobs.
     """
@@ -85,14 +85,44 @@ def create_sequence_group_output(
         if topk_token_id is not None
     })
 
+    return logprobs
+
+
+def create_sequence_group_output(
+    token_id: int,
+    token_id_logprob_rank: int,
+    token_id_logprob: float,
+    seq_id: SeqId,
+    topk_token_ids: List[Optional[int]],
+    topk_logprobs: List[Optional[float]],
+    prompt_logprobs: Optional[PromptLogprobs] = None,
+) -> CompletionSequenceGroupOutput:
+    """Create a SequenceGroupOutput given the sampling results.
+
+    Args:
+        token_id (int): The sampled token for the sequence.
+        token_id_logprob_rank (int): The logprob rank of the sampled token.
+        token_id_logprob (float): The logprob value of the sampled token.
+        seq_id (int): The sequence id.
+        topk_token_ids (List[Optional[int]]): The list of top-k token ids.
+        topk_logprobs (List[Optional[float]]): The list of top-k logprobs.
+    """
+
+    logprobs = create_logprobs_output(
+        token_id,
+        token_id_logprob_rank,
+        token_id_logprob,
+        topk_token_ids,
+        topk_logprobs,
+    )
+
     return CompletionSequenceGroupOutput(
         samples=[
             SequenceOutput(parent_seq_id=seq_id,
                            output_token=token_id,
                            logprobs=logprobs)
         ],
-        # TODO add prompt logprobs support.
-        prompt_logprobs=None,
+        prompt_logprobs=prompt_logprobs,
     )
 
 
@@ -218,11 +248,14 @@ def nvtx_range(msg, *args, **kwargs):
     Arguments:
         msg (string): message to associate with the range
     """
-    torch.cuda.nvtx.range_push(msg.format(*args, **kwargs))
-    try:
+    if current_platform.is_cuda_alike():
+        torch.cuda.nvtx.range_push(msg.format(*args, **kwargs))
+        try:
+            yield
+        finally:
+            torch.cuda.nvtx.range_pop()
+    else:
         yield
-    finally:
-        torch.cuda.nvtx.range_pop()
 
 
 class Timer:

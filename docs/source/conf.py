@@ -10,11 +10,13 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
+import inspect
 import logging
 import os
 import sys
 from typing import List
 
+import requests
 from sphinx.ext import autodoc
 
 logger = logging.getLogger(__name__)
@@ -34,12 +36,18 @@ author = 'the vLLM Team'
 extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
+    "sphinx.ext.linkcode",
     "sphinx.ext.intersphinx",
     "sphinx_copybutton",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
     "myst_parser",
     "sphinxarg.ext",
+    "sphinx_design",
+    "sphinx_togglebutton",
+]
+myst_enable_extensions = [
+    "colon_fence",
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -48,7 +56,7 @@ templates_path = ['_templates']
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns: List[str] = ["**/*.template.rst"]
+exclude_patterns: List[str] = ["**/*.template.md", "**/*.inc.md"]
 
 # Exclude the prompt "$" when copying code
 copybutton_prompt_text = r"\$ "
@@ -70,6 +78,35 @@ html_theme_options = {
 }
 html_static_path = ["_static"]
 html_js_files = ["custom.js"]
+
+myst_url_schemes = {
+    'http': None,
+    'https': None,
+    'mailto': None,
+    'ftp': None,
+    "gh-issue": {
+        "url":
+        "https://github.com/vllm-project/vllm/issues/{{path}}#{{fragment}}",
+        "title": "Issue #{{path}}",
+        "classes": ["github"],
+    },
+    "gh-pr": {
+        "url":
+        "https://github.com/vllm-project/vllm/pull/{{path}}#{{fragment}}",
+        "title": "Pull Request #{{path}}",
+        "classes": ["github"],
+    },
+    "gh-dir": {
+        "url": "https://github.com/vllm-project/vllm/tree/main/{{path}}",
+        "title": "{{path}}",
+        "classes": ["github"],
+    },
+    "gh-file": {
+        "url": "https://github.com/vllm-project/vllm/blob/main/{{path}}",
+        "title": "{{path}}",
+        "classes": ["github"],
+    },
+}
 
 # see https://docs.readthedocs.io/en/stable/reference/environment-variables.html # noqa
 READTHEDOCS_VERSION_TYPE = os.environ.get('READTHEDOCS_VERSION_TYPE')
@@ -94,9 +131,72 @@ def setup(app):
     generate_examples()
 
 
+_cached_base: str = ""
+_cached_branch: str = ""
+
+
+def get_repo_base_and_branch(pr_number):
+    global _cached_base, _cached_branch
+    if _cached_base and _cached_branch:
+        return _cached_base, _cached_branch
+
+    url = f"https://api.github.com/repos/vllm-project/vllm/pulls/{pr_number}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()
+        _cached_base = data['head']['repo']['full_name']
+        _cached_branch = data['head']['ref']
+        return _cached_base, _cached_branch
+    else:
+        logger.error("Failed to fetch PR details: %s", response)
+        return None, None
+
+
+def linkcode_resolve(domain, info):
+    if domain != 'py':
+        return None
+    if not info['module']:
+        return None
+    filename = info['module'].replace('.', '/')
+    module = info['module']
+
+    # try to determine the correct file and line number to link to
+    obj = sys.modules[module]
+
+    # get as specific as we can
+    lineno: int = 0
+    filename: str = ""
+    try:
+        for part in info['fullname'].split('.'):
+            obj = getattr(obj, part)
+
+            if not (inspect.isclass(obj) or inspect.isfunction(obj)
+                    or inspect.ismethod(obj)):
+                obj = obj.__class__  # Get the class of the instance
+
+            lineno = inspect.getsourcelines(obj)[1]
+            filename = (inspect.getsourcefile(obj)
+                        or f"{filename}.py").split("vllm/", 1)[1]
+    except Exception:
+        # For some things, like a class member, won't work, so
+        # we'll use the line number of the parent (the class)
+        pass
+
+    if filename.startswith("checkouts/"):
+        # a PR build on readthedocs
+        pr_number = filename.split("/")[1]
+        filename = filename.split("/", 2)[2]
+        base, branch = get_repo_base_and_branch(pr_number)
+        if base and branch:
+            return f"https://github.com/{base}/blob/{branch}/{filename}#L{lineno}"
+
+    # Otherwise, link to the source file on the main branch
+    return f"https://github.com/vllm-project/vllm/blob/main/{filename}#L{lineno}"
+
+
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
 autodoc_mock_imports = [
-    "aiohttp",
+    "blake3",
     "compressed_tensors",
     "cpuinfo",
     "cv2",
@@ -113,10 +213,12 @@ autodoc_mock_imports = [
     "tensorizer",
     "pynvml",
     "outlines",
+    "xgrammar",
     "librosa",
     "soundfile",
     "gguf",
     "lark",
+    "decord",
 ]
 
 for mock_target in autodoc_mock_imports:
@@ -143,6 +245,7 @@ intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
     "typing_extensions":
     ("https://typing-extensions.readthedocs.io/en/latest", None),
+    "aiohttp": ("https://docs.aiohttp.org/en/stable", None),
     "pillow": ("https://pillow.readthedocs.io/en/stable", None),
     "numpy": ("https://numpy.org/doc/stable", None),
     "torch": ("https://pytorch.org/docs/stable", None),

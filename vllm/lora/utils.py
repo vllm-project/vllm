@@ -1,5 +1,6 @@
 import os
-from typing import List, Optional, Set, Tuple, Type
+import re
+from typing import List, Optional, Set, Tuple, Type, Union
 
 import huggingface_hub
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
@@ -29,6 +30,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -90,27 +92,80 @@ def replace_submodule(model: nn.Module, module_name: str,
     return new_module
 
 
-def parse_fine_tuned_lora_name(name: str) -> Tuple[str, bool]:
+def parse_fine_tuned_lora_name(
+        name: str,
+        weights_mapper: Optional[WeightsMapper] = None
+) -> Tuple[str, bool, bool]:
     """Parse the name of lora weights.
 
     args:
         name: the name of the fine-tuned LoRA, e.g.
             base_model.model.dense1.weight
+        weights_mapper: maps the name of weight, e.g.
+            `model.` -> `language_model.model.`,
     return:
         Tuple(module_name, is_lora_a):
             module_name: the name of the module, e.g. model.dense1,
             is_lora_a whether the tensor is lora_a or lora_b.
+            is_bias whether the tensor is lora bias.
     """
-    parts = name.split(".")
 
-    if len(parts) >= 2 and parts[0] == "base_model" and parts[1] == "model":
-        if parts[-1] == "weight":
-            if parts[-2] == "lora_A" or parts[-2] == "lora_B":
-                return ".".join(parts[2:-2]), parts[-2] == "lora_A"
-        elif parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
-            return ".".join(parts[2:-1]), parts[-1] == "lora_embedding_A"
+    # LoRA weight qualified name always starts with `base_model.model.`,
+    # so we remove the prefix `base_model.model.` to make the following
+    # mapping correctly.
+    if "base_model.model." in name:
+        name = name.replace("base_model.model.", "")
+        name = weights_mapper._map_name(name) if weights_mapper else name
+        # recover the prefix `base_model.model.`
+        name = "base_model.model." + name
+
+    parts = name.split(".")
+    if parts[-1] == "weight" and (parts[-2] == "lora_A"
+                                  or parts[-2] == "lora_B"):
+        new_name = ".".join(parts[2:-2])
+        return new_name, parts[-2] == "lora_A", False
+
+    if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
+        new_name = ".".join(parts[2:-1])
+        return new_name, parts[-1] == "lora_embedding_A", False
+
+    if parts[-1] == "bias":
+        new_name = ".".join(parts[2:-2])
+        return new_name, False, True
 
     raise ValueError(f"{name} is unsupported LoRA weight")
+
+
+def is_regex_target_modules(load_modules: Union[str, List[str]],
+                            expected_lora_modules: List[str]) -> bool:
+    """
+    PEFT supports passing `target_modules` in the form of regular expressions, 
+    such as `model.*(q_proj|k_proj|v_proj)$`. This function is mainly used to 
+    determine whether the suffix in the regular expression is present in the 
+    `expected_lora_modules`.
+    """
+
+    def is_valid_regex(pattern):
+        try:
+            re.compile(pattern)
+            return True
+        except re.error:
+            return False
+
+    def is_subset(sub_list, full_list):
+        return set(sub_list).issubset(set(full_list))
+
+    # Similar to PEFT's processing logic, regex-related operations are only
+    #  executed when the load_modules is a `str`.
+    if not isinstance(load_modules, str):
+        return False
+
+    if is_valid_regex(load_modules):
+        match = re.search(r"\((.*?)\)\$?$", load_modules)
+        if match:
+            suffix = match.group(1).split("|")
+            return is_subset(suffix, expected_lora_modules)
+    return False
 
 
 def get_adapter_absolute_path(lora_path: str) -> str:

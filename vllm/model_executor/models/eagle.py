@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -12,7 +13,28 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.eagle import EAGLEConfig
+
+from .utils import maybe_prefix
+
+
+class DummyInputLayerNorm(nn.Module):
+
+    def __init__(self, weight=None, bias=None):
+        super().__init__()
+        self.weight = nn.Parameter(weight) if weight is not None else None
+        self.bias = nn.Parameter(bias) if bias is not None else None
+
+    def forward(self, x):
+        return x
+
+
+class DummyOutputNorm(nn.Module):
+
+    def forward(self, x, residual):
+        if residual is None:
+            return x
+        else:
+            return x, residual
 
 
 class EAGLE(nn.Module):
@@ -21,8 +43,9 @@ class EAGLE(nn.Module):
     
     Differences from reference implementation:
     1. In reference, LlamaDecoderLayer implementation doesn't have 
-       input_layernorm for 1st decoder layer (https://github.com/SafeAILab/EAGLE/blob/7d065d084443fbfd386f88839efd7193c12be869/eagle/model/cnets.py#L427) 
-       but we do as HF implementation also does.
+       input_layernorm for 1st decoder layer (https://github.com/SafeAILab/EAGLE/blob/7d065d084443fbfd386f88839efd7193c12be869/eagle/model/cnets.py#L427).
+       Following this approach, our implementation also disables
+       the input_layernorm for the first decoder layer.
     2. We allow any decoder layer to be used in EAGLE whereas in reference 
        decoder layer is fixed to be LlamaDecoderLayer.
     3. We have an optional token_map which reduces draft vocab to most 
@@ -34,17 +57,29 @@ class EAGLE(nn.Module):
        in the draft checkpoint (using key token_map). Also, the draft config
        needs to have truncated_vocab_size (=k) as an attribute."""
 
-    def __init__(self, config: EAGLEConfig, *args, **kwargs) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
         self.config = config
 
         architectures = getattr(self.config.model, "architectures", [])
         model_cls, _ = ModelRegistry.resolve_model_cls(architectures)
 
-        self.model = model_cls(self.config.model, *args, **kwargs)
+        self.model = model_cls(vllm_config=vllm_config,
+                               prefix=maybe_prefix(prefix, "model"))
+
         self.fc = nn.Linear(config.model.hidden_size * 2,
                             config.model.hidden_size,
-                            bias=False)
+                            bias=getattr(self.config, "eagle_fc_bias", False))
+
+        # Modify layer normalization and residual connections as suggested
+        # in the EAGLE framework: https://github.com/SafeAILab/EAGLE
+        # While weights and biases are generally not needed,
+        # they are retained here to support certain unit tests
+        # (e.g., spec_decode/e2e/test_eagle_correctness.py).
+        self.model.model.layers[0].input_layernorm = DummyInputLayerNorm(
+            weight=self.model.model.layers[0].input_layernorm.weight)
+        self.model.model.norm = DummyOutputNorm()
 
         self.orig_vocab_size = config.vocab_size
         self.truncated_vocab_size = config.truncated_vocab_size
@@ -74,6 +109,9 @@ class EAGLE(nn.Module):
     def sampler(self):
         return self.model.sampler
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.model.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -82,11 +120,14 @@ class EAGLE(nn.Module):
         attn_metadata: AttentionMetadata,
         previous_hidden_states: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        tok_embeds = self.model.model.embed_tokens(input_ids)
+        if inputs_embeds is None:
+            inputs_embeds = self.get_input_embeddings(input_ids)
+
         inputs_embeds = self.fc(
-            torch.cat([tok_embeds, previous_hidden_states], dim=-1))
+            torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
 
         inputs_embeds[positions == 0] = 0  # masking inputs at position=0
 
@@ -96,7 +137,8 @@ class EAGLE(nn.Module):
             positions=positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
-            intermediate_tensors=intermediate_tensors)
+            intermediate_tensors=intermediate_tensors,
+        )
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -136,10 +178,18 @@ class EAGLE(nn.Module):
                 if self.config.truncated_vocab_size < self.config.vocab_size:
                     self.token_map = nn.Parameter(loaded_weight,
                                                   requires_grad=False)
-            elif name.startswith("fc."):
+            elif name.startswith("fc.weight"):
                 weight_loader = getattr(self.fc.weight, "weight_loader",
                                         default_weight_loader)
                 weight_loader(self.fc.weight, loaded_weight)
+            elif name.startswith("fc.bias"):
+                if self.fc.bias is not None:
+                    weight_loader = getattr(self.fc.bias, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(self.fc.bias, loaded_weight)
+                else:
+                    raise ValueError("Found bias in the loaded weights "
+                                     "but the model config doesn't have bias")
             elif name.startswith("model.lm_head.") or name.startswith(
                     "model.model."):
                 model_weights[name.split("model.", 1)[-1]] = loaded_weight

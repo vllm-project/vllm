@@ -104,9 +104,9 @@ class TestNaiveBlockAllocator:
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [4])
     @pytest.mark.parametrize("block_size", [8])
-    def test_naive_block_get_num_blocks_touched(num_blocks, block_size):
+    def test_naive_block_get_num_full_blocks_touched(num_blocks, block_size):
         """ Verify the allocator can correctly return the number of
-        blocks touched, with different lookahead slots.
+        full blocks touched.
         """
         allocator_src = NaiveBlockAllocator(create_block=NaiveBlock,
                                             num_blocks=num_blocks,
@@ -124,7 +124,7 @@ class TestNaiveBlockAllocator:
         src_blocks = [allocate_block() for _ in range(num_blocks - 1)]
 
         # All blocks are cached
-        assert allocator_dst.get_num_blocks_touched(
+        assert allocator_dst.get_num_full_blocks_touched(
             src_blocks) == num_blocks - 1
 
         # Insert one non-full block in the src
@@ -136,9 +136,10 @@ class TestNaiveBlockAllocator:
         src_blocks.append(allocate_non_full_block())
         src_blocks[-1].append_token_ids([0])
 
-        assert allocator_dst.get_num_blocks_touched(
-            src_blocks, num_lookahead_slots=1) == num_blocks
-        assert allocator_dst.get_num_blocks_touched(
-            src_blocks, num_lookahead_slots=block_size - 1) == num_blocks
-        assert allocator_dst.get_num_blocks_touched(
-            src_blocks, num_lookahead_slots=block_size) == (num_blocks + 1)
+        assert allocator_dst.get_num_full_blocks_touched(
+            src_blocks) == num_blocks - 1
+        # Fill up the last source block and then invoke
+        # get_num_blocks_touched
+        src_blocks[-1].append_token_ids([0] * (block_size - 1))
+        assert allocator_dst.get_num_full_blocks_touched(
+            src_blocks) == num_blocks

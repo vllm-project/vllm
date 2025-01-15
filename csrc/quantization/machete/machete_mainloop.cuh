@@ -66,13 +66,11 @@ struct MacheteCollectiveMma {
   using Schedule = KernelScheduleType;
   static_assert(
       cute::is_same_v<Schedule, KernelTmaWarpSpecialized> ||
-          cute::is_same_v<Schedule, KernelTmaWarpSpecializedMixedInput> ||
+          cute::is_same_v<Schedule, KernelTmaWarpSpecialized> ||
           cute::is_same_v<Schedule, KernelTmaWarpSpecializedPingpong> ||
-          cute::is_same_v<Schedule,
-                          KernelTmaWarpSpecializedPingpongMixedInput> ||
+          cute::is_same_v<Schedule, KernelTmaWarpSpecializedPingpong> ||
           cute::is_same_v<Schedule, KernelTmaWarpSpecializedCooperative> ||
-          cute::is_same_v<Schedule,
-                          KernelTmaWarpSpecializedCooperativeMixedInput>,
+          cute::is_same_v<Schedule, KernelTmaWarpSpecializedCooperative>,
       "KernelSchedule must be one of the warp specialized policies");
 
  public:
@@ -113,8 +111,7 @@ struct MacheteCollectiveMma {
   // For coop schedules we have two warp groups cooperatively issuing wgmma
   // instructions so we use 2 atoms along the M dim (one for each warpgroup)
   using AtomLayoutMNK = cute::conditional_t<
-      cute::is_same_v<KernelScheduleType,
-                      KernelTmaWarpSpecializedCooperativeMixedInput>,
+      cute::is_same_v<KernelScheduleType, KernelTmaWarpSpecializedCooperative>,
       Layout<Shape<_2, _1, _1>>, Layout<Shape<_1, _1, _1>>>;
 
   using TiledMma = decltype(cute::make_tiled_mma(
@@ -168,6 +165,10 @@ struct MacheteCollectiveMma {
 
   // ((T, V), (BlocksM, BlocksK), pipe) -> offset
   using SmemLayoutA = decltype(GmemLayoutA::TVbNbKL_to_offset(
+      make_shape(size<0>(TileShape_MNK{}), size<2>(TileShape_MNK{}),
+                 Int<DispatchPolicy::Stages>{})));
+
+  using SmemLayoutACopy = decltype(GmemLayoutA::TVbNbKL_to_offset_copy(
       make_shape(size<0>(TileShape_MNK{}), size<2>(TileShape_MNK{}),
                  Int<DispatchPolicy::Stages>{})));
 
@@ -288,14 +289,7 @@ struct MacheteCollectiveMma {
   static_assert((size<2>(TileShape{}) % size<1>(SmemLayoutAtomScale{})) == 0,
                 "SmemLayoutAtomScale must evenly divide tile k shape.");
 
-  // Tile along modes in a way that maximizes the TMA box size.
-  using SmemLayoutACopy = decltype(tile_to_shape(
-      SmemLayoutAtomARowMajor{},
-      make_shape(shape<0>(TileShape{}), shape<2>(TileShape{}),
-                 Int<DispatchPolicy::Stages>{}),
-      conditional_t<::cutlass::gemm::detail::is_major<0, StrideA>(),
-                    Step<_2, _1, _3>, Step<_1, _2, _3>>{}));
-
+  // Tile along modes in a way that maximizes the TMA box size
   using SmemLayoutB = decltype(tile_to_shape(
       SmemLayoutAtomB{},
       make_shape(shape<1>(TileShape{}), shape<2>(TileShape{}),
@@ -428,12 +422,12 @@ struct MacheteCollectiveMma {
   // clang-format on
 
   // ((athrid, val), (BlocksM, BlockK), L) -> (storage_idx)
-  using PrepackedStrideA = decltype(stride(GmemLayoutA::TVbNbKL_to_offset(
+  using PrepackedStrideA = decltype(stride(GmemLayoutA::TVbNbKL_to_offset_copy(
       make_shape(int32_t(0), int32_t(0), int32_t(0)))));
 
   using ATensor = decltype(make_tensor(
       get_logical_ptr(static_cast<InternalElementA const*>(nullptr)),
-      shape(GmemLayoutA::TVbNbKL_to_offset(
+      shape(GmemLayoutA::TVbNbKL_to_offset_copy(
           make_shape(int32_t(0), int32_t(0), int32_t(0)))),
       PrepackedStrideA{}));
 
@@ -450,8 +444,8 @@ struct MacheteCollectiveMma {
 
   static constexpr auto make_tma_copy_A(ATensor tensor_a = ATensor{}) {
     return make_tma_copy<TmaElementA>(
-        GmemTiledCopyA{}, tensor_a, SmemLayoutA{}(_, _, cute::Int<0>{}),
-        shape(SmemLayoutA{}(_, _, cute::Int<0>{})),
+        GmemTiledCopyA{}, tensor_a, SmemLayoutACopy{}(_, _, cute::Int<0>{}),
+        shape(SmemLayoutACopy{}(_, _, cute::Int<0>{})),
         size<1>(ClusterShape{}));  // mcast along N mode for this M load, if any
   }
 
@@ -584,31 +578,34 @@ struct MacheteCollectiveMma {
     typename Params::TMA_Scale tma_load_scale;
     typename Params::TMA_Zero tma_load_zero;
 
-    auto layout = GmemLayoutA::TVbNbKL_to_offset(make_shape(M, K, L));
+    auto layout = GmemLayoutA::TVbNbKL_to_offset_copy(make_shape(M, K, L));
     tma_load_a = make_tma_copy_A(
         make_logical_tensor(ptr_A, shape(layout), stride(layout)));
 
     tma_load_b = make_tma_copy_B(
         make_logical_tensor(ptr_B, make_shape(N, K, L), args.dB));
 
+    int32_t scale_k =
+        (ModeHasScales) ? (K + args.group_size - 1) / args.group_size : 0;
+    int32_t group_size = (ModeHasScales) ? args.group_size : 0;
+
     if constexpr (ModeHasScales) {
-      tma_load_scale = make_tma_copy_scale(make_logical_tensor(
-          args.ptr_S, make_shape(M, args.group_size, L), args.dS));
+      tma_load_scale = make_tma_copy_scale(
+          make_logical_tensor(args.ptr_S, make_shape(M, scale_k, L), args.dS));
     }
 
     if constexpr (KernelConversionMode ==
                   ConversionMode::ConvertAndScaleWithZero) {
-      tma_load_zero = make_tma_copy_zero(make_logical_tensor(
-          args.ptr_Z, make_shape(M, args.group_size, L), args.dS));
+      tma_load_zero = make_tma_copy_zero(
+          make_logical_tensor(args.ptr_Z, make_shape(M, scale_k, L), args.dS));
     }
 
-    if constexpr (KernelConversionMode == ConversionMode::DirectConvert) {
-      return {tma_load_a, tma_load_b, tma_load_scale, tma_load_zero, 0, 0};
-    } else if constexpr (ModeHasScales) {
-      auto scale_k = (K + args.group_size - 1) / args.group_size;
-
+    if constexpr (KernelConversionMode == ConversionMode::DirectConvert ||
+                  KernelConversionMode == ConversionMode::ConvertAndScale ||
+                  KernelConversionMode ==
+                      ConversionMode::ConvertAndScaleWithZero) {
       return {tma_load_a,    tma_load_b, tma_load_scale,
-              tma_load_zero, scale_k,    args.group_size};
+              tma_load_zero, scale_k,    group_size};
     } else {
       static_assert(cutlass::detail::dependent_false<KernelSchedule>,
                     "Conversion mode not handled in to_underlying_arguments.");
@@ -719,7 +716,7 @@ struct MacheteCollectiveMma {
     // (TILE_V,TILE_B,m,k,l)
     auto make_gA_mkl = [&]() {
       // ((athrid, val), (BlocksM, BlockK), L) -> (storage_idx)
-      auto layout = GmemLayoutA::TVbNbKL_to_offset(make_shape(M, K, L));
+      auto layout = GmemLayoutA::TVbNbKL_to_offset_copy(make_shape(M, K, L));
       Tensor mA_mkl = mainloop_params.tma_load_a.get_tma_tensor(shape(layout));
       return local_tile(mA_mkl,
                         make_shape(size<0>(layout), PPBlocksPerTile_MK{}),

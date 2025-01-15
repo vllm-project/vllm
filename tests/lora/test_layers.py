@@ -28,7 +28,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
 # yapf: enable
 from vllm.lora.models import (LongContextLoRAContext, LoRALayerWeights,
                               PackedLoRALayerWeights)
-from vllm.lora.punica import PunicaWrapper
+from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -39,7 +39,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding, get_masked_input_and_mask)
 from vllm.model_executor.utils import set_random_seed
-from vllm.utils import seed_everything
+from vllm.platforms import current_platform
 
 from .utils import DummyLoRAManager
 
@@ -48,10 +48,16 @@ TOLERANCES = {
     torch.float32: (5e-3, 5e-3),
     torch.bfloat16: (3e-2, 2e-2),
 }
-CUDA_DEVICES = [
+
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_cpu()),
+    reason="Backend not supported")
+
+DEVICES = ([
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
-# We will launch different triton kernels between the prefill and decode
+] if current_platform.is_cuda_alike() else ["cpu"])
+
+#For GPU, we will launch different triton kernels between the prefill and decode
 # stages, so we need to verify this. prefill stage(True) or decode stage(False)
 STAGES = [True, False]
 
@@ -120,11 +126,12 @@ def populate_loras(
             subloras: List[LoRALayerWeights] = []
             sublora_len = layer_weights.shape[0] // repeats
             for i in range(repeats):
-                sublora = DummyLoRAManager().init_random_lora(
-                    module_name=f"fake_{i}",
-                    weight=layer_weights,
-                    generate_embeddings_tensor=generate_embeddings_tensor,
-                )
+                sublora = DummyLoRAManager(
+                    layer_weights.device).init_random_lora(
+                        module_name=f"fake_{i}",
+                        weight=layer_weights,
+                        generate_embeddings_tensor=generate_embeddings_tensor,
+                    )
                 sublora.lora_b = sublora.lora_b[:, (sublora_len *
                                                     i):(sublora_len * (i + 1))]
                 sublora.optimize()
@@ -152,6 +159,7 @@ def create_random_inputs(
     input_size: Tuple[int, ...],
     input_range: Tuple[float, float],
     input_type: torch.dtype = torch.int,
+    device: torch.device = "cuda"
 ) -> Tuple[List[torch.Tensor], List[int], List[int]]:
     """Creates random inputs.
 
@@ -173,10 +181,14 @@ def create_random_inputs(
     for _ in range(num_inputs):
         if input_type == torch.int:
             inputs.append(
-                torch.randint(low=int(low), high=int(high), size=input_size))
+                torch.randint(low=int(low),
+                              high=int(high),
+                              size=input_size,
+                              device=device))
         else:
             inputs.append(
-                torch.rand(size=input_size, dtype=input_type) * high + low)
+                torch.rand(size=input_size, dtype=input_type, device=device) *
+                high + low)
 
         lora_id = random.choice(active_lora_ids)
         index_mapping += [lora_id] * input_size[0]
@@ -185,16 +197,35 @@ def create_random_inputs(
     return inputs, index_mapping, prompt_mapping
 
 
+def check_punica_wrapper(punica_wrapper) -> bool:
+    if current_platform.is_cuda_alike():
+        from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
+
+        return type(punica_wrapper) is PunicaWrapperGPU
+    elif current_platform.is_cpu():
+        from vllm.lora.punica_wrapper.punica_cpu import PunicaWrapperCPU
+
+        return type(punica_wrapper) is PunicaWrapperCPU
+    else:
+        return False
+
+
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 128000])
 @pytest.mark.parametrize("stage", STAGES)
 def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
+    # For multi-GPU testing of Triton kernel, we must explicitly set the CUDA
+    # device, see: https://github.com/triton-lang/triton/issues/2925
+    # Same below.
+    if current_platform.is_cuda_alike():
+        torch.cuda.set_device(device)
 
     torch.set_default_device(device)
     max_loras = 8
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = get_punica_wrapper(8192, 256, device)
+    assert check_punica_wrapper(punica_wrapper)
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              lora_dtype=torch.float16)
@@ -225,7 +256,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
             num_inputs=num_loras * 3,
             input_size=(200, ),
             input_range=(1, vocab_size),
-        )
+            device=device)
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
                                    is_prefill=stage)
@@ -263,7 +294,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
             num_inputs=num_loras * 3,
             input_size=(200, ),
             input_range=(1, vocab_size),
-        )
+            device=device)
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
                                    is_prefill=stage)
@@ -285,15 +316,19 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
 # @pytest.mark.skip(
 #     reason="Fails when loras are in any slot other than the first.")
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 128000])
 @pytest.mark.parametrize("stage", STAGES)
 def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
                                         vocab_size, stage) -> None:
 
+    if current_platform.is_cuda_alike():
+        torch.cuda.set_device(device)
+
     torch.set_default_device(device)
     max_loras = 8
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = get_punica_wrapper(8192, 256, device)
+    assert check_punica_wrapper(punica_wrapper)
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              lora_dtype=torch.float16)
@@ -345,7 +380,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
             num_inputs=num_loras * 3,
             input_size=(200, ),
             input_range=(1, vocab_size),
-        )
+            device=device)
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
                                    is_prefill=stage)
@@ -400,7 +435,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
             num_inputs=num_loras * 3,
             input_size=(200, ),
             input_range=(1, vocab_size),
-        )
+            device=device)
         original_inputs = deepcopy(inputs)
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
@@ -420,15 +455,19 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
 
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 256512])
 @pytest.mark.parametrize("stage", STAGES)
 def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
                                   stage) -> None:
 
+    if current_platform.is_cuda_alike():
+        torch.cuda.set_device(device)
+
     torch.set_default_device(device)
     max_loras = 8
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = get_punica_wrapper(8192, 256, device)
+    assert check_punica_wrapper(punica_wrapper)
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              lora_dtype=torch.float16)
@@ -471,7 +510,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
             input_size=(1, 1024),
             input_range=(0, 1),
             input_type=torch.float16,
-        )
+            device=device)
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
                                    is_prefill=stage)
@@ -520,7 +559,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
             input_size=(1, 1024),
             input_range=(0, 1),
             input_type=torch.float16,
-        )
+            device=device)
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
                                    is_prefill=stage)
@@ -550,16 +589,23 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
 
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
-def test_linear_replicated(dist_init, num_loras, device, stage) -> None:
+@pytest.mark.parametrize("bias_enabled", [True, False])
+def test_linear_replicated(dist_init, num_loras, device, stage,
+                           bias_enabled) -> None:
+
+    if current_platform.is_cuda_alike():
+        torch.cuda.set_device(device)
 
     torch.set_default_device(device)
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = get_punica_wrapper(8192, 256, device)
+    assert check_punica_wrapper(punica_wrapper)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
-                             lora_dtype=torch.float16)
+                             lora_dtype=torch.float16,
+                             bias_enabled=bias_enabled)
 
     def create_random_linear_replicated_layer():
 
@@ -571,7 +617,12 @@ def test_linear_replicated(dist_init, num_loras, device, stage) -> None:
         lora_linear = ReplicatedLinearWithLoRA(linear)
 
         lora_linear.create_lora_weights(max_loras, lora_config)
-
+        assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
+            lora_linear.lora_b_stacked) == 1)
+        if bias_enabled:
+            assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
+        else:
+            assert lora_linear.lora_bias_stacked is None
         return linear, lora_linear
 
     for i in range(10):
@@ -592,7 +643,7 @@ def test_linear_replicated(dist_init, num_loras, device, stage) -> None:
             input_size=(1, 4096),
             input_range=(0, 1),
             input_type=torch.float16,
-        )
+            device=device)
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
                                    is_prefill=stage)
@@ -631,7 +682,7 @@ def test_linear_replicated(dist_init, num_loras, device, stage) -> None:
             input_size=(1, 4096),
             input_range=(0, 1),
             input_type=torch.float16,
-        )
+            device=device)
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
                                    is_prefill=stage)
@@ -653,18 +704,24 @@ def test_linear_replicated(dist_init, num_loras, device, stage) -> None:
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("orientation", ["row", "column"])
 @pytest.mark.parametrize("fully_shard", [True, False])
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
+@pytest.mark.parametrize("bias_enabled", [True, False])
 def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
-                         device, stage) -> None:
+                         device, stage, bias_enabled) -> None:
+
+    if current_platform.is_cuda_alike():
+        torch.cuda.set_device(device)
 
     torch.set_default_device(device)
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = get_punica_wrapper(8192, 256, device)
+    assert check_punica_wrapper(punica_wrapper)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              fully_sharded_loras=fully_shard,
-                             lora_dtype=torch.float16)
+                             lora_dtype=torch.float16,
+                             bias_enabled=bias_enabled)
 
     def create_random_linear_parallel_layer():
         if orientation == "row":
@@ -685,7 +742,12 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
                            if not fully_shard else
                            ColumnParallelLinearWithShardedLoRA(linear))
         lora_linear.create_lora_weights(max_loras, lora_config)
-
+        assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
+            lora_linear.lora_b_stacked) == 1)
+        if bias_enabled:
+            assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
+        else:
+            assert lora_linear.lora_bias_stacked is None
         return linear, lora_linear
 
     for i in range(10):
@@ -706,7 +768,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
             input_size=(1, 4096),
             input_range=(0, 1),
             input_type=torch.float16,
-        )
+            device=device)
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
                                    is_prefill=stage)
@@ -745,7 +807,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
             input_size=(1, 4096),
             input_range=(0, 1),
             input_type=torch.float16,
-        )
+            device=device)
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
                                    is_prefill=stage)
@@ -767,18 +829,24 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("repeats", [1, 2, 3])
 @pytest.mark.parametrize("fully_shard", [True, False])
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
+@pytest.mark.parametrize("bias_enabled", [True, False])
 def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
-                                device, stage) -> None:
+                                device, stage, bias_enabled) -> None:
+
+    if current_platform.is_cuda_alike():
+        torch.cuda.set_device(device)
 
     torch.set_default_device(device)
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = get_punica_wrapper(8192, 256, device)
+    assert check_punica_wrapper(punica_wrapper)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
                              fully_sharded_loras=fully_shard,
-                             lora_dtype=torch.float16)
+                             lora_dtype=torch.float16,
+                             bias_enabled=bias_enabled)
 
     def create_column_parallel_packed_layer():
         if repeats == 2:
@@ -816,10 +884,16 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             num_key_value_heads = 32
             num_attention_heads = 32
 
+        n_slices = repeats
         lora_linear.create_lora_weights(max_loras,
                                         lora_config,
                                         model_config=FakeConfig())
-
+        assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
+            lora_linear.lora_b_stacked) == n_slices)
+        if bias_enabled:
+            assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
+        else:
+            assert lora_linear.lora_bias_stacked is None
         return linear, lora_linear
 
     for i in range(10):
@@ -842,7 +916,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             input_size=(1, 4096),
             input_range=(0, 1),
             input_type=torch.float16,
-        )
+            device=device)
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
                                    is_prefill=stage)
@@ -883,7 +957,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             input_size=(1, 4096),
             input_range=(0, 1),
             input_type=torch.float16,
-        )
+            device=device)
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
                                    is_prefill=stage)
@@ -895,7 +969,6 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             512,
             lora_config.lora_extra_vocab_size,
         )
-        # lora_linear.set_mapping(*mapping_info)
 
         lora_result = lora_linear(torch.cat(inputs))[0]
         expected_result = linear(torch.cat(inputs))[0]
@@ -917,15 +990,18 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
 @pytest.mark.parametrize("rotary_dim", [None, 32])
 @pytest.mark.parametrize("head_size", [32, 108])
 @pytest.mark.parametrize("seq_len", [11, 1024])
+@pytest.mark.skipif(not current_platform.is_cuda_alike(),
+                    reason="Only CUDA backends are supported")
 def test_rotary_embedding_long_context(dist_init, num_loras, device,
                                        scaling_factors, max_position,
                                        is_neox_style, rotary_dim, head_size,
                                        seq_len) -> None:
     dtype = torch.float16
     seed = 0
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
-    punica_wrapper = PunicaWrapper(8192, 256, device)
+    punica_wrapper = get_punica_wrapper(8192, 256, device)
+    assert check_punica_wrapper(punica_wrapper)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
@@ -951,7 +1027,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
     lora_rope.create_lora_weights(max_loras, lora_config)
     linear_rope = get_rope(head_size, rotary_dim, max_position, base,
                            is_neox_style, {
-                               "type": "linear",
+                               "rope_type": "linear",
                                "factor": scaling_factors
                            })
     linear_rope = linear_rope.to(dtype=dtype)
@@ -962,7 +1038,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
         input_size=(1, max_position),
         input_range=(0, lora_config.lora_extra_vocab_size),
         input_type=torch.float16,
-    )
+        device=device)
 
     lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
     long_lora_context = LongContextLoRAContext(list(scaling_factors),

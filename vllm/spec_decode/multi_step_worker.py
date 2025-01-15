@@ -5,17 +5,21 @@ from typing import Dict, List, Set, Tuple
 import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, HiddenStates, SequenceData,
                            SequenceGroupMetadata)
-from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+
+if current_platform.is_cuda_alike():
+    from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
-from vllm.worker.worker import Worker
+from vllm.worker.worker_base import DelegateWorkerBase
 
 
-class MultiStepWorker(Worker, ProposerWorkerBase):
+class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
     """The MultiStepWorker is equivalent to a Worker except that it allows
     multiple forward passes in a single call, assuming the scheduler has
     allocated enough space to store the additional KV. This reduces overhead
@@ -28,14 +32,12 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
+        DelegateWorkerBase.__init__(self, *args, **kwargs)
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
 
     def init_device(self) -> None:
-        super().init_device()
-
+        self.worker.init_device()
         self._proposer = Top1Proposer(
             weakref.proxy(self),  # type: ignore[arg-type]
             self.device,
@@ -75,12 +77,14 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         # Run model sample_len times.
         model_outputs: List[SamplerOutput] = []
-        if isinstance(
+        if current_platform.is_cuda_alike() and isinstance(
                 self.model_runner, TP1DraftModelRunner
         ) and self.model_runner.supports_gpu_multi_step(expanded_request):
             # Here we run the draft_model_runner with multi-step prepare
             # on the GPU directly
             expanded_request.num_steps = sample_len
+            self.model_runner.set_indices_of_seq_with_bonus_tokens(
+                indices_of_seq_with_bonus_tokens)
             model_outputs = self.execute_model(
                 execute_model_req=expanded_request)
         else:
@@ -90,16 +94,20 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             # and other restrictions that are part of DraftModelRunner's
             # supports_gpu_multi_step(..)
             for _ in range(sample_len):
-                model_output: List[SamplerOutput] = super().execute_model(
+                model_output: List[SamplerOutput] = self.worker.execute_model(
                     execute_model_req=expanded_request)
                 assert (len(model_output) == 1
                         ), "composing multistep workers not supported"
                 model_output = model_output[0]
 
                 self._append_new_tokens(
-                    model_output, expanded_request.seq_group_metadata_list)
+                    model_output, expanded_request.seq_group_metadata_list,
+                    indices_of_seq_with_bonus_tokens)
                 model_outputs.append(model_output)
 
+        # move indices to device to avoid stream sync
+        indices_of_seq_with_bonus_tokens = torch.tensor(
+            indices_of_seq_with_bonus_tokens, device=self.device)
         filtered_model_outputs = self._filter_model_output(
             model_outputs, indices_of_seq_with_bonus_tokens)
         return filtered_model_outputs, True
@@ -169,7 +177,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     @staticmethod
     def _filter_model_output(
             expanded_batch_outputs: List[SamplerOutput],
-            output_indices_to_retain: List[int]) -> List[SamplerOutput]:
+            output_indices_to_retain: torch.Tensor) -> List[SamplerOutput]:
         """
         Filters the model output to include only the specified sequence
         outputs. This method contracts the expanded batch output from the
@@ -179,8 +187,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         Args:
             expanded_batch_output (List[SamplerOutput]): The expanded output
                 batch from the model.
-            output_indices_to_retain (List[int]): Indices of the model outputs
-                to retain.
+            output_indices_to_retain (torch.Tensor): Indices of the model
+                outputs to retain.
 
         Returns:
             List[SamplerOutput]: A list containing the filtered model 
@@ -221,13 +229,15 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     @staticmethod
     def _append_new_tokens(
             model_output: List[SamplerOutput],
-            seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            indices_of_seq_with_bonus_tokens: List[int]) -> None:
         """Given model output from a single run, append the tokens to the
         sequences. This is normally done outside of the worker, but it is
         required if the worker is to perform multiple forward passes.
         """
-        for seq_group_metadata, sequence_group_outputs in zip(
-                seq_group_metadata_list, model_output):
+        count = 0
+        for index, (seq_group_metadata, sequence_group_outputs) in enumerate(
+                zip(seq_group_metadata_list, model_output)):
             seq_group_metadata.is_prompt = False
 
             for seq_output in sequence_group_outputs.samples:
@@ -237,6 +247,16 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
                 token_id = seq_output.output_token
                 token_logprob = seq_output.logprobs[token_id]
+                # Determine the actual token ID to be generated,
+                # considering bonus tokens
+                if index != indices_of_seq_with_bonus_tokens[count]:
+                    bonus_seq_metadata = seq_group_metadata_list[
+                        indices_of_seq_with_bonus_tokens[count]]
+                    _, bonus_token_seq_data = next(
+                        iter(bonus_seq_metadata.seq_data.items()))
+                    token_id = bonus_token_seq_data.output_token_ids[-1]
+                else:
+                    count += 1
 
                 seq.append_token_id(token_id, token_logprob.logprob)
                 seq.update_num_computed_tokens(1)

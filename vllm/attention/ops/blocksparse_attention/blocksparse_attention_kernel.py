@@ -157,19 +157,22 @@ def _fwd_kernel_inner(
             k = tl.load(
                 k_ptrs + start_n * stride_kt,
                 mask=offs_n[None, :] + start_n < k_seqlen,
+                other=0.0,
             )
         else:
             k = tl.load(
                 k_ptrs + start_n * stride_kt,
                 mask=(offs_n[None, :] + start_n < k_seqlen) &
                 (offs_d[:, None] < D_HEAD),
+                other=0.0,
             )
     else:
         if EVEN_D:
             k = tl.load(k_ptrs + start_n * stride_kt)
         else:
             k = tl.load(k_ptrs + start_n * stride_kt,
-                        mask=offs_d[:, None] < D_HEAD)
+                        mask=offs_d[:, None] < D_HEAD,
+                        other=0.0)
 
     qk = tl.zeros([BLOCK_M_LOADING, BLOCK_N], dtype=tl.float32)
     qk += tl.dot(q, k)
@@ -200,19 +203,22 @@ def _fwd_kernel_inner(
             v = tl.load(
                 v_ptrs + start_n * stride_vt,
                 mask=offs_n[:, None] + start_n < k_seqlen,
+                other=0.0,
             )
         else:
             v = tl.load(
                 v_ptrs + start_n * stride_vt,
                 mask=(offs_n[:, None] + start_n < k_seqlen) &
                 (offs_d[None, :] < D_HEAD),
+                other=0.0,
             )
     else:
         if EVEN_D:
             v = tl.load(v_ptrs + start_n * stride_vt)
         else:
             v = tl.load(v_ptrs + start_n * stride_vt,
-                        mask=offs_d[None, :] < D_HEAD)
+                        mask=offs_d[None, :] < D_HEAD,
+                        other=0.0)
 
     acc += tl.dot(p, v)
 
@@ -318,12 +324,13 @@ def _fwd_kernel_batch_inference(
         q = tl.load(
             Q + offs_m[:, None] * stride_qt + offs_d[None, :] * stride_qd,
             mask=offs_m[:, None] < q_seqlen,
+            other=0.0,
         )
     else:
         q = tl.load(
             Q + offs_m[:, None] * stride_qt + offs_d[None, :] * stride_qd,
             mask=(offs_m[:, None] < q_seqlen) & (offs_d[None, :] < D_HEAD),
-            other=0,
+            other=0.0,
         )
 
     sparse_crow_ptr = (layout_crow_ptr + off_h * layout_crow_stride_h +

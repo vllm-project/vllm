@@ -1,0 +1,36 @@
+{%- if tools %}
+    {{- '<|start_of_role|>available_tools<|end_of_role|>
+' }}
+    {%- for tool in tools %}
+    {{- tool | tojson(indent=4) }}
+    {%- if not loop.last %}
+        {{- '
+
+' }}
+    {%- endif %}
+    {%- endfor %}
+    {{- '<|end_of_text|>
+' }}
+{%- endif %}
+
+{%- for message in messages %}
+    {%- if message['role'] == 'system' %}
+    {{- '<|start_of_role|>system<|end_of_role|>' + message['content'] + '<|end_of_text|>
+' }}
+    {%- elif message['role'] == 'user' %}
+    {{- '<|start_of_role|>user<|end_of_role|>' + message['content'] + '<|end_of_text|>
+' }}
+    {%- elif message['role'] == 'assistant_tool_call' or (message['role'] == 'assistant' and message.tool_calls is defined) %}
+    {{- '<|start_of_role|>assistant<|end_of_role|><|tool_call|>' + message.tool_calls|map(attribute='function')|list|tojson(indent=4) + '<|end_of_text|>
+' }}
+    {%- elif message['role'] == 'assistant' %}
+    {{- '<|start_of_role|>assistant<|end_of_role|>'  + message['content'] + '<|end_of_text|>
+' }}
+    {%- elif message['role'] == 'tool_response' or  message['role'] == 'tool' %}
+    {{- '<|start_of_role|>tool_response<|end_of_role|>' + message['content'] + '<|end_of_text|>
+' }}
+    {%- endif %}
+    {%- if loop.last and add_generation_prompt %}
+    {{- '<|start_of_role|>assistant<|end_of_role|>' }}
+    {%- endif %}
+{%- endfor %}

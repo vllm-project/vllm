@@ -1,11 +1,11 @@
+import ctypes
 import importlib.util
-import io
 import logging
 import os
 import re
 import subprocess
 import sys
-import warnings
+from pathlib import Path
 from shutil import which
 from typing import Dict, List
 
@@ -13,7 +13,8 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
-from torch.utils.cpp_extension import CUDA_HOME
+from setuptools_scm import get_version
+from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
 
 def load_module_from_path(module_name, path):
@@ -27,43 +28,20 @@ def load_module_from_path(module_name, path):
 ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
 
-
-def embed_commit_hash():
-    try:
-        if "BUILDKITE_COMMIT" in os.environ:
-            # ci build
-            commit_id = os.environ["BUILDKITE_COMMIT"]
-        else:
-            commit_id = subprocess.check_output(["git", "rev-parse", "HEAD"],
-                                                encoding="utf-8").strip()
-
-        commit_contents = f'__commit__ = "{commit_id}"\n'
-
-        version_file = os.path.join(ROOT_DIR, "vllm", "commit_id.py")
-        with open(version_file, "w", encoding="utf-8") as f:
-            f.write(commit_contents)
-
-    except subprocess.CalledProcessError as e:
-        warnings.warn(f"Failed to get commit hash:\n{e}",
-                      RuntimeWarning,
-                      stacklevel=2)
-    except Exception as e:
-        warnings.warn(f"Failed to embed commit hash:\n{e}",
-                      RuntimeWarning,
-                      stacklevel=2)
-
-
-embed_commit_hash()
-
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
 envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
-if not sys.platform.startswith("linux"):
+if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
     logger.warning(
-        "vLLM only supports Linux platform (including WSL). "
+        "VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
+    VLLM_TARGET_DEVICE = "cpu"
+elif not (sys.platform.startswith("linux")
+          or sys.platform.startswith("darwin")):
+    logger.warning(
+        "vLLM only supports Linux platform (including WSL) and MacOS."
         "Building on %s, "
         "so vLLM may not be able to run correctly", sys.platform)
     VLLM_TARGET_DEVICE = "empty"
@@ -81,12 +59,6 @@ def is_ccache_available() -> bool:
 
 def is_ninja_available() -> bool:
     return which("ninja") is not None
-
-
-def remove_prefix(text, prefix):
-    if text.startswith(prefix):
-        return text[len(prefix):]
-    return text
 
 
 class CMakeExtension(Extension):
@@ -152,15 +124,8 @@ class cmake_build_ext(build_ext):
         default_cfg = "Debug" if self.debug else "RelWithDebInfo"
         cfg = envs.CMAKE_BUILD_TYPE or default_cfg
 
-        # where .so files will be written, should be the same for all extensions
-        # that use the same CMakeLists.txt.
-        outdir = os.path.abspath(
-            os.path.dirname(self.get_ext_fullpath(ext.name)))
-
         cmake_args = [
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),
-            '-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}'.format(outdir),
-            '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}'.format(self.build_temp),
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
         ]
 
@@ -190,6 +155,14 @@ class cmake_build_ext(build_ext):
         # Pass the python path to cmake so it can reuse the build dependencies
         # on subsequent calls to python.
         cmake_args += ['-DVLLM_PYTHON_PATH={}'.format(":".join(sys.path))]
+
+        # Override the base directory for FetchContent downloads to $ROOT/.deps
+        # This allows sharing dependencies between profiles,
+        # and plays more nicely with sccache.
+        # To override this, set the FETCHCONTENT_BASE_DIR environment variable.
+        fc_base_dir = os.path.join(ROOT_DIR, ".deps")
+        fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
+        cmake_args += ['-DFETCHCONTENT_BASE_DIR={}'.format(fc_base_dir)]
 
         #
         # Setup parallelism and build tool
@@ -224,10 +197,14 @@ class cmake_build_ext(build_ext):
             os.makedirs(self.build_temp)
 
         targets = []
+
+        def target_name(s: str) -> str:
+            return s.removeprefix("vllm.").removeprefix("vllm_flash_attn.")
+
         # Build all the extensions
         for ext in self.extensions:
             self.configure(ext)
-            targets.append(remove_prefix(ext.name, "vllm."))
+            targets.append(target_name(ext.name))
 
         num_jobs, _ = self.compute_num_jobs()
 
@@ -240,6 +217,134 @@ class cmake_build_ext(build_ext):
 
         subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
 
+        # Install the libraries
+        for ext in self.extensions:
+            # Install the extension into the proper location
+            outdir = Path(self.get_ext_fullpath(ext.name)).parent.absolute()
+
+            # Skip if the install directory is the same as the build directory
+            if outdir == self.build_temp:
+                continue
+
+            # CMake appends the extension prefix to the install path,
+            # and outdir already contains that prefix, so we need to remove it.
+            prefix = outdir
+            for i in range(ext.name.count('.')):
+                prefix = prefix.parent
+
+            # prefix here should actually be the same for all components
+            install_args = [
+                "cmake", "--install", ".", "--prefix", prefix, "--component",
+                target_name(ext.name)
+            ]
+            subprocess.check_call(install_args, cwd=self.build_temp)
+
+    def run(self):
+        # First, run the standard build_ext command to compile the extensions
+        super().run()
+
+        # copy vllm/vllm_flash_attn/*.py from self.build_lib to current
+        # directory so that they can be included in the editable build
+        import glob
+        files = glob.glob(
+            os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "*.py"))
+        for file in files:
+            dst_file = os.path.join("vllm/vllm_flash_attn",
+                                    os.path.basename(file))
+            print(f"Copying {file} to {dst_file}")
+            self.copy_file(file, dst_file)
+
+
+class repackage_wheel(build_ext):
+    """Extracts libraries and other files from an existing wheel."""
+    default_wheel = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+
+    def run(self) -> None:
+        wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION",
+                                   self.default_wheel)
+
+        assert _is_cuda(
+        ), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+
+        import zipfile
+
+        if os.path.isfile(wheel_location):
+            wheel_path = wheel_location
+            print(f"Using existing wheel={wheel_path}")
+        else:
+            # Download the wheel from a given URL, assume
+            # the filename is the last part of the URL
+            wheel_filename = wheel_location.split("/")[-1]
+
+            import tempfile
+
+            # create a temporary directory to store the wheel
+            temp_dir = tempfile.mkdtemp(prefix="vllm-wheels")
+            wheel_path = os.path.join(temp_dir, wheel_filename)
+
+            print(f"Downloading wheel from {wheel_location} to {wheel_path}")
+
+            from urllib.request import urlretrieve
+
+            try:
+                urlretrieve(wheel_location, filename=wheel_path)
+            except Exception as e:
+                from setuptools.errors import SetupError
+
+                raise SetupError(
+                    f"Failed to get vLLM wheel from {wheel_location}") from e
+
+        with zipfile.ZipFile(wheel_path) as wheel:
+            files_to_copy = [
+                "vllm/_C.abi3.so",
+                "vllm/_moe_C.abi3.so",
+                "vllm/vllm_flash_attn/vllm_flash_attn_c.abi3.so",
+                "vllm/vllm_flash_attn/flash_attn_interface.py",
+                "vllm/vllm_flash_attn/__init__.py",
+                # "vllm/_version.py", # not available in nightly wheels yet
+            ]
+            file_members = filter(lambda x: x.filename in files_to_copy,
+                                  wheel.filelist)
+
+            for file in file_members:
+                print(f"Extracting and including {file.filename} "
+                      "from existing wheel")
+                package_name = os.path.dirname(file.filename).replace("/", ".")
+                file_name = os.path.basename(file.filename)
+
+                if package_name not in package_data:
+                    package_data[package_name] = []
+
+                wheel.extract(file)
+                if file_name.endswith(".py"):
+                    # python files shouldn't be added to package_data
+                    continue
+
+                package_data[package_name].append(file_name)
+
+
+def _is_hpu() -> bool:
+    # if VLLM_TARGET_DEVICE env var was set explicitly, skip HPU autodetection
+    if os.getenv("VLLM_TARGET_DEVICE", None) == VLLM_TARGET_DEVICE:
+        return VLLM_TARGET_DEVICE == "hpu"
+
+    # if VLLM_TARGET_DEVICE was not set explicitly, check if hl-smi succeeds,
+    # and if it doesn't, check if habanalabs driver is loaded
+    is_hpu_available = False
+    try:
+        out = subprocess.run(["hl-smi"], capture_output=True, check=True)
+        is_hpu_available = out.returncode == 0
+    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
+        if sys.platform.startswith("linux"):
+            try:
+                output = subprocess.check_output(
+                    'lsmod | grep habanalabs | wc -l', shell=True)
+                is_hpu_available = int(output) > 0
+            except (ValueError, FileNotFoundError, PermissionError,
+                    subprocess.CalledProcessError):
+                pass
+    return is_hpu_available
+
 
 def _no_device() -> bool:
     return VLLM_TARGET_DEVICE == "empty"
@@ -248,7 +353,7 @@ def _no_device() -> bool:
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
-            and not (_is_neuron() or _is_tpu()))
+            and not (_is_neuron() or _is_tpu() or _is_hpu()))
 
 
 def _is_hip() -> bool:
@@ -285,29 +390,31 @@ def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip() or _is_cpu()
 
 
-def _build_core_ext() -> bool:
-    return not (_is_neuron() or _is_tpu() or _is_openvino() or _is_xpu())
+def get_rocm_version():
+    # Get the Rocm version from the ROCM_HOME/bin/librocm-core.so
+    # see https://github.com/ROCm/rocm-core/blob/d11f5c20d500f729c393680a01fa902ebf92094b/rocm_version.cpp#L21
+    try:
+        librocm_core_file = Path(ROCM_HOME) / "lib" / "librocm-core.so"
+        if not librocm_core_file.is_file():
+            return None
+        librocm_core = ctypes.CDLL(librocm_core_file)
+        VerErrors = ctypes.c_uint32
+        get_rocm_core_version = librocm_core.getROCmVersion
+        get_rocm_core_version.restype = VerErrors
+        get_rocm_core_version.argtypes = [
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        major = ctypes.c_uint32()
+        minor = ctypes.c_uint32()
+        patch = ctypes.c_uint32()
 
-
-def get_hipcc_rocm_version():
-    # Run the hipcc --version command
-    result = subprocess.run(['hipcc', '--version'],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True)
-
-    # Check if the command was executed successfully
-    if result.returncode != 0:
-        print("Error running 'hipcc --version'")
+        if (get_rocm_core_version(ctypes.byref(major), ctypes.byref(minor),
+                                  ctypes.byref(patch)) == 0):
+            return "%d.%d.%d" % (major.value, minor.value, patch.value)
         return None
-
-    # Extract the version using a regular expression
-    match = re.search(r'HIP version: (\S+)', result.stdout)
-    if match:
-        # Return the version string
-        return match.group(1)
-    else:
-        print("Could not find HIP version in the output")
+    except Exception:
         return None
 
 
@@ -318,7 +425,7 @@ def get_neuronxcc_version():
                                 "__init__.py")
 
     # Check if the command was executed successfully
-    with open(version_file, "rt") as fp:
+    with open(version_file) as fp:
         content = fp.read()
 
     # Extract the version using a regular expression
@@ -327,7 +434,7 @@ def get_neuronxcc_version():
         # Return the version string
         return match.group(1)
     else:
-        raise RuntimeError("Could not find HIP version in the output")
+        raise RuntimeError("Could not find Neuron version in the output")
 
 
 def get_nvcc_cuda_version() -> Version:
@@ -348,52 +455,71 @@ def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
 
 
-def find_version(filepath: str) -> str:
-    """Extract version information from the given filepath.
-
-    Adapted from https://github.com/ray-project/ray/blob/0b190ee1160eeca9796bc091e07eaebf4c85b511/python/setup.py
+def get_gaudi_sw_version():
     """
-    with open(filepath) as fp:
-        version_match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]",
-                                  fp.read(), re.M)
-        if version_match:
-            return version_match.group(1)
-        raise RuntimeError("Unable to find version string.")
+    Returns the driver version.
+    """
+    # Enable console printing for `hl-smi` check
+    output = subprocess.run("hl-smi",
+                            shell=True,
+                            text=True,
+                            capture_output=True,
+                            env={"ENABLE_CONSOLE": "true"})
+    if output.returncode == 0 and output.stdout:
+        return output.stdout.split("\n")[2].replace(
+            " ", "").split(":")[1][:-1].split("-")[0]
+    return "0.0.0"  # when hl-smi is not available
 
 
 def get_vllm_version() -> str:
-    version = find_version(get_path("vllm", "version.py"))
+    # TODO: Revisit this temporary approach: https://github.com/vllm-project/vllm/issues/9182#issuecomment-2404860236
+    try:
+        version = get_version(
+            write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
+        )
+    except LookupError:
+        version = "0.0.0"
+
+    sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():
         if envs.VLLM_TARGET_DEVICE == "empty":
-            version += "+empty"
+            version += f"{sep}empty"
     elif _is_cuda():
-        cuda_version = str(get_nvcc_cuda_version())
-        if cuda_version != MAIN_CUDA_VERSION:
-            cuda_version_str = cuda_version.replace(".", "")[:3]
-            # skip this for source tarball, required for pypi
-            if "sdist" not in sys.argv:
-                version += f"+cu{cuda_version_str}"
+        if envs.VLLM_USE_PRECOMPILED:
+            version += f"{sep}precompiled"
+        else:
+            cuda_version = str(get_nvcc_cuda_version())
+            if cuda_version != MAIN_CUDA_VERSION:
+                cuda_version_str = cuda_version.replace(".", "")[:3]
+                # skip this for source tarball, required for pypi
+                if "sdist" not in sys.argv:
+                    version += f"{sep}cu{cuda_version_str}"
     elif _is_hip():
-        # Get the HIP version
-        hipcc_version = get_hipcc_rocm_version()
-        if hipcc_version != MAIN_CUDA_VERSION:
-            rocm_version_str = hipcc_version.replace(".", "")[:3]
-            version += f"+rocm{rocm_version_str}"
+        # Get the Rocm Version
+        rocm_version = get_rocm_version() or torch.version.hip
+        if rocm_version and rocm_version != MAIN_CUDA_VERSION:
+            version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
     elif _is_neuron():
         # Get the Neuron version
         neuron_version = str(get_neuronxcc_version())
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
-            version += f"+neuron{neuron_version_str}"
+            version += f"{sep}neuron{neuron_version_str}"
+    elif _is_hpu():
+        # Get the Intel Gaudi Software Suite version
+        gaudi_sw_version = str(get_gaudi_sw_version())
+        if gaudi_sw_version != MAIN_CUDA_VERSION:
+            gaudi_sw_version = gaudi_sw_version.replace(".", "")[:3]
+            version += f"{sep}gaudi{gaudi_sw_version}"
     elif _is_openvino():
-        version += "+openvino"
+        version += f"{sep}openvino"
     elif _is_tpu():
-        version += "+tpu"
+        version += f"{sep}tpu"
     elif _is_cpu():
-        version += "+cpu"
+        version += f"{sep}cpu"
     elif _is_xpu():
-        version += "+xpu"
+        version += f"{sep}xpu"
     else:
         raise RuntimeError("Unknown runtime environment")
 
@@ -404,7 +530,8 @@ def read_readme() -> str:
     """Read the README file if present."""
     p = get_path("README.md")
     if os.path.isfile(p):
-        return io.open(get_path("README.md"), "r", encoding="utf-8").read()
+        with open(get_path("README.md"), encoding="utf-8") as f:
+            return f.read()
     else:
         return ""
 
@@ -419,6 +546,8 @@ def get_requirements() -> List[str]:
         for line in requirements:
             if line.startswith("-r "):
                 resolved_requirements += _read_requirements(line.split()[1])
+            elif line.startswith("--"):
+                continue
             else:
                 resolved_requirements.append(line)
         return resolved_requirements
@@ -441,6 +570,8 @@ def get_requirements() -> List[str]:
         requirements = _read_requirements("requirements-rocm.txt")
     elif _is_neuron():
         requirements = _read_requirements("requirements-neuron.txt")
+    elif _is_hpu():
+        requirements = _read_requirements("requirements-hpu.txt")
     elif _is_openvino():
         requirements = _read_requirements("requirements-openvino.txt")
     elif _is_tpu():
@@ -451,15 +582,12 @@ def get_requirements() -> List[str]:
         requirements = _read_requirements("requirements-xpu.txt")
     else:
         raise ValueError(
-            "Unsupported platform, please use CUDA, ROCm, Neuron, "
+            "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "
             "OpenVINO, or CPU.")
     return requirements
 
 
 ext_modules = []
-
-if _build_core_ext():
-    ext_modules.append(CMakeExtension(name="vllm._core_C"))
 
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
@@ -467,18 +595,27 @@ if _is_cuda() or _is_hip():
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
 
+if _is_cuda():
+    ext_modules.append(
+        CMakeExtension(name="vllm.vllm_flash_attn.vllm_flash_attn_c"))
+
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
 }
-if envs.VLLM_USE_PRECOMPILED:
-    ext_modules = []
-    package_data["vllm"].append("*.so")
 
 if _no_device():
     ext_modules = []
+
+if not ext_modules:
+    cmdclass = {}
+else:
+    cmdclass = {
+        "build_ext":
+        repackage_wheel if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
+    }
 
 setup(
     name="vllm",
@@ -495,25 +632,29 @@ setup(
         "Documentation": "https://vllm.readthedocs.io/en/latest/",
     },
     classifiers=[
-        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: Apache Software License",
+        "Intended Audience :: Developers",
+        "Intended Audience :: Information Technology",
+        "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
+        "Topic :: Scientific/Engineering :: Information Analysis",
     ],
     packages=find_packages(exclude=("benchmarks", "csrc", "docs", "examples",
                                     "tests*")),
-    python_requires=">=3.8",
+    python_requires=">=3.9",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
-        "video": ["opencv-python"],  # Required for video processing
-        "audio": ["librosa", "soundfile"]  # Required for audio processing
+        "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
+        "audio": ["librosa", "soundfile"],  # Required for audio processing
+        "video": ["decord"]  # Required for video processing
     },
-    cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
+    cmdclass=cmdclass,
     package_data=package_data,
     entry_points={
         "console_scripts": [

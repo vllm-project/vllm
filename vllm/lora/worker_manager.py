@@ -73,6 +73,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
             max_num_batched_tokens=self.max_num_batched_tokens,
             vocab_size=self.vocab_size,
             lora_config=self.lora_config,
+            device=self.device,
             lora_manager_cls=self._manager_cls,
         )
         self._adapter_manager = lora_manager
@@ -90,7 +91,17 @@ class WorkerLoRAManager(AbstractWorkerManager):
                         packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
+
+            expected_lora_modules = list(set(expected_lora_modules))
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
+
+            # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
+            # to ensure correct loading of lora weights.
+            hf_to_vllm_mapper = None
+            if (hasattr(model, "hf_to_vllm_mapper")
+                    and model.hf_to_vllm_mapper is not None):
+                hf_to_vllm_mapper = model.hf_to_vllm_mapper
+
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_path,
                 expected_lora_modules,
@@ -102,7 +113,16 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 self.lora_config.lora_extra_vocab_size,
                 embedding_modules=self.embedding_modules,
                 embedding_padding_modules=self.embedding_padding_modules,
-            )
+                weights_mapper=hf_to_vllm_mapper)
+
+        except FileNotFoundError as e:
+            # FileNotFoundError should be raised if both
+            # - No adapter found to download from huggingface (or in
+            #       offline mode)
+            # - No local adapter files found at `lora_request.lora_path`
+            raise ValueError(
+                f"Loading lora {lora_request.lora_name} failed: No adapter "
+                f"found for {lora_path}") from e
         except Exception as e:
             raise RuntimeError(f"Loading lora {lora_path} failed") from e
         if lora.rank > self.lora_config.max_lora_rank:
@@ -176,6 +196,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             max_num_seqs=self.max_num_seqs,
             vocab_size=self.vocab_size,
             lora_config=self.lora_config,
+            device=self.device,
             max_num_batched_tokens=self.max_num_batched_tokens,
         )
         self._adapter_manager = lora_manager
@@ -196,12 +217,19 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
 
     def add_adapter(self, lora_request: LoRARequest) -> bool:
         if lora_request.lora_int_id not in self.list_adapters():
-            # Remove before we load the new lora to save memory
+            # Load the new adapter first to ensure it is actually valid, before
+            # evicting any existing adapters.
+            # This may cause the # of loaded lora adapters to very temporarily
+            # exceed `--max-cpu-loras`.
+            lora = self._load_adapter(lora_request)
+
+            # Loading succeeded, now check if we will exceed cache capacity and
+            # evict if the oldest adapter if so
             if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
                 assert isinstance(self._adapter_manager,
                                   LRUCacheLoRAModelManager)
                 self._adapter_manager.remove_oldest_adapter()
-            lora = self._load_adapter(lora_request)
+            # Then add the new adapter to the cache
             loaded = self._adapter_manager.add_adapter(lora)
         else:
             # If the lora is already loaded, just touch it to

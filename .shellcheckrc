@@ -1,0 +1,9 @@
+# rules currently disabled:
+#
+#   SC1091 (info): Not following: <sourced file> was not specified as input (see shellcheck -x)
+#   SC2004 (style): $/${} is unnecessary on arithmetic variables.
+#   SC2129 (style): Consider using { cmd1; cmd2; } >> file instead of individual redirects.
+#   SC2155 (warning): Declare and assign separately to avoid masking return values.
+#   SC2164 (warning): Use 'cd ... || exit' or 'cd ... || return' in case cd fails.
+#
+disable=SC1091,SC2004,SC2129,SC2155,SC2164

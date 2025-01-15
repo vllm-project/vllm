@@ -4,7 +4,6 @@ from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
-from vllm.utils import cdiv
 
 Refcount = int
 
@@ -64,6 +63,7 @@ class NaiveBlockAllocator(BlockAllocator):
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
                                  token_ids: List[int],
+                                 extra_hash: Optional[int] = None,
                                  device: Optional[Device] = None) -> Block:
         """Allocates a new immutable block with the given token IDs, linked to
         the previous block.
@@ -86,6 +86,7 @@ class NaiveBlockAllocator(BlockAllocator):
             self,
             prev_block: Optional[Block],
             block_token_ids: List[List[int]],
+            extra_hash: Optional[int] = None,
             device: Optional[Device] = None) -> List[Block]:
         assert device is None
         num_blocks = len(block_token_ids)
@@ -107,6 +108,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
+                               extra_hash: Optional[int] = None,
                                device: Optional[Device] = None) -> Block:
         """Allocates a new mutable block, linked to the previous block.
 
@@ -263,13 +265,6 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         pass
 
-    def get_computed_block_ids(self, prev_computed_block_ids: List[int],
-                               block_ids: List[int],
-                               skip_last_block_id: bool) -> List[int]:
-        """No prefix caching here => return empty list
-        """
-        return []
-
     def get_common_computed_block_ids(
             self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         """Determine blocks that can be skipped in prefill.
@@ -282,40 +277,26 @@ class NaiveBlockAllocator(BlockAllocator):
     def promote_to_immutable_block(self, block: Block) -> BlockId:
         raise NotImplementedError("There is no promotion for naive blocks")
 
-    def get_num_blocks_touched(self,
-                               blocks: List[Block],
-                               num_lookahead_slots: int = 0) -> int:
-        """Determine the number of blocks that will be touched by
-        swapping in/out the given blocks from certain sequence
-        group with the provided num_lookahead_slots.
+    def get_num_full_blocks_touched(self, blocks: List[Block]) -> int:
+        """Returns the number of full blocks that will be touched by
+        swapping in/out.
 
         Args:
-            blocks (List[Block]): The potential blocks to swap.
-            num_lookahead_slots (int): number of lookahead slots (0 for swap 
-                out).
-        
+            blocks: List of blocks to be swapped.
         Returns:
-            int: the number of blocks that will be touched by
-                swapping in/out the given blocks and num_lookahead_slots.
+            int: the number of full blocks that will be touched by
+                swapping in/out the given blocks. Non full blocks are ignored
+                when deciding the number of blocks to touch.
         """
         # NOTE: for naive block, we use set to eliminate common blocks among
         # seqs, also we compare the empty slots in the mutable blocks with
         # lookahead slots to get the number of unique new block that are
         # needed.
         old_block_set = set()
-        new_block_count = 0
-        # TODO(cade): make sure the logic is correct and clean it up.
         for block in blocks:
-            if not block.is_full and num_lookahead_slots != 0:
-                new_block_count += 1
-                if num_lookahead_slots > block.num_empty_slots:
-                    new_block_count += cdiv(
-                        num_lookahead_slots - block.num_empty_slots,
-                        self._block_size)
-            else:
-                old_block_set.add(block.block_id)
-        num_touched_blocks = new_block_count + len(old_block_set)
-        return num_touched_blocks
+            if block.is_full:
+                old_block_set.add(block)
+        return len(old_block_set)
 
     def swap_out(self, blocks: List[Block]) -> None:
         for block in blocks:
@@ -343,6 +324,10 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def get_prefix_cache_hit_rate(self) -> float:
         return -1
+
+    def find_cached_blocks_prefix(self, block_hashes: List[int]) -> List[int]:
+        # Not applicable for naive block allocator.
+        return []
 
 
 class NaiveBlock(Block):
@@ -373,7 +358,8 @@ class NaiveBlock(Block):
                  block_size: int,
                  allocator: BlockAllocator,
                  block_id: Optional[int] = None,
-                 _cow_target: Optional[Block] = None):
+                 _cow_target: Optional[Block] = None,
+                 extra_hash: Optional[int] = None):
         self._token_ids: List[int] = []
         self._block_size = block_size
         self._prev_block = prev_block
@@ -458,6 +444,10 @@ class NaiveBlock(Block):
     @property
     def prev_block(self) -> Optional["Block"]:
         return self._prev_block
+
+    @property
+    def extra_hash(self):
+        return None
 
     @property
     def content_hash(self) -> Optional[int]:

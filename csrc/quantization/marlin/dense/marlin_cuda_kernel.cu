@@ -26,6 +26,7 @@
 #include <iostream>
 
 #include "common/base.h"
+#include "core/registration.h"
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   #include "common/mem.h"
@@ -1065,4 +1066,8 @@ torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                             thread_n, sms, marlin_dense::max_par);
 
   return c;
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("marlin_gemm", &marlin_gemm);
 }

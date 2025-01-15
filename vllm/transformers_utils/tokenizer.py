@@ -1,6 +1,8 @@
+import contextlib
 import os
 import warnings
 from pathlib import Path
+from types import MethodType
 from typing import Optional, Union
 
 import huggingface_hub
@@ -10,8 +12,7 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizers import (BaichuanTokenizer,
-                                                MistralTokenizer)
+from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import make_async
 
@@ -19,6 +20,38 @@ logger = init_logger(__name__)
 
 AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
                      MistralTokenizer]
+
+
+def decode_tokens(
+    tokenizer: AnyTokenizer,
+    token_ids: list[int],
+    *,
+    skip_special_tokens: bool = False,
+) -> str:
+    """
+    Backend-agnostic equivalent of HF's
+    :code:`tokenizer.decode(token_ids, skip_special_tokens=...)`.
+    """
+    return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
+
+
+def encode_tokens(
+    tokenizer: AnyTokenizer,
+    text: str,
+    *,
+    add_special_tokens: Optional[bool] = None,
+) -> list[int]:
+    """
+    Backend-agnostic equivalent of HF's
+    :code:`tokenizer.encode(text, add_special_tokens=...)`.
+    """
+    if isinstance(tokenizer, MistralTokenizer):
+        return tokenizer.tokenizer.encode(text,
+                                          bos=add_special_tokens,
+                                          eos=add_special_tokens)
+    elif add_special_tokens is not None:
+        return tokenizer.encode(text, add_special_tokens=add_special_tokens)
+    return tokenizer.encode(text)
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
@@ -36,6 +69,15 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
     tokenizer_len = len(tokenizer)
 
+    max_token_id = max(tokenizer.get_vocab().values())
+    # Some tokenizers (e.g., QwenTokenizer) have special tokens that
+    # are added and included in the implementation of the vocab_size
+    # property, but not in get_vocab(); if there is an implementation
+    # of vocab size, we should take the greater value.
+    if hasattr(tokenizer, "vocab_size"):
+        with contextlib.suppress(NotImplementedError):
+            max_token_id = max(max_token_id, tokenizer.vocab_size)
+
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
 
         @property
@@ -50,6 +92,10 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
         def all_special_tokens_extended(self):
             return tokenizer_all_special_tokens_extended
 
+        @property
+        def max_token_id(self):
+            return max_token_id
+
         def __len__(self):
             return tokenizer_len
 
@@ -57,6 +103,26 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
     tokenizer.__class__ = CachedTokenizer
     return tokenizer
+
+
+def patch_padding_side(tokenizer: PreTrainedTokenizer) -> None:
+    """Patch _pad method to accept `padding_side` for older tokenizers."""
+    orig_pad = tokenizer._pad
+
+    def _pad(
+        self: PreTrainedTokenizer,
+        *args,
+        padding_side: Optional[str] = None,
+        **kwargs,
+    ):
+        if padding_side is not None and padding_side != self.padding_side:
+            msg = ("`padding_side` argument is not supported by "
+                   f"{type(tokenizer).__name__} and will be ignored.")
+            warnings.warn(msg, stacklevel=2)
+
+        return orig_pad(*args, **kwargs)
+
+    tokenizer._pad = MethodType(_pad, tokenizer)
 
 
 def get_tokenizer(
@@ -107,11 +173,10 @@ def get_tokenizer(
     if is_from_mistral_org and tokenizer_mode != "mistral":
         warnings.warn(
             'It is strongly recommended to run mistral models with '
-            '`--tokenizer_mode "mistral"` to ensure correct '
+            '`--tokenizer-mode "mistral"` to ensure correct '
             'encoding and decoding.',
             FutureWarning,
             stacklevel=2)
-
     if tokenizer_mode == "mistral":
         tokenizer = MistralTokenizer.from_pretrained(str(tokenizer_name),
                                                      revision=revision)
@@ -139,19 +204,12 @@ def get_tokenizer(
                 raise RuntimeError(err_msg) from e
             else:
                 raise e
-        except AttributeError as e:
-            if "BaichuanTokenizer" in str(e):
-                # This is for the error "'BaichuanTokenizer' object has no
-                # attribute 'sp_model'".
-                tokenizer = BaichuanTokenizer.from_pretrained(
-                    tokenizer_name,
-                    *args,
-                    trust_remote_code=trust_remote_code,
-                    revision=revision,
-                    **kwargs,
-                )
-            else:
-                raise e
+
+        # NOTE: We can remove this after https://github.com/THUDM/ChatGLM3/issues/1324
+        if type(tokenizer).__name__ in ("ChatGLMTokenizer",
+                                        "ChatGLM4Tokenizer"):
+            assert isinstance(tokenizer, PreTrainedTokenizer)
+            patch_padding_side(tokenizer)
 
         if not isinstance(tokenizer, PreTrainedTokenizerFast):
             logger.warning(
@@ -168,7 +226,7 @@ def get_lora_tokenizer(lora_request: LoRARequest, *args,
         return None
     try:
         tokenizer = get_tokenizer(lora_request.lora_path, *args, **kwargs)
-    except OSError as e:
+    except Exception as e:
         # No tokenizer was found in the LoRA folder,
         # use base model tokenizer
         logger.warning(

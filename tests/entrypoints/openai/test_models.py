@@ -51,12 +51,14 @@ async def client(server):
 
 
 @pytest.mark.asyncio
-async def test_check_models(client: openai.AsyncOpenAI):
+async def test_check_models(client: openai.AsyncOpenAI, zephyr_lora_files):
     models = await client.models.list()
     models = models.data
     served_model = models[0]
     lora_models = models[1:]
     assert served_model.id == MODEL_NAME
-    assert all(model.root == MODEL_NAME for model in models)
+    assert served_model.root == MODEL_NAME
+    assert all(lora_model.root == zephyr_lora_files
+               for lora_model in lora_models)
     assert lora_models[0].id == "zephyr-lora"
     assert lora_models[1].id == "zephyr-lora2"

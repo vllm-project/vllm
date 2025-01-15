@@ -213,9 +213,6 @@ class AQLMConfig(QuantizationConfig):
             return AQLMLinearMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
 
 class AQLMLinearMethod(LinearMethodBase):
     """Linear method for AQLM.

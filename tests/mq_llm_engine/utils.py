@@ -20,7 +20,7 @@ async def generate(
     count = 0
     async for out in client.generate(
             request_id=request_id,
-            inputs="Hello my name is Robert and",
+            prompt="Hello my name is Robert and",
             sampling_params=SamplingParams(max_tokens=num_tokens,
                                            temperature=0)):
 
@@ -68,7 +68,7 @@ class RemoteMQLLMEngine:
 
     async def make_client(self) -> MQLLMEngineClient:
         engine_config = self.engine_args.create_engine_config()
-        client = MQLLMEngineClient(self.ipc_path, engine_config)
+        client = MQLLMEngineClient(self.ipc_path, engine_config, self.proc.pid)
         while True:
             try:
                 await client.setup()
