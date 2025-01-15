@@ -1328,9 +1328,12 @@ class Scheduler:
                 # Also managed at SequenceGroup level
                 cross_block_table = self.block_manager.get_cross_block_table(
                     seq_group)
+                cross_slot_mapping = self.block_manager.get_cross_slot_mapping(
+                    seq_group)
             else:
                 encoder_seq_data = None
                 cross_block_table = None
+                cross_slot_mapping = None
 
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
@@ -1381,6 +1384,7 @@ class Scheduler:
                     computed_block_nums=common_computed_block_nums,
                     encoder_seq_data=encoder_seq_data,
                     cross_block_table=cross_block_table,
+                    cross_slot_mapping=cross_slot_mapping,
                     state=seq_group.state,
                     token_type_ids=seq_group.token_type_ids,
                     # `multi_modal_data` will only be present for the 1st comm

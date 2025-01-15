@@ -285,6 +285,12 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         assert all(b is not None for b in block_ids)
         return block_ids  # type: ignore
 
+    def get_cross_slot_mapping(self, seq_group: SequenceGroup) -> List[int]:
+        request_id = seq_group.request_id
+        assert request_id in self.cross_cache_policies
+        seq_slot_mappings = self.cross_cache_policies[request_id].slot_mappings
+        return seq_slot_mappings  # type: ignore
+
     def access_all_blocks_in_seq(self, seq: Sequence, now: float):
         if self.enable_caching:
             # Record the latest access time for the sequence. The actual update

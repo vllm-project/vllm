@@ -315,6 +315,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 slot_mappings=None,
                 encoder_seq_data=encoder_dummy_data.seq_data,
                 cross_block_table=None,
+                cross_slot_mapping=None,
                 multi_modal_data=decoder_dummy_data.multi_modal_data
                 or encoder_dummy_data.multi_modal_data,
                 multi_modal_placeholders=decoder_dummy_data.
@@ -421,12 +422,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                     # In embeddings, the block tables are {seq_id: None}.
                     cross_slot_mapping.extend([PAD_SLOT_ID] * seq_len)
                 else:
-                    for i in range(0, seq_len):
-                        block_number = seq_group_metadata.cross_block_table[
-                            i // self.block_size]
-                        block_offset = i % self.block_size
-                        slot = block_number * self.block_size + block_offset
-                        cross_slot_mapping.append(slot)
+                    seq_cross_slot_mapping = seq_group_metadata.cross_slot_mapping
+                    cross_slot_mapping.extend(seq_cross_slot_mapping[0:seq_len])
 
                 # Build encoder input tokens
                 encoder_input_tokens.extend(token_ids)
