@@ -122,7 +122,7 @@ def test_mamba_prefill_chunking(hf_runner, vllm_runner, example_prompts,
         example_prompts.pop(6)
         example_prompts.pop(3)
         example_prompts.pop(2)
-        dtype = "half" # use a different dtype for Bamba
+        dtype = "half"  # use a different dtype for Bamba
 
     with hf_runner(
             model,
