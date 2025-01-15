@@ -283,6 +283,13 @@ class Platform:
         """
         raise NotImplementedError
 
+    @classmethod
+    def get_executor_cls(cls,
+                         distributed_executor_backend: Optional[str] = None,
+                         is_async: Optional[bool] = None) -> str:
+        """Get the executor class of the out-of-tree device."""
+        return ""
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED

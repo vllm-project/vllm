@@ -43,6 +43,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -58,7 +59,8 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter, Device, deprecate_kwargs, weak_bind
+from vllm.utils import (Counter, Device, deprecate_kwargs,
+                        resolve_obj_by_qualname, weak_bind)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -445,6 +447,10 @@ class LLMEngine:
             if distributed_executor_backend.uses_ray:  # type: ignore
                 initialize_ray_cluster(engine_config.parallel_config)
             executor_class = distributed_executor_backend
+        elif current_platform.is_out_of_tree():
+            executor_cls = current_platform.get_executor_cls(
+                distributed_executor_backend)
+            executor_class = resolve_obj_by_qualname(executor_cls)
         elif engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutor
             executor_class = NeuronExecutor
