@@ -268,7 +268,7 @@ def download_weights_from_hf(
 
 def download_safetensors_index_file_from_hf(
     model_name_or_path: str,
-    possible_index_files: str | List[str],
+    possible_index_files: Union[str, List[str]],
     cache_dir: Optional[str],
     revision: Optional[str] = None,
 ) -> None:
@@ -311,9 +311,9 @@ def download_safetensors_index_file_from_hf(
 # Passing both of these to the weight loader functionality breaks.
 # So, we use the first index_file found from `possible_index_files` to
 # look up which safetensors files should be used.
-def filter_duplicate_safetensors_files(hf_weights_files: List[str],
-                                       hf_folder: str,
-                                       possible_index_files: str | List[str]) -> List[str]:
+def filter_duplicate_safetensors_files(
+        hf_weights_files: List[str], hf_folder: str,
+        possible_index_files: Union[str, List[str]]) -> List[str]:
     # index file (like `model.safetensors.index.json`) is a mapping from
     # keys in the torch state_dict to safetensors file holding that weight.
     index_file_name = None

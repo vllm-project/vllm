@@ -239,11 +239,10 @@ class DefaultModelLoader(BaseModelLoader):
             allow_patterns = ["*.safetensors"]
         elif load_format == LoadFormat.MISTRAL:
             use_safetensors = True
-            allow_patterns = ["model*.safetensors",
-                              "consolidated*.safetensors"]
-            possible_index_files.append(
-                "consolidated.safetensors.index.json"
-            )
+            allow_patterns = [
+                "model*.safetensors", "consolidated*.safetensors"
+            ]
+            possible_index_files.append("consolidated.safetensors.index.json")
         elif load_format == LoadFormat.PT:
             allow_patterns = ["*.pt"]
         elif load_format == LoadFormat.NPCACHE:
@@ -277,8 +276,8 @@ class DefaultModelLoader(BaseModelLoader):
             # For models like Mistral-7B-Instruct-v0.3
             # there are both sharded safetensors files and a consolidated
             # safetensors file. Using both breaks.
-            # Here, we download the `(model|consolidated).safetensors.index.json` 
-            # and filter any files not found in the index.
+            # Here, we download `(model|consolidated).safetensors.index.json`
+            # index file and filter any files not found in the index.
             if not is_local:
                 download_safetensors_index_file_from_hf(
                     model_name_or_path,
