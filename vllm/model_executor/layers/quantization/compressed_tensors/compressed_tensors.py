@@ -113,7 +113,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         :return: A dictionary mapping target layer names to their corresponding
             sparsity compression configurations
         """
-        if (sparsity_config := config.get(SPARSITY_CONFIG_NAME)) is None:
+        if not (sparsity_config := config.get(SPARSITY_CONFIG_NAME)):
             return dict()
 
         sparsity_config = SparsityCompressionConfig.model_validate(
