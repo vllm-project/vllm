@@ -211,16 +211,14 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
 
     def __init__(
         self,
-        ov_core: ov.Core,
         vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
-        kv_cache_dtype: Optional[ov.Type] = ov.Type.undefined,
         is_driver_worker: bool = False,
     ) -> None:
-        self.ov_core = ov_core
         WorkerBase.__init__(self, vllm_config)
+        self.ov_core = ov.Core()
         self.parallel_config.rank = rank
         self.local_rank = local_rank
         self.rank = rank
@@ -237,7 +235,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         self.model_runner = OpenVINOModelRunner(
             self.ov_core,
             vllm_config=self.vllm_config,
-            kv_cache_dtype=kv_cache_dtype,
+            kv_cache_dtype=self.vllm_config.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
         )
         # Uninitialized cache engine. Will be initialized by
