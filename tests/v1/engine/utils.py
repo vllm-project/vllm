@@ -7,10 +7,9 @@ import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
-from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.engine import EngineCoreOutput
 
 GeneralTokenizerType = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
@@ -220,79 +219,6 @@ def generate_dummy_prompt_logprobs(
                 len(tokenizer.vocab) - 1, prompt_tokens_list[1:]))
 
 
-def _decode_token(
-    tok_id: int,
-    tokenizer: PreTrainedTokenizer,
-) -> str:
-    """Reproduce the process of detokenizing a token for testing purposes.
-
-    Args:
-      tok_id: token id to detokenize
-      tokenizer: tokenizer to use for detokenization
-
-    Returns:
-      string representation of token
-    """
-    return tokenizer.batch_decode([tok_id])[0]
-
-
-def validate_requests_logprobs(
-    requests: List[EngineCoreRequest],
-    request_outputs: List[RequestOutput],
-    tokenizer: PreTrainedTokenizer,
-) -> None:
-    """Validate detokenizer logprobs output
-
-    For each sample or prompt logprob, the logprob's
-    `decoded_token` member should match the result of
-    detokenizing the logprob's token id.
-
-    Fails upon mismatch.
-
-    Requires that `requests` and `request_outputs` have
-    the same ordering with respect to requests (i.e.
-    the data structure pertaining to a given request
-    id appears at the same index in both lists and
-    both lists have the same length.)
-
-    Args:
-      requests: list of detokenizer input requests
-      request_outputs: list of detokenizer outputs
-    """
-    for req, req_out in zip(requests, request_outputs):
-        logprobs = req.sampling_params.logprobs
-        prompt_logprobs = req.sampling_params.prompt_logprobs
-        if logprobs is not None and logprobs > 0:
-            # Validate sample logprobs
-            for comp in req_out.outputs:
-                # For each completion
-                for lp_dict in comp.logprobs:
-                    # For each sampled token offset
-                    for tok_id, lp in lp_dict.items():
-                        # For each top logprob,
-                        # compare each `decoded_token` to the result
-                        # of decoding the logprob's token id
-                        assert lp.decoded_token == _decode_token(
-                            tok_id,
-                            tokenizer), "sample logprob decoded token mismatch"
-
-        if prompt_logprobs is not None and prompt_logprobs > 0 and len(
-                req_out.prompt_logprobs) > 0:
-            # Validate prompt logprobs
-            assert req_out.prompt_logprobs[
-                0] is None  # always true for prompt logprobs
-            for plp_dict in req_out.prompt_logprobs[1:]:
-                # For each prompt token offset
-                assert plp_dict is not None
-                for tok_id, plp in plp_dict.items():
-                    # For each top logprob,
-                    # compare each `decoded_token` to the result
-                    # of decoding the logprob's token id
-                    assert plp.decoded_token == _decode_token(
-                        tok_id,
-                        tokenizer), "prompt logprob decoded token mismatch"
-
-
 @dataclass
 class DummyOutputProcessorTestVectors:
     """Dummy test vectors for output processor tests"""
@@ -336,7 +262,6 @@ class MockEngineCore:
         do_logprobs = self.do_logprobs
         do_prompt_logprobs = self.do_prompt_logprobs
         token_idx = self.current_idx
-        self.current_idx += 1
 
         outputs = []
         for req_idx, token_ids in enumerate(self.tokens_list):
@@ -375,4 +300,5 @@ class MockEngineCore:
                     output.finish_reason = "stopped"
                 outputs.append(output)
 
+        self.current_idx += 1
         return outputs
