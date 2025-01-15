@@ -1,3 +1,5 @@
+from typing import Optional
+
 import pytest
 
 from tests.v1.engine.utils import STOP_STRINGS, MockEngineCore
@@ -9,11 +11,18 @@ from vllm.v1.engine.output_processor import OutputProcessor
 @pytest.mark.parametrize(
     "request_output_kind",
     [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+@pytest.mark.parametrize("num_sample_logprobs", [None, 5])
+@pytest.mark.parametrize("num_prompt_logprobs", [None, 5])
 def test_incremental_detokenization(request_output_kind: RequestOutputKind,
+                                    num_sample_logprobs: Optional[int],
+                                    num_prompt_logprobs: Optional[int],
                                     dummy_test_vectors):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
                                        log_stats=False)
-    engine_core = MockEngineCore(dummy_test_vectors.generation_tokens)
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        generated_logprobs_raw=dummy_test_vectors.generation_logprobs,
+        prompt_logprobs_raw=dummy_test_vectors.prompt_logprobs)
 
     # Make N requests.
     requests = [
@@ -31,10 +40,12 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
                               spaces_between_special_tokens=False,
                               output_kind=request_output_kind,
                               stop=[],
-                              include_stop_str_in_output=False))
-        for idx, (prompt, prompt_tokens) in enumerate(
-            zip(dummy_test_vectors.prompt_strings,
-                dummy_test_vectors.prompt_tokens))
+                              include_stop_str_in_output=False,
+                              logprobs=num_sample_logprobs,
+                              prompt_logprobs=num_prompt_logprobs,
+                          )) for idx, (prompt, prompt_tokens) in enumerate(
+                              zip(dummy_test_vectors.prompt_strings,
+                                  dummy_test_vectors.prompt_tokens))
     ]
 
     # Add requests to the detokenizer.
@@ -50,7 +61,7 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
             break
 
         # Step the Detokenizer.
-        processed_outputs = output_processor.process_outputs(outputs, )
+        processed_outputs = output_processor.process_outputs(outputs)
         request_outputs = processed_outputs.request_outputs
         requests_to_abort = processed_outputs.reqs_to_abort
         assert len(requests_to_abort) == 0
@@ -82,10 +93,17 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
 
 
 @pytest.mark.parametrize("include_stop_str_in_output", [True, False])
-def test_stop_string(include_stop_str_in_output: bool, dummy_test_vectors):
+@pytest.mark.parametrize("num_sample_logprobs", [None, 5])
+@pytest.mark.parametrize("num_prompt_logprobs", [None, 5])
+def test_stop_string(include_stop_str_in_output: bool,
+                     num_sample_logprobs: Optional[int],
+                     num_prompt_logprobs: Optional[int], dummy_test_vectors):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
                                        log_stats=False)
-    engine_core = MockEngineCore(dummy_test_vectors.generation_tokens)
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        generated_logprobs_raw=dummy_test_vectors.generation_logprobs,
+        prompt_logprobs_raw=dummy_test_vectors.prompt_logprobs)
 
     # Make N requests.
     requests = [
@@ -105,6 +123,8 @@ def test_stop_string(include_stop_str_in_output: bool, dummy_test_vectors):
                 output_kind=RequestOutputKind.DELTA,
                 stop=STOP_STRINGS,
                 include_stop_str_in_output=include_stop_str_in_output,
+                logprobs=num_sample_logprobs,
+                prompt_logprobs=num_prompt_logprobs,
             )) for idx, (prompt, prompt_tokens) in enumerate(
                 zip(dummy_test_vectors.prompt_strings,
                     dummy_test_vectors.prompt_tokens))

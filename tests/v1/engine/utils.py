@@ -318,9 +318,10 @@ class MockEngineCore:
     def __init__(
         self,
         tokens_list: List[List[int]],
-        generated_logprobs_raw: Optional[List[List[Tuple[torch.Tensor,
-                                                         torch.Tensor]]]],
-        prompt_logprobs_raw: Optional[List[Tuple[torch.Tensor, torch.Tensor]]],
+        generated_logprobs_raw: Optional[List[List[Tuple[
+            torch.Tensor, torch.Tensor]]]] = None,
+        prompt_logprobs_raw: Optional[List[Tuple[torch.Tensor,
+                                                 torch.Tensor]]] = None,
     ) -> None:
         self.tokens_list = tokens_list
         self.current_idx = 0
