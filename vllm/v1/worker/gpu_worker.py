@@ -33,6 +33,7 @@ class Worker:
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        is_driver_worker: bool = False,
     ):
 
         # TODO: use WorkerBase.__init__(self, vllm_config=vllm_config)
@@ -75,7 +76,7 @@ class Worker:
         else:
             self.profiler = None
 
-    def initialize(self):
+    def init_device(self):
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
             # the synchronization point. This causes the memory usage to grow
@@ -132,7 +133,6 @@ class Worker:
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         self.model_runner.profile_run()
-        torch.cuda.synchronize()
 
         free_gpu_memory, _ = torch.cuda.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same

@@ -379,18 +379,22 @@ class Scheduler:
             if self.encoder_cache_manager.has_cache(request, i):
                 # The encoder input is already computed and cached.
                 continue
-            if not self.encoder_cache_manager.can_allocate(request, i):
-                # The encoder cache is full. We can only schedule the decoder
-                # tokens just before the encoder input.
-                num_new_tokens = start_pos - num_computed_tokens
-                break
-            if num_encoder_tokens > encoder_budget:
-                # The encoder budget is exhausted. We can only schedule the
-                # decoder tokens up until the encoder input.
-                # NOTE(woosuk): We assume that the encoder tokens should be
-                # processed altogether, as the encoder usually uses
+            if (not self.encoder_cache_manager.can_allocate(request, i)
+                    or num_encoder_tokens > encoder_budget):
+                # The encoder cache is full or the encoder budget is exhausted.
+                # NOTE(woosuk): We assume that the encoder input tokens should
+                # be processed altogether, as the encoder usually uses
                 # bidirectional attention.
-                num_new_tokens = start_pos - num_computed_tokens
+                if num_computed_tokens < start_pos:
+                    # We only schedule the decoder tokens just before the
+                    # encoder input.
+                    num_new_tokens = start_pos - num_computed_tokens
+                else:
+                    # Because of prefix caching, num_computed_tokens is greater
+                    # than start_pos even though its encoder input is not
+                    # available. In this case, we can't schedule any token for
+                    # the request in this step.
+                    num_new_tokens = 0
                 break
 
             encoder_budget -= num_encoder_tokens
@@ -461,10 +465,10 @@ class Scheduler:
                     new_token_ids=request.output_token_ids[-num_new_tokens:],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
-                    logprobs_token_ids=logprobs_token_ids,
-                    logprobs=logprobs,
-                    prompt_logprobs_token_ids=prompt_logprobs_token_ids,
-                    prompt_logprobs=prompt_logprobs,
+                    new_logprobs_token_ids=logprobs_token_ids,
+                    new_logprobs=logprobs,
+                    new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
+                    new_prompt_logprobs=prompt_logprobs,
                     stop_reason=request.stop_reason)
                 outputs.append(output)
 
@@ -481,10 +485,10 @@ class Scheduler:
                     new_token_ids=[],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
-                    logprobs_token_ids=[],
-                    logprobs=[],
-                    prompt_logprobs_token_ids=prompt_logprobs_token_ids,
-                    prompt_logprobs=prompt_logprobs,
+                    new_logprobs_token_ids=[],
+                    new_logprobs=[],
+                    new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
+                    new_prompt_logprobs=prompt_logprobs,
                     stop_reason=request.stop_reason)
                 outputs.append(output)
 

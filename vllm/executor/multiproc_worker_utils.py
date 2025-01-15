@@ -12,6 +12,7 @@ from typing import (Any, Callable, Dict, Generic, List, Optional, TextIO,
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.triton_utils.importing import HAS_TRITON
 from vllm.utils import _check_multiproc_method, get_mp_context
@@ -147,7 +148,8 @@ class ProcessWorkerWrapper:
     for handling single-node multi-GPU tensor parallel."""
 
     def __init__(self, result_handler: ResultHandler,
-                 worker_factory: Callable[[], Any]) -> None:
+                 worker_factory: Callable[[VllmConfig, int], Any],
+                 vllm_config: VllmConfig, rank: int) -> None:
         self.mp = get_mp_context()
         self._task_queue = self.mp.Queue()
         self.result_queue = result_handler.result_queue
@@ -159,6 +161,8 @@ class ProcessWorkerWrapper:
                 worker_factory=worker_factory,
                 task_queue=self._task_queue,
                 result_queue=self.result_queue,
+                vllm_config=vllm_config,
+                rank=rank,
             ),
             daemon=True)
 
@@ -199,9 +203,11 @@ class ProcessWorkerWrapper:
 
 
 def _run_worker_process(
-    worker_factory: Callable[[], Any],
+    worker_factory: Callable[[VllmConfig, int], Any],
     task_queue: Queue,
     result_queue: Queue,
+    vllm_config: VllmConfig,
+    rank: int,
 ) -> None:
     """Worker process event loop"""
 
@@ -212,7 +218,7 @@ def _run_worker_process(
     _add_prefix(sys.stderr, process_name, pid)
 
     # Initialize worker
-    worker = worker_factory()
+    worker = worker_factory(vllm_config, rank)
     del worker_factory
 
     # Accept tasks from the engine in task_queue
