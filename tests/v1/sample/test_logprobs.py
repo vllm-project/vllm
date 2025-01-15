@@ -22,6 +22,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
     detokenize: bool,
     batch_logprobs_composition: str,
     max_num_batched_tokens: int,
+    enable_prefix_caching: bool,
     example_prompts,
     monkeypatch,
 ) -> None:
@@ -76,6 +77,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
             max_num_seqs=max_num_seqs,
             max_model_len=max_model_len,
             enforce_eager=True,
+            enable_prefix_caching=enable_prefix_caching,
     ) as vllm_model:
         vllm_results = vllm_model.model.generate(
             test_prompts, sampling_params=vllm_sampling_params)
@@ -243,6 +245,7 @@ def test_get_logprobs_and_prompt_logprobs(
         detokenize=True,
         batch_logprobs_composition=batch_logprobs_composition,
         max_num_batched_tokens=max_num_batched_tokens,
+        enable_prefix_caching=False,
         example_prompts=example_prompts,
         monkeypatch=monkeypatch)
 
@@ -257,7 +260,7 @@ def test_max_logprobs(monkeypatch):
     """
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
-    runner = VllmRunner("facebook/opt-125m", max_logprobs=1)
+    runner = VllmRunner("facebook/opt-125m", max_logprobs=1,enable_prefix_caching=False)
     vllm_sampling_params = SamplingParams(logprobs=1)
     # should pass
     runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
@@ -288,6 +291,7 @@ def test_none_logprobs(vllm_runner, model, example_prompts, monkeypatch):
             model,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
+            enable_prefix_caching=False,
     ) as vllm_model:
         sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
                                                        logprobs=None,
