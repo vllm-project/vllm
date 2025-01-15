@@ -252,11 +252,8 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
     ) -> Mapping[str, int]:
         """
-        Get the maximum number of tokens per data item from each modality
-        for profiling the memory usage of a model.
-
-        Note:
-            This is currently directly used only in V1.
+        Get the maximum number of tokens per data item from each modality based 
+        on underlying model configuration.
         """
         if self.has_processor(model_config):
             tokenizer = cached_get_tokenizer(
@@ -270,6 +267,28 @@ class MultiModalRegistry:
         return {
             key: plugin.get_max_multimodal_tokens(model_config)
             for key, plugin in self._plugins.items()
+        }
+
+    def get_max_tokens_per_item_by_nonzero_modality(
+        self,
+        model_config: "ModelConfig",
+    ) -> Mapping[str, int]:
+        """
+        Get the maximum number of tokens per data item from each modality based
+        on underlying model configuration, excluding modalities that user 
+        explicitly disabled via `limit_mm_per_prompt`.
+
+        Note:
+            This is currently directly used only in V1 for profiling the memory 
+            usage of a model.
+        """
+        limits_per_plugin = self._limits_by_model[model_config]
+
+        return {
+            key: max_tokens_per_mm_item
+            for key, max_tokens_per_mm_item in
+            self.get_max_tokens_per_item_by_modality(model_config).items()
+            if limits_per_plugin[key] > 0
         }
 
     def get_max_tokens_by_modality(

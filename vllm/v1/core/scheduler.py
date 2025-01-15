@@ -3,10 +3,11 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
                     Tuple, Union)
 
-from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
+from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
+                                                compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.metrics.stats import SchedulerStats
@@ -25,6 +26,7 @@ class Scheduler:
     def __init__(
         self,
         scheduler_config: SchedulerConfig,
+        model_config: ModelConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
     ) -> None:
@@ -69,16 +71,24 @@ class Scheduler:
         self.running_reqs_data: Dict[str, RunningRequestData] = {}
 
         # Encoder-related.
+        # Calculate encoder cache size if applicable
+        # NOTE: For now we use the same budget for both compute and space.
+        # This can be changed when we make encoder cache for embedding caching
+        # across requests.
+        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
+            model_config=model_config,
+            scheduler_config=scheduler_config,
+        )
+
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
         # projector if needed). Currently, we assume that the encoder also
         # has the Transformer architecture (e.g., ViT).
-        self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  #noqa: E501
-        # NOTE(woosuk): For the models without encoder (e.g., text-only models),
-        # the encoder cache will not be initialized and used, regardless of
-        # the cache size. This is because the memory space for the encoder cache
-        # is preallocated in the profiling run.
+        self.max_num_encoder_input_tokens = encoder_compute_budget
+        # NOTE: For the models without encoder (e.g., text-only models),
+        # the encoder cache will not be initialized because cache size is 0
+        # for these models.
         self.encoder_cache_manager = EncoderCacheManager(
-            cache_size=self.scheduler_config.encoder_cache_size)
+            cache_size=encoder_cache_size)
 
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
