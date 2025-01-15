@@ -70,15 +70,13 @@ ray.get(pg_train.ready())
 
 scheduling_train = PlacementGroupSchedulingStrategy(
     placement_group=pg_train,
-    placement_group_capture_child_tasks=True,
-    placement_group_bundle_index=0)
+    placement_group_capture_child_tasks=True)
 
 pg_inference = placement_group([{"GPU": 2, "CPU": 0}])
 ray.get(pg_inference.ready())
 scheduling_inference = PlacementGroupSchedulingStrategy(
     placement_group=pg_inference,
-    placement_group_capture_child_tasks=True,
-    placement_group_bundle_index=1)
+    placement_group_capture_child_tasks=True)
 
 
 class PlaceHolder:
