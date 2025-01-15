@@ -16,6 +16,8 @@ prompts = [
 
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
+# important: use `distributed_executor_backend="uni"` so that
+# this llm engine/instance only creates one worker.
 llm = LLM(model="facebook/opt-125m",
           tensor_parallel_size=2,
           distributed_executor_backend="uni")
