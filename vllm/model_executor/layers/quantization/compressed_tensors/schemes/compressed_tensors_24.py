@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 from compressed_tensors import CompressionFormat, ModelCompressor
@@ -270,9 +270,9 @@ class CompressedTensors24(CompressedTensorsScheme):
             )
             return sparsity_compressor.decompress_weight(weight_data)
 
-        split_weights = None
-        split_bitmask = None
-        split_shape = None
+        split_weights: List[torch.Tensor] = []
+        split_bitmask: List[torch.Tensor] = []
+        split_shape: List[Tuple[int, int]] = []
 
         if isinstance(layer, (QKVParallelLinear, MergedColumnParallelLinear)):
             split_weights = torch.split(compressed, layer.logical_widths)
@@ -280,7 +280,7 @@ class CompressedTensors24(CompressedTensorsScheme):
             split_shape = [(out, layer.input_size_per_partition)
                            for out in layer.logical_widths]
 
-        if split_weights is not None:
+        if split_weights:
             decompressed_shards = [
                 _process_split(compressed_weight, shape, bitmask)
                 for compressed_weight, shape, bitmask in zip(

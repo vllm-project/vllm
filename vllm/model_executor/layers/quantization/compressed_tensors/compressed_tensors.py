@@ -482,9 +482,13 @@ class CompressedTensorsConfig(QuantizationConfig):
         :return: True if the layer is supported by the Cutlass 2:4 Kernel
             False otherwise
         """
-        is_valid_sparsity_structure = (sparsity_scheme is not None
-                                       and sparsity_scheme.sparsity_structure
-                                       == SparsityStructure.TWO_FOUR.value)
+        if sparsity_scheme is None:
+            return False
+
+        is_valid_sparsity_structure: bool = (
+            sparsity_scheme.sparsity_structure ==
+            SparsityStructure.TWO_FOUR.value)
+
         valid_compressors = {
             CompressionFormat.dense.value,
             CompressionFormat.sparse_24_bitmask.value
