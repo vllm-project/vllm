@@ -189,31 +189,22 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
     ),
     "deepseek_vl_v2": VLMTestInfo(
-        models=["deepseek-ai/deepseek-vl2-small"],
+        models=["deepseek-ai/deepseek-vl2-tiny"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        dtype="bfloat16",
         prompt_formatter=lambda img_prompt: f"<|User|>: {img_prompt}\n\n<|Assistant|>: ", # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
         single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<image>\nWhat's the color of the stop sign and car?",
-            "cherry_blossom": "<image>\nWhat's the color of the tower?",
+            "stop_sign": "<image>\nWhat's the content in the center of the image?", # noqa: E501
+            "cherry_blossom": "<image>\nPlease infer the season with reason in details.",   # noqa: E501
         }),
         multi_image_prompt="image_1:<image>\nimage_2:<image>\nDescribe the two images shortly.",    # noqa: E501
         vllm_runner_kwargs={"hf_overrides": {"architectures": ["DeepseekVLV2ForCausalLM"]}},  # noqa: E501
-        image_size_factors=[(0.10, 0.15)],
         patch_hf_runner=model_utils.deepseekvl2_patch_hf_runner,
         postprocess_inputs=model_utils.cast_dtype_post_processor("images"),
         hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],  # noqa: E501
-        num_logprobs=5,
-        marks=[
-            pytest.mark.skipif(
-                not is_flash_attn_2_available(),
-                reason="Model needs flash-attn for numeric convergence.",
-            ),
-            large_gpu_mark(min_gb=48),
-        ],
+        image_size_factors=[(), (1.0, ), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
     ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
