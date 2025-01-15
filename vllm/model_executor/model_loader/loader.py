@@ -39,7 +39,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
-from vllm.model_executor.model_loader.utils import (get_model_architecture,
+from vllm.model_executor.model_loader.utils import (ParamMapping,
+                                                    get_model_architecture,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
@@ -452,9 +453,9 @@ class TensorizerLoader(BaseModelLoader):
         """Load a serialized model with tensorizer to the CPU.
 
         This is only necessary when the model isn't vLLM-tensorized (see
-        examples/tensorize_vllm_model.py) This should still be faster than
-        default HuggingFace loading, but will be slower than loading a
-        vLLM-tensorized model.
+        examples/other/tensorize_vllm_model.py) This should still
+        be faster than default HuggingFace loading, but will be slower than
+        loading a vLLM-tensorized model.
         """
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
@@ -472,7 +473,7 @@ class TensorizerLoader(BaseModelLoader):
         """Load a serialized model with tensorizer.
 
         Expects a vLLM-tensorized model. See the
-        examples/tensorize_vllm_model.py example script
+        examples/other/tensorize_vllm_model.py example script
         for serializing vLLM models."""
 
         device_config = vllm_config.device_config
@@ -529,7 +530,8 @@ class ShardedStateLoader(BaseModelLoader):
     Model loader that directly loads each worker's model state dict, which
     enables a fast load path for large tensor-parallel models where each worker
     only needs to read its own shard rather than the entire checkpoint. See
-    `examples/save_sharded_state.py` for creating a sharded checkpoint.
+    `examples/offline_inference/save_sharded_state.py` for creating a sharded
+    checkpoint.
     """
 
     DEFAULT_PATTERN = "model-rank-{rank}-part-{part}.safetensors"
@@ -982,21 +984,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def _get_bnb_target_modules(self, model: nn.Module) -> None:
 
-        # TODO: Maybe we can replace bitsandbytes_stacked_params_mapping with
-        # packed_modules_mapping.
-        inverse_stacked_mapping: Dict[str, List[str]] = {}
-        for orig, (
-                packed,
-                idx,
-        ) in model.bitsandbytes_stacked_params_mapping.items():
-            if packed not in inverse_stacked_mapping:
-                inverse_stacked_mapping[packed] = []
-            inverse_stacked_mapping[packed].insert(idx, orig)
-
         for name, module in model.named_modules():
             if isinstance(module, (LinearBase, )):
                 last_name = name.split(".")[-1]
-                if sub_modules := inverse_stacked_mapping.get(last_name, []):
+                if sub_modules := self.modules_mapping.packed_mapping.get(
+                        last_name, []):
                     # Map vllm's names to transformers's names.
                     for sub_name in sub_modules:
                         self.target_modules.append(
@@ -1017,15 +1009,19 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 "The required method 'load_weights' is not defined in class"
                 f" {type(model).__name__}.")
 
-        if not hasattr(model, "bitsandbytes_stacked_params_mapping"):
+        if not hasattr(model, "packed_modules_mapping"):
             raise AttributeError(
                 f"Model {type(model).__name__} does not support BitsAndBytes "
-                "quantization yet.")
+                "quantization yet. No 'packed_modules_mapping' found.")
+
+        self.modules_mapping = ParamMapping(
+            copy.deepcopy(model.packed_modules_mapping))
 
         # For some models like Molmo, we need to use hf_to_vllm_mapper
         # to ensure correct loading of weights.
         if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
             self.weight_mapper = lambda name: hf_to_vllm_mapper._map_name(name)
+
         # Modules whose weights might have fused on disk
         # we need their output_sizes to make shard in flight correctly with TP
         self.maybe_fused_weights_modules: Dict[str, List[int]] = {}
@@ -1108,7 +1104,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             for shard_name, (
                     weight_name,
                     index,
-            ) in model.bitsandbytes_stacked_params_mapping.items():
+            ) in self.modules_mapping.inverse_packed_mapping.items():
                 shard_pos = quant_param_name.find(shard_name)
                 # Some models, such as MiniCPM V2.5/2.6, contain both
                 # module names 'kv_proj' and 'qkv_proj'. To prevent 'kv_proj'

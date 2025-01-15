@@ -2,6 +2,7 @@
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
+import contextlib
 import gc
 import os
 from typing import List, Optional, Set, Tuple, Type
@@ -18,8 +19,10 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
+from vllm.utils import bind_kv_cache
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.hpu_model_runner import HPUModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
@@ -123,6 +126,70 @@ class HPUWorker(LocalOrDistributedWorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None,
+    ) -> Optional[List[SamplerOutput]]:
+        assert execute_model_req is not None
+        # VLLM_HPU_LOG_STEP_GRAPH_COMPILATION     - will log graph compilations per engine step, only when there was any - highly recommended to use alongside PT_HPU_METRICS_GC_DETAILS! # noqa:E501
+        # VLLM_HPU_LOG_STEP_GRAPH_COMPILATION_ALL - will log graph compilations per engine step, always, even if there were none # noqa:E501
+        # VLLM_HPU_LOG_STEP_CPU_FALLBACKS         - will log cpu fallbacks per engine step, only when there was any # noqa:E501
+        # VLLM_HPU_LOG_STEP_CPU_FALLBACKS_ALL     - will log cpu fallbacks per engine step, always, even if there were none # noqa:E501
+        log_graph_compilation_all = os.environ.get(
+            'VLLM_HPU_LOG_STEP_GRAPH_COMPILATION_ALL', '0') != '0'
+        log_graph_compilation = os.environ.get(
+            'VLLM_HPU_LOG_STEP_GRAPH_COMPILATION',
+            '0') != '0' or log_graph_compilation_all
+        log_cpu_fallbacks_all = os.environ.get(
+            'VLLM_HPU_LOG_STEP_CPU_FALLBACKS_ALL', '0') != '0'
+        log_cpu_fallbacks = os.environ.get('VLLM_HPU_LOG_STEP_CPU_FALLBACKS',
+                                           '0') != '0' or log_cpu_fallbacks_all
+        if log_graph_compilation or log_cpu_fallbacks:
+            from habana_frameworks.torch.hpu.metrics import metric_localcontext
+            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
+            is_prompt = any([
+                seq_group_metadata.is_prompt
+                for seq_group_metadata in seq_group_metadata_list
+            ])
+            max_context_len = max([
+                max([
+                    len(v.prompt_token_ids) + len(v.output_token_ids)
+                    for v in seq_group_metadata.seq_data.values()
+                ]) for seq_group_metadata in seq_group_metadata_list
+            ])  # whoa, that's some spicy stuff right here
+            max_num_blocks = (
+                (max_context_len - 1) // self.cache_config.block_size) + 1
+            input_stats = (f'is_prompt: {is_prompt}, '
+                           f'num_seqs: {len(seq_group_metadata_list)}, '
+                           f'max_context_len: {max_context_len}, '
+                           f'max_num_blocks {max_num_blocks}')
+            gc_ctx = metric_localcontext(
+                "graph_compilation"
+            ) if log_graph_compilation else contextlib.nullcontext()
+            cpu_fallback_ctx = metric_localcontext(
+                "cpu_fallback"
+            ) if log_cpu_fallbacks else contextlib.nullcontext()
+            with gc_ctx as gc_local_metric, \
+                cpu_fallback_ctx as cpu_fallback_local_metric:
+                output = LocalOrDistributedWorkerBase.execute_model(
+                    self, execute_model_req)
+            if (log_graph_compilation and gc_local_metric.stats()[0][1] > 0
+                ) or log_graph_compilation_all:
+                msg = ("VLLM_HPU_STEP_GRAPH_COMPILATION: "
+                       f"{gc_local_metric.stats()}, {input_stats}")
+                logger.warning(msg)
+            if (log_cpu_fallbacks and cpu_fallback_local_metric.stats()[0][1] >
+                    0) or log_cpu_fallbacks_all:
+                msg = ("VLLM_HPU_STEP_CPU_FALLBACK: "
+                       f"{cpu_fallback_local_metric.stats()}, {input_stats}")
+                logger.warning(msg)
+
+            return output
+
+        output = LocalOrDistributedWorkerBase.execute_model(
+            self, execute_model_req)
+        return output
+
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
@@ -215,6 +282,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
+        bind_kv_cache(self.compilation_config.static_forward_context,
+                      self.hpu_cache)
 
     def _warm_up_model(self) -> None:
         # NOTE(kzawora): We should use virtual engine index here

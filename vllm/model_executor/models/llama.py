@@ -97,20 +97,19 @@ class LlamaMLP(nn.Module):
 
 class LlamaAttention(nn.Module):
 
-    def __init__(
-        self,
-        config: LlamaConfig,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        max_position_embeddings: int = 8192,
-        quant_config: Optional[QuantizationConfig] = None,
-        bias: bool = False,
-        cache_config: Optional[CacheConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self,
+                 config: LlamaConfig,
+                 hidden_size: int,
+                 num_heads: int,
+                 num_kv_heads: int,
+                 rope_theta: float = 10000,
+                 rope_scaling: Optional[Dict[str, Any]] = None,
+                 max_position_embeddings: int = 8192,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 bias: bool = False,
+                 cache_config: Optional[CacheConfig] = None,
+                 prefix: str = "",
+                 bias_o_proj: bool = False) -> None:
         super().__init__()
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
@@ -150,13 +149,14 @@ class LlamaAttention(nn.Module):
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
-            bias=bias,
+            bias=bias_o_proj,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
 
         is_neox_style = True
-        if quant_config is not None and quant_config.get_name() == "gguf":
+        is_gguf = quant_config and quant_config.get_name() == "gguf"
+        if is_gguf and config.model_type == "llama":
             is_neox_style = False
 
         self.rotary_emb = get_rope(
@@ -230,6 +230,11 @@ class LlamaDecoderLayer(nn.Module):
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
+        bias_o_proj = attention_bias
+        # support internlm/internlm3-8b with qkv_bias
+        if hasattr(config, 'qkv_bias'):
+            attention_bias = config.qkv_bias
+
         self.self_attn = LlamaAttention(
             config=config,
             hidden_size=self.hidden_size,
@@ -241,6 +246,7 @@ class LlamaDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=attention_bias,
+            bias_o_proj=bias_o_proj,
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
         )
@@ -476,16 +482,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "lm_head": "output_embeddings"
     }
     embedding_padding_modules = ["lm_head"]
-
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
-    }
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints

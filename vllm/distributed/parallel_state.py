@@ -357,10 +357,7 @@ class GroupCoordinator:
             return out
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
-        # TODO: pynccl should not use `stream=`
-        # it can just always use the current stream.
-        out = pynccl_comm.all_reduce(input_,
-                                     stream=torch.cuda.current_stream())
+        out = pynccl_comm.all_reduce(input_)
         if out is None:
             # fall back to the default all-reduce using PyTorch.
             # this usually happens during testing.
@@ -865,12 +862,14 @@ def init_model_parallel_group(
 ) -> GroupCoordinator:
     if use_custom_allreduce is None:
         use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
+    from vllm.platforms import current_platform
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
         torch_distributed_backend=backend,
-        use_pynccl=True,
-        use_custom_allreduce=use_custom_allreduce,
+        use_pynccl=current_platform.is_cuda_alike(),
+        use_custom_allreduce=current_platform.is_cuda_alike()
+        and use_custom_allreduce,
         use_tpu_communicator=True,
         use_hpu_communicator=True,
         use_xpu_communicator=True,

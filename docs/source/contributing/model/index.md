@@ -2,7 +2,7 @@
 
 # Adding a New Model
 
-This section provides more information on how to integrate a [HuggingFace Transformers](https://github.com/huggingface/transformers) model into vLLM.
+This section provides more information on how to integrate a [PyTorch](https://pytorch.org/) model into vLLM.
 
 ```{toctree}
 :caption: Contents
@@ -10,6 +10,7 @@ This section provides more information on how to integrate a [HuggingFace Transf
 
 basic
 registration
+tests
 multimodal
 ```
 

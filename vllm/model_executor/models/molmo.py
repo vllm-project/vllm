@@ -23,7 +23,8 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
+from vllm.model_executor.layers.activation import (MulAndSilu, QuickGELU,
+                                                   SiluAndMul)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -462,15 +463,6 @@ class MolmoAttention(nn.Module):
         return output
 
 
-class SwiGLU(nn.Module):
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, gate = x.chunk(2, dim=-1)
-        # Note that the order is reversed compared to
-        # SiluAndMul.
-        return x * F.silu(gate)
-
-
 class LanuageModelMLP(nn.Module):
     """Molmo's LLM mlp."""
 
@@ -489,7 +481,7 @@ class LanuageModelMLP(nn.Module):
             quant_config=quant_config,
         )
         # Activation function.
-        self.act_fn = SwiGLU()
+        self.act_fn = MulAndSilu()
         # Feed-forward output projection.
         self.down_proj = RowParallelLinear(
             self.intermediate_size,
@@ -972,8 +964,6 @@ def image_input_mapper_for_molmo(
         assert len(data) == 1, "Molmo supports only one image per prompt."
         data = data[0]
 
-    # Remove unused dummy PIL image
-    data.pop('raw_mm_data', None)
     return MultiModalKwargs(data)
 
 
@@ -1019,7 +1009,6 @@ def dummy_data_for_molmo(ctx: InputContext, seq_len: int,
     dummy_imgdata = {
         "images": out["images"],
         "image_input_idx": out["image_input_idx"],
-        "raw_mm_data": dummy_image,
     }
     if "image_masks" in out:
         dummy_imgdata["image_masks"] = out["image_masks"]
@@ -1071,7 +1060,7 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
         trust_remote_code=model_config.trust_remote_code)
 
     # NOTE: message formatting for raw text prompt is only applied for
-    # offline inference; for online inference, the prompt is always in
+    # offline inference; for online serving, the prompt is always in
     # instruction format and tokenized.
     if prompt is not None and re.match(r"^User:[\s\S]*?(Assistant:)*$",
                                        prompt):
@@ -1195,12 +1184,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
     ]
     embedding_modules = {}
     embedding_padding_modules = []
-
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        "gate_proj": ("merged_linear", 0),
-        "up_proj": ("merged_linear", 1),
-    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

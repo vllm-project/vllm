@@ -31,6 +31,10 @@ class AttentionType:
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
+    # For some attention backends, we allocate an output tensor before
+    # calling the custom op. When piecewise cudagraph is enabled, this
+    # makes sure the output tensor is allocated inside the cudagraph.
+    accept_output_buffer: bool = False
 
     @staticmethod
     @abstractmethod
@@ -233,6 +237,7 @@ class AttentionImpl(ABC, Generic[T]):
         kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         raise NotImplementedError
 
@@ -246,7 +251,6 @@ class AttentionImpl(ABC, Generic[T]):
         attn_metadata: T,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError

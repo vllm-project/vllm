@@ -538,7 +538,7 @@ class EngineArgs:
             default=None,
             type=json.loads,
             help='RoPE scaling configuration in JSON format. '
-            'For example, {"rope_type":"dynamic","factor":2.0}')
+            'For example, ``{"rope_type":"dynamic","factor":2.0}``')
         parser.add_argument('--rope-theta',
                             default=None,
                             type=float,
@@ -607,7 +607,7 @@ class EngineArgs:
             default=None,
             type=json.loads,
             help=('Overrides for the multimodal input mapping/processing, '
-                  'e.g., image processor. For example: {"num_crops": 4}.'))
+                  'e.g., image processor. For example: ``{"num_crops": 4}``.'))
         parser.add_argument(
             '--disable-mm-preprocessor-cache',
             action='store_true',
@@ -908,13 +908,13 @@ class EngineArgs:
             type=json.loads,
             default=None,
             help="Override or set neuron device configuration. "
-            "e.g. {\"cast_logits_dtype\": \"bloat16\"}.'")
+            "e.g. ``{\"cast_logits_dtype\": \"bloat16\"}``.")
         parser.add_argument(
             '--override-pooler-config',
             type=PoolerConfig.from_json,
             default=None,
             help="Override or set the pooling method for pooling models. "
-            "e.g. {\"pooling_type\": \"mean\", \"normalize\": false}.'")
+            "e.g. ``{\"pooling_type\": \"mean\", \"normalize\": false}``.")
 
         parser.add_argument('--compilation-config',
                             '-O',
@@ -1157,6 +1157,12 @@ class EngineArgs:
             if self.enable_chunked_prefill and self.pipeline_parallel_size > 1:
                 raise ValueError("Multi-Step Chunked-Prefill is not supported "
                                  "for pipeline-parallel-size > 1")
+            from vllm.platforms import current_platform
+            if current_platform.is_cpu():
+                logger.warning("Multi-Step (--num-scheduler-steps > 1) is "
+                               "currently not supported for CPUs and has been "
+                               "disabled.")
+                self.num_scheduler_steps = 1
 
         # make sure num_lookahead_slots is set the higher value depending on
         # if we are using speculative decoding or multi-step
