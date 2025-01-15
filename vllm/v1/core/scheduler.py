@@ -375,7 +375,7 @@ class Scheduler:
                 continue
             if not self.encoder_cache_manager.can_allocate(request, i):
                 # The encoder cache is full.
-                if start_pos < num_computed_tokens:
+                if num_computed_tokens < start_pos:
                     # We only schedule the decoder tokens just before the
                     # encoder input.
                     num_new_tokens = start_pos - num_computed_tokens
