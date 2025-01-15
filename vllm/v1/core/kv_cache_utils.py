@@ -63,7 +63,7 @@ class KVCacheBlock:
 
 """When a model needs different types of kv_caches (e.g., full attention + 
 sliding window attention), the attention layers will be split to multiple 
-"KV cache groups", where layers in the same group has the same kv cache type and 
+"KV cache groups", where layers in the same group has the same kv cache type and
 can use the same KVCacheBlock. There will be only one group if all layers use 
 the same type of KV cache.
 See KVCacheConfig class for more examples of "KV cache group".
