@@ -710,13 +710,7 @@ class DeviceMemoryProfiler:
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
         from vllm.platforms import current_platform
-        if current_platform.is_cuda_alike():
-            torch.cuda.reset_peak_memory_stats(self.device)
-            mem = torch.cuda.max_memory_allocated(self.device)
-        elif current_platform.is_xpu():
-            torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
-            mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
-        return mem
+        return current_platform.get_current_memory_usage(self.device)
 
     def __enter__(self):
         self.initial_memory = self.current_memory_usage()

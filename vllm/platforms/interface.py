@@ -278,6 +278,15 @@ class Platform:
         return True
 
     @classmethod
+    def get_current_memory_usage(cls,
+                                 device: Optional[torch.types.Device] = None
+                                 ) -> float:
+        """
+        Return the memory usage in bytes.
+        """
+        raise NotImplementedError
+
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         """
         Return the punica wrapper for current platform.
