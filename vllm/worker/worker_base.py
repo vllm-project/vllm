@@ -510,8 +510,8 @@ class WorkerWrapperBase:
         kwargs = all_kwargs[self.rank]
         enable_trace_function_call_for_thread(self.vllm_config)
 
-        # see https://github.com/NVIDIA/nccl/issues/1234
-        os.environ['NCCL_CUMEM_ENABLE'] = '0'
+        from vllm import configure_as_vllm_process
+        configure_as_vllm_process()
 
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -520,9 +520,11 @@ class WorkerWrapperBase:
             worker_class = resolve_obj_by_qualname(
                 self.vllm_config.parallel_config.worker_cls)
         else:
-            assert isinstance(self.vllm_config.parallel_config.worker_cls, bytes)
+            assert isinstance(self.vllm_config.parallel_config.worker_cls,
+                              bytes)
             import cloudpickle
-            worker_class = cloudpickle.loads(self.vllm_config.parallel_config.worker_cls)
+            worker_class = cloudpickle.loads(
+                self.vllm_config.parallel_config.worker_cls)
         self.worker = worker_class(**kwargs)
         assert self.worker is not None
 
