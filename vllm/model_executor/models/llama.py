@@ -97,21 +97,19 @@ class LlamaMLP(nn.Module):
 
 class LlamaAttention(nn.Module):
 
-    def __init__(
-        self,
-        config: LlamaConfig,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        max_position_embeddings: int = 8192,
-        quant_config: Optional[QuantizationConfig] = None,
-        bias: bool = False,
-        cache_config: Optional[CacheConfig] = None,
-        prefix: str = "",
-        bias_o_proj: bool = False
-    ) -> None:
+    def __init__(self,
+                 config: LlamaConfig,
+                 hidden_size: int,
+                 num_heads: int,
+                 num_kv_heads: int,
+                 rope_theta: float = 10000,
+                 rope_scaling: Optional[Dict[str, Any]] = None,
+                 max_position_embeddings: int = 8192,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 bias: bool = False,
+                 cache_config: Optional[CacheConfig] = None,
+                 prefix: str = "",
+                 bias_o_proj: bool = False) -> None:
         super().__init__()
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
@@ -236,7 +234,7 @@ class LlamaDecoderLayer(nn.Module):
         # support internlm/internlm3-8b with qkv_bias
         if hasattr(config, 'qkv_bias'):
             attention_bias = config.qkv_bias
-        
+
         self.self_attn = LlamaAttention(
             config=config,
             hidden_size=self.hidden_size,
