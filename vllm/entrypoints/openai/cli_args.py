@@ -189,9 +189,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument(
         "--return-tokens-as-token-ids",
         action="store_true",
-        help="When ``--max-logprobs`` is specified, represents single tokens as "
-        "strings of the form 'token_id:{token_id}' so that tokens that "
-        "are not JSON-encodable can be identified.")
+        help="When ``--max-logprobs`` is specified, represents single tokens "
+        " as strings of the form 'token_id:{token_id}' so that tokens "
+        "that are not JSON-encodable can be identified.")
     parser.add_argument(
         "--disable-frontend-multiprocessing",
         action="store_true",
@@ -207,8 +207,8 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         action="store_true",
         default=False,
         help=
-        "Enable auto tool choice for supported models. Use ``--tool-call-parser``"
-        " to specify which parser to use.")
+        "Enable auto tool choice for supported models. Use "
+        "``--tool-call-parser`` to specify which parser to use.")
 
     valid_tool_parsers = ToolParserManager.tool_parsers.keys()
     parser.add_argument(
