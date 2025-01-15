@@ -20,7 +20,6 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
-from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
@@ -356,16 +355,10 @@ class MQLLMEngine:
             self._errored_with = e
 
     def start_profile(self) -> None:
-        if type(self.engine.model_executor) is GPUExecutor:
-            self.engine.model_executor.start_profile()
-        else:
-            self.engine.model_executor._run_workers("start_profile")
+        self.engine.start_profile()
 
     def stop_profile(self) -> None:
-        if type(self.engine.model_executor) is GPUExecutor:
-            self.engine.model_executor.stop_profile()
-        else:
-            self.engine.model_executor._run_workers("stop_profile")
+        self.engine.stop_profile()
 
 
 def signal_handler(*_) -> None:
