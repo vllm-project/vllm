@@ -268,50 +268,62 @@ def download_weights_from_hf(
 
 def download_safetensors_index_file_from_hf(
     model_name_or_path: str,
-    index_file: str,
+    possible_index_files: str | List[str],
     cache_dir: Optional[str],
     revision: Optional[str] = None,
 ) -> None:
-    """Download hf safetensors index file from Hugging Face Hub.
+    """Download hf safetensors index file(s) from Hugging Face Hub.
 
     Args:
         model_name_or_path (str): The model name or path.
+        possible_index_files (str | List[str]): The possible index files.
+            Can specify a single index file, or a list of index files
         cache_dir (Optional[str]): The cache directory to store the model
             weights. If None, will use HF defaults.
         revision (Optional[str]): The revision of the model.
     """
+
+    if isinstance(possible_index_files, str):
+        possible_index_files = [possible_index_files]
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
-    with get_lock(model_name_or_path, cache_dir):
-        try:
-            # Download the safetensors index file.
-            hf_hub_download(
-                repo_id=model_name_or_path,
-                filename=index_file,
-                cache_dir=cache_dir,
-                revision=revision,
-                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-            )
-        # If file not found on remote or locally, we should not fail since
-        # only some models will have index_file.
-        except huggingface_hub.utils.EntryNotFoundError:
-            logger.info("No %s found in remote.", index_file)
-        except huggingface_hub.utils.LocalEntryNotFoundError:
-            logger.info("No %s found in local cache.", index_file)
+    for index_file in possible_index_files:
+        with get_lock(model_name_or_path, cache_dir):
+            try:
+                # Download the safetensors index file.
+                hf_hub_download(
+                    repo_id=model_name_or_path,
+                    filename=index_file,
+                    cache_dir=cache_dir,
+                    revision=revision,
+                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                )
+            # If file not found on remote or locally, we should not fail since
+            # only some models will have index_file.
+            except huggingface_hub.utils.EntryNotFoundError:
+                logger.info("No %s found in remote.", index_file)
+            except huggingface_hub.utils.LocalEntryNotFoundError:
+                logger.info("No %s found in local cache.", index_file)
 
 
 # For models like Mistral-7B-v0.3, there are both sharded
 # safetensors files and a consolidated safetensors file.
 # Passing both of these to the weight loader functionality breaks.
-# So, we use the index_file to
+# So, we use the first index_file found from `possible_index_files` to
 # look up which safetensors files should be used.
 def filter_duplicate_safetensors_files(hf_weights_files: List[str],
                                        hf_folder: str,
-                                       index_file: str) -> List[str]:
-    # model.safetensors.index.json is a mapping from keys in the
-    # torch state_dict to safetensors file holding that weight.
-    index_file_name = os.path.join(hf_folder, index_file)
-    if not os.path.isfile(index_file_name):
+                                       possible_index_files: str | List[str]) -> List[str]:
+    # index file (like `model.safetensors.index.json`) is a mapping from
+    # keys in the torch state_dict to safetensors file holding that weight.
+    index_file_name = None
+    for index_file in possible_index_files:
+        file_name = os.path.join(hf_folder, index_file)
+        if os.path.isfile(file_name):
+            index_file_name = file_name
+            break
+
+    if index_file_name is None:
         return hf_weights_files
 
     # Iterate through the weight_map (weight_name: safetensors files)

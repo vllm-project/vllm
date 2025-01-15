@@ -227,7 +227,10 @@ class DefaultModelLoader(BaseModelLoader):
         is_local = os.path.isdir(model_name_or_path)
         load_format = self.load_config.load_format
         use_safetensors = False
-        index_file = SAFE_WEIGHTS_INDEX_NAME
+        # Some model formats have different index file names.
+        # `possible_index_files` contains the possible names, but if
+        # multiple files are found only the first one found will be considered
+        possible_index_files = [SAFE_WEIGHTS_INDEX_NAME]
         # Some quantized models use .pt files for storing the weights.
         if load_format == LoadFormat.AUTO:
             allow_patterns = ["*.safetensors", "*.bin"]
@@ -236,8 +239,11 @@ class DefaultModelLoader(BaseModelLoader):
             allow_patterns = ["*.safetensors"]
         elif load_format == LoadFormat.MISTRAL:
             use_safetensors = True
-            allow_patterns = ["consolidated*.safetensors"]
-            index_file = "consolidated.safetensors.index.json"
+            allow_patterns = ["model*.safetensors",
+                              "consolidated*.safetensors"]
+            possible_index_files.append(
+                "consolidated.safetensors.index.json"
+            )
         elif load_format == LoadFormat.PT:
             allow_patterns = ["*.pt"]
         elif load_format == LoadFormat.NPCACHE:
@@ -271,17 +277,17 @@ class DefaultModelLoader(BaseModelLoader):
             # For models like Mistral-7B-Instruct-v0.3
             # there are both sharded safetensors files and a consolidated
             # safetensors file. Using both breaks.
-            # Here, we download the `model.safetensors.index.json` and filter
-            # any files not found in the index.
+            # Here, we download the `(model|consolidated).safetensors.index.json` 
+            # and filter any files not found in the index.
             if not is_local:
                 download_safetensors_index_file_from_hf(
                     model_name_or_path,
-                    index_file,
+                    possible_index_files,
                     self.load_config.download_dir,
                     revision,
                 )
             hf_weights_files = filter_duplicate_safetensors_files(
-                hf_weights_files, hf_folder, index_file)
+                hf_weights_files, hf_folder, possible_index_files)
         else:
             hf_weights_files = filter_files_not_needed_for_inference(
                 hf_weights_files)
