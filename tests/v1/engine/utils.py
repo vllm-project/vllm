@@ -1,12 +1,31 @@
 """Engine test utils"""
 import random
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import List, Tuple, Union
 
 import torch
-from transformers.tokenization_utils import PreTrainedTokenizer
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from vllm.engine.arg_utils import EngineArgs
 from vllm.outputs import RequestOutput
-from vllm.v1.engine import EngineCoreRequest
+from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
+    BaseTokenizerGroup)
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+
+# Number of sample logprobs to request when testing sample logprobs
+NUM_SAMPLE_LOGPROBS = 5
+# Number of prompt logprobs to request when testing prompt logprobs
+NUM_PROMPT_LOGPROBS = 7
+
+TOKENIZER_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
+
+FULL_STRINGS = [
+    "My name is Robert from Neural Magic and I love working on vLLM so much!",
+    "Red Hat is the best open source company by far across Linux, K8s, and AI.",
+    "Nick is the name of my brother in addition to my colleague from Red Hat.",
+]
+STOP_STRINGS = ["I love working on", "company by far", "brother in"]
+PROMPT_LEN = 5
 
 random.seed(42)
 
@@ -270,3 +289,49 @@ def validate_requests_logprobs(
                     assert plp.decoded_token == _decode_token(
                         tok_id,
                         tokenizer), "prompt logprob decoded token mismatch"
+
+
+@dataclass
+class DummyOutputProcessorTestVectors:
+    """Dummy test vectors for output processor tests"""
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+    tokenizer_group: BaseTokenizerGroup
+    vllm_config: EngineArgs
+    full_tokens: List[List[int]]  # Prompt + generated tokens
+    prompt_tokens: List[List[int]]
+    generation_tokens: List[List[int]]
+    # Each request is associated with a tuple of (top logprobs,top tokens)
+    # prompt logprobs tensors
+    prompt_logprobs: List[Tuple[torch.Tensor, torch.Tensor]]
+    # Each request is associated with a sample logprobs; a request's
+    # sample logprobs are a list of (top logprobs,top tokens)
+    # sample logprobs tensors at each sequence position
+    generation_logprobs: List[List[Tuple[torch.Tensor, torch.Tensor]]]
+    prompt_strings: List[str]
+    prompt_strings_len: List[int]
+    generation_strings: List[str]
+
+
+class MockEngineCore:
+    """Mock engine core outputs form premade tokens lists."""
+
+    def __init__(self, tokens_list: List[List[int]]):
+        self.tokens_list = tokens_list
+        self.current_idx = 0
+
+    def get_outputs(self) -> List[EngineCoreOutput]:
+        token_idx = self.current_idx
+        self.current_idx += 1
+
+        outputs = []
+        for req_idx, token_ids in enumerate(self.tokens_list):
+            if len(token_ids) > token_idx:
+                output = EngineCoreOutput(request_id=f"request-{req_idx}",
+                                          new_token_ids=[token_ids[token_idx]],
+                                          finished=False)
+                if token_idx == len(token_ids) - 1:
+                    output.finished = True
+                    output.finish_reason = "stopped"
+                outputs.append(output)
+
+        return outputs
