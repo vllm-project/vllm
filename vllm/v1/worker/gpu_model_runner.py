@@ -634,15 +634,13 @@ class GPUModelRunner:
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             assert req_id is not None
             req_state = self.requests[req_id]
-            seq_len = (
-                req_state.num_computed_tokens
-                + scheduler_output.num_scheduled_tokens[req_id]
-            )
+            seq_len = (req_state.num_computed_tokens +
++                       scheduler_output.num_scheduled_tokens[req_id])
             assert seq_len <= req_state.num_tokens
             if seq_len == req_state.num_tokens:
                 # Append the sampled token to the output token ids.
                 self.input_batch.num_tokens[i] += 1
-                # OPTIMIZATION: Priming the state updates, and assign the actual tokens later.
+                # OPTIMIZATION: Priming the state updates for later updates.
                 req_state.output_token_ids.append(0)
                 request_seq_lens.append((i, req_state, seq_len))
             else:
@@ -659,7 +657,8 @@ class GPUModelRunner:
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
 
-        # GPU -> CPU Sync happens here. Move as many CPU operations before the sync point as possible.
+        # NOTE: GPU -> CPU Sync happens here.
+        # Move as many CPU operations as possible before this sync point.
         sampled_token_ids = sampler_output.sampled_token_ids.tolist()
         # Update with the actual token ids
         for i, req_state, seq_len in request_seq_lens:
