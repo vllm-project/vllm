@@ -70,6 +70,7 @@ class UniprocExecutor(Executor):
         scheduler_output,
     ) -> ModelRunnerOutput:
         output = self.worker.execute_model(scheduler_output)
+        assert output is not None
         return output
 
     def profile(self, is_start: bool = True):
