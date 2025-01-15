@@ -626,8 +626,7 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
-                # Loading kv cache scales for quark and
-                # compressed-tensors quantization
+                # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
