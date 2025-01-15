@@ -203,7 +203,7 @@ steps:
     - python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Prefix Caching Test # 9min
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/prefix_caching
