@@ -19,6 +19,10 @@ class XPUPlatform(Platform):
     device_name: str = "xpu"
     device_type: str = "xpu"
     dispatch_key: str = "XPU"
+    # Intel XPU's device key is "GPU" for Ray.
+    # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20 # noqa: E501
+    ray_device_key: str = "GPU"
+    device_control_env_var: str = "ONEAPI_DEVICE_SELECTOR"
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
