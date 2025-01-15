@@ -163,11 +163,11 @@ class OutputProcessor:
             request_state.request_id,
             request_state.prompt,
             request_state.prompt_token_ids,
+            detokenizer_output.output_text,
+            detokenizer_output.token_ids,
             logprobs_output.logprobs,
             logprobs_output.prompt_logprobs,
             logprobs_output.cumulative_logprob,
-            detokenizer_output.output_text,
-            detokenizer_output.token_ids,
             detokenizer_output.finished,
         )
         if detokenizer_output.finished:

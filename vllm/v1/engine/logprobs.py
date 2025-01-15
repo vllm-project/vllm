@@ -52,8 +52,8 @@ class LogprobsProcessor:
             output_kind=request.sampling_params.output_kind,
             prompt_token_ids=request.prompt_token_ids,
             cumulative_logprob=(0. if num_logprobs else None),
-            logprobs=(None if num_logprobs is None else []),
-            prompt_logprobs=(None if num_prompt_logprobs is None else []),
+            logprobs=([] if num_logprobs else None),
+            prompt_logprobs=([] if num_prompt_logprobs else None),
             num_prompt_logprobs=(num_prompt_logprobs or 0),
             num_logprobs=(num_logprobs or 0),
         )
@@ -79,6 +79,9 @@ class LogprobsProcessor:
         Return:
           Sample logprobs, if required for this request
         """
+        if self.num_logprobs == 0:
+            # Sample logprobs disabled for this request
+            return None
         assert self.logprobs is not None
 
         for sampled_token_id, logprobs, token_ids in zip(
@@ -149,6 +152,9 @@ class LogprobsProcessor:
         Return:
           Prompt logprobs, if required for this request
         """
+        if self.num_prompt_logprobs == 0:
+            # Prompt logprobs disabled for this request
+            return None
         assert prompt_logprobs is not None
         assert token_ids is not None
         if prompt_logprobs.numel() == 0:
