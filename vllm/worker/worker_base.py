@@ -1,3 +1,4 @@
+import cloudpickle
 import dataclasses
 import os
 import time
@@ -522,7 +523,6 @@ class WorkerWrapperBase:
         else:
             assert isinstance(self.vllm_config.parallel_config.worker_cls,
                               bytes)
-            import cloudpickle
             worker_class = cloudpickle.loads(
                 self.vllm_config.parallel_config.worker_cls)
         self.worker = worker_class(**kwargs)
