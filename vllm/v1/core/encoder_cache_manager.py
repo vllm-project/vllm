@@ -58,7 +58,7 @@ class EncoderCacheManager:
 def compute_encoder_budget(
     model_config: "ModelConfig",
     scheduler_config: "SchedulerConfig",
-) -> tuple[int, int]:
+) -> Tuple[int, int]:
     """Compute the encoder cache budget based on the model and scheduler 
     configurations.
 
@@ -88,7 +88,7 @@ def compute_encoder_budget(
 def _compute_encoder_budget_multimodal(
     model_config: "ModelConfig",
     scheduler_config: "SchedulerConfig",
-) -> tuple[int, int]:
+) -> Tuple[int, int]:
     """Compute the encoder cache budget based on the model and scheduler 
     configurations for a multimodal model.
 
