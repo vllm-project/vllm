@@ -141,7 +141,7 @@ class Attention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         if self.calculate_kv_scales and \
-            _attn_metadata.enable_kv_scales_calculation:
+            attn_metadata.enable_kv_scales_calculation:
             self.calc_kv_scales(key, value)
         if self.use_output:
             output = torch.empty_like(query)
