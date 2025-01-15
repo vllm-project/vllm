@@ -103,6 +103,8 @@ class MQAScorer(SpeculativeScorer):
             has_prompt_log = any((sg.sampling_params.prompt_logprobs
                                   and sg.sampling_params.prompt_logprobs > 0)
                                  for sg in target_seq_group_metadata_list)
+            # TODO (NickLucche) we should surface `disable_logprobs` as to not
+            # break abstraction to get its value.
             if (not self._scorer_worker.model_runner.disable_logprobs\
                 and has_prompt_log):
                 prompt_logprobs = [
