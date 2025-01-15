@@ -40,19 +40,27 @@ outputs = llm.generate(prompts, sampling_params)
 # with the model's device group communication.
 cpu_group = get_world_group().cpu_group
 
+
+def test_consistent_across_ranks(obj):
+    if torch_rank == 0:
+        dist.broadcast_object_list([obj], src=0, group=cpu_group)
+    else:
+        container = [None]
+        dist.broadcast_object_list(container, src=0, group=cpu_group)
+        assert container[0] == obj
+
+
+test_consistent_across_ranks(
+    llm.llm_engine.vllm_config.cache_config.num_cpu_blocks)
+test_consistent_across_ranks(
+    llm.llm_engine.vllm_config.cache_config.num_gpu_blocks)
+
 # all ranks should have the same outputs
 for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
-    if torch_rank == 0:
-        dist.broadcast_object_list([prompt, generated_text],
-                                   src=0,
-                                   group=cpu_group)
-    else:
-        container = [None, None]
-        dist.broadcast_object_list(container, src=0, group=cpu_group)
-        assert container[0] == prompt
-        assert container[1] == generated_text
+    test_consistent_across_ranks(prompt)
+    test_consistent_across_ranks(generated_text)
     print(f"Rank {torch_rank}, Prompt: {prompt!r}, "
           f"Generated text: {generated_text!r}")
 
