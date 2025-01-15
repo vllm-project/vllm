@@ -198,7 +198,7 @@ VLM_TEST_SETTINGS = {
             "stop_sign": "<image>\nWhat's the content in the center of the image?", # noqa: E501
             "cherry_blossom": "<image>\nPlease infer the season with reason in details.",   # noqa: E501
         }),
-        multi_image_prompt="image_1:<image>\nimage_2:<image>\nDescribe the two images shortly.",    # noqa: E501
+        multi_image_prompt="image_1:<image>\nimage_2:<image>\nWhich image can we see the car and the tower?",    # noqa: E501
         vllm_runner_kwargs={"hf_overrides": {"architectures": ["DeepseekVLV2ForCausalLM"]}},  # noqa: E501
         patch_hf_runner=model_utils.deepseekvl2_patch_hf_runner,
         postprocess_inputs=model_utils.cast_dtype_post_processor("images"),
