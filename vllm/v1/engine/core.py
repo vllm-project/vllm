@@ -16,9 +16,9 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
 from vllm.v1.core.scheduler import Scheduler
-from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreProfile, EngineCoreRequest,
-                            EngineCoreRequestType, EngineCoreRequestUnion)
+from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
+                            EngineCoreRequest, EngineCoreRequestType,
+                            EngineCoreRequestUnion)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
@@ -27,9 +27,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-POLLING_TIMEOUT_MS = 5000
-POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
-LOGGING_TIME_S = 5
+POLLING_TIMEOUT_S = 2.5
 
 
 class EngineCore:
@@ -39,10 +37,8 @@ class EngineCore:
         self,
         vllm_config: VllmConfig,
         executor_class: Type[Executor],
-        log_stats: bool = False,
     ):
         assert vllm_config.model_config.runner_type != "pooling"
-        self.log_stats = log_stats
 
         logger.info("Initializing an LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
@@ -60,8 +56,6 @@ class EngineCore:
         self.scheduler = Scheduler(vllm_config.scheduler_config,
                                    vllm_config.cache_config,
                                    vllm_config.lora_config)
-
-        self._last_logging_time = time.time()
 
         self.mm_input_mapper_server = MMInputMapperServer(
             vllm_config.model_config)
@@ -113,11 +107,12 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
-    def step(self) -> List[EngineCoreOutput]:
+    def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
         if not self.scheduler.has_unfinished_requests():
-            return []
+            return EngineCoreOutputs(
+                outputs=[], scheduler_stats=self.scheduler.make_stats())
 
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
@@ -144,7 +139,9 @@ class EngineCoreProc(EngineCore):
         executor_class: Type[Executor],
         log_stats: bool = False,
     ):
-        super().__init__(vllm_config, executor_class, log_stats)
+        super().__init__(vllm_config, executor_class)
+
+        self.log_stats = log_stats
 
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -152,7 +149,7 @@ class EngineCoreProc(EngineCore):
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
         self.input_queue: queue.Queue[EngineCoreRequestUnion] = queue.Queue()
-        self.output_queue: queue.Queue[List[EngineCoreOutput]] = queue.Queue()
+        self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, ),
                          daemon=True).start()
@@ -216,8 +213,10 @@ class EngineCoreProc(EngineCore):
                         self._handle_client_request(req)
                         break
                     except queue.Empty:
-                        self._log_stats()
                         logger.debug("EngineCore busy loop waiting.")
+                        # Break out the loop so we can log_stats in step().
+                        if self.log_stats:
+                            break
                     except BaseException:
                         raise
 
@@ -229,27 +228,8 @@ class EngineCoreProc(EngineCore):
             # 3) Step the engine core.
             outputs = self.step()
 
-            # 4) Put EngineCoreOutputs into the output queue.
+            # 5) Put EngineCoreOutputs into the output queue.
             self.output_queue.put_nowait(outputs)
-
-            self._log_stats()
-
-    def _log_stats(self):
-        """Log basic stats every LOGGING_TIME_S"""
-
-        if not self.log_stats:
-            return
-
-        now = time.time()
-
-        if now - self._last_logging_time > LOGGING_TIME_S:
-            logger.info(
-                "RUNNING: %s | WAITING: %s",
-                len(self.scheduler.running),
-                len(self.scheduler.waiting),
-            )
-
-            self._last_logging_time = now
 
     def _handle_client_request(self, request: EngineCoreRequestUnion) -> None:
         """Handle EngineCoreRequest or EngineCoreABORT from Client."""
@@ -300,7 +280,6 @@ class EngineCoreProc(EngineCore):
 
         with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
-                engine_core_outputs = self.output_queue.get()
-                outputs = EngineCoreOutputs(outputs=engine_core_outputs)
+                outputs = self.output_queue.get()
                 encoder.encode_into(outputs, buffer)
                 socket.send_multipart((buffer, ), copy=False)

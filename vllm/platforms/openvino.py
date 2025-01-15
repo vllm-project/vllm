@@ -66,9 +66,8 @@ class OpenVinoPlatform(Platform):
         from vllm.utils import GiB_bytes
 
         parallel_config = vllm_config.parallel_config
-        assert (
-            parallel_config.world_size == 1
-        ), "OpenVINOExecutor only supports single CPU socket currently."
+        assert (parallel_config.world_size == 1
+                ), "OpenVINO only supports single CPU socket currently."
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = \
@@ -141,3 +140,10 @@ class OpenVinoPlatform(Platform):
             raise RuntimeError(
                 "Invalid environment variable VLLM_OPENVINO_KVCACHE_SPACE"
                 f" {kv_cache_space}, expect a positive integer value.")
+
+        assert vllm_config.device_config.device_type == "openvino"
+        assert vllm_config.lora_config is None, \
+            "OpenVINO backend doesn't support LoRA"
+        assert cls.is_openvino_cpu() or \
+            cls.is_openvino_gpu(), \
+            "OpenVINO backend supports only CPU and GPU devices"
