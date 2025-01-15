@@ -228,6 +228,9 @@ class cmake_build_ext(build_ext):
 
             # CMake appends the extension prefix to the install path,
             # and outdir already contains that prefix, so we need to remove it.
+            # We assume only the final component of extension prefix is added by
+            # CMake, this is currently true for current extensions but may not
+            # always be the case.
             prefix = outdir
             if '.' in ext.name:
                 prefix = prefix.parent

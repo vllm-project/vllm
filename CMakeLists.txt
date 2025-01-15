@@ -555,7 +555,7 @@ endif()
 # They should be identical but if they aren't, this is a massive footgun.
 #
 # The vllm-flash-attn install rules are nested under vllm to make sure the library gets installed in the correct place.
-# To only install vllm-flash-attn, use --component vllm_flash_attn_c.
+# To only install vllm-flash-attn, use --component _vllm_fa2_C (for FA2) or --component _vllm_fa3_C (for FA3).
 # If no component is specified, vllm-flash-attn is still installed.
 
 # If VLLM_FLASH_ATTN_SRC_DIR is set, vllm-flash-attn is installed from that directory instead of downloading.
@@ -588,12 +588,20 @@ endif()
 FetchContent_MakeAvailable(vllm-flash-attn)
 message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
 
-# Copy over the vllm-flash-attn python files
+# Copy over the vllm-flash-attn python files (duplicated for fa2 and fa3, incase
+# only one is built, in the case both are built redundant work is done)
 install(
-        DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
-        DESTINATION vllm_flash_attn
-        COMPONENT _vllm_fa3_C
-        FILES_MATCHING PATTERN "*.py"
+  DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
+  DESTINATION vllm_flash_attn
+  COMPONENT _vllm_fa2_C
+  FILES_MATCHING PATTERN "*.py"
+)
+
+install(
+  DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
+  DESTINATION vllm_flash_attn
+  COMPONENT _vllm_fa3_C
+  FILES_MATCHING PATTERN "*.py"
 )
 
 # Nothing after vllm-flash-attn, see comment about macros above
