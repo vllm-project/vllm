@@ -89,6 +89,12 @@ def get_default_config_root():
     )
 
 
+def maybe_convert_int(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    return int(value)
+
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
@@ -205,7 +211,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Force vllm to use a specific flash-attention version (2 or 3), only valid
     # when using the flash-attention backend.
     "VLLM_FLASH_ATTN_VERSION":
-    lambda: int(os.environ.get("VLLM_FLASH_ATTN_VERSION", None)),
+    lambda: maybe_convert_int(os.environ.get("VLLM_FLASH_ATTN_VERSION", None)),
 
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
