@@ -79,8 +79,6 @@ class BlockTable:
         self.num_blocks_per_row[row_idx] = start + num_blocks
         if self.use_uva:
             self.block_table_diff_np[row_idx, 0] = start
-            # Move-and-append is not allowed.
-            assert self.block_table_diff_np[row_idx, 1] == 0
             self.block_table_diff_np[row_idx, 1] = num_blocks
 
     def move_row(self, src: int, tgt: int) -> None:
@@ -90,7 +88,8 @@ class BlockTable:
         self.num_blocks_per_row[tgt] = num_blocks
         if self.use_uva:
             # Append-and-move is allowed.
-            self.block_table_diff_np[tgt] = self.block_table_diff_np[src]
+            self.block_table_diff_np[tgt, 0] = 0
+            self.block_table_diff_np[tgt, 1] = num_blocks
             # Clear the source row.
             self.block_table_diff_np[src].fill(0)
 
