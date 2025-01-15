@@ -4,7 +4,7 @@ import json
 import math
 import os
 from dataclasses import MISSING, dataclass, field, fields
-from typing import Literal, Optional, Union
+from typing import Literal, Optional, Union,List
 
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
@@ -38,17 +38,16 @@ class PEFTHelper:
     vllm_max_position_embeddings: Optional[int] = field(default=False)
     vllm_long_context_scaling_factor: Optional[float] = field(default=None)
 
-    def _validate_features(self):
+    def _validate_features(self)->List[str]:
+        """
+        Check if there are any unsupported Lora features.
+        """
         error_msg = []
-
         if self.modules_to_save:
             error_msg.append("vLLM only supports modules_to_save being None.")
-
         if self.use_dora:
             error_msg.append("vLLM does not yet support DoRA.")
-
-        if error_msg:
-            raise ValueError(f"{', '.join(error_msg)}")
+        return error_msg
 
     def __post_init__(self):
         self._validate_features()
@@ -98,17 +97,17 @@ class PEFTHelper:
         config["vllm_max_position_embeddings"] = max_position_embeddings
         return cls.from_dict(config)
 
-    def post_validity(self, lora_config: LoRAConfig) -> None:
+    def validate_legal(self, lora_config: LoRAConfig) -> None:
         """
         Validates the LoRA configuration settings against application 
         constraints and requirements.
         """
-        error_msg = []
+        error_msg = self._validate_features()
         if self.r > lora_config.max_lora_rank:
             error_msg.append(f"LoRA rank {self.r} is greater than max rank "
                              f"{lora_config.max_lora_rank}.")
         if self.bias != "none" and lora_config.bias_enabled:
             error_msg.append(
                 "Adapter bias cannot be used without bias_enabled.")
-            if error_msg:
-                raise ValueError(f"{', '.join(error_msg)}")
+        if error_msg:
+            raise ValueError(f"{' '.join(error_msg)}")

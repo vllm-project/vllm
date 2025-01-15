@@ -101,7 +101,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
 
             # Validates the LoRA configuration against requirements before
             # loading weights, throwing an exception if validation fails.
-            peft_helper.post_validity(self.lora_config)
+            peft_helper.validate_legal(self.lora_config)
 
             # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
             # to ensure correct loading of lora weights.
