@@ -86,6 +86,7 @@ _TEXT_GENERATION_MODELS = {
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
+    "Phi4ForCausalLM": ("phi4", "Phi3ForCausalLM"),
     # QWenLMHeadModel supports multimodal
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -122,6 +123,7 @@ _EMBEDDING_MODELS = {
     },
     "MistralModel": ("llama", "LlamaForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
+    "Phi4ForCausalLM": ("phi4", "Phi3ForCausalLM"),
     "Qwen2Model": ("qwen2", "Qwen2EmbeddingModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
