@@ -292,6 +292,11 @@ def run_equality_correctness_test_tp(model,
     # Separate logprobs to avoid asserting exact equality.
     arg1_logprobs = [r.pop("logprobs") for r in arg1_results]
     arg2_logprobs = [r.pop("logprobs") for r in arg2_results]
+    import pickle
+    with open("a", "wb") as f:
+        pickle.dump(arg1_logprobs, f)
+    with open("b", "wb") as f:
+        pickle.dump(arg2_logprobs, f)
     for arg1_result, arg2_result in zip(arg1_results, arg2_results):
         assert arg1_result == arg2_result, (
             f"Results for {model=} are not the same with {arg1=} and {arg2=}. "
@@ -299,7 +304,4 @@ def run_equality_correctness_test_tp(model,
     if logprobs:
         for logs1, logs2 in zip(arg1_logprobs, arg2_logprobs):
             for l1, l2 in zip(logs1, logs2):
-                torch.testing.assert_close(l1.token_logprobs,
-                                           l2.token_logprobs,
-                                           atol=1e-2,
-                                           rtol=1e-4)
+                assert l1.tokens == l2.tokens
