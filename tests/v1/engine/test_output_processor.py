@@ -1,9 +1,12 @@
-from typing import Optional
+from typing import Dict, List, Optional
 
 import pytest
 
-from tests.v1.engine.utils import STOP_STRINGS, MockEngineCore
+from tests.v1.engine.utils import (STOP_STRINGS,
+                                   DummyOutputProcessorTestVectors,
+                                   MockEngineCore)
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.sequence import PromptLogprobs, SampleLogprobs
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
 
@@ -84,6 +87,39 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
     assert not output_processor.has_unfinished_requests()
 
 
+def _validate_logprobs(
+    gen_tokens: Dict[str, List[int]],
+    gen_logprobs: Dict[str, Optional[SampleLogprobs]],
+    gen_prompt_logprobs: Dict[str, Optional[PromptLogprobs]],
+    gen_cumulative_logprob: Dict[str, float],
+    dtv: DummyOutputProcessorTestVectors,
+    request_id_list: List[str],
+    num_sample_logprobs: Optional[int],
+    num_prompt_logprobs: Optional[int],
+) -> None:
+    for req_idx, req_id in enumerate(request_id_list):
+        new_tokens = gen_tokens[req_id]
+        logprobs = gen_logprobs[req_id]
+        prompt_logprobs = gen_prompt_logprobs[req_id]
+        cumulative_logprob = gen_cumulative_logprob[req_id]
+        prompt_token_ids = dtv.prompt_tokens[req_idx]
+
+        if num_sample_logprobs:
+            len_sample_logprobs = len(logprobs)
+            assert len(new_tokens) == len_sample_logprobs
+        else:
+            # Sample logprobs disabled for this request
+            assert logprobs is None
+            assert cumulative_logprob is None
+
+        if num_prompt_logprobs:
+            len_prompt_logprobs = len(prompt_logprobs)
+            assert len(prompt_token_ids) == len_prompt_logprobs
+        else:
+            # Prompt logprobs disabled for this request
+            assert prompt_logprobs is None
+
+
 @pytest.mark.parametrize(
     "request_output_kind",
     [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
@@ -103,8 +139,12 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
         if num_prompt_logprobs else None)
 
     # Make N requests.
+    request_id_list = [
+        f"request-{idx}"
+        for idx in range(len(dummy_test_vectors.prompt_strings))
+    ]
     requests = [
-        EngineCoreRequest(request_id=f"request-{idx}",
+        EngineCoreRequest(request_id=request_id_list[idx],
                           prompt=prompt,
                           prompt_token_ids=prompt_tokens,
                           arrival_time=0,
@@ -130,15 +170,17 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
     for request in requests:
         output_processor.add_request(request)
 
-    gen_strings = {}
     gen_tokens = {}
+    gen_logprobs = {}
+    gen_prompt_logprobs = {}
+    gen_cumulative_logprobs = {}
     while True:
         # Mock output from the EngineCore.
         outputs = engine_core.get_outputs()
         if len(outputs) == 0:
             break
 
-        # Step the Detokenizer.
+        # Step the logprobs processor.
         processed_outputs = output_processor.process_outputs(outputs)
         request_outputs = processed_outputs.request_outputs
         requests_to_abort = processed_outputs.reqs_to_abort
@@ -147,24 +189,31 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
         # Update tracking.
         for request_output in request_outputs:
             request_id = request_output.request_id
-            new_text = request_output.outputs[0].text
             new_tokens = request_output.outputs[0].token_ids
-            if request_id not in gen_strings:
-                gen_strings[request_id] = new_text
+            prompt_logprobs = request_output.prompt_logprobs
+            logprobs = request_output.outputs[0].logprobs
+            gen_cumulative_logprobs[request_id] = request_output.outputs[
+                0].cumulative_logprob
+            if request_id not in gen_logprobs:
+                # Start tracking sample and prompt logprobs for this request
                 gen_tokens[request_id] = new_tokens
+                gen_logprobs[request_id] = logprobs
+                gen_prompt_logprobs[request_id] = prompt_logprobs
             else:
-                gen_strings[request_id] += new_text
+                # Extend logprobs tracker
                 gen_tokens[request_id].extend(new_tokens)
+                lp = gen_logprobs[request_id]
+                plp = gen_prompt_logprobs[request_id]
+                if lp:
+                    lp.extend(logprobs)
+                if plp:
+                    plp.extend(prompt_logprobs)
 
-    # Confirmed tracked values matches what we expected.
-    for idx, (ref_gen_str, ref_gen_toks) in enumerate(
-            zip(dummy_test_vectors.generation_strings,
-                dummy_test_vectors.generation_tokens)):
-        gen_str = gen_strings[f"request-{idx}"]
-        gen_toks = gen_tokens[f"request-{idx}"]
-
-        assert gen_str == ref_gen_str, f"{gen_str=}, {ref_gen_str=}"
-        assert gen_toks == ref_gen_toks, f"{gen_toks=}, {ref_gen_toks=}"
+    # Confirmed tracked logprobs match what we expect
+    _validate_logprobs(gen_tokens, gen_logprobs, gen_prompt_logprobs,
+                       gen_cumulative_logprobs, dummy_test_vectors,
+                       request_id_list, num_sample_logprobs,
+                       num_prompt_logprobs)
 
     assert output_processor.get_num_unfinished_requests() == 0
     assert not output_processor.has_unfinished_requests()
@@ -186,9 +235,13 @@ def test_stop_string(include_stop_str_in_output: bool,
         if num_prompt_logprobs else None)
 
     # Make N requests.
+    request_id_list = [
+        f"request-{idx}"
+        for idx in range(len(dummy_test_vectors.prompt_strings))
+    ]
     requests = [
         EngineCoreRequest(
-            request_id=f"request-{idx}",
+            request_id=request_id_list[idx],
             prompt=prompt,
             prompt_token_ids=prompt_tokens,
             arrival_time=0,
@@ -215,6 +268,10 @@ def test_stop_string(include_stop_str_in_output: bool,
         output_processor.add_request(request)
 
     gen_strings = {}
+    gen_tokens = {}
+    gen_logprobs = {}
+    gen_prompt_logprobs = {}
+    gen_cumulative_logprobs = {}
     aborted = []
     while True:
         # Mock output from the EngineCore.
@@ -238,10 +295,25 @@ def test_stop_string(include_stop_str_in_output: bool,
 
             request_id = request_output.request_id
             new_text = request_output.outputs[0].text
+            new_tokens = request_output.outputs[0].token_ids
+            prompt_logprobs = request_output.prompt_logprobs
+            logprobs = request_output.outputs[0].logprobs
+            gen_cumulative_logprobs[request_id] = request_output.outputs[
+                0].cumulative_logprob
             if request_id not in gen_strings:
                 gen_strings[request_id] = new_text
+                gen_tokens[request_id] = new_tokens
+                gen_logprobs[request_id] = logprobs
+                gen_prompt_logprobs[request_id] = prompt_logprobs
             else:
                 gen_strings[request_id] += new_text
+                gen_tokens[request_id].extend(new_tokens)
+                lp = gen_logprobs[request_id]
+                plp = gen_prompt_logprobs[request_id]
+                if lp:
+                    lp.extend(logprobs)
+                if plp:
+                    plp.extend(prompt_logprobs)
 
     # Confirmed tracked values matches what we expected.
     for idx, (ref_gen_str, stop_str) in enumerate(
@@ -265,6 +337,12 @@ def test_stop_string(include_stop_str_in_output: bool,
         else:
             assert gen_str == ref_str_exc_stop, (
                 f"{gen_str=}, {ref_str_exc_stop=}")
+
+    # Confirmed tracked logprobs match what we expect
+    _validate_logprobs(gen_tokens, gen_logprobs, gen_prompt_logprobs,
+                       gen_cumulative_logprobs, dummy_test_vectors,
+                       request_id_list, num_sample_logprobs,
+                       num_prompt_logprobs)
 
     assert output_processor.get_num_unfinished_requests() == 0
     assert not output_processor.has_unfinished_requests()
