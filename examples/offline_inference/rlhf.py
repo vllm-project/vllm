@@ -99,8 +99,8 @@ master_address = get_ip()
 master_port = get_open_port()
 
 # set up the connection between the training process and the inference engine.
-handle = llm.collective_rpc.remote("init_process_group", master_address,
-                                   master_port, 1, 3)
+handle = llm.collective_rpc.remote("init_process_group",
+                                   args=(master_address, master_port, 1, 3))
 model_update_group = stateless_init_process_group(master_address, master_port,
                                                   0, 3, torch.device("cuda:0"))
 ray.get(handle)
@@ -111,7 +111,8 @@ for name, p in train_model.named_parameters():
 
 # sync weight from the training process to the inference engine.
 for name, p in train_model.named_parameters():
-    handle = llm.collective_rpc.remote("update_weight", name, p.dtype, p.shape)
+    handle = llm.collective_rpc.remote("update_weight",
+                                       args=(name, p.dtype, p.shape))
     model_update_group.broadcast(p, src=0, stream=torch.cuda.current_stream())
     ray.get(handle)
 
