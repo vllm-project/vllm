@@ -374,9 +374,17 @@ class Scheduler:
                 # The encoder input is already computed and cached.
                 continue
             if not self.encoder_cache_manager.can_allocate(request, i):
-                # The encoder cache is full. We can only schedule the decoder
-                # tokens just before the encoder input.
-                num_new_tokens = start_pos - num_computed_tokens
+                # The encoder cache is full.
+                if start_pos < num_computed_tokens:
+                    # We only schedule the decoder tokens just before the
+                    # encoder input.
+                    num_new_tokens = start_pos - num_computed_tokens
+                else:
+                    # Because of prefix caching, num_computed_tokens is greater
+                    # than start_pos even though its encoder input is not
+                    # available. In this case, we can't schedule any token for
+                    # the request in this step.
+                    num_new_tokens = 0
                 break
             if num_encoder_tokens > encoder_budget:
                 # The encoder budget is exhausted. We can only schedule the
