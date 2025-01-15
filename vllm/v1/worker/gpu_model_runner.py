@@ -741,16 +741,15 @@ class GPUModelRunner:
             # Check how many items of this modality can be supported by
             # the encoder budget.
             encoder_budget = min(self.max_num_encoder_input_tokens,
-                                       self.encoder_cache_size)
+                                 self.encoder_cache_size)
 
             max_num_mm_items_encoder_budget = cdiv(encoder_budget,
                                                    max_tokens_per_mm_item)
 
             # Check how many items of this modality can be supported by
             # the decoder budget.
-            max_mm_items_per_req = max(
-                self.mm_registry.get_mm_limits_per_prompt(
-                    self.model_config).values())
+            max_mm_items_per_req = self.mm_registry.get_mm_limits_per_prompt(
+                self.model_config)[dummy_data_modality]
 
             # NOTE: We do not consider max_num_batched_tokens on purpose
             # because the multimodal embeddings can be generated in advance
