@@ -17,7 +17,9 @@ from vllm.attention.backends.utils import (
     compute_slot_mapping_start_idx, get_num_prefill_decode_query_kv_tokens,
     get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
     is_all_encoder_attn_metadata_set, is_block_tables_empty)
+from vllm.envs import VLLM_FLASH_ATTN_VERSION
 from vllm.multimodal import MultiModalPlaceholderMap
+from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
@@ -25,7 +27,8 @@ if TYPE_CHECKING:
                                           ModelInputForGPUWithSamplingMetadata)
 
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
-                                  flash_attn_with_kvcache)
+                                  flash_attn_with_kvcache,
+                                  is_fa_version_supported)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -634,6 +637,20 @@ class FlashAttentionImpl(AttentionImpl):
                 f"Supported head sizes are: {support_head_sizes}.")
         self.attn_type = attn_type
 
+        # if hopper default to FA3, otherwise stick to FA2 for now
+        # TODO(lucas): profile FA3 on ampere to see if it makes sense to
+        #  use FA3 as default for both
+        if current_platform.get_device_capability()[0] >= 9:
+            self.fa_version = 3 if is_fa_version_supported(3) else 2
+        else:
+            self.fa_version = 2
+
+        if VLLM_FLASH_ATTN_VERSION is not None:
+            assert VLLM_FLASH_ATTN_VERSION in [2, 3]
+            self.fa_version = VLLM_FLASH_ATTN_VERSION
+
+        is_fa_version_supported(self.fa_version)
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -732,7 +749,7 @@ class FlashAttentionImpl(AttentionImpl):
                 # normal attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
-                q_seq_start_loc, q_seq_len, k_seqlens, k_seq_len = \
+                q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = \
                     _get_query_key_seq_metadata(prefill_meta, True, attn_type)
 
                 key = key[:num_prefill_kv_tokens]
@@ -743,7 +760,7 @@ class FlashAttentionImpl(AttentionImpl):
                     k=key,
                     v=value,
                     cu_seqlens_q=q_seq_start_loc,
-                    seqused_k=k_seqlens,
+                    cu_seqlens_k=k_seq_start_loc,
                     max_seqlen_q=q_seq_len,
                     max_seqlen_k=k_seq_len,
                     softmax_scale=softmax_scale,
@@ -847,7 +864,7 @@ def _get_query_key_seq_metadata(
         tuple: A tuple containing four integers:
             - Starting location for the query sequence.
             - Maximum sequence length for the query sequence.
-            - Seqlens for the key sequence.
+            - Starting location for the key sequence.
             - Maximum sequence length for the key sequence.
 
     Raises:
@@ -861,7 +878,7 @@ def _get_query_key_seq_metadata(
         else:
             max_seq_len = attn_metadata.max_decode_seq_len
         return (attn_metadata.seq_start_loc, max_seq_len,
-                attn_metadata.seq_lens_tensor, max_seq_len)
+                attn_metadata.seq_start_loc, max_seq_len)
 
     elif attn_type == AttentionType.ENCODER_DECODER:
         # This is cross attention between the where the key

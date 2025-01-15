@@ -9,8 +9,11 @@ import triton.language as tl
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.envs import VLLM_FLASH_ATTN_VERSION
+from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from vllm.vllm_flash_attn import flash_attn_varlen_func
+from vllm.vllm_flash_attn import (flash_attn_varlen_func,
+                                  is_fa_version_supported)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -128,6 +131,20 @@ class FlashAttentionImpl(AttentionImpl):
                                       "are not implemented for "
                                       "FlashAttentionImpl")
 
+        # if hopper default to FA3, otherwise stick to FA2 for now
+        # TODO(lucas): profile FA3 on ampere to see if it makes sense to
+        #  use FA3 as default for both
+        if current_platform.get_device_capability()[0] >= 9:
+            self.fa_version = 3 if is_fa_version_supported(3) else 2
+        else:
+            self.fa_version = 2
+
+        if VLLM_FLASH_ATTN_VERSION is not None:
+            assert VLLM_FLASH_ATTN_VERSION in [2, 3]
+            self.fa_version = VLLM_FLASH_ATTN_VERSION
+
+        is_fa_version_supported(self.fa_version)
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -204,6 +221,7 @@ class FlashAttentionImpl(AttentionImpl):
                 window_size=self.sliding_window,
                 block_table=attn_metadata.block_table,
                 softcap=self.logits_soft_cap,
+                fa_version=self.fa_version,
             )
             return output
 
@@ -225,6 +243,7 @@ class FlashAttentionImpl(AttentionImpl):
             logits_soft_cap=self.logits_soft_cap,
             block_table=attn_metadata.block_table,
             common_prefix_len=attn_metadata.common_prefix_len,
+            fa_version=self.fa_version,
         )
         return output
 
@@ -314,6 +333,7 @@ def cascade_attention(
     logits_soft_cap: float,
     block_table: torch.Tensor,
     common_prefix_len: int,
+    fa_version: int,
 ) -> torch.Tensor:
     assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
     # TODO: Support sliding window.
@@ -341,6 +361,7 @@ def cascade_attention(
         block_table=block_table[:1],
         softcap=logits_soft_cap,
         return_softmax_lse=True,
+        fa_version=fa_version,
     )
 
     # Process suffix per query.
@@ -358,6 +379,7 @@ def cascade_attention(
         block_table=block_table[:, num_common_kv_blocks:],
         softcap=logits_soft_cap,
         return_softmax_lse=True,
+        fa_version=fa_version,
     )
 
     # Merge prefix and suffix outputs, and store the result in output.
