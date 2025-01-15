@@ -27,7 +27,6 @@ def stateless_init_process_group(master_address, master_port, rank, world_size,
 
 # inference code, inherit from Worker to provide custom functions
 class MyWorker(Worker):
-
     def init_weight_update_group(self, master_address, master_port,
                                  rank_offset, world_size):
         from vllm.distributed.parallel_state import get_world_group
@@ -56,12 +55,17 @@ class MyWorker(Worker):
             sum_value += p.square().sum().item()
         return sum_value
 
+class MyLLM(LLM):
+    def __init__(self, *args, **kwargs):
+        import os
+        del os.environ["CUDA_VISIBLE_DEVICES"]
+        super().__init__(*args, **kwargs)
 
 # current process is a training process, and it takes 1 GPU.
 # important: set some common environment variables the same as vLLM workers.
 configure_as_vllm_process()
 
-train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
+train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m").to("cuda:0")
 
 ray.init()
 
@@ -70,13 +74,15 @@ ray.get(pg_train.ready())
 
 scheduling_train = PlacementGroupSchedulingStrategy(
     placement_group=pg_train,
-    placement_group_capture_child_tasks=True)
+    placement_group_capture_child_tasks=True,
+    placement_group_bundle_index=0,)
 
-pg_inference = placement_group([{"GPU": 2, "CPU": 0}])
+pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2)
 ray.get(pg_inference.ready())
 scheduling_inference = PlacementGroupSchedulingStrategy(
     placement_group=pg_inference,
-    placement_group_capture_child_tasks=True)
+    placement_group_capture_child_tasks=True,
+    placement_group_bundle_index=0,)
 
 
 class PlaceHolder:
@@ -90,7 +96,7 @@ place_holder = ray.remote(
     scheduling_strategy=scheduling_train,
 )(PlaceHolder).remote()
 
-# inferencing engine, and it takes 2 GPUs.
+# inferencing engine, it takes 2 GPUs.
 # for simplicity, we define the MyWorker class in this self-contained script,
 # and the MyWorker class does not have qualified name in the global scope,
 # so we need to pass the worker_cls through `cloudpickle.dumps(MyWorker)`.
@@ -99,9 +105,9 @@ place_holder = ray.remote(
 # here we use `enforce_eager` to reduce test time.
 llm = ray.remote(
     num_cpus=0,
-    num_gpus=2,
+    num_gpus=0,
     scheduling_strategy=scheduling_inference,
-)(LLM).remote(
+)(MyLLM).remote(
     model="facebook/opt-125m",
     enforce_eager=True,
     worker_cls=cloudpickle.dumps(MyWorker),
@@ -133,7 +139,7 @@ ray.get(handle)
 
 # simulate training, modify the weights of the model.
 for name, p in train_model.named_parameters():
-    p.zero_()
+    p.data.zero_()
 
 # sync weight from the training process to the inference engine.
 for name, p in train_model.named_parameters():
