@@ -11,6 +11,22 @@ from vllm.v1.engine.output_processor_utils import RequestState
 from vllm.v1.metrics.stats import IterationStats
 
 
+
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Union
+
+import pytest
+import torch
+from transformers import (AutoTokenizer, PreTrainedTokenizer,
+                          PreTrainedTokenizerFast)
+
+from tests.v1.engine.utils import (generate_dummy_prompt_logprobs,
+                                   generate_dummy_sample_logprobs,
+                                   validate_requests_logprobs)
+from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.engine.detokenizer import Detokenizer
+
 @dataclass
 class OutputProcessorOutput:
 
