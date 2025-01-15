@@ -117,6 +117,18 @@ void advance_step_flashinfer(
     torch::Tensor& paged_kv_indices, torch::Tensor& paged_kv_indptr,
     torch::Tensor& paged_kv_last_page_len, torch::Tensor& block_table_bounds);
 
+void block_table_appends(torch::Tensor& append_row_indices,
+                         torch::Tensor& append_row_indices_cpu,
+                         torch::Tensor& append_cumsums,
+                         torch::Tensor& append_cumsums_cpu,
+                         torch::Tensor& append_block_ids,
+                         torch::Tensor& append_block_ids_cpu,
+                         torch::Tensor& block_table, int64_t num_appends,
+                         int64_t total_num_append_blocks);
+
+void block_table_moves(torch::Tensor& src_dst_n, torch::Tensor& src_dst_n_cpu,
+                       torch::Tensor& block_table, int64_t num_moves);
+
 #ifndef USE_ROCM
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks,

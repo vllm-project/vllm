@@ -9,7 +9,7 @@ import torch
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.block_table import BlockTable
+from vllm.v1.worker.gpu_block_table import GPUBlockTable
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import PlaceholderRange
@@ -72,7 +72,7 @@ class InputBatch:
         self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
 
         # Block table.
-        self.block_table = BlockTable(
+        self.block_table = GPUBlockTable(
             max_num_reqs=max_num_reqs,
             max_model_len=max_model_len,
             max_num_blocks_per_req=max_num_blocks_per_req,

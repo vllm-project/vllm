@@ -187,6 +187,32 @@ def advance_step_flashinfer(num_seqs: int, num_queries: int, block_size: int,
         paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len,
         block_table_bound)
 
+def block_table_appends(
+    append_row_indices: torch.Tensor,
+    append_row_indices_cpu: torch.Tensor,
+    append_cumsums: torch.Tensor,
+    append_cumsums_cpu: torch.Tensor,
+    append_block_ids: torch.Tensor,
+    append_block_ids_cpu: torch.Tensor,
+    block_table: torch.Tensor,
+    num_appends: int,
+    total_num_append_blocks: int,
+) -> None:
+    torch.ops._C.block_table_appends.default(
+        append_row_indices, append_row_indices_cpu, append_cumsums,
+        append_cumsums_cpu, append_block_ids, append_block_ids_cpu,
+        block_table, num_appends, total_num_append_blocks)
+
+
+def block_table_moves(
+    src_dst_n: torch.Tensor,
+    src_dst_n_cpu: torch.Tensor,
+    block_table: torch.Tensor,
+    num_moves: int,
+) -> None:
+    torch.ops._C.block_table_moves.default(src_dst_n, src_dst_n_cpu, block_table,
+                                           num_moves)
+
 
 # fused quant layer norm ops
 def rms_norm_dynamic_per_token_quant(

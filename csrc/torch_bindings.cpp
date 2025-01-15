@@ -101,6 +101,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       ") -> ()");
   ops.impl("advance_step_flashinfer", torch::kCUDA, &advance_step_flashinfer);
 
+  ops.def(
+    "block_table_appends(Tensor append_row_indices, "
+    "Tensor append_row_indices_cpu, Tensor append_cumsums, "
+    "Tensor append_cumsums_cpu, Tensor append_block_ids, "
+    "Tensor append_block_ids_cpu, Tensor! block_table, int num_appends, "
+    "int total_num_append_blocks) -> ()");
+  ops.impl("block_table_appends", torch::kCUDA, &block_table_appends);
+
+  ops.def(
+    "block_table_moves(Tensor src_dst_n, Tensor src_dst_n_cpu, "
+    "Tensor! block_table, int num_moves) -> ()");
+  ops.impl("block_table_moves", torch::kCUDA, &block_table_moves);
+
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
