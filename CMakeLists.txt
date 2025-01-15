@@ -588,8 +588,8 @@ endif()
 FetchContent_MakeAvailable(vllm-flash-attn)
 message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
 
-# Copy over the vllm-flash-attn python files (duplicated for fa2 and fa3, incase
-# only one is built, in the case both are built redundant work is done)
+# Copy over the vllm-flash-attn python files (duplicated for fa2 and fa3, in
+# case only one is built, in the case both are built redundant work is done)
 install(
   DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
   DESTINATION vllm_flash_attn
