@@ -190,11 +190,11 @@ class MultiHeadAttention(nn.Module):
                                         kv_cache_dtype=None,
                                         block_size=16,
                                         is_attention_free=False)
-        attn_backend = backend_name_to_enum(attn_backend.get_name())
-        if attn_backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
-            attn_backend = _Backend.XFORMERS
+        backend = backend_name_to_enum(attn_backend.get_name())
+        if backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
+            backend = _Backend.XFORMERS
 
-        self.attn_backend = attn_backend if attn_backend in {
+        self.attn_backend = backend if backend in {
             _Backend.TORCH_SDPA, _Backend.XFORMERS
         } else _Backend.TORCH_SDPA
 
