@@ -516,8 +516,13 @@ class WorkerWrapperBase:
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
-        worker_class = resolve_obj_by_qualname(
-            self.vllm_config.parallel_config.worker_cls)
+        if isinstance(self.vllm_config.parallel_config.worker_cls, str):
+            worker_class = resolve_obj_by_qualname(
+                self.vllm_config.parallel_config.worker_cls)
+        else:
+            assert issubclass(self.vllm_config.parallel_config.worker_cls, bytes)
+            import cloudpickle
+            worker_class = cloudpickle.loads(self.vllm_config.parallel_config.worker_cls)
         self.worker = worker_class(**kwargs)
         assert self.worker is not None
 

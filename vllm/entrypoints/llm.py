@@ -455,6 +455,22 @@ class LLM:
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
+    def collective_rpc(self,
+                       method: str,
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> List[Any]:
+        """
+        Run a method on all workers, with homogeneous arguments.
+        The main extension point for the LLM entrypoint.
+        Users can provide custom worker class through `worker_cls`
+        argument, and implement new methods in the worker class.
+        Then, users can call the new methods through this API.
+        It is recommended to use this API to only pass control messages,
+        and set up data-plane communication to pass data.
+        """
+        return self.llm_engine.model_executor.collective_rpc(method, timeout, args, kwargs)
+
     def beam_search(
         self,
         prompts: List[Union[TokensPrompt, TextPrompt]],
