@@ -66,6 +66,8 @@ async def test_load(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_abort(monkeypatch):
+    # NOTE: this test fails on fast GPUs (e.g. H100) because some requests are
+    # finished before they are canceled.
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
