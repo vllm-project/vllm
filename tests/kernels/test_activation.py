@@ -6,8 +6,9 @@ import torch
 
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.activation import (FastGELU, FatreluAndMul,
-                                                   GeluAndMul, NewGELU,
-                                                   QuickGELU, SiluAndMul)
+                                                   GeluAndMul, MulAndSilu,
+                                                   NewGELU, QuickGELU,
+                                                   SiluAndMul)
 from vllm.platforms import current_platform
 
 from .allclose_default import get_default_atol, get_default_rtol
@@ -21,8 +22,9 @@ CUDA_DEVICES = [
 ]
 
 
-@pytest.mark.parametrize("activation",
-                         ["silu", "gelu", "gelu_tanh", "fatrelu"])
+@pytest.mark.parametrize(
+    "activation",
+    ["silu_and_mul", "mul_and_silu", "gelu", "gelu_tanh", "fatrelu"])
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -40,9 +42,12 @@ def test_act_and_mul(
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
     x = torch.randn(num_tokens, 2 * d, dtype=dtype)
-    if activation == "silu":
+    if activation == "silu_and_mul":
         layer = SiluAndMul()
         fn = torch.ops._C.silu_and_mul
+    if activation == "mul_and_silu":
+        layer = MulAndSilu()
+        fn = torch.ops._C.mul_and_silu
     elif activation == "gelu":
         layer = GeluAndMul(approximate="none")
         fn = torch.ops._C.gelu_and_mul
@@ -55,8 +60,9 @@ def test_act_and_mul(
         fn = torch.ops._C.fatrelu_and_mul
     out = layer(x)
     ref_out = layer.forward_native(x)
-    # The SiLU, GELU and FatReLU implementations are equivalent to the native
-    # PyTorch implementations, so we can do exact comparison.
+    # The SiluAndMul, MulAndSilu, GELU and FatReLU implementations are
+    # equivalent to the native PyTorch implementations, so we can do exact
+    # comparison.
     torch.testing.assert_close(out, ref_out, atol=0.0, rtol=0.0)
 
     d = x.shape[-1] // 2
