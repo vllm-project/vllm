@@ -256,7 +256,12 @@ class FlashInferState(AttentionState):
     def begin_forward(self, model_input):
         assert not self._is_graph_capturing
         state = self
-        if model_input.attn_metadata.use_cuda_graph:
+        use_cuda_graph = model_input.attn_metadata.use_cuda_graph
+        is_decode = model_input.attn_metadata.num_prefills == 0
+        # In case of multistep chunked-prefill, there might be prefill requests
+        # scheduled while CUDA graph mode is enabled. We don't run graph in that
+        # case.
+        if use_cuda_graph and is_decode:
             batch_size = model_input.input_tokens.shape[0]
             state = (self.runner.graph_runners[model_input.virtual_engine]
                      [batch_size].attn_state)
@@ -429,10 +434,24 @@ class FlashInferMetadata(AttentionMetadata):
         Update metadata in-place to advance one decode step.
         """
 
-        assert not turn_prefills_into_decodes, \
-            ("Chunked prefill is not supported with flashinfer yet."
-             "turn_prefills_into_decodes is a Multi-Step + Chunked-Prefill "
-             "specific parameter.")
+        if turn_prefills_into_decodes:
+            # When Multi-Step is enabled with Chunked-Prefill, prefills and
+            # decodes are scheduled together. In the first step, all the
+            # prefills turn into decodes. This update reflects that
+            # conversion.
+            assert self.num_decode_tokens + self.num_prefills == num_seqs
+            # Flashinfer doesn't support speculative decoding + chunked-prefill
+            # + multi-step scheduling yet.
+            assert self.decode_query_len == 1
+            self.num_decode_tokens += self.num_prefills
+            self.num_prefills = 0
+            self.num_prefill_tokens = 0
+            self.max_prefill_seq_len = 0
+            self.max_query_len = 1
+
+            self.slot_mapping = self.slot_mapping[:num_seqs]
+        else:
+            assert self.seq_lens_tensor is not None
 
         assert num_seqs > 0
         assert num_queries > 0
