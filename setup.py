@@ -298,7 +298,8 @@ class repackage_wheel(build_ext):
             files_to_copy = [
                 "vllm/_C.abi3.so",
                 "vllm/_moe_C.abi3.so",
-                "vllm/vllm_flash_attn/vllm_flash_attn_c.abi3.so",
+                "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
+                "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                 "vllm/vllm_flash_attn/flash_attn_interface.py",
                 "vllm/vllm_flash_attn/__init__.py",
                 "vllm/cumem_allocator.abi3.so",
