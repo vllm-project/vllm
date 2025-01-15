@@ -195,7 +195,7 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        computed_blocks_of_groups: ReqKVCacheBlocks,
+        computed_blocks_all_groups: ReqKVCacheBlocks,
     ) -> Optional[ReqKVCacheBlocks]:
         """Allocate slots for a new request.
 
@@ -213,7 +213,7 @@ class KVCacheManager:
             raise ValueError(
                 f"num_tokens must be greater than 0, got {num_tokens}")
 
-        computed_blocks = computed_blocks_of_groups[0]  # only one group
+        computed_blocks = computed_blocks_all_groups[0]  # only one group
         # If a computed block of a request is an eviction candidate (in the
         # free queue and ref_cnt == 0), it cannot be counted as a free block
         # when allocating this request.
@@ -253,7 +253,7 @@ class KVCacheManager:
         self.req_to_blocks[request.request_id] = computed_blocks + new_blocks
 
         if not self.enable_caching:
-            return new_blocks
+            return [new_blocks]
 
         num_computed_tokens = len(computed_blocks) * self.block_size
         num_full_blocks = (num_computed_tokens + num_tokens) // self.block_size

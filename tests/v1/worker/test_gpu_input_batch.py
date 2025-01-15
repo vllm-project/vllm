@@ -166,7 +166,8 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
                                          max_num_blocks_per_req=10,
                                          device=torch.device(device),
                                          pin_memory=is_pin_memory_available(),
-                                         vocab_size=1024)
+                                         vocab_size=1024,
+                                         num_kv_cache_groups=1)
     reqs: List[CachedRequestState] = []
     req_id_reqs = {}
     req_id_output_token_ids = {}

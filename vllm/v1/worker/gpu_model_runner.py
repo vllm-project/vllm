@@ -214,7 +214,7 @@ class GPUModelRunner:
                 continue
             self.input_batch.block_table.append_row(req_index,
                                                     req_data.new_block_ids)
-            for group_id, new_block_ids in enumerate(new_block_ids):
+            for group_id, new_block_ids in enumerate(req_data.new_block_ids):
                 req_state.block_ids[group_id].extend(new_block_ids)
 
         req_ids_to_add: List[str] = []
