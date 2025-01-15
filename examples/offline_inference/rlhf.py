@@ -65,7 +65,7 @@ train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
 
 ray.init()
 
-pg_train = placement_group([{"GPU": 1, "CPU": 0}] * 1)
+pg_train = placement_group([{"GPU": 1, "CPU": 0}])
 ray.get(pg_train.ready())
 
 scheduling_train = PlacementGroupSchedulingStrategy(
@@ -73,7 +73,7 @@ scheduling_train = PlacementGroupSchedulingStrategy(
     placement_group_capture_child_tasks=True,
     placement_group_bundle_index=0)
 
-pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2)
+pg_inference = placement_group([{"GPU": 2, "CPU": 0}])
 ray.get(pg_inference.ready())
 scheduling_inference = PlacementGroupSchedulingStrategy(
     placement_group=pg_inference,
