@@ -184,12 +184,8 @@ class Scheduler:
 
                 request = self.waiting[0]
                 # Get already-cached tokens.
-                computed_blocks = self.kv_cache_manager.get_computed_blocks(
-                    request)
-                # NOTE(woosuk): Since incomplete blocks are not eligible for
-                # sharing, `num_computed_tokens` is always a multiple of
-                # `block_size`.
-                num_computed_tokens = len(computed_blocks) * self.block_size
+                computed_blocks, num_computed_tokens = \
+                    self.kv_cache_manager.get_computed_blocks(request)
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
@@ -373,18 +369,22 @@ class Scheduler:
             if self.encoder_cache_manager.has_cache(request, i):
                 # The encoder input is already computed and cached.
                 continue
-            if not self.encoder_cache_manager.can_allocate(request, i):
-                # The encoder cache is full. We can only schedule the decoder
-                # tokens just before the encoder input.
-                num_new_tokens = start_pos - num_computed_tokens
-                break
-            if num_encoder_tokens > encoder_budget:
-                # The encoder budget is exhausted. We can only schedule the
-                # decoder tokens up until the encoder input.
-                # NOTE(woosuk): We assume that the encoder tokens should be
-                # processed altogether, as the encoder usually uses
+            if (not self.encoder_cache_manager.can_allocate(request, i)
+                    or num_encoder_tokens > encoder_budget):
+                # The encoder cache is full or the encoder budget is exhausted.
+                # NOTE(woosuk): We assume that the encoder input tokens should
+                # be processed altogether, as the encoder usually uses
                 # bidirectional attention.
-                num_new_tokens = start_pos - num_computed_tokens
+                if num_computed_tokens < start_pos:
+                    # We only schedule the decoder tokens just before the
+                    # encoder input.
+                    num_new_tokens = start_pos - num_computed_tokens
+                else:
+                    # Because of prefix caching, num_computed_tokens is greater
+                    # than start_pos even though its encoder input is not
+                    # available. In this case, we can't schedule any token for
+                    # the request in this step.
+                    num_new_tokens = 0
                 break
 
             encoder_budget -= num_encoder_tokens

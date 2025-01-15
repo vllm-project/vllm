@@ -55,6 +55,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
 
+  ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
+  ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);
+
   // Activation function used in GeGLU with `none` approximation.
   ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_and_mul", torch::kCUDA, &gelu_and_mul);

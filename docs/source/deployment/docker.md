@@ -19,6 +19,8 @@ $ docker run --runtime nvidia --gpus all \
     --model mistralai/Mistral-7B-v0.1
 ```
 
+You can add any other <project:#engine-args> you need after the image tag (`vllm/vllm-openai:latest`).
+
 ```{note}
 You can either use the `ipc=host` flag or `--shm-size` flag to allow the
 container to access the host's shared memory. vLLM uses PyTorch, which uses shared
