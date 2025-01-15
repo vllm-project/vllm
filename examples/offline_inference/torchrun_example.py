@@ -1,4 +1,7 @@
+import torch.distributed as dist
+
 from vllm import LLM, SamplingParams
+from vllm.distributed.parallel_state import get_world_group
 
 # Create prompts
 prompts = [
@@ -21,12 +24,11 @@ llm = LLM(model="facebook/opt-125m",
 # and should be the same across all ranks
 outputs = llm.generate(prompts, sampling_params)
 
-from vllm.distributed.parallel_state import get_world_group
 # it is recommended to use this `cpu_group` to communicate
 # control messages across all ranks, to avoid interference
 # with the model's device group communication.
 cpu_group = get_world_group().cpu_group
-rank = get_world_group().rank
+torch_rank = get_world_group().rank
 
 # all ranks should have the same outputs
 for output in outputs:
