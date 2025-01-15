@@ -635,7 +635,7 @@ class GPUModelRunner:
             assert req_id is not None
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
-+                       scheduler_output.num_scheduled_tokens[req_id])
+                       scheduler_output.num_scheduled_tokens[req_id])
             assert seq_len <= req_state.num_tokens
             if seq_len == req_state.num_tokens:
                 # Append the sampled token to the output token ids.
