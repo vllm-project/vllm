@@ -1,6 +1,7 @@
 import itertools
 import warnings
 from contextlib import contextmanager
+import cloudpickle
 from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
                     Union, cast, overload)
 
@@ -185,6 +186,13 @@ class LLM:
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
+
+        if "worker_cls" in kwargs:
+            worker_cls = kwargs["worker_cls"]
+            # if the worker_cls is not qualified string name,
+            # we serialize it using cloudpickle to avoid pickling issues
+            if isinstance(worker_cls, type):
+                kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
 
         if compilation_config is not None:
             if isinstance(compilation_config, (int, dict)):

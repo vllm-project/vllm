@@ -1,5 +1,5 @@
 # a simple demonstration of RLHF with VLLM.
-import cloudpickle
+import os
 import ray
 import torch
 from ray.util.placement_group import placement_group
@@ -57,7 +57,8 @@ class MyWorker(Worker):
 
 class MyLLM(LLM):
     def __init__(self, *args, **kwargs):
-        import os
+        # stop ray from manipulating CUDA_VISIBLE_DEVICES
+        # at the top-level
         del os.environ["CUDA_VISIBLE_DEVICES"]
         super().__init__(*args, **kwargs)
 
@@ -67,15 +68,9 @@ configure_as_vllm_process()
 
 train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m").to("cuda:0")
 
+# start ray with 2 GPUs
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
 ray.init()
-
-pg_train = placement_group([{"GPU": 1, "CPU": 0}])
-ray.get(pg_train.ready())
-
-scheduling_train = PlacementGroupSchedulingStrategy(
-    placement_group=pg_train,
-    placement_group_capture_child_tasks=True,
-    placement_group_bundle_index=0,)
 
 pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2)
 ray.get(pg_inference.ready())
@@ -84,22 +79,8 @@ scheduling_inference = PlacementGroupSchedulingStrategy(
     placement_group_capture_child_tasks=True,
     placement_group_bundle_index=0,)
 
-
-class PlaceHolder:
-    pass
-
-
-# a place holder to reserve 1 GPU for the training process.
-place_holder = ray.remote(
-    num_cpus=0,
-    num_gpus=1,
-    scheduling_strategy=scheduling_train,
-)(PlaceHolder).remote()
-
 # inferencing engine, it takes 2 GPUs.
-# for simplicity, we define the MyWorker class in this self-contained script,
-# and the MyWorker class does not have qualified name in the global scope,
-# so we need to pass the worker_cls through `cloudpickle.dumps(MyWorker)`.
+# for simplicity, we define the MyWorker class in this self-contained script.
 # normally, we should define the MyWorker class in a separate file and pass
 # the qualified name of the class to the worker_cls parameter.
 # here we use `enforce_eager` to reduce test time.
@@ -110,7 +91,7 @@ llm = ray.remote(
 )(MyLLM).remote(
     model="facebook/opt-125m",
     enforce_eager=True,
-    worker_cls=cloudpickle.dumps(MyWorker),
+    worker_cls=MyWorker,
     tensor_parallel_size=2,
     distributed_executor_backend="ray",
 )
