@@ -892,6 +892,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_indices=block_indices,
             block_offsets=block_offsets,
             block_scales=None,
+            block_groups=None,
             attn_bias=None,
             seq_lens_tensor=seq_lens_tensor,
             num_prefills=real_num_seqs,
@@ -1047,6 +1048,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_indices=block_indices,
             block_offsets=block_offsets,
             block_scales=block_scales,
+            block_groups=None,
             attn_bias=None,
             seq_lens_tensor=None,
             num_prefills=0,
@@ -1258,7 +1260,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
             'attn_bias', 'seq_lens_tensor', 'block_list', 'block_mapping',
             'block_usage', 'slot_mapping', 'is_prompt', 'block_indices',
-            'block_offsets', 'block_scales'
+            'block_offsets', 'block_scales', 'block_groups'
         ])
         return attention_metadata
 
