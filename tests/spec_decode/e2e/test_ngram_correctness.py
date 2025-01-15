@@ -26,8 +26,8 @@ for the target model outputs.
 
 import pytest
 
-from .conftest import run_equality_correctness_test
 from ..utils import maybe_enable_chunked_prefill
+from .conftest import run_equality_correctness_test
 
 
 @pytest.mark.parametrize(
