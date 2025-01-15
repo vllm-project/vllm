@@ -77,6 +77,7 @@ place_holder = ray.remote(num_gpus=1)(PlaceHolder).remote()
 # so we need to pass the worker_cls through `cloudpickle.dumps(MyWorker)`.
 # normally, we should define the MyWorker class in a separate file and pass
 # the qualified name of the class to the worker_cls parameter.
+# here we use `enforce_eager` to reduce test time.
 llm = ray.remote(num_gpus=2)(LLM).remote(
     model="facebook/opt-125m",
     enforce_eager=True,
@@ -99,7 +100,7 @@ master_address = get_ip()
 master_port = get_open_port()
 
 # set up the connection between the training process and the inference engine.
-handle = llm.collective_rpc.remote("init_process_group",
+handle = llm.collective_rpc.remote("init_weight_update_group",
                                    args=(master_address, master_port, 1, 3))
 model_update_group = stateless_init_process_group(master_address, master_port,
                                                   0, 3, torch.device("cuda:0"))
