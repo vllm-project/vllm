@@ -78,7 +78,9 @@ class KVCacheManager:
             request: The request to get the computed blocks.
 
         Returns:
-            A list of blocks that are computed for the request.
+            A tuple containing:
+                - A list of blocks that are computed for the request.
+                - The number of computed tokens.
         """
         if not self.enable_caching:
             # Prefix caching is disabled.
