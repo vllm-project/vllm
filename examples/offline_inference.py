@@ -6,7 +6,6 @@ prompts = [
     "The president of the United States is",
     "The capital of France is",
     "The future of AI is",
-    # "Milly needs to return a book she decided was really boring. The book weighs 4 pounds, cost $32, and needs to be returned to a distribution center 20 miles away. If the shipping company charges $0.35 per pound plus $0.08 per mile, and Amazon will only refund 75% of the book's purchase price, how much money will Milly lose?"
 ]
 # Create a sampling params object.
 sampling_params = SamplingParams(
@@ -36,8 +35,3 @@ for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-    # print the prompt token ids and output token ids
-    tokens = list(output.prompt_token_ids) + list(output.outputs[0].token_ids)
-    # print in block of 8
-    for i in range(0, len(tokens), 8):
-        print(tokens[i:i + 8])

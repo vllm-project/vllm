@@ -23,22 +23,22 @@ usage() {
 
 while getopts "m:b:l:f:t:" OPT; do
   case ${OPT} in
-    m ) 
+    m )
         MODEL="$OPTARG"
         ;;
-    b ) 
+    b )
         BATCH_SIZE="$OPTARG"
         ;;
-    l ) 
+    l )
         LIMIT="$OPTARG"
         ;;
-    f ) 
+    f )
         FEWSHOT="$OPTARG"
         ;;
     t )
         TP_SIZE="$OPTARG"
         ;;
-    \? ) 
+    \? )
         usage
         exit 1
         ;;
@@ -46,6 +46,6 @@ while getopts "m:b:l:f:t:" OPT; do
 done
 
 lm_eval --model vllm \
-  --model_args "pretrained=$MODEL,tensor_parallel_size=$TP_SIZE,distributed_executor_backend=ray,trust_remote_code=true,max_model_len=4096" \
+  --model_args "pretrained=$MODEL,tensor_parallel_size=$TP_SIZE,distributed_executor_backend=ray,trust_remote_code=true,max_model_len=4096,enforce_eager=true" \
   --tasks gsm8k --num_fewshot "$FEWSHOT" --limit "$LIMIT" \
   --batch_size "$BATCH_SIZE"
