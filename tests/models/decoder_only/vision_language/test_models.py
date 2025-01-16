@@ -9,6 +9,7 @@ from typing import Type
 
 import pytest
 from transformers import AutoModelForVision2Seq
+from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.utils import is_flash_attn_2_available
 
 from vllm.platforms import current_platform
@@ -205,6 +206,12 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],  # noqa: E501
         image_size_factors=[(), (1.0, ), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
+        marks=[
+            pytest.mark.skipif(
+                TRANSFORMERS_VERSION >= "4.48.0",
+                reason="HF model is not compatible with transformers>=4.48.0",
+            )
+        ],
     ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
