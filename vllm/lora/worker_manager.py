@@ -128,10 +128,12 @@ class WorkerLoRAManager(AbstractWorkerManager):
             # - No adapter found to download from huggingface (or in
             #       offline mode)
             # - No local adapter files found at `lora_request.lora_path`
+            # For NotFoundError
             raise ValueError(
                 f"Loading lora {lora_request.lora_name} failed: No adapter "
                 f"found for {lora_path}") from e
         except Exception as e:
+            # For BadRequestError
             raise e
 
         if lora.extra_vocab_size > self.lora_config.lora_extra_vocab_size:

@@ -103,9 +103,10 @@ class PEFTHelper:
         """
         error_msg = self._validate_features()
         if self.r > lora_config.max_lora_rank:
-            error_msg.append(f"LoRA rank {self.r} is greater than max rank "
-                             f"{lora_config.max_lora_rank}.")
-        if self.bias != "none" and lora_config.bias_enabled:
+            error_msg.append(
+                f"LoRA rank {self.r} is greater than max_lora_rank"
+                f" {lora_config.max_lora_rank}.")
+        if self.bias != "none" and not lora_config.bias_enabled:
             error_msg.append(
                 "Adapter bias cannot be used without bias_enabled.")
         if error_msg:
