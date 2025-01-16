@@ -8,15 +8,20 @@ from typing import Any, Dict, Optional
 
 import safetensors.torch
 import torch
-from botocore.config import Config
-from botocore.exceptions import ClientError, NoCredentialsError
 
 logger = logging.getLogger(__name__)
 
 try:
     import boto3
+    from botocore.config import Config
+    from botocore.exceptions import ClientError, NoCredentialsError
+    _has_aws = True
 except ImportError:
     boto3 = None
+    Config = None
+    ClientError = Exception
+    NoCredentialsError = Exception
+    _has_aws = False
 
 
 class LoRASourceError(Exception):
@@ -100,11 +105,9 @@ class S3LoRASource(LoRASource):
         if not s3_path.startswith("s3://"):
             raise S3LoRASourceError(f"Invalid S3 path format: {s3_path}")
 
-        if boto3 is None:
+        if not _has_aws:
             raise LoRASourceError(
-                "S3 support requires boto3. Install with: pip install vllm[s3] "
-                "or pip install boto3"
-            )
+                "S3 support requires boto3 Install : pip install vllm[s3]")
 
         try:
             self.bucket, self.prefix = self._parse_s3_path(s3_path)

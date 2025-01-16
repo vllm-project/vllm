@@ -648,7 +648,8 @@ setup(
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
         "video": ["decord"],  # Required for video processing
-        "s3": ["boto3>=1.26.0"],  # Optional S3 support for LoRA adapters
+        "s3": ["boto3>=1.26.0",
+               "botocore>=1.29.0"],  # Optional S3 support for LoRA adapters
     },
     cmdclass=cmdclass,
     package_data=package_data,
