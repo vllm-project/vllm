@@ -7,7 +7,7 @@ OpenAI compatible API server.
 You can start the server using Python, or using [Docker](#deployment-docker):
 
 ```console
-$ vllm serve unsloth/Llama-3.2-1B-Instruct
+vllm serve unsloth/Llama-3.2-1B-Instruct
 ```
 
 Then query the endpoint to get the latest metrics from the server:

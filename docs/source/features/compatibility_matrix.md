@@ -322,7 +322,9 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
 
 ```
 
-### Feature x Hardware
+(feature-x-hardware)=
+
+## Feature x Hardware
 
 ```{list-table}
    :header-rows: 1
@@ -359,7 +361,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ✅
      - ✅
-     - [✗](gh-pr:4830)
+     - ✅
      - ✅
    * - <abbr title="Prompt Adapter">prmpt adptr</abbr>
      - ✅
