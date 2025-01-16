@@ -19,10 +19,11 @@ from .version import __version__, __version_tuple__
 
 
 def configure_as_vllm_process():
-
-    # some common environment variables
-    # for all processes created by vllm
-
+    """
+    set some common config/environment variables that should be set
+    for all processes created by vllm and all processes
+    that interact with vllm workers.
+    """
     import os
 
     import torch
