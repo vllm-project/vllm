@@ -4,7 +4,7 @@ import pytest
 
 from tests.v1.engine.utils import (STOP_STRINGS,
                                    DummyOutputProcessorTestVectors,
-                                   MockEngineCore)
+                                   MockEngineCore, _decode_token)
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import PromptLogprobs, SampleLogprobs
 from vllm.v1.engine import EngineCoreRequest
@@ -103,10 +103,32 @@ def _validate_logprobs(
         prompt_logprobs = gen_prompt_logprobs[req_id]
         cumulative_logprob = gen_cumulative_logprob[req_id]
         prompt_token_ids = dtv.prompt_tokens[req_idx]
+        ref_logprobs = dtv.generation_logprobs[req_idx]
+        ref_prompt_logprobs = dtv.prompt_logprobs[req_idx]
 
         if num_sample_logprobs:
+            # Sample logprobs required by this request
+
+            # Require num sampled tokens to match num
+            # sampled logprobs - especially important
+            # to check since the detokenizer can cause
+            # a request to finish early due to a stop
+            # string being hit
             len_sample_logprobs = len(logprobs)
             assert len(new_tokens) == len_sample_logprobs
+
+            for sampled_token, pos_logprob_dict in zip(new_tokens, logprobs):
+                # For each position in the completion sequence,
+                # ensure the actual sampled token is among the
+                # logprobs
+                assert sampled_token in pos_logprob_dict
+                for lp_tok in pos_logprob_dict:
+                    # Confirm that sample logprob decoded token matches
+                    # the logprob token id at this sequence position
+                    pos_logprob = pos_logprob_dict[lp_tok]
+                    assert pos_logprob.decoded_token == _decode_token(
+                        lp_tok,
+                        dtv.tokenizer), "prompt logprob decoded token mismatch"
         else:
             # Sample logprobs disabled for this request
             assert logprobs is None
