@@ -1,6 +1,7 @@
 from typing import Dict, List, Optional
 
 import pytest
+import math
 
 from tests.v1.engine.utils import (STOP_STRINGS,
                                    DummyOutputProcessorTestVectors,
@@ -107,36 +108,63 @@ def _validate_logprobs(
         ref_prompt_logprobs = dtv.prompt_logprobs[req_idx]
 
         if num_sample_logprobs:
-            # Sample logprobs required by this request
+            # Validate sample logprobs
 
             # Require num sampled tokens to match num
             # sampled logprobs - especially important
             # to check since the detokenizer can cause
             # a request to finish early due to a stop
             # string being hit
-            len_sample_logprobs = len(logprobs)
-            assert len(new_tokens) == len_sample_logprobs
+            assert len(new_tokens) == len(logprobs)
 
+            ref_cumulative_logprob = 0.0
             for sampled_token, pos_logprob_dict in zip(new_tokens, logprobs):
                 # For each position in the completion sequence,
                 # ensure the actual sampled token is among the
                 # logprobs
                 assert sampled_token in pos_logprob_dict
+                ref_cumulative_logprob += pos_logprob_dict[
+                    sampled_token].logprob
                 for lp_tok in pos_logprob_dict:
                     # Confirm that sample logprob decoded token matches
                     # the logprob token id at this sequence position
-                    pos_logprob = pos_logprob_dict[lp_tok]
-                    assert pos_logprob.decoded_token == _decode_token(
-                        lp_tok,
-                        dtv.tokenizer), "prompt logprob decoded token mismatch"
+                    decoded_token = pos_logprob_dict[lp_tok].decoded_token
+                    ref_decoded_token = _decode_token(lp_tok, dtv.tokenizer)
+                    assert decoded_token == ref_decoded_token, (
+                        f"Sampled logprob token id {lp_tok} decodes to"
+                        f" {ref_decoded_token} but Logprob decoded"
+                        f" token is {decoded_token} instead.")
+
+            # Assert that cumulative logprobs are correct
+            assert math.isclose(cumulative_logprob, ref_cumulative_logprob)
         else:
             # Sample logprobs disabled for this request
             assert logprobs is None
             assert cumulative_logprob is None
 
         if num_prompt_logprobs:
-            len_prompt_logprobs = len(prompt_logprobs)
-            assert len(prompt_token_ids) == len_prompt_logprobs
+            # Validate prompt logprobs
+
+            # Require num prompt tokens to match num
+            # prompt logprobs
+            assert len(prompt_token_ids) == len(prompt_logprobs)
+            assert prompt_logprobs[0] is None
+
+            for prompt_token, pos_logprob_dict in zip(prompt_token_ids[1:],
+                                                      prompt_logprobs[1:]):
+                # For each position in the prompt sequence,
+                # ensure the actual prompt token is among the
+                # logprobs
+                assert prompt_token in pos_logprob_dict
+                for plp_tok in pos_logprob_dict:
+                    # Confirm that prompt logprob decoded token matches
+                    # the logprob token id at this sequence position
+                    decoded_token = pos_logprob_dict[plp_tok].decoded_token
+                    ref_decoded_token = _decode_token(plp_tok, dtv.tokenizer)
+                    assert decoded_token == ref_decoded_token, (
+                        f"Prompt logprob token id {plp_tok} decodes to"
+                        f" {ref_decoded_token} but Logprob decoded"
+                        f" token is {decoded_token} instead.")
         else:
             # Prompt logprobs disabled for this request
             assert prompt_logprobs is None
