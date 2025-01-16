@@ -94,8 +94,6 @@ async def worker_routine(worker_addr: str, app: FastAPI,
                                              json.dumps(generator.model_dump()).encode('utf-8')])
             else:
                 async for chunk in generator:
-                    logger.info("worker-%d Sending response chunk: [ %s ]",
-                                i, chunk)
                     await socket.send_multipart([identity,
                                                  b"text/event-stream",
                                                  chunk.encode('utf-8')])

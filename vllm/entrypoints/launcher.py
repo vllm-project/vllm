@@ -91,7 +91,7 @@ async def serve_zmq(arg, zmq_server_port: int, app: FastAPI) -> None:
     try:
         tasks = [
             asyncio.create_task(worker_routine(workers_addr, app, context, i))
-            for i in range(20)
+            for i in range(100)
         ]
         logger.info("zmq tasks: %s", tasks)
         # thread safety proxy create socket in the background:
