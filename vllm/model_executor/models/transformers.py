@@ -72,8 +72,8 @@ def vllm_flash_attention_forward(_module,
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
 
 
-# Linear Layer that is compatiable with transformers internal forward
-# TODO: This is a temporary solution, we should find a better way to intergrate
+# Linear Layer that is compatible with transformers internal forward
+# TODO: This is a temporary solution, we should find a better way to integrate
 class HFColumnParallelLinear(ColumnParallelLinear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -129,7 +129,7 @@ class TransformersModel(nn.Module):
                 divide(config.num_attention_heads, tp_size),
                 config.head_dim,
                 config.head_dim**
-                -0.5,  # ish, the sacling is different for every attn layer
+                -0.5,  # ish, the scaling is different for every attn layer
                 num_kv_heads=divide(config.num_key_value_heads, tp_size),
                 cache_config=cache_config,
                 quant_config=quant_config,
