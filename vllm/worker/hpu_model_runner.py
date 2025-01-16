@@ -884,7 +884,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             if seq_group_metadata.multi_modal_data:
                 positions = input_positions[0]
                 mm_data, placeholder_maps = MultiModalPlaceholderMap \
-                    .from_seq_group(seq_group_metadata, range(positions[0], positions[0] + len(positions)))
+                    .from_seq_group(seq_group_metadata,
+                      range(positions[0], positions[0] + len(positions)))
 
                 if self.mm_registry.has_processor(self.model_config):
                     mm_kwargs = mm_data
@@ -1041,8 +1042,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=placeholder_index_maps
-        )
+            multi_modal_placeholder_index_maps=placeholder_index_maps)
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
         for t in multi_modal_kwargs:
             if torch.is_tensor(multi_modal_kwargs[t]):
