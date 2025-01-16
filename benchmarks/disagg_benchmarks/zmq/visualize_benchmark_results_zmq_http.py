@@ -5,7 +5,9 @@ import pandas as pd
 
 if __name__ == "__main__":
     data = []
-    for name in ['disagg_prefill_http', 'disagg_prefill_zmq', 'chunked_prefill']:
+    for name in [
+            'disagg_prefill_http', 'disagg_prefill_zmq', 'chunked_prefill'
+    ]:
         for qps in [2, 4, 6, 8, 10, 12]:
             with open(f"results/{name}-qps-{qps}.json") as f:
                 x = json.load(f)
@@ -17,7 +19,6 @@ if __name__ == "__main__":
     dis_http_df = df[df['name'] == 'disagg_prefill_http']
     dis_zmq_df = df[df['name'] == 'disagg_prefill_zmq']
     chu_df = df[df['name'] == 'chunked_prefill']
-
 
     plt.style.use('bmh')
     plt.rcParams['font.size'] = 20
@@ -50,7 +51,6 @@ if __name__ == "__main__":
         ax.set_ylim(bottom=0)
         fig.savefig(f'results/http_zmq_chunk/{key}.png')
         plt.close(fig)
-
 
         fig1, ax1 = plt.subplots(figsize=(11, 7))
         plt.plot(dis_http_df['qps'],
