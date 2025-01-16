@@ -10,6 +10,7 @@ from multiprocessing.process import BaseProcess
 from typing import Any, Dict, List, Optional, Tuple
 
 import psutil
+import torch.nn as nn
 import zmq
 
 from vllm.config import VllmConfig
@@ -159,6 +160,9 @@ class MultiprocExecutor(Executor):
         except Exception as e:
             # Re-raise any other exceptions
             raise e
+
+    def get_model(self) -> nn.Module:
+        return self.collective_rpc("get_model")[0]
 
     def execute_model(
         self,

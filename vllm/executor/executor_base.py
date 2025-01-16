@@ -272,6 +272,9 @@ class DistributedExecutorBase(ExecutorBase):
                        kwargs: Optional[Dict] = None) -> List[Any]:
         return self._run_workers(method, *args, **(kwargs or {}))
 
+    def get_model(self) -> nn.Module:
+        return self.collective_rpc("get_model")[0]
+
     @abstractmethod
     def _run_workers(
         self,

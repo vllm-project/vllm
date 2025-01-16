@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorBase
@@ -52,6 +53,9 @@ class UniProcExecutor(ExecutorBase):
                 from None
         answer = func(*args, **kwargs)
         return [answer]
+
+    def get_model(self) -> nn.Module:
+        return self.collective_rpc("get_model")[0]
 
     def check_health(self) -> None:
         # UniProcExecutor will always be healthy as long as

@@ -3,6 +3,8 @@ from collections import defaultdict
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+import torch.nn as nn
+
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -274,6 +276,9 @@ class RayExecutor(Executor):
                  ) in zip(self.workers, all_worker_args, all_worker_kwargs)
         ]
         return ray.get(ray_worker_refs)
+
+    def get_model(self) -> nn.Module:
+        return ray.get(self.workers[0].get_model.remote)
 
     def execute_model(
         self,

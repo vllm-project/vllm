@@ -1812,7 +1812,7 @@ class LLMEngine:
         return self.model_executor.list_prompt_adapters()
 
     def get_model(self) -> nn.Module:
-        return self.model_executor.collective_rpc("get_model")[0]
+        return self.model_executor.get_model()
 
     def start_profile(self) -> None:
         self.model_executor.start_profile()

@@ -2,6 +2,8 @@ import time
 from collections import defaultdict
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
+import torch.nn as nn
+
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -59,6 +61,10 @@ try:
             if not self.compiled_dag_cuda_device_set:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
+
+        def get_model(self) -> nn.Module:
+            assert self.worker is not None, "Worker is not initialized"
+            return self.worker.model_runner.get_model()
 
         def execute_model(
             self,

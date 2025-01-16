@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Tuple, Type
 
+import torch.nn as nn
+
 from vllm.config import VllmConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -36,6 +38,10 @@ class Executor(ABC):
 
     @abstractmethod
     def determine_num_available_blocks(self) -> Tuple[int, int]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_model(self) -> nn.Module:
         raise NotImplementedError
 
     @abstractmethod
