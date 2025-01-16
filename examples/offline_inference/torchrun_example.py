@@ -1,5 +1,5 @@
 """
-experimental example for tensor-parallel inference with torchrun,
+experimental support for tensor-parallel inference with torchrun,
 see https://github.com/vllm-project/vllm/issues/11400 for
 the motivation and use case for this example.
 run the script with `torchrun --nproc-per-node=2 torchrun_example.py`,
