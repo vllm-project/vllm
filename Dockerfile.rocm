@@ -51,6 +51,24 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 
+# -----------------------
+# Test vLLM image
+FROM base AS test
+
+# Install vLLM
+RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
+    cd /install \
+    && pip install -U -r requirements-rocm.txt \
+    && pip uninstall -y vllm \
+    && pip install *.whl
+
+WORKDIR /vllm-workspace
+ARG COMMON_WORKDIR
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm /vllm-workspace
+
+# install development dependencies (for testing)
+RUN cd /vllm-workspace \
+    && python3 -m pip install -e tests/vllm_test_utils
 
 # -----------------------
 # Final vLLM image
@@ -84,20 +102,13 @@ ARG COMMON_WORKDIR
 
 # Copy over the benchmark scripts as well
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
-COPY --from=export_vllm /tests ${COMMON_WORKDIR}/vllm/tests
 COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
-COPY --from=export_vllm /.buildkite ${COMMON_WORKDIR}/vllm/.buildkite
-
 
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 ENV TOKENIZERS_PARALLELISM=false
 
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
-
-# install development dependencies (for testing)
-RUN cd ${COMMON_WORKDIR}/vllm \
-    && python3 -m pip install -e tests/vllm_test_utils
 
 CMD ["/bin/bash"]
 
