@@ -11,8 +11,7 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import (CompletionOutput, EmbeddingRequestOutput,
-                          RequestOutput)
+from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -209,8 +208,8 @@ class EngineClient(ABC):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-    ) -> AsyncGenerator[EmbeddingRequestOutput, None]:
-        """Generate outputs for a request from an embedding model."""
+    ) -> AsyncGenerator[PoolingRequestOutput, None]:
+        """Generate outputs for a request from a pooling model."""
         ...
 
     @abstractmethod
@@ -270,4 +269,9 @@ class EngineClient(ABC):
     @abstractmethod
     async def stop_profile(self) -> None:
         """Start profiling the engine"""
+        ...
+
+    @abstractmethod
+    async def add_lora(self, lora_request: LoRARequest) -> None:
+        """Load a new LoRA adapter into the engine for future requests."""
         ...

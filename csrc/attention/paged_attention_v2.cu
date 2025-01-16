@@ -54,7 +54,7 @@ void paged_attention_v2_launcher(
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int num_kv_heads, float scale,
     torch::Tensor& block_tables, torch::Tensor& seq_lens, int max_seq_len,
-    const c10::optional<torch::Tensor>& alibi_slopes, float k_scale,
+    const std::optional<torch::Tensor>& alibi_slopes, float k_scale,
     float v_scale, const int tp_rank, const int blocksparse_local_blocks,
     const int blocksparse_vert_stride, const int blocksparse_block_size,
     const int blocksparse_head_sliding_step) {
@@ -147,13 +147,10 @@ void paged_attention_v2_launcher(
       blocksparse_head_sliding_step);
 
 #define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE) \
-  switch (is_block_sparse) {                                               \
-    case true:                                                             \
-      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);     \
-      break;                                                               \
-    case false:                                                            \
-      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);    \
-      break;                                                               \
+  if (is_block_sparse) {                                                   \
+    CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);       \
+  } else {                                                                 \
+    CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);      \
   }
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
@@ -190,7 +187,7 @@ void paged_attention_v2(
     torch::Tensor& block_tables,  // [num_seqs, max_num_blocks_per_seq]
     torch::Tensor& seq_lens,      // [num_seqs]
     int64_t block_size, int64_t max_seq_len,
-    const c10::optional<torch::Tensor>& alibi_slopes,
+    const std::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, double k_scale, double v_scale,
     const int64_t tp_rank, const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,

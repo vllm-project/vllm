@@ -9,21 +9,20 @@ from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
-from vllm.worker.worker import Worker
+from vllm.worker.worker_base import DelegateWorkerBase
 
 
-class MedusaWorker(NonLLMProposerWorkerBase, Worker):
+class MedusaWorker(NonLLMProposerWorkerBase, DelegateWorkerBase):
     """Worker for Medusa.
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
+        DelegateWorkerBase.__init__(self, *args, **kwargs)
         # Lazy initialization list.
         self._proposer: Top1Proposer
 
     def init_device(self):
-        super().init_device()
+        self.worker.init_device()
 
         self._proposer = Top1Proposer(
             weakref.proxy(self),  # type: ignore[arg-type]

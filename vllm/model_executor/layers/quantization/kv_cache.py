@@ -1,8 +1,10 @@
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.utils import print_warning_once
+
+logger = init_logger(__name__)
 
 
 class BaseKVCacheMethod(QuantizeMethodBase):
@@ -67,7 +69,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             layer._v_scale = v_scale
             if (layer._k_scale == 1.0 and layer._v_scale == 1.0
                     and "e5m2" not in layer.kv_cache_dtype):
-                print_warning_once(
+                logger.warning_once(
                     "Using KV cache scaling factor 1.0 for fp8_e4m3. This "
                     "may cause accuracy issues. Please make sure k/v_scale "
                     "scaling factors are available in the fp8 checkpoint.")

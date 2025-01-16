@@ -193,7 +193,8 @@ class MLPSpeculator(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-            param = params_dict.get(name.replace("speculator.", ""))
+            name = name.replace("speculator.", "")
+            param = params_dict.get(name)
             if param is not None:
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

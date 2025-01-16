@@ -34,7 +34,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 
 # Supported NVIDIA architectures.
-set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
+set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0")
 
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1100;gfx1101")
@@ -196,6 +196,8 @@ set(VLLM_EXT_SRC
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/compressed_tensors/int8_quant_kernels.cu"
   "csrc/quantization/fp8/common.cu"
+  "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
+  "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
   "csrc/torch_bindings.cpp")
@@ -204,19 +206,32 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
-  set(CUTLASS_REVISION "v3.5.1" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "v3.6.0" CACHE STRING "CUTLASS revision to use")
 
-  FetchContent_Declare(
+  # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
+  if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
+    set(VLLM_CUTLASS_SRC_DIR $ENV{VLLM_CUTLASS_SRC_DIR})
+  endif()
+
+  if(VLLM_CUTLASS_SRC_DIR)
+    if(NOT IS_ABSOLUTE VLLM_CUTLASS_SRC_DIR)
+      get_filename_component(VLLM_CUTLASS_SRC_DIR "${VLLM_CUTLASS_SRC_DIR}" ABSOLUTE)
+    endif()
+    message(STATUS "The VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
+    FetchContent_Declare(cutlass SOURCE_DIR ${VLLM_CUTLASS_SRC_DIR})
+  else()
+    FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        GIT_TAG v3.5.1
+        GIT_TAG v3.6.0
         GIT_PROGRESS TRUE
 
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
         # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
         # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
         GIT_SHALLOW TRUE
-  )
+    )
+  endif()
   FetchContent_MakeAvailable(cutlass)
 
   list(APPEND VLLM_EXT_SRC
@@ -224,10 +239,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/mamba/causal_conv1d/causal_conv1d.cu"
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
-    "csrc/quantization/gguf/gguf_kernel.cu"
     "csrc/custom_all_reduce.cu"
     "csrc/permute_cols.cu"
-    "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu")
+    "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
+    "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
+    "csrc/sparse/cutlass/sparse_compressor_entry.cu"
+    "csrc/cutlass_extensions/common.cpp")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
@@ -236,7 +253,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Only build Marlin kernels if we are building for at least some compatible archs.
   # Keep building Marlin for 9.0 as there are some group sizes and shapes that
   # are not supported by Machete yet.
-  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.9;9.0" ${CUDA_ARCHS})
+  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.7;8.9;9.0" ${CUDA_ARCHS})
   if (MARLIN_ARCHS)
     set(MARLIN_SRCS
        "csrc/quantization/fp8/fp8_marlin.cu"
@@ -256,7 +273,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                    " in CUDA target architectures")
   endif()
 
-  #
   # The cutlass_scaled_mm kernels for Hopper (c3x, i.e. CUTLASS 3.x) require
   # CUDA 12.0 or later (and only work on Hopper, 9.0/9.0a for now).
   cuda_archs_loose_intersection(SCALED_MM_3X_ARCHS "9.0;9.0a" "${CUDA_ARCHS}")
@@ -288,7 +304,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # For the cutlass_scaled_mm kernels we want to build the c2x (CUTLASS 2.x)
   # kernels for the remaining archs that are not already built for 3x.
   cuda_archs_loose_intersection(SCALED_MM_2X_ARCHS
-    "7.5;8.0;8.6;8.9;9.0" "${CUDA_ARCHS}")
+    "7.5;8.0;8.6;8.7;8.9;9.0" "${CUDA_ARCHS}")
   # subtract out the archs that are already built for 3x
   list(REMOVE_ITEM SCALED_MM_2X_ARCHS ${SCALED_MM_3X_ARCHS})
   if (SCALED_MM_2X_ARCHS)
@@ -306,6 +322,31 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     else()
       message(STATUS "Not building scaled_mm_c2x as no compatible archs found "
                     "in CUDA target architectures")
+    endif()
+  endif()
+
+  #
+  # 2:4 Sparse Kernels
+
+  # The 2:4 sparse kernels cutlass_scaled_sparse_mm and cutlass_compressor
+  # require CUDA 12.2 or later (and only work on Hopper, 9.0/9.0a for now).
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_3X_ARCHS)
+    set(SRCS "csrc/sparse/cutlass/sparse_compressor_c3x.cu"
+             "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${SCALED_MM_3X_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SPARSE_SCALED_MM_C3X=1")
+    message(STATUS "Building sparse_scaled_mm_c3x for archs: ${SCALED_MM_3X_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_3X_ARCHS)
+      message(STATUS "Not building sparse_scaled_mm_c3x kernels as CUDA Compiler version is "
+                     "not >= 12.2, we recommend upgrading to CUDA 12.2 or later "
+                     "if you intend on running FP8 sparse quantized models on Hopper.")
+    else()
+      message(STATUS "Not building sparse_scaled_mm_c3x as no compatible archs found "
+                     "in CUDA target architectures")
     endif()
   endif()
 
@@ -390,7 +431,7 @@ define_gpu_extension_target(
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
-  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
 
@@ -414,7 +455,7 @@ set_gencode_flags_for_srcs(
   CUDA_ARCHS "${CUDA_ARCHS}")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.9;9.0" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.7;8.9;9.0" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
     set(MARLIN_MOE_SRC
         "csrc/moe/marlin_kernels/marlin_moe_kernel.h"
@@ -509,7 +550,7 @@ else()
   FetchContent_Declare(
           vllm-flash-attn
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG 5259c586c403a4e4d8bf69973c159b40cc346fb9
+          GIT_TAG 96266b1111111f3d11aabefaf3bacbab6a89d03c
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn

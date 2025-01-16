@@ -3,12 +3,14 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
                     Tuple, Union)
 
-from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
+from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
+                                                compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.engine import EngineCoreOutput
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -24,6 +26,7 @@ class Scheduler:
     def __init__(
         self,
         scheduler_config: SchedulerConfig,
+        model_config: ModelConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
     ) -> None:
@@ -33,21 +36,22 @@ class Scheduler:
         # TODO: Support LoRA.
         assert lora_config is None, "V1 does not support LoRA yet."
 
-        num_gpu_blocks = cache_config.num_gpu_blocks
-        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
-        # Create the block space manager.
-        self.kv_cache_manager = KVCacheManager(
-            block_size=self.cache_config.block_size,
-            num_gpu_blocks=num_gpu_blocks,
-            sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
-        self.block_size = self.cache_config.block_size
-
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = \
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
+
+        num_gpu_blocks = cache_config.num_gpu_blocks
+        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
+        # Create the KV cache manager.
+        self.kv_cache_manager = KVCacheManager(
+            block_size=self.cache_config.block_size,
+            num_gpu_blocks=num_gpu_blocks,
+            max_model_len=self.max_model_len,
+            sliding_window=self.cache_config.sliding_window,
+            enable_caching=self.cache_config.enable_prefix_caching)
+        self.block_size = self.cache_config.block_size
 
         # req_id -> Request
         self.requests: Dict[str, Request] = {}
@@ -67,17 +71,24 @@ class Scheduler:
         self.running_reqs_data: Dict[str, RunningRequestData] = {}
 
         # Encoder-related.
+        # Calculate encoder cache size if applicable
+        # NOTE: For now we use the same budget for both compute and space.
+        # This can be changed when we make encoder cache for embedding caching
+        # across requests.
+        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
+            model_config=model_config,
+            scheduler_config=scheduler_config,
+        )
+
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
         # projector if needed). Currently, we assume that the encoder also
         # has the Transformer architecture (e.g., ViT).
-        # FIXME(woosuk): Below are placeholder values. We need to calculate the
-        # actual values from the configurations.
-        self.max_num_encoder_input_tokens = 2048
-        # NOTE(woosuk): For the models without encoder (e.g., text-only models),
-        # the encoder cache will not be initialized and used, regardless of
-        # the cache size. This is because the memory space for the encoder cache
-        # is preallocated in the profiling run.
-        self.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
+        self.max_num_encoder_input_tokens = encoder_compute_budget
+        # NOTE: For the models without encoder (e.g., text-only models),
+        # the encoder cache will not be initialized because cache size is 0
+        # for these models.
+        self.encoder_cache_manager = EncoderCacheManager(
+            cache_size=encoder_cache_size)
 
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
@@ -149,6 +160,7 @@ class Scheduler:
                     break
             if not can_schedule:
                 break
+            assert new_blocks is not None
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -182,12 +194,8 @@ class Scheduler:
 
                 request = self.waiting[0]
                 # Get already-cached tokens.
-                computed_blocks = self.kv_cache_manager.get_computed_blocks(
-                    request)
-                # NOTE(woosuk): Since incomplete blocks are not eligible for
-                # sharing, `num_computed_tokens` is always a multiple of
-                # `block_size`.
-                num_computed_tokens = len(computed_blocks) * self.block_size
+                computed_blocks, num_computed_tokens = \
+                    self.kv_cache_manager.get_computed_blocks(request)
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
@@ -196,9 +204,13 @@ class Scheduler:
                 if num_new_tokens == 0:
                     # The happens when prompt length is divisible by the block
                     # size and all blocks are cached. Now we force to recompute
-                    # the last token.
-                    num_computed_tokens -= 1
-                    num_new_tokens = 1
+                    # the last block. Note that we have to re-compute an entire
+                    # block because allocate_slots() assumes num_computed_tokens
+                    # is always a multiple of the block size. This limitation
+                    # can potentially be removed in the future to slightly
+                    # improve the performance.
+                    num_computed_tokens -= self.block_size
+                    num_new_tokens = self.block_size
                     computed_blocks.pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
@@ -255,6 +267,14 @@ class Scheduler:
         assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
                 len(scheduled_running_reqs) == len(self.running))
 
+        # Get the longest common prefix among all requests in the running queue.
+        # This can be potentially used for cascade attention.
+        if self.running:
+            any_request = self.running[0]
+            num_common_prefix_blocks = (
+                self.kv_cache_manager.get_num_common_prefix_blocks(
+                    any_request, len(self.running)))
+
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
@@ -280,6 +300,7 @@ class Scheduler:
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
+            num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids=preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -358,18 +379,22 @@ class Scheduler:
             if self.encoder_cache_manager.has_cache(request, i):
                 # The encoder input is already computed and cached.
                 continue
-            if not self.encoder_cache_manager.can_allocate(request, i):
-                # The encoder cache is full. We can only schedule the decoder
-                # tokens just before the encoder input.
-                num_new_tokens = start_pos - num_computed_tokens
-                break
-            if num_encoder_tokens > encoder_budget:
-                # The encoder budget is exhausted. We can only schedule the
-                # decoder tokens up until the encoder input.
-                # NOTE(woosuk): We assume that the encoder tokens should be
-                # processed altogether, as the encoder usually uses
+            if (not self.encoder_cache_manager.can_allocate(request, i)
+                    or num_encoder_tokens > encoder_budget):
+                # The encoder cache is full or the encoder budget is exhausted.
+                # NOTE(woosuk): We assume that the encoder input tokens should
+                # be processed altogether, as the encoder usually uses
                 # bidirectional attention.
-                num_new_tokens = start_pos - num_computed_tokens
+                if num_computed_tokens < start_pos:
+                    # We only schedule the decoder tokens just before the
+                    # encoder input.
+                    num_new_tokens = start_pos - num_computed_tokens
+                else:
+                    # Because of prefix caching, num_computed_tokens is greater
+                    # than start_pos even though its encoder input is not
+                    # available. In this case, we can't schedule any token for
+                    # the request in this step.
+                    num_new_tokens = 0
                 break
 
             encoder_budget -= num_encoder_tokens
@@ -380,12 +405,12 @@ class Scheduler:
         self,
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
-    ) -> List[EngineCoreOutput]:
+    ) -> EngineCoreOutputs:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
-        sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
+        sampled_token_ids = model_runner_output.sampled_token_ids
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
-        engine_core_outputs: List[EngineCoreOutput] = []
+        outputs: List[EngineCoreOutput] = []
         for request in self.running:
             req_id = request.request_id
             request.num_computed_tokens += num_scheduled_tokens[req_id]
@@ -424,7 +449,7 @@ class Scheduler:
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
                     stop_reason=request.stop_reason)
-                engine_core_outputs.append(output)
+                outputs.append(output)
 
                 # Breakout of the loop.
                 if stopped:
@@ -432,7 +457,10 @@ class Scheduler:
 
             new_running.append(request)
         self.running = new_running
-        return engine_core_outputs
+        return EngineCoreOutputs(
+            outputs=outputs,
+            scheduler_stats=self.make_stats(),
+        )
 
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len
@@ -501,6 +529,12 @@ class Scheduler:
     def has_unfinished_requests(self) -> bool:
         return self.get_num_unfinished_requests() > 0
 
+    def make_stats(self) -> SchedulerStats:
+        return SchedulerStats(
+            num_running_reqs=len(self.running),
+            num_waiting_reqs=len(self.waiting),
+        )
+
 
 @dataclass
 class NewRequestData:
@@ -509,6 +543,7 @@ class NewRequestData:
     prompt_token_ids: List[int]
     prompt: Optional[str]
     mm_inputs: List["MultiModalKwargs"]
+    mm_hashes: List[str]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
     block_ids: List[int]
@@ -526,6 +561,7 @@ class NewRequestData:
             prompt_token_ids=request.prompt_token_ids,
             prompt=request.prompt,
             mm_inputs=request.mm_inputs,
+            mm_hashes=request.mm_hashes,
             mm_positions=request.mm_positions,
             sampling_params=request.sampling_params,
             block_ids=block_ids,
@@ -585,6 +621,7 @@ class SchedulerOutput:
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int
     scheduled_encoder_inputs: Dict[str, List[int]]
+    num_common_prefix_blocks: int
 
     preempted_req_ids: Set[str]
     finished_req_ids: Set[str]

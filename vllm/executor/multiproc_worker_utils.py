@@ -1,5 +1,4 @@
 import asyncio
-import multiprocessing
 import os
 import sys
 import threading
@@ -11,8 +10,15 @@ from multiprocessing.process import BaseProcess
 from typing import (Any, Callable, Dict, Generic, List, Optional, TextIO,
                     TypeVar, Union)
 
-import vllm.envs as envs
+import torch
+
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.triton_utils.importing import HAS_TRITON
+from vllm.utils import _check_multiproc_method, get_mp_context
+
+if HAS_TRITON:
+    from vllm.triton_utils import maybe_set_triton_cache_manager
 
 logger = init_logger(__name__)
 
@@ -142,7 +148,8 @@ class ProcessWorkerWrapper:
     for handling single-node multi-GPU tensor parallel."""
 
     def __init__(self, result_handler: ResultHandler,
-                 worker_factory: Callable[[], Any]) -> None:
+                 worker_factory: Callable[[VllmConfig, int], Any],
+                 vllm_config: VllmConfig, rank: int) -> None:
         self.mp = get_mp_context()
         self._task_queue = self.mp.Queue()
         self.result_queue = result_handler.result_queue
@@ -154,6 +161,8 @@ class ProcessWorkerWrapper:
                 worker_factory=worker_factory,
                 task_queue=self._task_queue,
                 result_queue=self.result_queue,
+                vllm_config=vllm_config,
+                rank=rank,
             ),
             daemon=True)
 
@@ -194,9 +203,11 @@ class ProcessWorkerWrapper:
 
 
 def _run_worker_process(
-    worker_factory: Callable[[], Any],
+    worker_factory: Callable[[VllmConfig, int], Any],
     task_queue: Queue,
     result_queue: Queue,
+    vllm_config: VllmConfig,
+    rank: int,
 ) -> None:
     """Worker process event loop"""
 
@@ -207,7 +218,7 @@ def _run_worker_process(
     _add_prefix(sys.stderr, process_name, pid)
 
     # Initialize worker
-    worker = worker_factory()
+    worker = worker_factory(vllm_config, rank)
     del worker_factory
 
     # Accept tasks from the engine in task_queue
@@ -267,6 +278,31 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     file.write = write_with_prefix  # type: ignore[method-assign]
 
 
-def get_mp_context():
-    mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
-    return multiprocessing.get_context(mp_method)
+def set_multiprocessing_worker_envs(parallel_config):
+    """ Set up environment variables that should be used when there are workers
+    in a multiprocessing environment. This should be called by the parent 
+    process before worker processes are created"""
+
+    _check_multiproc_method()
+
+    # Configure thread parallelism if OMP_NUM_THREADS isn't set
+    #
+    # Helps to avoid CPU contention. The default of spawning a thread per
+    # core combined with multiprocessing for each GPU can have a negative
+    # impact on performance. The contention is amplified when running in a
+    # container where CPU limits can cause throttling.
+    default_omp_num_threads = 1
+    if "OMP_NUM_THREADS" not in os.environ and (
+            current_parallelism :=
+            torch.get_num_threads()) > default_omp_num_threads:
+        logger.warning(
+            "Reducing Torch parallelism from %d threads to %d to avoid "
+            "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
+            "external environment to tune this value as needed.",
+            current_parallelism, default_omp_num_threads)
+        os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
+        torch.set_num_threads(default_omp_num_threads)
+
+    # workaround for https://github.com/vllm-project/vllm/issues/6103
+    if HAS_TRITON and parallel_config.world_size > 1:
+        maybe_set_triton_cache_manager()

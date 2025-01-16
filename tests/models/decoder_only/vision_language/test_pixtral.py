@@ -228,7 +228,7 @@ def test_model_engine(vllm_runner, model: str, dtype: str) -> None:
                          name_1="output")
 
 
-@large_gpu_test(min_gb=24)
+@large_gpu_test(min_gb=48)
 @pytest.mark.parametrize(
     "prompt,expected_ranges",
     [(_create_engine_inputs_hf(IMG_URLS[:1]), [{

@@ -1,6 +1,6 @@
 # Adapted from
-# https://github.com/THUDM/GLM-4
-"""Inference-only ChatGLM model compatible with THUDM weights."""
+# https://github.com/THUDM/CogAgent
+"""Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
 from array import array
 from typing import (Dict, Iterable, List, Mapping, Optional, Set, Tuple,
@@ -33,7 +33,8 @@ from vllm.model_executor.models.glm4_vision_encoder import EVA2CLIPModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalData, MultiModalKwargs
+from vllm.multimodal.inputs import (ModalityData, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
@@ -53,7 +54,7 @@ def calculate_image_placeholder(vision_config):
 
 def mm_input_mapper_for_glmv(
     ctx: InputContext,
-    data: MultiModalData[object],
+    data: ModalityData[object],
 ) -> Dict:
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(
@@ -200,7 +201,6 @@ def input_processor_for_glmv(ctx: InputContext, inputs: DecoderOnlyInputs):
 
     new_input_ids = []
     final_processed_position = 0
-    final_processed_position = 0
 
     for boi_position, eoi_position in zip(boi_positions, eoi_positions):
         assert boi_position < eoi_position
@@ -230,6 +230,7 @@ class GLMAttention(nn.Module):
         config: ChatGLMConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -273,19 +274,23 @@ class GLMAttention(nn.Module):
         # https://huggingface.co/THUDM/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
         rope_ratio = getattr(config, "rope_ratio", 1.0)
         max_positions = getattr(config, "seq_length", 8192)
+        # NOTE: THUDM/cogagent-9b-20241220 uses original_rope=False,
+        # which is equivalent to is_neox_style=True
+        is_neox_style = not config.original_rope
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim // 2,
             max_position=max_positions,
             base=10000 * rope_ratio,
-            is_neox_style=False,
+            is_neox_style=is_neox_style,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -364,6 +369,7 @@ class GLMBlock(nn.Module):
         config: ChatGLMConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.apply_residual_connection_post_layernorm = (
@@ -377,7 +383,10 @@ class GLMBlock(nn.Module):
                                                eps=config.layernorm_epsilon)
 
         # Self attention.
-        self.self_attention = GLMAttention(config, cache_config, quant_config)
+        self.self_attention = GLMAttention(config,
+                                           cache_config,
+                                           quant_config,
+                                           prefix=f"{prefix}.self_attention")
         self.hidden_dropout = config.hidden_dropout
 
         # Layernorm on the attention output
@@ -446,7 +455,8 @@ class GLMTransformer(nn.Module):
         # Transformer layers.
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.num_layers,
-            lambda prefix: GLMBlock(config, cache_config, quant_config),
+            lambda prefix: GLMBlock(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -500,16 +510,22 @@ class ChatGLMModel(nn.Module):
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
         self.kv_channels = config.kv_channels
-        self.encoder = GLMTransformer(config, cache_config, quant_config)
+        self.encoder = GLMTransformer(config,
+                                      cache_config,
+                                      quant_config,
+                                      prefix=f"{prefix}.encoder")
 
         self.output_layer = ParallelLMHead(config.padded_vocab_size,
                                            config.hidden_size,
-                                           quant_config=quant_config)
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.output_layer")
 
         vision_config_flag = getattr(config, 'vision_config', None)
         if vision_config_flag is not None:
             self.vision_config = Namespace(**config.vision_config)
-            self.vision = EVA2CLIPModel(self.config, quant_config)
+            self.vision = EVA2CLIPModel(self.config,
+                                        quant_config,
+                                        prefix=f"{prefix}.vision")
         else:
             self.vision = None
 
@@ -532,6 +548,30 @@ class ChatGLMModel(nn.Module):
                     """)
         return GLMImagePixelInputs(pixel_values=pixel_values)
 
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input["pixel_values"] is None:
+            return None
+        pixel_values = image_input["pixel_values"].to(
+            dtype=self.config.torch_dtype)
+        vision_embeddings = self.vision(pixel_values)
+        return vision_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.embedding(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_glm_vision_embeddings(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                vision_embeddings=multimodal_embeddings,
+                boi_token_id=self.config.boi_token_id,
+                eoi_token_id=self.config.eoi_token_id)
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -539,26 +579,17 @@ class ChatGLMModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> torch.Tensor:
-        if intermediate_tensors is None:
-            inputs_embeds = self.embedding(input_ids)
-            image_input = self._parse_and_validate_image_input(**kwargs)
 
-            if image_input["pixel_values"] is not None:
-                pixel_values = image_input["pixel_values"].to(
-                    dtype=inputs_embeds.dtype)
-                image_embeds = self.vision(pixel_values)
-
-                boi_token_id = self.config.boi_token_id
-                eoi_token_id = self.config.eoi_token_id
-
-                inputs_embeds = merge_glm_vision_embeddings(
-                    input_ids=input_ids,
-                    inputs_embeds=inputs_embeds,
-                    vision_embeddings=image_embeds,
-                    boi_token_id=boi_token_id,
-                    eoi_token_id=eoi_token_id)
+        # NOTE: In v1, inputs_embeds is always generated at model runner, this
+        # condition is for v0 compatibility.
+        if intermediate_tensors is None and inputs_embeds is None:
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
         else:
             inputs_embeds = intermediate_tensors["hidden_states"]
 
@@ -575,8 +606,7 @@ class ChatGLMModel(nn.Module):
         return hidden_states
 
 
-class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP,
-                       SupportsMultiModal):
+class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -695,7 +725,7 @@ class ChatGLM(ChatGLMBaseModel):
     embedding_padding_modules = []
 
 
-class ChatGLMV(ChatGLMBaseModel):
+class ChatGLMV(ChatGLMBaseModel, SupportsMultiModal):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],
@@ -748,7 +778,7 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         config = vllm_config.model_config.hf_config
         # Initialize VL
         if hasattr(config, "visual"):
-            return ChatGLM(vllm_config=vllm_config, prefix=prefix)
+            return ChatGLMV(vllm_config=vllm_config, prefix=prefix)
         # Initialize LLM
         else:
-            return ChatGLMV(vllm_config=vllm_config, prefix=prefix)
+            return ChatGLM(vllm_config=vllm_config, prefix=prefix)

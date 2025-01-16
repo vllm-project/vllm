@@ -63,6 +63,7 @@ class NaiveBlockAllocator(BlockAllocator):
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
                                  token_ids: List[int],
+                                 extra_hash: Optional[int] = None,
                                  device: Optional[Device] = None) -> Block:
         """Allocates a new immutable block with the given token IDs, linked to
         the previous block.
@@ -85,6 +86,7 @@ class NaiveBlockAllocator(BlockAllocator):
             self,
             prev_block: Optional[Block],
             block_token_ids: List[List[int]],
+            extra_hash: Optional[int] = None,
             device: Optional[Device] = None) -> List[Block]:
         assert device is None
         num_blocks = len(block_token_ids)
@@ -106,6 +108,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
+                               extra_hash: Optional[int] = None,
                                device: Optional[Device] = None) -> Block:
         """Allocates a new mutable block, linked to the previous block.
 
@@ -262,13 +265,6 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         pass
 
-    def get_computed_block_ids(self, prev_computed_block_ids: List[int],
-                               block_ids: List[int],
-                               skip_last_block_id: bool) -> List[int]:
-        """No prefix caching here => return empty list
-        """
-        return []
-
     def get_common_computed_block_ids(
             self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         """Determine blocks that can be skipped in prefill.
@@ -329,6 +325,10 @@ class NaiveBlockAllocator(BlockAllocator):
     def get_prefix_cache_hit_rate(self) -> float:
         return -1
 
+    def find_cached_blocks_prefix(self, block_hashes: List[int]) -> List[int]:
+        # Not applicable for naive block allocator.
+        return []
+
 
 class NaiveBlock(Block):
     """An implementation of the Block class that does not support prefix
@@ -358,7 +358,8 @@ class NaiveBlock(Block):
                  block_size: int,
                  allocator: BlockAllocator,
                  block_id: Optional[int] = None,
-                 _cow_target: Optional[Block] = None):
+                 _cow_target: Optional[Block] = None,
+                 extra_hash: Optional[int] = None):
         self._token_ids: List[int] = []
         self._block_size = block_size
         self._prev_block = prev_block
@@ -443,6 +444,10 @@ class NaiveBlock(Block):
     @property
     def prev_block(self) -> Optional["Block"]:
         return self._prev_block
+
+    @property
+    def extra_hash(self):
+        return None
 
     @property
     def content_hash(self) -> Optional[int]:

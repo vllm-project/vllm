@@ -284,7 +284,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
 def _get_attn_bias(
     attn_metadata: XFormersMetadata,
-    attn_type: AttentionType,
+    attn_type: str,
 ) -> Optional[AttentionBias]:
     '''
     Extract appropriate attention bias from attention metadata
@@ -314,7 +314,7 @@ def _get_attn_bias(
 def _set_attn_bias(
     attn_metadata: XFormersMetadata,
     attn_bias: List[Optional[AttentionBias]],
-    attn_type: AttentionType,
+    attn_type: str,
 ) -> None:
     '''
     Update appropriate attention bias field of attention metadata,
@@ -381,13 +381,14 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
                 "XFormers does not support block-sparse attention.")
         if logits_soft_cap is not None:
-            raise ValueError(
-                "XFormers does not support attention logits soft capping.")
+            logger.warning_once("XFormers does not support logits soft cap. "
+                                "Outputs may be slightly off.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -407,6 +408,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
+        self.attn_type = attn_type
+
     def forward(
         self,
         query: torch.Tensor,
@@ -416,7 +419,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         attn_metadata: "XFormersMetadata",
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -469,7 +472,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-
+        attn_type = self.attn_type
         # Check that appropriate attention metadata attributes are
         # selected for the desired attention type
         if (attn_type == AttentionType.ENCODER
@@ -617,7 +620,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         key: torch.Tensor,
         value: torch.Tensor,
         attn_metadata: XFormersMetadata,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Attention for 1D query of multiple prompts. Multiple prompt
         tokens are flattened in to `query` input.

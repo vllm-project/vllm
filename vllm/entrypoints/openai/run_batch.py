@@ -20,7 +20,8 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
-from vllm.entrypoints.openai.serving_engine import BaseModelPath
+from vllm.entrypoints.openai.serving_models import (BaseModelPath,
+                                                    OpenAIServingModels)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
@@ -213,26 +214,31 @@ async def main(args):
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
     # Create the openai serving objects.
+    openai_serving_models = OpenAIServingModels(
+        engine_client=engine,
+        model_config=model_config,
+        base_model_paths=base_model_paths,
+        lora_modules=None,
+        prompt_adapters=None,
+    )
     openai_serving_chat = OpenAIServingChat(
         engine,
         model_config,
-        base_model_paths,
+        openai_serving_models,
         args.response_role,
-        lora_modules=None,
-        prompt_adapters=None,
         request_logger=request_logger,
         chat_template=None,
         chat_template_content_format="auto",
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-    ) if model_config.task == "generate" else None
+    ) if model_config.runner_type == "generate" else None
     openai_serving_embedding = OpenAIServingEmbedding(
         engine,
         model_config,
-        base_model_paths,
+        openai_serving_models,
         request_logger=request_logger,
         chat_template=None,
         chat_template_content_format="auto",
-    ) if model_config.task == "embedding" else None
+    ) if model_config.task == "embed" else None
 
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)

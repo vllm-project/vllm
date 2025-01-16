@@ -294,6 +294,7 @@ class PhiMoEAttention(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         rope_scaling: Optional[dict] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -347,6 +348,7 @@ class PhiMoEAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(
@@ -371,6 +373,7 @@ class PhiMoEDecoderLayer(nn.Module):
         config: PhiMoEConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -385,6 +388,7 @@ class PhiMoEDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             rope_scaling=config.rope_scaling,
+            prefix=f"{prefix}.self_attn",
         )
         self.block_sparse_moe = PhiMoE(
             num_experts=config.num_local_experts,
@@ -454,8 +458,8 @@ class PhiMoEModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: PhiMoEDecoderLayer(config, cache_config,
-                                              quant_config),
+            lambda prefix: PhiMoEDecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
         self.norm = nn.LayerNorm(config.hidden_size,
                                  eps=config.rms_norm_eps,
@@ -542,6 +546,7 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
+        self.quant_config = vllm_config.quant_config
 
         self.model = PhiMoEModel(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "model"))
@@ -617,6 +622,18 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

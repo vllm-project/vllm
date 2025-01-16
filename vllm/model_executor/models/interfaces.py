@@ -2,16 +2,21 @@ from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
                     Protocol, Type, Union, overload, runtime_checkable)
 
 import torch
-from typing_extensions import TypeIs
+from typing_extensions import TypeIs, TypeVar
 
 from vllm.logger import init_logger
 from vllm.utils import supports_kw
 
+from .interfaces_base import is_pooling_model
+
 if TYPE_CHECKING:
-    from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
+    from vllm.attention import AttentionMetadata
+    from vllm.multimodal.inputs import NestedTensors  # noqa: F401
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
+
+T = TypeVar("T", default="NestedTensors")
 
 
 @runtime_checkable
@@ -27,7 +32,46 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def __init__(self, *, multimodal_config: "MultiModalConfig") -> None:
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[T]:
+        """
+        Returns multimodal embeddings generated from multimodal kwargs 
+        to be merged with text embeddings.
+
+        The output embeddings must be one of the following formats:
+    
+        - A list or tuple of 2D tensors, where each tensor corresponds to
+          each input multimodal data item (e.g, image).
+        - A single 3D tensor, with the batch dimension grouping the 2D tensors.
+
+        Note:
+            The returned multimodal embeddings must be in the same order as
+            the appearances of their corresponding multimodal data item in the
+            input prompt.
+        """
+        ...
+
+    # Only for models that support v0 chunked prefill
+    # TODO(ywang96): Remove this overload once v0 is deprecated
+    @overload
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[T] = None,
+        attn_metadata: Optional["AttentionMetadata"] = None,
+    ) -> torch.Tensor:
+        ...
+
+    @overload
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[T] = None,
+    ) -> torch.Tensor:
+        """
+        Returns the input embeddings merged from the text embeddings from 
+        input_ids and the multimodal embeddings generated from multimodal 
+        kwargs.
+        """
         ...
 
 
@@ -36,9 +80,6 @@ class SupportsMultiModal(Protocol):
 @runtime_checkable
 class _SupportsMultiModalType(Protocol):
     supports_multimodal: Literal[True]
-
-    def __call__(self, *, multimodal_config: "MultiModalConfig") -> None:
-        ...
 
 
 @overload
@@ -79,10 +120,6 @@ class SupportsLoRA(Protocol):
     embedding_modules: ClassVar[Dict[str, str]]
     embedding_padding_modules: ClassVar[List[str]]
 
-    # lora_config is None when LoRA is not enabled
-    def __init__(self, *, lora_config: Optional["LoRAConfig"] = None) -> None:
-        ...
-
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
 # so we need to treat the class as an instance and use isinstance instead
@@ -94,9 +131,6 @@ class _SupportsLoRAType(Protocol):
     supported_lora_modules: List[str]
     embedding_modules: Dict[str, str]
     embedding_padding_modules: List[str]
-
-    def __call__(self, *, lora_config: Optional["LoRAConfig"] = None) -> None:
-        ...
 
 
 @overload
@@ -274,20 +308,10 @@ class HasInnerState(Protocol):
         for max_num_seqs, etc. True for e.g. both Mamba and Jamba.
     """
 
-    def __init__(self,
-                 *,
-                 scheduler_config: Optional["SchedulerConfig"] = None) -> None:
-        ...
-
 
 @runtime_checkable
 class _HasInnerStateType(Protocol):
     has_inner_state: ClassVar[Literal[True]]
-
-    def __init__(self,
-                 *,
-                 scheduler_config: Optional["SchedulerConfig"] = None) -> None:
-        ...
 
 
 @overload
@@ -321,16 +345,10 @@ class IsAttentionFree(Protocol):
         True for Mamba but not Jamba.
     """
 
-    def __init__(self) -> None:
-        ...
-
 
 @runtime_checkable
 class _IsAttentionFreeType(Protocol):
     is_attention_free: ClassVar[Literal[True]]
-
-    def __init__(self) -> None:
-        ...
 
 
 @overload
@@ -350,3 +368,74 @@ def is_attention_free(
         return isinstance(model, _IsAttentionFreeType)
 
     return isinstance(model, IsAttentionFree)
+
+
+@runtime_checkable
+class IsHybrid(Protocol):
+    """The interface required for all models like Jamba that have both
+    attention and mamba blocks, indicates that 
+    hf_config has 'layers_block_type'"""
+
+    is_hybrid: ClassVar[Literal[True]] = True
+    """
+        A flag that indicates this model has both mamba and attention blocks
+        , also indicates that the model's hf_config has 
+        'layers_block_type' """
+
+
+@runtime_checkable
+class _IsHybridType(Protocol):
+    is_hybrid: ClassVar[Literal[True]]
+
+
+@overload
+def is_hybrid(model: object) -> TypeIs[IsHybrid]:
+    ...
+
+
+@overload
+def is_hybrid(model: Type[object]) -> TypeIs[Type[IsHybrid]]:
+    ...
+
+
+def is_hybrid(
+    model: Union[Type[object], object]
+) -> Union[TypeIs[Type[IsHybrid]], TypeIs[IsHybrid]]:
+    if isinstance(model, type):
+        return isinstance(model, _IsHybridType)
+
+    return isinstance(model, IsHybrid)
+
+
+@runtime_checkable
+class SupportsCrossEncoding(Protocol):
+    """The interface required for all models that support cross encoding."""
+
+    supports_cross_encoding: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_cross_encoding(
+        model: Type[object]) -> TypeIs[Type[SupportsCrossEncoding]]:
+    ...
+
+
+@overload
+def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]:
+    ...
+
+
+def _supports_cross_encoding(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
+
+    if isinstance(model, type):
+        return isinstance(model, SupportsCrossEncoding)
+
+    return isinstance(model, SupportsCrossEncoding)
+
+
+def supports_cross_encoding(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
+    return is_pooling_model(model) and _supports_cross_encoding(model)

@@ -1,25 +1,26 @@
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
+from pathlib import Path
+from typing import (TYPE_CHECKING, Any, Callable, Generic, NamedTuple,
                     Optional, Sequence, Tuple, Type, TypeVar, Union)
 
 from torch import nn
 
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-from vllm.utils import (get_allowed_kwarg_only_overrides,
+from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
                         resolve_mm_processor_kwargs)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.sequence import SequenceGroupMetadata
 
-from .inputs import (MultiModalData, MultiModalDataDict, MultiModalKwargs,
+from .inputs import (ModalityData, MultiModalDataDict, MultiModalKwargs,
                      PlaceholderRange)
 
 logger = init_logger(__name__)
 
-MultiModalInputMapper = Callable[[InputContext, MultiModalData[object]],
+MultiModalInputMapper = Callable[[InputContext, ModalityData[object]],
                                  MultiModalKwargs]
 """
 Return a dictionary to be passed as keyword arguments to
@@ -48,14 +49,11 @@ class MultiModalPlugin(ABC):
     process the same data differently). This registry is in turn used by
     :class:`~MultiModalRegistry` which acts at a higher level
     (i.e., the modality of the data).
-
-    See also:
-        :ref:`adding_multimodal_plugin`
     """
 
     def __init__(self) -> None:
-        self._input_mappers: Dict[Type[nn.Module], MultiModalInputMapper] = {}
-        self._max_mm_tokens: Dict[Type[nn.Module], MultiModalTokensCalc] = {}
+        self._input_mappers = ClassRegistry[nn.Module, MultiModalInputMapper]()
+        self._max_mm_tokens = ClassRegistry[nn.Module, MultiModalTokensCalc]()
 
     @abstractmethod
     def get_data_key(self) -> str:
@@ -68,7 +66,7 @@ class MultiModalPlugin(ABC):
     def _default_input_mapper(
         self,
         ctx: InputContext,
-        data: MultiModalData[Any],
+        data: ModalityData[Any],
         **mm_processor_kwargs,
     ) -> MultiModalKwargs:
         """
@@ -92,14 +90,10 @@ class MultiModalPlugin(ABC):
         invoked to transform the data into a dictionary of model inputs.
 
         If `None` is provided, then the default input mapper is used instead.
-
-        See also:
-            - :ref:`input_processing_pipeline`
-            - :ref:`enabling_multimodal_inputs`
         """
 
         def wrapper(model_cls: N) -> N:
-            if model_cls in self._input_mappers:
+            if self._input_mappers.contains(model_cls, strict=True):
                 logger.warning(
                     "Model class %s already has an input mapper "
                     "registered to %s. It is overwritten by the new one.",
@@ -117,8 +111,8 @@ class MultiModalPlugin(ABC):
     def map_input(
         self,
         model_config: "ModelConfig",
-        data: MultiModalData[Any],
-        mm_processor_kwargs: Optional[Dict[str, Any]],
+        data: ModalityData[Any],
+        mm_processor_kwargs: Optional[dict[str, Any]],
     ) -> MultiModalKwargs:
         """
         Transform the data into a dictionary of model inputs using the
@@ -128,10 +122,6 @@ class MultiModalPlugin(ABC):
 
         Raises:
             TypeError: If the data type is not supported.
-
-        See also:
-            - :ref:`input_processing_pipeline`
-            - :ref:`enabling_multimodal_inputs`
         """
 
         # Avoid circular import
@@ -188,13 +178,10 @@ class MultiModalPlugin(ABC):
         for a model class.
 
         If `None` is provided, then the default calculation is used instead.
-
-        See also:
-            :ref:`enabling_multimodal_inputs`
         """
 
         def wrapper(model_cls: N) -> N:
-            if model_cls in self._max_mm_tokens:
+            if self._max_mm_tokens.contains(model_cls, strict=True):
                 logger.warning(
                     "Model class %s already calculates maximum number of "
                     "tokens in %s. It is overwritten by the new one.",
@@ -220,22 +207,19 @@ class MultiModalPlugin(ABC):
         If this registry is not applicable to the model, `0` is returned.
 
         The model is identified by ``model_config``.
-
-        See also:
-            :ref:`enabling_multimodal_inputs`
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
+        from vllm.model_executor.models import supports_multimodal
 
         model_cls, _ = get_model_architecture(model_config)
 
-        if model_cls not in self._input_mappers:
+        if not supports_multimodal(model_cls):
             return 0
 
         max_mm_tokens = self._max_mm_tokens.get(model_cls)
         if max_mm_tokens is None:
-            raise KeyError(f"No maximum number of multi-modal tokens is given "
-                           f"for model class {model_cls.__name__} in {self}.")
+            return 0
 
         if callable(max_mm_tokens):
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
@@ -254,10 +238,10 @@ class MultiModalPlaceholderMap:
     """
 
     class IndexMap(NamedTuple):
-        src: List[int]
-        dest: List[int]
+        src: list[int]
+        dest: list[int]
 
-    src_ranges: List[range]
+    src_ranges: list[range]
     """
     The indices of the multi-modal embeddings that will replace the
     corresponding placeholder embeddings pointed to by ``dest_ranges``.
@@ -268,7 +252,7 @@ class MultiModalPlaceholderMap:
     The total number of flattened multi-modal embeddings.
     """
 
-    dest_ranges: List[range]
+    dest_ranges: list[range]
     """
     The indices of the placeholder embeddings that will be replaced by the
     multimodal embeddings.
@@ -288,7 +272,7 @@ class MultiModalPlaceholderMap:
     @classmethod
     def from_seq_group(
         cls, seq_group: "SequenceGroupMetadata", positions: range
-    ) -> Tuple[Optional[MultiModalDataDict], Dict[str,
+    ) -> Tuple[Optional[MultiModalDataDict], dict[str,
                                                   "MultiModalPlaceholderMap"]]:
         """
         Returns the multi-modal items that intersect with the portion of a
@@ -296,56 +280,79 @@ class MultiModalPlaceholderMap:
         ``MultiModalPlaceholderMap`` that relates the multi-modal embedding
         vectors to their corresponding placeholders.
 
-        Consider the following scenarios:
+        Examples:
 
-           Prompt: |AAAA BBBB What's in these images?|
-        Positions: |.................................|
+        .. code-block::
 
-            images      = [A, B]
-            src_ranges  = [(0, 4), (4, 8)]
-            dest_ranges = [(0, 4), (5, 9)]
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |.................................|
 
-           Prompt: |AAAA BBBB What's in these images?|
-        Positions: |  .....                          |
+                images      = [A, B]
+                src_ranges  = [(0, 4), (4, 8)]
+                dest_ranges = [(0, 4), (5, 9)]
 
-            images      = [A, B]
-            src_ranges  = [(2, 4), (4, 6)]
-            dest_ranges = [(0, 2), (3, 5)]
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |  .....                          |
 
-           Prompt: |AAAA BBBB What's in these images?|
-        Positions: |     .........                   |
+                images      = [A, B]
+                src_ranges  = [(2, 4), (4, 6)]
+                dest_ranges = [(0, 2), (3, 5)]
 
-            images      = [B]
-            src_ranges  = [(0, 4)]
-            dest_ranges = [(0, 4)]
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |     .........                   |
 
-           Prompt: |AAAA BBBB What's in these images?|
-        Positions: |          .......................|
+                images      = [B]
+                src_ranges  = [(0, 4)]
+                dest_ranges = [(0, 4)]
 
-            images      = []
-            src_ranges  = []
-            dest_ranges = []
+            Prompt:    |AAAA BBBB What's in these images?|
+            Positions: |          .......................|
+
+                images      = []
+                src_ranges  = []
+                dest_ranges = []
         """
-        if (not seq_group.multi_modal_data
-                or not seq_group.multi_modal_placeholders):
-            return seq_group.multi_modal_data, {}
+        seq_mm_data = seq_group.multi_modal_data
+        seq_mm_placeholders = seq_group.multi_modal_placeholders
 
-        mm_data = {**seq_group.multi_modal_data}
-        placeholder_maps: Dict[str, MultiModalPlaceholderMap] = defaultdict(
+        if not seq_mm_data or not seq_mm_placeholders:
+            return seq_mm_data, {}
+
+        # For merged processor, we directly use mm_kwargs as mm_data
+        if isinstance(seq_mm_data, MultiModalKwargs):
+            placeholder_maps = dict[str, MultiModalPlaceholderMap]()
+
+            for modality, placeholders in seq_mm_placeholders.items():
+                placeholder_map = MultiModalPlaceholderMap()
+
+                if positions:
+                    placeholder_map.append_items_from_seq_group(
+                        positions,
+                        # Dummy, since we don't care about intersecting items
+                        [None] * len(placeholders),
+                        placeholders,
+                    )
+
+                placeholder_maps[modality] = placeholder_map
+
+            return seq_mm_data, placeholder_maps
+
+        mm_data = {**seq_mm_data}
+        placeholder_maps = defaultdict[str, MultiModalPlaceholderMap](
             MultiModalPlaceholderMap)
 
-        for (
-                modality,
-                placeholders,
-        ) in seq_group.multi_modal_placeholders.items():
+        for modality, placeholders in seq_mm_placeholders.items():
             mm_items = mm_data.pop(modality)
             if not isinstance(mm_items, list):
                 mm_items = [mm_items]
 
             if positions:
-                intersecting_items = placeholder_maps[
-                    modality].append_items_from_seq_group(
-                        positions, mm_items, placeholders)
+                intersecting_items = placeholder_maps[modality] \
+                    .append_items_from_seq_group(
+                        positions,
+                        mm_items,
+                        placeholders,
+                    )
 
                 if intersecting_items:
                     mm_data[modality] = intersecting_items
@@ -355,9 +362,9 @@ class MultiModalPlaceholderMap:
     def append_items_from_seq_group(
         self,
         positions: range,
-        multi_modal_items: List[_T],
+        multi_modal_items: list[_T],
         multi_modal_placeholders: Sequence[PlaceholderRange],
-    ) -> List[_T]:
+    ) -> list[_T]:
         """
         Adds the multi-modal items that intersect ```positions`` to this
         placeholder map and returns the intersecting items.
@@ -435,16 +442,20 @@ class MultiModalPlaceholderMap:
                                                  dest=dest_indices)
 
 
-def __getattr__(name: str):
-    import warnings
+class MediaIO(ABC, Generic[_T]):
 
-    if name == "MultiModalInputs":
-        msg = ("MultiModalInputs has been renamed to MultiModalKwargs. "
-               "The original name will take another meaning in an upcoming "
-               "version.")
+    @abstractmethod
+    def load_bytes(self, data: bytes) -> _T:
+        raise NotImplementedError
 
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+    @abstractmethod
+    def load_base64(self, media_type: str, data: str) -> _T:
+        """
+        List of media types:
+        https://www.iana.org/assignments/media-types/media-types.xhtml
+        """
+        raise NotImplementedError
 
-        return MultiModalKwargs
-
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    @abstractmethod
+    def load_file(self, filepath: Path) -> _T:
+        raise NotImplementedError
