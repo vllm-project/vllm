@@ -174,7 +174,6 @@ class MambaMixer2(CustomOp):
                  intermediate_size: int,
                  use_conv_bias: bool,
                  use_bias: bool,
-                 use_rms_norm: bool,
                  n_groups: int = 1,
                  num_heads: int = 128,
                  head_dim: int = 64,
@@ -203,7 +202,6 @@ class MambaMixer2(CustomOp):
             "Tensor parallel world size must divide num heads."
 
         self.ssm_state_size = ssm_state_size
-        self.use_rms_norm = use_rms_norm
         self.activation = activation
 
         self.chunk_size = chunk_size

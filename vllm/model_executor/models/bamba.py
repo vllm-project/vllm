@@ -89,7 +89,6 @@ class BambaMixerDecoderLayer(nn.Module):
                                                     config.hidden_size,
                                 use_conv_bias = config.mamba_conv_bias,
                                 use_bias = config.mamba_proj_bias,
-                                use_rms_norm=True,
                                 n_groups=config.mamba_n_groups,
                                 num_heads=config.mamba_n_heads,
                                 head_dim=config.mamba_d_head,
