@@ -109,20 +109,40 @@ def _validate_logprobs(
 
         if num_sample_logprobs:
             # Validate sample logprobs
-
+            assert logprobs is not None, (f"Request {req_id} requires sample"
+                                          " logprobs but sample logprobs are"
+                                          " None.")
             # Require num sampled tokens to match num
             # sampled logprobs - especially important
             # to check since the detokenizer can cause
             # a request to finish early due to a stop
             # string being hit
-            assert len(new_tokens) == len(logprobs)
-
+            num_new_tokens = len(new_tokens)
+            len_sample_logprobs = len(logprobs)
+            assert num_new_tokens == len_sample_logprobs, (
+                f"Request {req_id} has {num_new_tokens}"
+                " completion tokens but has"
+                f" {len_sample_logprobs} sample logprobs.")
             ref_cumulative_logprob = 0.0
-            for sampled_token, pos_logprob_dict in zip(new_tokens, logprobs):
+            for idx, (sampled_token,
+                      pos_logprob_dict) in enumerate(zip(new_tokens,
+                                                         logprobs)):
                 # For each position in the completion sequence,
                 # ensure the actual sampled token is among the
                 # logprobs
-                assert sampled_token in pos_logprob_dict
+                assert sampled_token in pos_logprob_dict, (
+                    f"Sampled token {sampled_token} not"
+                    f" present in logprob at index {idx}")
+                # Validate number of sample logprobs
+                num_lp_toks = len(pos_logprob_dict)
+                assert (num_lp_toks == num_sample_logprobs
+                        or num_lp_toks == num_sample_logprobs +
+                        1), ("Valid numbers of sample logprobs are"
+                             f" {num_sample_logprobs} or"
+                             f" {num_sample_logprobs+1} but"
+                             f" {num_lp_toks} logprobs found at"
+                             f" position {idx}. Logprobs dict:"
+                             f" {pos_logprob_dict}")
                 ref_cumulative_logprob += pos_logprob_dict[
                     sampled_token].logprob
                 for lp_tok in pos_logprob_dict:
@@ -133,7 +153,8 @@ def _validate_logprobs(
                     assert decoded_token == ref_decoded_token, (
                         f"Sampled logprob token id {lp_tok} decodes to"
                         f" {ref_decoded_token} but Logprob decoded"
-                        f" token is {decoded_token} instead.")
+                        f" token is {decoded_token} instead"
+                        f" (at position {idx})")
 
             # Assert that cumulative logprobs are correct
             assert math.isclose(cumulative_logprob, ref_cumulative_logprob)
@@ -144,18 +165,42 @@ def _validate_logprobs(
 
         if num_prompt_logprobs:
             # Validate prompt logprobs
-
+            assert prompt_logprobs is not None, (
+                f"Request {req_id} requires prompt"
+                " logprobs but prompt logprobs are"
+                " None.")
             # Require num prompt tokens to match num
             # prompt logprobs
-            assert len(prompt_token_ids) == len(prompt_logprobs)
-            assert prompt_logprobs[0] is None
-
-            for prompt_token, pos_logprob_dict in zip(prompt_token_ids[1:],
-                                                      prompt_logprobs[1:]):
+            num_prompt_tokens = len(prompt_token_ids)
+            len_prompt_logprobs = len(prompt_logprobs)
+            assert num_prompt_tokens == len_prompt_logprobs, (
+                f"Request {req_id} has {num_prompt_tokens}"
+                " prompt tokens but has"
+                f" {len_prompt_logprobs} prompt logprobs.")
+            # First prompt logprob is None
+            first_plp_dict = prompt_logprobs[0]
+            assert first_plp_dict is None, (
+                f"Request {req_id} first prompt logprob"
+                f" should be None but has following value"
+                f" instead: {first_plp_dict}")
+            for idx, (prompt_token, pos_logprob_dict) in enumerate(
+                    zip(prompt_token_ids[1:], prompt_logprobs[1:])):
                 # For each position in the prompt sequence,
                 # ensure the actual prompt token is among the
                 # logprobs
-                assert prompt_token in pos_logprob_dict
+                assert prompt_token in pos_logprob_dict, (
+                    f"Prompt token {prompt_token} not"
+                    f" present in logprob at index {idx}")
+                # Validate number of prompt logprobs
+                num_plp_toks = len(pos_logprob_dict)
+                assert (num_plp_toks == num_prompt_logprobs
+                        or num_plp_toks == num_prompt_logprobs +
+                        1), ("Valid numbers of prompt logprobs are"
+                             f" {num_prompt_logprobs} or"
+                             f" {num_prompt_logprobs+1} but"
+                             f" {num_plp_toks} logprobs found at"
+                             f" position {idx}. Logprobs dict:"
+                             f" {pos_logprob_dict}")
                 for plp_tok in pos_logprob_dict:
                     # Confirm that prompt logprob decoded token matches
                     # the logprob token id at this sequence position
@@ -164,7 +209,8 @@ def _validate_logprobs(
                     assert decoded_token == ref_decoded_token, (
                         f"Prompt logprob token id {plp_tok} decodes to"
                         f" {ref_decoded_token} but Logprob decoded"
-                        f" token is {decoded_token} instead.")
+                        f" token is {decoded_token} instead"
+                        f" (at position {idx})")
         else:
             # Prompt logprobs disabled for this request
             assert prompt_logprobs is None
