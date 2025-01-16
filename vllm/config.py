@@ -611,8 +611,8 @@ class ModelConfig:
         if (self.hf_config.model_type in MODEL_NOT_SUPPORT_CUDA_GRAPH
                 and not self.enforce_eager):
             logger.warning(
-                f"CUDA graph is not supported for {self.hf_config.model_type} yet, "
-                "fallback to the eager mode.")
+                "CUDA graph is not supported for %s yet, fallback to the eager "
+                "mode.", self.hf_config.model_type)
             self.enforce_eager = True
 
     def _verify_bnb_config(self) -> None:
