@@ -7,6 +7,7 @@ from typing import (Any, AsyncGenerator, Callable, Coroutine, Dict, Iterable,
                     List, Mapping, Optional, Set, Tuple, Type, Union, overload)
 from weakref import ReferenceType
 
+import torch.nn as nn
 from typing_extensions import deprecated
 
 import vllm.envs as envs
@@ -1175,6 +1176,9 @@ class AsyncLLMEngine(EngineClient):
 
     def remove_logger(self, logger_name: str) -> None:
         self.engine.remove_logger(logger_name=logger_name)
+
+    def get_model(self) -> nn.Module:
+        return self.engine.get_model()
 
     async def start_profile(self) -> None:
         self.engine.start_profile()

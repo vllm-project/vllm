@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
+import torch.nn as nn
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -59,6 +60,8 @@ def test_custom_executor(model, tmp_path):
         engine.step()
 
         assert os.path.exists(".marker")
+
+        assert isinstance(engine.get_model(), nn.Module)
     finally:
         os.chdir(cwd)
 
@@ -83,5 +86,7 @@ def test_custom_executor_async(model, tmp_path):
         asyncio.run(t())
 
         assert os.path.exists(".marker")
+
+        assert isinstance(engine.get_model(), nn.Module)
     finally:
         os.chdir(cwd)
