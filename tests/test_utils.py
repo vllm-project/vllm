@@ -9,10 +9,10 @@ import torch
 from vllm_test_utils import monitor
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.utils import (FlexibleArgumentParser, PlaceholderModule,
-                        StoreBoolean, bind_kv_cache, deprecate_kwargs,
-                        get_open_port, memory_profiling, merge_async_iterators,
-                        supports_kw)
+from vllm.utils import (FlexibleArgumentParser, MemorySnapshot,
+                        PlaceholderModule, StoreBoolean, bind_kv_cache,
+                        deprecate_kwargs, get_open_port, memory_profiling,
+                        merge_async_iterators, supports_kw)
 
 from .utils import error_on_warning, fork_new_process_for_each_test
 
@@ -284,8 +284,7 @@ def test_memory_profiling():
     # 512 MiB allocation outside of this instance
     handle1 = lib.cudaMalloc(512 * 1024 * 1024)
 
-    baseline_memory_in_bytes = \
-        torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]
+    baseline_snapshot = MemorySnapshot()
 
     # load weights
 
@@ -300,7 +299,7 @@ def test_memory_profiling():
         current_non_torch = current_used - current_torch
         return current_non_torch
 
-    with memory_profiling(baseline_memory_in_bytes=baseline_memory_in_bytes,
+    with memory_profiling(baseline_snapshot=baseline_snapshot,
     weights_memory_in_bytes=weights_memory_in_bytes) as result, \
         monitor(measure_current_non_torch) as monitored_values:
         # make a memory spike, 1 GiB
