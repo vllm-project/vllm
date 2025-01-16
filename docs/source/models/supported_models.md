@@ -618,7 +618,7 @@ See [this page](#generative-models) for more information on how to use generativ
 * - `DeepseekVLV2ForCausalLM`
   - DeepSeek-VL2
   - T + I<sup>+</sup>
-  - `deepseek-ai/deepseek-vl2-tiny`(WIP), `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2` etc. (see note)
+  - `deepseek-ai/deepseek-vl2-tiny`, `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2` etc. (see note)
   -
   - ✅︎
   - ✅︎
@@ -768,9 +768,8 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 ````{note}
-The `deepseek-ai/deepseek-vl2-tiny` is not supported yet.
-
 To use `DeepSeek-VL2` series models, you need to install a fork version `deepseek_vl2` package:
+
 ```shell
 pip install git+https://github.com/Isotr0py/DeepSeek-VL2.git
 ```
