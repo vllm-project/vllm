@@ -1,9 +1,9 @@
+import math
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
-import math
 from functools import cached_property
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 
 from vllm.multimodal import MultiModalPlaceholderMap
 
@@ -14,9 +14,8 @@ except ImportError:
     BatchDecodeMlaWithPagedKVCacheWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
-from vllm_flash_attn import flash_attn_varlen_func
-
 import torch
+from vllm_flash_attn import flash_attn_varlen_func
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -27,7 +26,6 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.ops.paged_attn import PagedAttention
-
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
 
@@ -571,6 +569,7 @@ class FlashInferMLAImpl(AttentionImpl):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -587,6 +586,12 @@ class FlashInferMLAImpl(AttentionImpl):
                 "alibi_slopes, sliding_window, blocksparse_params, "
                 "logits_soft_cap")
 
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "FlashInferMLAImpl")
+
     def forward(
         self,
         query: torch.Tensor,
@@ -596,15 +601,8 @@ class FlashInferMLAImpl(AttentionImpl):
         attn_metadata: FlashInferMLAMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "FlashInferMLAImpl")
-
         if output is not None:
             raise NotImplementedError(
                 "output is not yet supported for FlashInferMLAImpl")

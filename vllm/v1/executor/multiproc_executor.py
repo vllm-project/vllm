@@ -9,6 +9,7 @@ from enum import Enum, auto
 from multiprocessing.process import BaseProcess
 from typing import Any, Dict, List, Optional, Tuple
 
+import psutil
 import zmq
 
 from vllm.config import VllmConfig
@@ -37,6 +38,19 @@ class MultiprocExecutor(Executor):
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
+
+        # The child processes will send SIGUSR1 when unrecoverable
+        # errors happen.
+        def sigusr1_handler(signum, frame):
+            logger.fatal(
+                "MulitprocExecutor got fatal signal from worker processes, "
+                "shutting down. See stack trace above for root cause issue.")
+            # Propagate error up to parent process.
+            parent_process = psutil.Process().parent()
+            parent_process.send_signal(signal.SIGUSR1)
+            self.shutdown()
+
+        signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         self.vllm_config = vllm_config
         self.parallel_config = vllm_config.parallel_config
@@ -81,6 +95,7 @@ class MultiprocExecutor(Executor):
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
+        logger.info("# GPU blocks: %d", num_gpu_blocks)
         self.collective_rpc("initialize_cache", args=(num_gpu_blocks, ))
         self.collective_rpc("compile_or_warm_up_model")
 
@@ -231,9 +246,18 @@ class WorkerProc:
         ready_path: str,
     ):
         self.rank = rank
-        wrapper = WorkerWrapperBase(vllm_config=vllm_config)
-        wrapper.init_worker(vllm_config, local_rank, rank,
-                            distributed_init_method)
+        wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
+        # TODO: move `init_worker` to executor level as a collective rpc call
+        all_kwargs: List[Dict] = [
+            {} for _ in range(vllm_config.parallel_config.world_size)
+        ]
+        all_kwargs[rank] = {
+            "vllm_config": vllm_config,
+            "local_rank": local_rank,
+            "rank": rank,
+            "distributed_init_method": distributed_init_method,
+        }
+        wrapper.init_worker(all_kwargs)
         self.worker = wrapper.worker
 
         pid = os.getpid()
@@ -255,7 +279,7 @@ class WorkerProc:
             ready_socket.send_string(WorkerProc.READY_STR)
             ready_socket.send(payload)
 
-        self.worker.initialize()
+        self.worker.init_device()
         self.worker.load_model()
 
     @staticmethod
@@ -335,8 +359,11 @@ class WorkerProc:
         except SystemExit:
             logger.debug("Worker interrupted.")
 
-        except BaseException as e:
-            logger.exception(e)
+        except Exception:
+            # worker_busy_loop sends exceptions exceptons to Executor
+            # for shutdown, but if there is an error in startup or an
+            # error with IPC itself, we need to alert the parent.
+            psutil.Process().parent().send_signal(signal.SIGUSR1)
             raise
 
         finally:
@@ -377,9 +404,10 @@ class WorkerProc:
 
             try:
                 output = getattr(self.worker, method)(*args, **kwargs)
-            except BaseException as e:
+            except Exception as e:
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.FAILURE, e))
+                logger.exception("WorkerProc hit an exception: %s", exc_info=e)
                 continue
 
             self.worker_response_mq.enqueue(
