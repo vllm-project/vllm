@@ -11,7 +11,7 @@ from .conftest import run_equality_correctness_test
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "model_name": "JackFram/llama-68m",
+        "model_name": "JackFram/llama-160m",
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True
@@ -20,11 +20,11 @@ from .conftest import run_equality_correctness_test
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs",
                          [{
-                             "speculative_model": "JackFram/llama-160m",
+                             "speculative_model": "JackFram/llama-68m",
                              "num_speculative_tokens": 3,
                              "disable_logprobs_during_spec_decoding": False,
                          }, {
-                             "speculative_model": "JackFram/llama-160m",
+                             "speculative_model": "JackFram/llama-68m",
                              "num_speculative_tokens": 3,
                              "disable_logprobs_during_spec_decoding": True,
                          }])
