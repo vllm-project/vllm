@@ -50,6 +50,7 @@ class MyWorker(Worker):
     Normally, we should define the `MyWorker` class in a separate file and pass
     the qualified name of the class to the `worker_cls` parameter.
     """
+
     def init_weight_update_group(self, master_address, master_port,
                                  rank_offset, world_size):
         from vllm.distributed.parallel_state import get_world_group
@@ -78,16 +79,20 @@ class MyWorker(Worker):
         """
         weights_updated = False
         for name, p in self.model_runner.model.named_parameters():
-            weights_updated = weights_updated and torch.allclose(p, torch.zeros_like(p))
+            weights_updated = weights_updated and torch.allclose(
+                p, torch.zeros_like(p))
         return weights_updated
 
+
 class MyLLM(LLM):
+
     def __init__(self, *args, **kwargs):
         # a hack to make the script work.
         # stop ray from manipulating CUDA_VISIBLE_DEVICES
         # at the top-level
         del os.environ["CUDA_VISIBLE_DEVICES"]
         super().__init__(*args, **kwargs)
+
 
 """
 Start the training process, here we use huggingface transformers 
@@ -101,7 +106,6 @@ configure_as_vllm_process()
 
 train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
 train_model.to("cuda:0")
-
 """
 Start the inference process, here we use vLLM to hold a model on GPU 1 and GPU 2.
 For the details on how to use ray, please refer to the ray documentation
@@ -117,7 +121,6 @@ scheduling_inference = PlacementGroupSchedulingStrategy(
     placement_group_capture_child_tasks=True,
     placement_group_bundle_index=0,
 )
-
 """
 launch the vLLM inference engine.
 here we use `enforce_eager` to reduce the start time.
@@ -174,8 +177,7 @@ for name, p in train_model.named_parameters():
     ray.get(handle)
 
 # check if the weights are updated.
-assert all(ray.get(
-    llm.collective_rpc.remote("check_weights_changed")))
+assert all(ray.get(llm.collective_rpc.remote("check_weights_changed")))
 
 # use the updated model to generate texts, they will be nonsense
 # because the weights are all zeros.
