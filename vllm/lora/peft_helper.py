@@ -4,7 +4,7 @@ import json
 import math
 import os
 from dataclasses import MISSING, dataclass, field, fields
-from typing import Literal, Optional, Union,List
+from typing import List, Literal, Optional, Union
 
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
@@ -38,7 +38,7 @@ class PEFTHelper:
     vllm_max_position_embeddings: Optional[int] = field(default=False)
     vllm_long_context_scaling_factor: Optional[float] = field(default=None)
 
-    def _validate_features(self)->List[str]:
+    def _validate_features(self) -> List[str]:
         """
         Check if there are any unsupported Lora features.
         """
@@ -50,7 +50,6 @@ class PEFTHelper:
         return error_msg
 
     def __post_init__(self):
-        self._validate_features()
         if self.use_rslora:
             logger.info_once("Loading LoRA weights trained with rsLoRA.")
             self.vllm_lora_scaling_factor = self.lora_alpha / math.sqrt(self.r)
