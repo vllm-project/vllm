@@ -212,22 +212,21 @@ async def run_disagg_connector(args, **uvicorn_kwargs) -> None:
 
 
 if __name__ == "__main__":
-        # NOTE(simon):
+    # NOTE(simon):
     # This section should be in sync with vllm/scripts.py for CLI entrypoints.
-    parser = FlexibleArgumentParser(
-        description="vLLM disagg zmq server.")
+    parser = FlexibleArgumentParser(description="vLLM disagg zmq server.")
     parser.add_argument("--port",
-                                type=int,
-                                default=8000,
-                                help="The fastapi server port")
+                        type=int,
+                        default=8000,
+                        help="The fastapi server port")
     parser.add_argument("--prefill-addr",
-                                type=str,
-                                required=True,
-                                help="The prefill address IP:PORT")
+                        type=str,
+                        required=True,
+                        help="The prefill address IP:PORT")
     parser.add_argument("--decode-addr",
-                                type=str,
-                                required=True,
-                                help="The decode address IP:PORT")
+                        type=str,
+                        required=True,
+                        help="The decode address IP:PORT")
 
     args = parser.parse_args()
 
