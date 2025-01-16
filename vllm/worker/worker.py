@@ -140,7 +140,6 @@ class Worker(LocalOrDistributedWorkerBase):
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
             self.baseline_snapshot = MemorySnapshot()
-            self.baseline_snapshot.measure()
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")

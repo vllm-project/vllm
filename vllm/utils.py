@@ -1937,11 +1937,8 @@ class MemorySnapshot:
         # After `torch.cuda.reset_peak_memory_stats()`,
         # `torch.cuda.memory_reserved()` will keep growing, and only shrink
         # when we call `torch.cuda.empty_cache()` or OOM happens.
-        data = torch.cuda.memory_stats()
-        if "allocated_bytes.all.peak" in data:
-            self.torch_peak = data["allocated_bytes.all.peak"]
-        else:
-            self.torch_peak = 0
+        self.torch_peak = torch.cuda.memory_stats().get(
+            "allocated_bytes.all.peak", 0)
 
         self.cuda_memory = torch.cuda.mem_get_info(
         )[1] - torch.cuda.mem_get_info()[0]
@@ -1955,11 +1952,13 @@ class MemorySnapshot:
         self.timestamp = time.time()
 
     def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
-        """support a - b"""
-        return MemorySnapshot(torch_peak=self.torch_peak - other.torch_peak,
-                              torch_memory=self.torch_memory -
-                              other.torch_memory,
-                              timestamp=self.timestamp - other.timestamp)
+        return MemorySnapshot(
+            torch_peak=self.torch_peak - other.torch_peak,
+            cuda_memory=self.cuda_memory - other.cuda_memory,
+            torch_memory=self.torch_memory - other.torch_memory,
+            non_torch_memory=self.non_torch_memory - other.non_torch_memory,
+            timestamp=self.timestamp - other.timestamp,
+        )
 
 
 @dataclass

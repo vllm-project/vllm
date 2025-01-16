@@ -309,6 +309,7 @@ def test_memory_profiling():
         # Add some extra non-torch memory 256 MiB (simulate NCCL)
         handle2 = lib.cudaMalloc(256 * 1024 * 1024)
 
+    print(result)
     # this is an analytic value, it is exact,
     # we only have 256 MiB non-torch memory increase
     measured_diff = monitored_values.values[-1] - monitored_values.values[0]
