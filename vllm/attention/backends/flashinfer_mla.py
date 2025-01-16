@@ -720,4 +720,3 @@ class FlashInferMLAImpl(AttentionImpl):
             paged_kpe_cache=kv_cache[:, 1],
         )
         return decode_output
-

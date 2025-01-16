@@ -520,8 +520,6 @@ class DeepseekV2MLAAttention(nn.Module):
         )
         self.W_UK, self.W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        # self.W_UK = self.W_UK.view(self.kv_lora_rank, self.num_local_heads * self.qk_nope_head_dim)
-        # self.W_UV = self.W_UV.view(self.kv_lora_rank, self.num_local_heads * self.v_head_dim)
 
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
