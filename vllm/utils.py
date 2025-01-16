@@ -1937,7 +1937,11 @@ class MemorySnapshot:
         # After `torch.cuda.reset_peak_memory_stats()`,
         # `torch.cuda.memory_reserved()` will keep growing, and only shrink
         # when we call `torch.cuda.empty_cache()` or OOM happens.
-        self.torch_peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+        data = torch.cuda.memory_stats()
+        if "allocated_bytes.all.peak" in data:
+            self.torch_peak = data["allocated_bytes.all.peak"]
+        else:
+            self.torch_peak = 0
 
         self.cuda_memory = torch.cuda.mem_get_info(
         )[1] - torch.cuda.mem_get_info()[0]
