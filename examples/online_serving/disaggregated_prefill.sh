@@ -69,7 +69,7 @@ wait_for_server 8200
 #   instance
 # NOTE: the usage of this API is subject to change --- in the future we will 
 # introduce "vllm connect" to connect between prefill and decode instances
-python3 ../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
+python3 ../../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
 sleep 1
 
 # serve two example requests
