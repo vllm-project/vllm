@@ -27,7 +27,7 @@ def _validate_image_max_tokens_one(
         assert feature_size <= max_tokens, f"{feature_size} <= {max_tokens}"
     except Exception as exc:
         failed_size_excs.append((image_size, exc))
-    
+
 
 @pytest.mark.skip("This test takes around 5 minutes to run. "
                   "Comment this out to run it manually.")
@@ -57,7 +57,7 @@ def test_processor_max_tokens(model_id):
         if 1 <= aspect_ratio <= 6 and aspect_ratio not in seen_aspect_ratios:
             image_sizes.append(ImageSize(w, h))
             seen_aspect_ratios.add(aspect_ratio)
-    
+
     failed_size_excs = list[tuple[ImageSize, Exception]]()
 
     validate_one = partial(
