@@ -1927,9 +1927,11 @@ class MemorySnapshot:
     torch_memory: int = 0
     non_torch_memory: int = 0
     timestamp: float = 0.0
+    auto_measure: bool = True
 
     def __post_init__(self):
-        self.measure()
+        if self.auto_measure:
+            self.measure()
 
     def measure(self):
         # we measure the torch peak memory usage via allocated_bytes,
@@ -1958,6 +1960,7 @@ class MemorySnapshot:
             torch_memory=self.torch_memory - other.torch_memory,
             non_torch_memory=self.non_torch_memory - other.non_torch_memory,
             timestamp=self.timestamp - other.timestamp,
+            auto_measure=False,
         )
 
 
