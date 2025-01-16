@@ -78,7 +78,7 @@ class MyWorker(Worker):
         """
         Check if the weights are updated to 0.
         """
-        weights_updated = False
+        weights_updated = True
         for name, p in self.model_runner.model.named_parameters():
             weights_updated = weights_updated and torch.allclose(
                 p, torch.zeros_like(p))
