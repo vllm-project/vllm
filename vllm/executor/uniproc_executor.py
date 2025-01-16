@@ -95,6 +95,10 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         a, b = super().determine_num_available_blocks()
 
         # an additional all_reduce to get the min across all ranks
+        # note that even if we have the same `gpu_memory_utilization` and `swap_space`,
+        # the available memory in every rank might still differ because NCCL can take
+        # different amount of memory in different ranks, therefore it is necessary to
+        # test if all ranks agree on the same kv cache configuration.
         from vllm.distributed.parallel_state import get_world_group
         cpu_group = get_world_group().cpu_group
         a_tensor = torch.tensor([a], device="cpu", dtype=torch.int64)

@@ -3,11 +3,8 @@
 import torch.distributed as dist
 
 from vllm import LLM, SamplingParams
+import random
 from vllm.distributed.parallel_state import get_world_group
-
-dist.init_process_group(backend="nccl")
-
-torch_rank = dist.get_rank()
 
 # Create prompts
 prompts = [
@@ -24,16 +21,14 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 llm = LLM(model="facebook/opt-125m",
           tensor_parallel_size=2,
           distributed_executor_backend="external_launcher",
-          gpu_memory_utilization=0.9 if torch_rank == 0 else 0.7,
-          swap_space=3 if torch_rank == 0 else 4)
+          gpu_memory_utilization=random.uniform(0.7, 0.9),
+          swap_space=random.randint(1,4))
 
 outputs = llm.generate(prompts, sampling_params)
 
-# it is recommended to use this `cpu_group` to communicate
-# control messages across all ranks, to avoid interference
-# with the model's device group communication.
 cpu_group = get_world_group().cpu_group
 
+torch_rank = dist.get_rank(group=cpu_group)
 
 def test_consistent_across_ranks(obj):
     if torch_rank == 0:
