@@ -105,9 +105,9 @@ class LlamaAttention(nn.Module):
                  max_position_embeddings: int = 8192,
                  quant_config: Optional[QuantizationConfig] = None,
                  bias: bool = False,
+                 bias_o_proj: bool = False,
                  cache_config: Optional[CacheConfig] = None,
-                 prefix: str = "",
-                 bias_o_proj: bool = False) -> None:
+                 prefix: str = "") -> None:
         super().__init__()
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
@@ -398,8 +398,7 @@ class LlamaModel(nn.Module):
                 continue
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
-                # Loading kv cache scales for quark and
-                # compressed-tensors quantization
+                # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
