@@ -11,25 +11,27 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 import uvicorn
+import uvloop
 import zmq
 import zmq.asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.logger import init_logger
+from vllm.utils import FlexibleArgumentParser
 
 # default prefill and decode addr
-time_out = 3
-fastapi_port = 8001
+time_out = 180
+fastapi_port = 8000
 prefill_addr = "ipc://localhost:7010"
-socket_prefill_num = 20
+socket_prefill_num = 100
 decode_addr = "ipc://localhost:7020"
-socket_decode_num = 20
+socket_decode_num = 100
 context_type_json = "application/json"
 context_type_error = "error"
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
-logger = init_logger('vllm.entrypoints.connect')
+logger = init_logger('vllm.entrypoints.disagg_connector')
 
 
 @asynccontextmanager
@@ -146,7 +148,7 @@ async def decode(route: str, header: dict, original_request_data: dict):
                                      media_type="text/event-stream")
 
 
-@app.post('/v1/connect/completions')
+@app.post('/v1/completions')
 async def chat_completions(request: Request):
     try:
         # Add the X-Request-Id header to the raw headers list
@@ -210,5 +212,25 @@ async def run_disagg_connector(args, **uvicorn_kwargs) -> None:
 
 
 if __name__ == "__main__":
-    # url = 'tcp://127.0.0.1:5555'
-    uvicorn.run(app, host="0.0.0.0", port=fastapi_port)
+        # NOTE(simon):
+    # This section should be in sync with vllm/scripts.py for CLI entrypoints.
+    parser = FlexibleArgumentParser(
+        description="vLLM disagg zmq server.")
+    parser.add_argument("--port",
+                                type=int,
+                                default=8000,
+                                help="The fastapi server port")
+    parser.add_argument("--prefill-addr",
+                                type=str,
+                                required=True,
+                                help="The prefill address IP:PORT")
+    parser.add_argument("--decode-addr",
+                                type=str,
+                                required=True,
+                                help="The decode address IP:PORT")
+
+    args = parser.parse_args()
+
+    uvloop.run(run_disagg_connector(args))
+
+    # uvicorn.run(app, host="0.0.0.0", port=fastapi_port)

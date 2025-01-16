@@ -11,7 +11,7 @@ import aiohttp
 # 3. python test_request.py
 async def test_connect_completions(session):
     try:
-        base_url = "http://localhost:8001/v1/connect/completions"
+        base_url = "http://localhost:8001/v1/completions"
         body = {
             "temperature": 0.5,
             "top_p": 0.9,
