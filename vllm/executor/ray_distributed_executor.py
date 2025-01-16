@@ -204,7 +204,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     # as the resource holder for the driver process.
                     self.driver_dummy_worker = worker
                     self.driver_worker = RayWorkerWrapper(
-                        vllm_config=self.vllm_config, rank=0)
+                        vllm_config=self.vllm_config, rpc_rank=0)
                     worker_metadata.pop(i)
                     break
 
