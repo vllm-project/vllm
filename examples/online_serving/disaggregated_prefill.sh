@@ -3,6 +3,8 @@
 # We will launch 2 vllm instances (1 for prefill and 1 for decode),
 # and then transfer the KV cache between them.
 
+set -xe
+
 echo "🚧🚧 Warning: The usage of disaggregated prefill is experimental and subject to change 🚧🚧"
 sleep 1
 
