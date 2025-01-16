@@ -101,7 +101,7 @@ class MultiprocExecutor(Executor):
 
     def determine_available_memory(self) -> int:
         """
-        Determine the available memory (in bytes) for KV cacheby invoking the
+        Determine the available memory (in bytes) for KV cache by invoking the
         underlying worker.
         """
         memory_sizes = self.collective_rpc("determine_available_memory")

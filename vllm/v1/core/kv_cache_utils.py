@@ -320,7 +320,7 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
     Args:
         vllm_config: The global VllmConfig
         kv_cache_spec: The kv cache spec of the model
-        available_memory (int): Memory available for KV cache in bytes.
+        available_memory: Memory available for KV cache in bytes.
 
     Raises:
         ValueError: If there is not enough memory available for the KV cache.
@@ -351,9 +351,9 @@ def is_kv_cache_type_uniform(kv_cache_spec: KVCacheSpec) -> bool:
     Whether all layers in the given KVCacheSpec have the same type of KV cache.
 
     Args:
-        kv_cache_spec (KVCacheSpec): The KVCacheSpec of the model
+        kv_cache_spec: The KVCacheSpec of the model
 
-            Returns:
+    Returns:
         True if all layers have the same type, False otherwise.
     """
 
@@ -371,7 +371,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     Args:
         vllm_config: The global VllmConfig
         kv_cache_spec: The kv cache spec of the model
-        available_memory (int): Memory available for KV cache in bytes.
+        available_memory: Memory available for KV cache in bytes.
 
     Returns:
         The generated KVCacheConfig
@@ -416,7 +416,7 @@ def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
     Args:
         vllm_config: The global VllmConfig
         kv_cache_spec: The kv cache spec of the model
-        available_memory (int): Memory available for KV cache in bytes.
+        available_memory: Memory available for KV cache in bytes.
 
     Returns:
         The generated KVCacheConfig

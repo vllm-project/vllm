@@ -26,6 +26,7 @@ class KVCacheSpecBase:
         different number of tokens like full attention vs sliding window 
         attention, different KV cache size per token like layers with different 
         number of heads)
+
         Returns:
             The type identifier of this KV cache.
         """
@@ -35,6 +36,7 @@ class KVCacheSpecBase:
     def page_size_bytes(self) -> int:
         """
         The size of a page with `block_size` tokens in bytes.
+
         Returns:
             The page size
         """
@@ -44,6 +46,7 @@ class KVCacheSpecBase:
         """
         The KV cache size for `num_tokens` tokens in bytes. Returns the real
         memory size after padding `num_tokens` to full blocks.
+
         Returns:
             The KV cache size
         """
