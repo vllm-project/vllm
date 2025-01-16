@@ -6,8 +6,8 @@ import time
 from multiprocessing.connection import Connection
 from typing import List, Tuple, Type
 
-import torch.nn as nn
 import psutil
+import torch.nn as nn
 import zmq
 import zmq.asyncio
 from msgspec import msgpack

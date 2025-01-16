@@ -253,7 +253,7 @@ class RayExecutor(Executor):
         all_args: Optional[List[Tuple[Any, ...]]] = None,
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
         **kwargs,
-    ) -> Any:
+    ) -> List[Any]:
         """
         Runs the given method on all workers. Can be used in the following
         ways:
