@@ -15,7 +15,7 @@ image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 # Create two different prompts
 prompts = [
     "What do you see in this image?",
-    # "What colors are most prominent in this image?",
+    "What colors are most prominent in this image?",
 ]
 
 # Format prompts according to LLaVA's requirements
