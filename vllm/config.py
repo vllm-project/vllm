@@ -357,6 +357,10 @@ class ModelConfig:
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
         self.task: Final = task
+        if self.task in ("draft", "generate"):
+            self.truncation_side = "left"
+        else:
+            self.truncation_side = "right"
 
         self.pooler_config = self._init_pooler_config(override_pooler_config)
         self.logits_processor_pattern = logits_processor_pattern
@@ -553,7 +557,7 @@ class ModelConfig:
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
-            "compressed-tensors", "experts_int8"
+            "compressed-tensors", "experts_int8", "quark"
         ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
@@ -1294,8 +1298,11 @@ class ParallelConfig:
             from vllm.executor import ray_utils
             backend = "mp"
             ray_found = ray_utils.ray_is_available()
-            if (current_platform.is_cuda()
-                    and cuda_device_count_stateless() < self.world_size):
+            if current_platform.is_neuron():
+                # neuron uses single process to control multiple devices
+                backend = "uni"
+            elif (current_platform.is_cuda()
+                  and cuda_device_count_stateless() < self.world_size):
                 if not ray_found:
                     raise ValueError("Unable to load Ray which is "
                                      "required for multi-node inference, "
@@ -1328,13 +1335,14 @@ class ParallelConfig:
         from vllm.executor.executor_base import ExecutorBase
         from vllm.platforms import current_platform
         if self.distributed_executor_backend not in (
-                "ray", "mp", None) and not (isinstance(
+                "ray", "mp", "uni", None) and not (isinstance(
                     self.distributed_executor_backend, type) and issubclass(
                         self.distributed_executor_backend, ExecutorBase)):
             raise ValueError(
                 "Unrecognized distributed executor backend "
                 f"{self.distributed_executor_backend}. Supported "
-                "values are 'ray', 'mp' or custom ExecutorBase subclass.")
+                "values are 'ray', 'mp' 'uni', or custom ExecutorBase"
+                " subclass.")
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
@@ -1379,13 +1387,15 @@ class SchedulerConfig:
 
     is_multimodal_model: bool = False
 
-    # FIXME(woosuk & ywang96): Below are placeholder values. We need to
-    # calculate the actual values from the configurations.
-    # Multimodal encoder run compute budget, only used in V1
-    max_num_encoder_input_tokens = 16384
+    # NOTE: The following multimodal encoder budget will be initialized to
+    # max_num_batched_tokens and overridden in case max multimodal embedding
+    # size is larger.
+    # TODO (ywang96): Make these configurable.
+    # Multimodal encoder compute budget, only used in V1
+    max_num_encoder_input_tokens: int = field(default=None)  # type: ignore
 
     # Multimodal encoder cache size, only used in V1
-    encoder_cache_size = 16384
+    encoder_cache_size: int = field(default=None)  # type: ignore
 
     # Whether to perform preemption by swapping or
     # recomputation. If not specified, we determine the mode as follows:
@@ -1458,6 +1468,9 @@ class SchedulerConfig:
                     self.max_num_batched_tokens,
                     _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
+
+        self.max_num_encoder_input_tokens = self.max_num_batched_tokens
+        self.encoder_cache_size = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
             logger.info(

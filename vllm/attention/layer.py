@@ -110,11 +110,7 @@ class Attention(nn.Module):
         self.use_direct_call = not current_platform.is_cuda_alike(
         ) and not current_platform.is_cpu()
 
-        # For some attention backends, we allocate an output tensor before
-        # calling the custom op. When piecewise cudagraph is enabled, this
-        # makes sure the output tensor is allocated inside the cudagraph.
-        self.use_output = self.backend == _Backend.FLASH_ATTN or \
-            self.backend == _Backend.FLASH_ATTN_VLLM_V1
+        self.use_output = attn_backend.accept_output_buffer
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -137,12 +133,7 @@ class Attention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-
-        if self.use_direct_call:
-            return self.impl.forward(query, key, value, kv_cache,
-                                     attn_metadata, self._k_scale,
-                                     self._v_scale)
-        elif self.use_output:
+        if self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
             # Reshape the query, key, and value tensors.
@@ -154,12 +145,19 @@ class Attention(nn.Module):
                 key = key.view(-1, self.num_kv_heads, self.head_size)
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size)
-            torch.ops.vllm.unified_attention_with_output(
-                query, key, value, output, self.layer_name)
+            if self.use_direct_call:
+                unified_attention_with_output(query, key, value, output,
+                                              self.layer_name)
+            else:
+                torch.ops.vllm.unified_attention_with_output(
+                    query, key, value, output, self.layer_name)
             return output.view(-1, hidden_size)
         else:
-            return torch.ops.vllm.unified_attention(query, key, value,
-                                                    self.layer_name)
+            if self.use_direct_call:
+                return unified_attention(query, key, value, self.layer_name)
+            else:
+                return torch.ops.vllm.unified_attention(
+                    query, key, value, self.layer_name)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
@@ -192,11 +190,11 @@ class MultiHeadAttention(nn.Module):
                                         kv_cache_dtype=None,
                                         block_size=16,
                                         is_attention_free=False)
-        attn_backend = backend_name_to_enum(attn_backend.get_name())
-        if attn_backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
-            attn_backend = _Backend.XFORMERS
+        backend = backend_name_to_enum(attn_backend.get_name())
+        if backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
+            backend = _Backend.XFORMERS
 
-        self.attn_backend = attn_backend if attn_backend in {
+        self.attn_backend = backend if backend in {
             _Backend.TORCH_SDPA, _Backend.XFORMERS
         } else _Backend.TORCH_SDPA
 
@@ -230,7 +228,7 @@ class MultiHeadAttention(nn.Module):
                                                  value,
                                                  scale=self.scale)
             out = out.transpose(1, 2)
-        return out.view(bsz, q_len, -1)
+        return out.reshape(bsz, q_len, -1)
 
 
 def unified_attention(

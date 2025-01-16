@@ -9,7 +9,7 @@ Compared to other quantization methods, BitsAndBytes eliminates the need for cal
 Below are the steps to utilize BitsAndBytes with vLLM.
 
 ```console
-$ pip install bitsandbytes>=0.45.0
+pip install bitsandbytes>=0.45.0
 ```
 
 vLLM reads the model's config file and supports both in-flight quantization and pre-quantized checkpoint.
@@ -17,7 +17,7 @@ vLLM reads the model's config file and supports both in-flight quantization and 
 You can find bitsandbytes quantized models on <https://huggingface.co/models?other=bitsandbytes>.
 And usually, these repositories have a config.json file that includes a quantization_config section.
 
-## Read quantized checkpoint.
+## Read quantized checkpoint
 
 ```python
 from vllm import LLM
@@ -37,10 +37,11 @@ model_id = "huggyllama/llama-7b"
 llm = LLM(model=model_id, dtype=torch.bfloat16, trust_remote_code=True, \
 quantization="bitsandbytes", load_format="bitsandbytes")
 ```
+
 ## OpenAI Compatible Server
 
 Append the following to your 4bit model arguments:
 
-```
+```console
 --quantization bitsandbytes --load-format bitsandbytes
 ```

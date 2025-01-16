@@ -25,6 +25,7 @@ from ..utils import check_embeddings_close
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
         pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
         pytest.param("Alibaba-NLP/gte-Qwen2-7B-instruct"),
+        pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
