@@ -457,6 +457,11 @@ class LLMEngine:
                 # JAX-style, single-process, multi-device executor.
                 from vllm.executor.uniproc_executor import UniProcExecutor
                 executor_class = UniProcExecutor
+            elif distributed_executor_backend == "external_launcher":
+                # executor with external launcher
+                from vllm.executor.uniproc_executor import (  # noqa
+                    ExecutorWithExternalLauncher)
+                executor_class = ExecutorWithExternalLauncher
         else:
             from vllm.executor.uniproc_executor import UniProcExecutor
             executor_class = UniProcExecutor
