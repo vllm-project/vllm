@@ -85,6 +85,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "InternLM2VEForCausalLM": _HfExamplesInfo("OpenGVLab/Mono-InternVL-2B",
                                               trust_remote_code=True),
+    "InternLM3ForCausalLM": _HfExamplesInfo("internlm/internlm3-8b-instruct",
+                                            trust_remote_code=True),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini"),
     "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Meta-Llama-3-8B"),
