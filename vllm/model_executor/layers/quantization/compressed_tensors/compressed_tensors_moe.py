@@ -79,8 +79,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                        hidden_size: int, intermediate_size: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
-        # not needed by fp8
-        extra_weight_attrs.pop("intermediate_full")
         params_dtype = torch.float8_e4m3fn
 
         # WEIGHTS
@@ -273,6 +271,10 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                        hidden_size: int, intermediate_size: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
+        assert params_dtype == torch.float16, (
+            "float16 is required for MoE compressd models. Set dtype=torch.float16"  # noqa: E501
+        )
+
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
@@ -305,8 +307,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         w2_scales_size = (intermediate_full
                           if load_full_w2 else intermediate_size)
         # @eliza TODO: is this condition actually needed/is it doing anything?
-        self.is_k_full = (not self.actorder) or (
-            self.actorder and intermediate_size == intermediate_full)
+        self.is_k_full = (not self.actorder) or (intermediate_size
+                                                 == intermediate_full)
 
         if self.strategy == "channel":
             num_groups_w2 = num_groups_w13 = 1
