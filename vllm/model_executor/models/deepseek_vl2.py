@@ -1,7 +1,7 @@
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 import math
-from functools import cached_property, partial
+from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from transformers import AutoProcessor, BatchFeature, ProcessorMixin
+from transformers import BatchFeature
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -31,6 +31,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import (DeepseekVLV2Config,
                                                           MlpProjectorConfig,
                                                           VisionEncoderConfig)
+from vllm.transformers_utils.processors.deepseek_vl2 import (
+    DeepseekVLV2Processor)
 from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
@@ -129,25 +131,8 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(DeepseekVLV2Config)
 
-    def get_hf_processor(self) -> ProcessorMixin:
-        # TODO(Isotr0py): we should get rid of dependency on deepseek_vl2
-        # in the future, because it's flasky and lack of maintenance.
-        try:
-            from deepseek_vl2.models.processing_deepseek_vl_v2 import (
-                DeepseekVLV2Processor, select_best_resolution)
-            AutoProcessor.register("DeepseekVLV2Processor",
-                                   DeepseekVLV2Processor)
-        except ModuleNotFoundError as exc:
-            raise ModuleNotFoundError(
-                "You need to `pip install "
-                "git+https://github.com/deepseek-ai/DeepSeek-VL2.git` "
-                "to use this model") from exc
-
-        processor = self.ctx.get_hf_processor(DeepseekVLV2Processor)
-        processor.select_best_resolution = partial(
-            select_best_resolution,
-            candidate_resolutions=processor.candidate_resolutions)
-        return processor
+    def get_hf_processor(self) -> DeepseekVLV2Processor:
+        return self.ctx.get_hf_processor(DeepseekVLV2Processor)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
