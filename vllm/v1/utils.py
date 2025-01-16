@@ -159,10 +159,10 @@ def bind_kv_cache(
          corresponding KV cache in kv_caches.
 
     Args:
+        kv_caches: The allocated kv_caches with layer names as keys.
         forward_context: The global forward context containing all Attention 
         layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
-        kv_caches: The allocated kv_caches with layer names as keys.
     """
     # Bind kv_caches to ModelRunner
     assert len(runner_kv_caches) == 0
