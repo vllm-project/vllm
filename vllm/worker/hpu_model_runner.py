@@ -606,6 +606,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         if is_fake_hpu():
             self.device_config.device = torch.device('cpu')
             self.device_config.device_type = 'cpu'
+            self.load_config.device = None
         self.device = self.device_config.device
         self.enforce_eager = self.model_config.enforce_eager
         self.max_num_seqs = self.scheduler_config.max_num_seqs
