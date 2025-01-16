@@ -108,8 +108,7 @@ def test_facebook_roberta_model_loading_with_params(vllm_runner):
         model_tokenizer = model.model.llm_engine.tokenizer
         assert model_tokenizer.tokenizer_id == model_name
 
-        model = model.model.llm_engine.model_executor\
-                     .driver_worker.model_runner.model
+        model = model.model.llm_engine.get_model()
         assert not hasattr(model, "lm_head")
         assert isinstance(model, RobertaEmbeddingModel)
         assert isinstance(model._pooler, CLSPool)

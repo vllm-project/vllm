@@ -12,7 +12,7 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
 def test_quark_fp8(vllm_runner):
     model_path = "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test"
     with vllm_runner(model_path) as llm:
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        model = llm.model.llm_engine.get_model()
         layer = model.model.layers[0]
 
         qkv_proj = layer.self_attn.qkv_proj

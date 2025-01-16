@@ -468,7 +468,4 @@ def tensorize_vllm_model(engine_args: EngineArgs,
         )
     else:
         # with a single worker, we can get to the underlying model directly
-        serialize_vllm_model(
-            engine.model_executor.driver_worker.model_runner.model,
-            tensorizer_config,
-        )
+        serialize_vllm_model(engine.get_model(), tensorizer_config)

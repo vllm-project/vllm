@@ -248,7 +248,7 @@ def _test_2of4_quant_models(qkv_proj, weight_strategy, input_strategy):
 def test_compressed_tensors_2of4_quant_fp8(vllm_runner, args_2of4):
     model, weight_strategy, input_strategy = args_2of4
     with vllm_runner(model) as llm:
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        model = llm.model.llm_engine.get_model()
         layer = model.model.layers[0]
 
         qkv_proj = layer.self_attn.qkv_proj
@@ -273,7 +273,7 @@ def test_compressed_tensors_2of4_quant_fp8(vllm_runner, args_2of4):
 def test_compressed_tensors_2of4_quant_int8(vllm_runner, args_2of4):
     model, weight_strategy, input_strategy = args_2of4
     with vllm_runner(model) as llm:
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        model = llm.model.llm_engine.get_model()
         layer = model.model.layers[0]
 
         qkv_proj = layer.self_attn.qkv_proj
@@ -293,7 +293,7 @@ def test_compressed_tensors_2of4_quant_int8(vllm_runner, args_2of4):
 def test_compressed_tensors_2of4_sparse(vllm_runner, args_2of4):
     model = args_2of4
     with vllm_runner(model) as llm:
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        model = llm.model.llm_engine.get_model()
         layer = model.model.layers[0]
 
         qkv_proj = layer.self_attn.qkv_proj
