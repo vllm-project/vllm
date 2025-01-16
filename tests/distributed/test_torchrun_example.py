@@ -19,8 +19,6 @@ prompts = [
 
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-# important: use `distributed_executor_backend="external_launcher"` so that
-# this llm engine/instance only creates one worker.
 # set different `gpu_memory_utilization` and `swap_space` for different ranks,
 # to test if all ranks agree on the same kv cache configuration.
 llm = LLM(model="facebook/opt-125m",
@@ -29,9 +27,6 @@ llm = LLM(model="facebook/opt-125m",
           gpu_memory_utilization=0.9 if torch_rank == 0 else 0.7,
           swap_space=3 if torch_rank == 0 else 4)
 
-# important: prompts should be the same across all ranks
-# important: scheduling decisions should be deterministic
-# and should be the same across all ranks
 outputs = llm.generate(prompts, sampling_params)
 
 # it is recommended to use this `cpu_group` to communicate
@@ -62,6 +57,3 @@ for output in outputs:
     test_consistent_across_ranks(generated_text)
     print(f"Rank {torch_rank}, Prompt: {prompt!r}, "
           f"Generated text: {generated_text!r}")
-
-# all ranks can access the model directly
-# via `llm.llm_engine.model_executor.driver_worker.worker.model_runner.model`
