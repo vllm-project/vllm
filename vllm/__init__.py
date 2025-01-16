@@ -41,7 +41,7 @@ def configure_as_vllm_process():
     if current_platform.is_xpu():
         # see https://github.com/pytorch/pytorch/blob/43c5f59/torch/_dynamo/config.py#L158
         torch._dynamo.config.disable = True
-    if current_platform.is_hpu():
+    elif current_platform.is_hpu():
         # NOTE(kzawora): PT HPU lazy backend (PT_HPU_LAZY_MODE = 1)
         # does not support torch.compile
         # Eager backend (PT_HPU_LAZY_MODE = 0) must be selected for
