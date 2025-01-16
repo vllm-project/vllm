@@ -349,10 +349,9 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     }
 
     # LoRA specific attributes
-    # which is missing from ultravox
     # TODO : Add LoRA to the audio tower and projector.
     supported_lora_modules = [
-        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "lm_head"
+        "qkv_proj", "o_proj", "gate_up_proj", "down_proj"
     ]
     embedding_modules = {}
     embedding_padding_modules = []
@@ -385,9 +384,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
-        # logits_processor is added here to support 'lm_head' LoRA module
-        # for language model
-        self.logits_processor = self.language_model.logits_processor
         if config.text_model_id is not None:
             # this prefix is not for initialization, but for loading weights
             # note the trailing dot
