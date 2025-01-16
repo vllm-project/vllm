@@ -46,9 +46,10 @@ def stateless_init_process_group(master_address, master_port, rank, world_size,
 class MyWorker(Worker):
     """
     The `MyWorker` class inherits from `Worker` to provide custom functions.
-    For simplicity, we define the `MyWorker` class in this self-contained script.
-    Normally, we should define the `MyWorker` class in a separate file and pass
-    the qualified name of the class to the `worker_cls` parameter.
+    For simplicity, we define the `MyWorker` class in this self-contained 
+    script. Normally, we should define the `MyWorker` class in a separate 
+    file and pass the qualified name of the class to the `worker_cls` 
+    parameter.
     """
 
     def init_weight_update_group(self, master_address, master_port,
@@ -107,9 +108,9 @@ configure_as_vllm_process()
 train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
 train_model.to("cuda:0")
 """
-Start the inference process, here we use vLLM to hold a model on GPU 1 and GPU 2.
-For the details on how to use ray, please refer to the ray documentation
-https://docs.ray.io/en/latest/ .
+Start the inference process, here we use vLLM to hold a model on GPU 1 and 
+GPU 2. For the details on how to use ray, please refer to the ray 
+documentation https://docs.ray.io/en/latest/ .
 """
 os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
 ray.init()
@@ -155,7 +156,8 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, "
           f"Generated text: {generated_text!r}")
 
-# set up the communication between the training process and the inference engine.
+# set up the communication between the training process
+# and the inference engine.
 master_address = get_ip()
 master_port = get_open_port()
 
