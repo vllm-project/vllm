@@ -183,9 +183,8 @@ class ExecutorBase(ABC):
                                         pattern=pattern,
                                         max_size=max_size))
 
-    @abstractmethod
     def get_model(self) -> nn.Module:
-        raise NotImplementedError
+        return self.collective_rpc("get_model")[0]
 
     @abstractmethod
     def check_health(self) -> None:
@@ -271,9 +270,6 @@ class DistributedExecutorBase(ExecutorBase):
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
         return self._run_workers(method, *args, **(kwargs or {}))
-
-    def get_model(self) -> nn.Module:
-        return self.collective_rpc("get_model")[0]
 
     @abstractmethod
     def _run_workers(
