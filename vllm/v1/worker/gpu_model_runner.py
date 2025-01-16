@@ -677,6 +677,7 @@ class GPUModelRunner:
         return model_runner_output
 
     def load_model(self) -> None:
+        # We will need to replace the model loading position here...
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)

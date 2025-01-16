@@ -2,6 +2,7 @@ import gc
 import os
 from typing import Optional, Tuple
 
+import oneccl_bindings_for_pytorch  # noqa: F401
 import torch
 import torch.distributed
 
@@ -127,11 +128,11 @@ def init_worker_distributed_environment(
             "is not already initialized")
     else:
         # oneapi 2025 will use pidfd as default
-        ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE", "drmfd")
+        # ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE", "drmfd")
         ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
         ENV_LOCAL_WORLD_SIZE = os.getenv("LOCAL_WORLD_SIZE",
                                          str(parallel_config.world_size))
-        os.environ["CCL_ZE_IPC_EXCHANGE"] = ENV_CCL_ZE_IPC_EXCHANGE
+        # os.environ["CCL_ZE_IPC_EXCHANGE"] = ENV_CCL_ZE_IPC_EXCHANGE
         os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
         os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
         os.environ["LOCAL_RANK"] = str(local_rank)

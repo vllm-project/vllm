@@ -7,6 +7,10 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.attention.ops.paged_attn import (PagedAttention,
+                                           PagedAttentionMetadata)
+from vllm.attention.backends.ipex_attn import use_gqa_kernel
+import os
 
 
 class IPEXAttentionBackend(AttentionBackend):
@@ -34,9 +38,13 @@ class IPEXAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        # if block_size % 16 != 0:
+            # raise ValueError("Block size must be a multiple of 16.")
+        # This needs to be changed...
+        # return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
+                                                 num_kv_heads, head_size)
+
 
 
 class IPEXAttentionImpl(AttentionImpl):
@@ -115,7 +123,8 @@ class IPEXAttentionImpl(AttentionImpl):
             "key/v_scale is not supported in IPEXAttention.")
 
         output = torch.empty_like(query)
-        torch.ops.vllm.ipex_attn_chunked_prefill(
+        # torch.ops.vllm.ipex_attn_chunked_prefill(
+        ipex_llm_chunked_prefill(
             output,
             query,
             key,
@@ -133,6 +142,37 @@ class IPEXAttentionImpl(AttentionImpl):
             self.logits_soft_cap,
         )
         return output.view(-1, self.num_heads * self.head_size)
+
+def split_kv_cache_ipexllm(
+    kv_cache: torch.Tensor,
+    num_kv_heads: int,
+    head_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    # For GQA kernel, key_cache and value_cache shape should be [num_blocks, num_kv_heads, head_size, block_size]
+    num_blocks = kv_cache.shape[1]
+
+    key_cache = kv_cache[0]
+    key_cache = key_cache.view(num_blocks, num_kv_heads, -1, head_size)
+    value_cache = kv_cache[1]
+    value_cache = value_cache.view(num_blocks, num_kv_heads, -1, head_size)
+    return key_cache, value_cache
+
+def split_kv_cache(
+    kv_cache: torch.Tensor,
+    num_kv_heads: int,
+    head_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    x = 16 // kv_cache.element_size()
+    num_blocks = kv_cache.shape[1]
+
+    key_cache = kv_cache[0]
+    key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
+                                -1, x)
+
+    value_cache = kv_cache[1]
+    value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
+    return key_cache, value_cache
+
 
 
 @torch.library.custom_op("vllm::ipex_attn_fake",
@@ -155,6 +195,88 @@ def ipex_attn_fake(
     logits_soft_cap: Optional[float] = None,
 ) -> None:
     pass
+
+def ipex_llm_chunked_prefill(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    num_heads: int,
+    head_size: int,
+    num_kv_heads: int,
+    kv_cache: torch.Tensor,
+    kv_cache_dtype: str,
+    k_scale: float,
+    v_scale: float,
+    scale: float,
+    sliding_window: Optional[List[int]] = None,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    logits_soft_cap: Optional[float] = None,
+) -> None:
+    context = get_forward_context()
+    current_metadata = context.dynamic_forward_context
+    if current_metadata is None:
+        # Profiling run.
+        return
+    assert current_metadata is not None
+    assert isinstance(current_metadata, FlashAttentionMetadata)
+    attn_metadata: FlashAttentionMetadata = current_metadata
+    num_actual_tokens = attn_metadata.num_actual_tokens
+
+    query = query.view(-1, num_heads, head_size)
+    key = key.view(-1, num_kv_heads, head_size)
+    value = value.view(-1, num_kv_heads, head_size)
+
+    using_gqa_kernel = use_gqa_kernel(num_heads, num_kv_heads, head_size, logits_soft_cap)
+
+
+    if using_gqa_kernel:
+        key_cache, value_cache = split_kv_cache_ipexllm(
+                kv_cache, num_kv_heads, head_size)
+        ipex_ops.reshape_and_cache_ipexllm(
+            key[:num_actual_tokens],
+            value[:num_actual_tokens],
+            key_cache,
+            value_cache,
+            attn_metadata.slot_mapping.flatten(),
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+        )
+    else:
+        key_cache, value_cache = split_kv_cache(
+            kv_cache, num_kv_heads, head_size)   
+        ipex_ops.reshape_and_cache(
+            key[:num_actual_tokens],
+            value[:num_actual_tokens],
+            key_cache,
+            value_cache,
+            attn_metadata.slot_mapping.flatten(),
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+        )
+    # Invoke chunked prefill method...
+    import vllm._C.ops
+    assert head_size == 128 or head_size == 64
+    value = os.environ.get('USE_CONTEXT_V1')
+    query_len = attn_metadata.query_start_loc[1:] - attn_metadata.query_start_loc[:-1]
+    seq_len = attn_metadata.seq_start_loc[1:] - attn_metadata.seq_start_loc[:-1]
+    context_len = seq_len - query_len
+    if using_gqa_kernel:
+        print("using gqa kernel")
+        # if using_gqa_kernel, then only the v1 kernel can be used
+        out = vllm._C.ops.context_attention_forward_v1(query[:num_actual_tokens], key_cache, value_cache, attn_metadata.block_table, attn_metadata.query_start_loc, seq_len, context_len, attn_metadata.max_seq_len, torch.amax(context_len).item())
+    elif value is None:
+        # Otherwise, by default use v2 attention forward kernel...
+        out = vllm._C.ops.context_attention_forward_v2(query[:num_actual_tokens], key_cache, value_cache, prefill_meta.block_tables, prefill_meta.query_start_loc, prefill_meta.seq_lens_tensor, prefill_meta.context_lens, prefill_meta.max_seqlen, torch.amax(prefill_meta.context_lens).item())
+    else:
+        out = vllm._C.ops.context_attention_forward_v1(query, key_cache, value_cache, prefill_meta.block_tables, prefill_meta.query_start_loc, prefill_meta.seq_lens_tensor, prefill_meta.context_lens, prefill_meta.max_seqlen, torch.amax(prefill_meta.context_lens).item())
+    
+    # output[:num_actual_tokens] = out
+    output[:num_actual_tokens] = out.view(out.shape[0], -1)
+
+
 
 
 @torch.library.custom_op("vllm::ipex_attn_chunked_prefill",
