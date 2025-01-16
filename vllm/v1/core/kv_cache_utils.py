@@ -349,9 +349,11 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
 def is_kv_cache_type_uniform(kv_cache_spec: KVCacheSpec) -> bool:
     """
     Whether all layers in the given KVCacheSpec have the same type of KV cache.
+
     Args:
         kv_cache_spec (KVCacheSpec): The KVCacheSpec of the model
-    Returns:
+
+            Returns:
         True if all layers have the same type, False otherwise.
     """
 
@@ -359,19 +361,20 @@ def is_kv_cache_type_uniform(kv_cache_spec: KVCacheSpec) -> bool:
     return len(layer_keys) == 1
 
 
-def _get_kv_cache_config_uniform_type(
-        vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
-        available_memory: int) -> Tuple[KVCacheConfig, int]:
+def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
+                                      kv_cache_spec: KVCacheSpec,
+                                      available_memory: int) -> KVCacheConfig:
     """
     Generates the KV cache configuration for a model with one type of KV cache.
     Divide the available memory equally among all layers.
+
     Args:
         vllm_config: The global VllmConfig
         kv_cache_spec: The kv cache spec of the model
         available_memory (int): Memory available for KV cache in bytes.
+
     Returns:
-        Tuple[KVCacheConfig, int]: The generated KVCacheConfig and the number of
-        GPU blocks.
+        The generated KVCacheConfig
     """
 
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
@@ -409,10 +412,12 @@ def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
     """
     Generates the KV cache configuration for a model
     TODO: support hybrid models with more than one type of KV cache.
+
     Args:
         vllm_config: The global VllmConfig
         kv_cache_spec: The kv cache spec of the model
         available_memory (int): Memory available for KV cache in bytes.
+
     Returns:
         The generated KVCacheConfig
     """
