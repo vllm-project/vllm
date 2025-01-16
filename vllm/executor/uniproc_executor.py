@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
@@ -89,6 +90,9 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             ("ExecutorWithExternalLauncher needs deterministic "
             "execution, so it"
             "does not support delay_factor in scheduling")
+        assert not envs.VLLM_USE_V1, \
+            ("V1 architecture cannot guarantee deterministic execution, "
+            "so it is not supported in ExecutorWithExternalLauncher.")
         self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
                                                rpc_rank=0)
         # engines are launched in torchrun-compatible launchers
