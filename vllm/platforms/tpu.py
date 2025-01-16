@@ -83,7 +83,7 @@ class TpuPlatform(Platform):
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
-                parallel_config.worker_cls = "vllm.v1.worker.tpu_worker.TRUWorker"
+                parallel_config.worker_cls = "vllm.v1.worker.tpu_worker.TPUWorker"
             else:
                 if scheduler_config.is_multi_step:
                     parallel_config.worker_cls = \

@@ -7,6 +7,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.platforms import current_platform
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.ray_utils import (RayWorkerWrapper,
                                         initialize_ray_cluster, ray)
@@ -27,12 +28,16 @@ class RayExecutor(Executor):
         self.vllm_config = vllm_config
         self.parallel_config = vllm_config.parallel_config
         self.model_config = vllm_config.model_config
+
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
 
         # Disable Ray usage stats collection.
         ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
         if ray_usage != "1":
             os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
+
+        self.device_str = "TPU" if current_platform.is_tpu() else "GPU"
+        self.use_dag = current_platform.is_cuda()
 
         initialize_ray_cluster(self.parallel_config)
         placement_group = self.parallel_config.placement_group
@@ -42,16 +47,16 @@ class RayExecutor(Executor):
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
-        # A list of workers to run a model.
-        self.workers: List[RayWorkerWrapper] = []
-        if self.parallel_config.ray_workers_use_nsight:
+        if (current_platform.is_cuda()
+                and self.parallel_config.ray_workers_use_nsight):
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
                 ray_remote_kwargs)
 
         # Create the workers.
+        self.workers: List[RayWorkerWrapper] = []
         driver_ip = get_ip()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-            if not bundle.get("GPU", 0):
+            if not bundle.get(self.device_str, 0):
                 # Skip bundles that don't have GPUs,
                 # as each worker needs one GPU.
                 continue
@@ -63,7 +68,7 @@ class RayExecutor(Executor):
 
             worker = ray.remote(
                 num_cpus=0,
-                num_gpus=1,
+                resources={self.device_str: 1},
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(vllm_config=self.vllm_config)
@@ -279,11 +284,14 @@ class RayExecutor(Executor):
         self,
         scheduler_output,
     ) -> ModelRunnerOutput:
-        if self.forward_dag is None:
-            self.forward_dag = self._compiled_ray_dag()
-        # Only the first worker (with rank 0) returns the execution result.
-        # Others return None.
-        output = ray.get(self.forward_dag.execute(scheduler_output))[0]
+        if self.use_dag:
+            if self.forward_dag is None:
+                self.forward_dag = self._compiled_ray_dag()
+
+            output = ray.get(self.forward_dag.execute(scheduler_output))[0]
+        else:
+            output = self._run_workers("execute_model", scheduler_output)[0]
+
         return output
 
     def profile(self, is_start=True):
