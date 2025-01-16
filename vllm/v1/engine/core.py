@@ -80,8 +80,9 @@ class EngineCore:
         availble_gpu_memory = self.model_executor.determine_available_memory()
 
         # Get the kv cache tensor size
-        kv_cache_config, num_gpu_blocks = get_kv_cache_config(
-            vllm_config, kv_cache_spec, availble_gpu_memory)
+        kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
+                                              availble_gpu_memory)
+        num_gpu_blocks = kv_cache_config.num_blocks
         num_cpu_blocks = 0
 
         # Initialize kv cache and warmup the execution

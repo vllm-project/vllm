@@ -243,7 +243,7 @@ class RayExecutor(Executor):
         they are identical. The KVCacheSpec is then returned.
         """
         kv_cache_specs = self._run_workers("get_kv_cache_spec")
-        assert all(lc == kv_cache_specs[0] for lc in kv_cache_specs)
+        assert all(s == kv_cache_specs[0] for s in kv_cache_specs)
         return kv_cache_specs[0]
 
     def _run_workers(

@@ -117,7 +117,8 @@ class Worker:
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the free memory that can be used for KV cache
+        Then, it calculate the free memory that can be used for KV cache in
+        bytes.
 
         .. tip::
             You may limit the usage of GPU memory

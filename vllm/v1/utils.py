@@ -144,32 +144,45 @@ def shutdown(proc: multiprocessing.Process, input_path: str, output_path: str):
 
 
 def bind_kv_cache(
-    ctx: Dict[str, "Attention"],
-    runner_kv_caches: List[torch.Tensor],
     kv_caches: Dict[str, torch.Tensor],
+    forward_context: Dict[str, "Attention"],
+    runner_kv_caches: List[torch.Tensor],
 ) -> None:
     """
-    Bind kv_caches to the forward context and model_runner's kv_cache.
+    Bind the allocated KV cache to both ModelRunner and forward context so
+    that the KV cache can be used in the forward pass.
+
+    This function:
+      1) Fills the ModelRunner's kv cache list (`runner_kv_caches`) with
+         kv_caches.
+      2) Associates each attention layer in the `forward_context` with its 
+         corresponding KV cache in kv_caches.
+
     Args:
-        ctx: The global forward context containing all Attention layers with 
-        layer names as keys.
+        forward_context: The global forward context containing all Attention 
+        layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
         kv_caches: The allocated kv_caches with layer names as keys.
     """
-    # bind kv_caches to ModelRunner's kv_caches
+    # Bind kv_caches to ModelRunner
     assert len(runner_kv_caches) == 0
+
+    # Convert kv_caches dict to a list of tensors in the order of layer_index.
     index2name = defaultdict(list)
     for layer_name in kv_caches:
         index2name[extract_layer_index(layer_name)].append(layer_name)
 
     for layer_index in sorted(index2name.keys()):
         layer_names = index2name[layer_index]
+        if len(layer_names) > 1:
+            # One typical case is encoder-decoder model, e.g., bart.
+            # The cross attention and self attention in the same decoder layer
+            # has different layer_name but the same layer_index.
+            raise NotImplementedError
         layer_name = layer_names[0]
-        assert all(kv_caches[n] is kv_caches[layer_name]
-                   for n in layer_names[1:])
         runner_kv_caches.append(kv_caches[layer_name])
 
-    # bind kv_caches to forward context
+    # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
         # NOTE: Use list because of v0 PP virtual engine.
-        ctx[layer_name].kv_cache = [kv_cache]
+        forward_context[layer_name].kv_cache = [kv_cache]

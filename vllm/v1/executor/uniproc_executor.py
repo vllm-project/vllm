@@ -51,8 +51,8 @@ class UniprocExecutor(Executor):
         )
 
     def determine_available_memory(self) -> int:
-        """Determine the available memory for KV cache by invoking the
-        underlying worker.
+        """Determine the available memory (in bytes) for KV cache by invoking 
+        the underlying worker.
         """
         return self.worker.determine_available_memory()
 

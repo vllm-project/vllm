@@ -101,7 +101,7 @@ class MultiprocExecutor(Executor):
 
     def determine_available_memory(self) -> int:
         """
-        Determine the available memory for KV cache by invoking the
+        Determine the available memory (in bytes) for KV cacheby invoking the
         underlying worker.
         """
         memory_sizes = self.collective_rpc("determine_available_memory")
@@ -116,7 +116,7 @@ class MultiprocExecutor(Executor):
         Get all kv cache needed by the model by invoking the underlying worker.
         """
         kv_cache_specs = self.collective_rpc("get_kv_cache_spec")
-        assert all(lc == kv_cache_specs[0] for lc in kv_cache_specs)
+        assert all(s == kv_cache_specs[0] for s in kv_cache_specs)
         return kv_cache_specs[0]
 
     def collective_rpc(self,

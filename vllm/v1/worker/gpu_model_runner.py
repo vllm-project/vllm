@@ -886,8 +886,9 @@ class GPUModelRunner:
                 raise NotImplementedError
 
         bind_kv_cache(
+            kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
-            self.kv_caches, kv_caches)
+            self.kv_caches)
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
