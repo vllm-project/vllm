@@ -269,7 +269,6 @@ class ModelRunnerBase(ABC, Generic[T]):
     def get_model(self) -> nn.Module:
         raise NotImplementedError
 
-    @current_platform.inference_mode()
     def execute_model(
         self,
         model_input: T,
