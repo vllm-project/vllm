@@ -607,10 +607,12 @@ class ModelConfig:
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
 
-        if (self.hf_config.model_type == 'deepseek_v3'
+        MODEL_NOT_SUPPORT_CUDA_GRAPH = ['deepseek_v3', 'mllama']
+        if (self.hf_config.model_type in MODEL_NOT_SUPPORT_CUDA_GRAPH
                 and not self.enforce_eager):
-            logger.warning("CUDA graph is not supported for Deepseek V3 yet, "
-                           "fallback to the eager mode.")
+            logger.warning(
+                f"CUDA graph is not supported for {self.hf_config.model_type} yet, "
+                "fallback to the eager mode.")
             self.enforce_eager = True
 
     def _verify_bnb_config(self) -> None:
