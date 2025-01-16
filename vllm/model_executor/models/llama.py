@@ -159,7 +159,8 @@ class LlamaAttention(nn.Module):
         )
 
         is_neox_style = True
-        if quant_config is not None and quant_config.get_name() == "gguf":
+        is_gguf = quant_config and quant_config.get_name() == "gguf"
+        if is_gguf and config.model_type == "llama":
             is_neox_style = False
 
         self.rotary_emb = get_rope(
@@ -172,13 +173,15 @@ class LlamaAttention(nn.Module):
         )
 
         if hasattr(config, "interleaved_sliding_window"):
-            if isinstance(config.interleaved_sliding_window, int):
-                sliding_window = config.interleaved_sliding_window
-            elif isinstance(config.interleaved_sliding_window, list):
-                sw_idx = layer_idx % len(config.interleaved_sliding_window)
-                sliding_window = config.interleaved_sliding_window[sw_idx]
+            interleaved_sliding_window = config.interleaved_sliding_window
+            if isinstance(interleaved_sliding_window, int):
+                sliding_window = interleaved_sliding_window
+            elif isinstance(interleaved_sliding_window, list):
+                sw_idx = layer_idx % len(interleaved_sliding_window)
+                sliding_window = interleaved_sliding_window[sw_idx]
             else:
-                raise ValueError(f"{type(sliding_window)} is not supported.")
+                raise ValueError(
+                    f"{type(interleaved_sliding_window)} is not supported.")
         else:
             sliding_window = None
 
@@ -435,8 +438,6 @@ class LlamaModel(nn.Module):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
-            if is_hpu:
-                torch.hpu.synchronize()
         return loaded_params
 
     # If this function is called, it should always initialize KV cache scale
@@ -458,8 +459,9 @@ class LlamaModel(nn.Module):
                 # which is consistent with the practice of setting
                 # scaling_factor = tensor_amax / FPtype_max
                 scaling_factor *= 2
-            if hasattr(layer_self_attn, "kv_scale"):
-                layer_self_attn.attn._kv_scale = scaling_factor
+            if hasattr(layer_self_attn.attn, "_k_scale"):
+                layer_self_attn.attn._k_scale = scaling_factor
+                layer_self_attn.attn._v_scale = scaling_factor
             else:
                 raise RuntimeError("Self attention has no KV cache scaling "
                                    "factor attribute!")

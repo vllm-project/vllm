@@ -6,11 +6,108 @@ on:
 permissions:
     pull-requests: write
 jobs:
-  TriggerJenkinsTests:
+  DependencyReview:
+    name: Dependency Review
     runs-on: ubuntu-latest
     steps:
-        - name: Trigger Jenkins Tests
+      - name: 'Checkout Repository'
+        uses: actions/checkout@v4
+      - name: 'Dependency Review'
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+  CodeQLScan:
+    name: CodeQL Scan
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4      
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: python
+        build-mode: none
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:python"
+        upload: "never"
+  CalculateJobs:
+    runs-on: generic-runner
+    name: Calculate Tests To Trigger
+    needs: [DependencyReview,CodeQLScan]
+    outputs:
+        tests_list: ${{ steps.tests.outputs.tests_list }}
+    steps:
+        - name: Checkout
+          uses: actions/checkout@v4
+        - name: Install YQ
           run: |
-            curl -XPOST -H "Content-Type: application/json" \
-            "${{ secrets.WEBHOOK_URL }}" \
-            -d '${{ toJson(github) }}'          
+            wget https://github.com/mikefarah/yq/releases/download/v4.14.1/yq_linux_amd64.tar.gz -O - |\
+              tar xz && sudo mv yq_linux_amd64 /usr/bin/yq                
+        - name: Calculate Tests
+          id: tests
+          run: |
+            test_list=$(yq -oj e .jenkins/test_config.yaml  | jq -c "[.stages[].steps[]]")
+            echo "tests_list=${test_list}" >> "$GITHUB_OUTPUT"
+  TestRun:
+    name: Test / ${{matrix.tests.name}}
+    needs: [CalculateJobs]
+    runs-on: generic-runner
+    strategy:
+      fail-fast: false
+      matrix:
+          tests: ${{ fromJson(needs.CalculateJobs.outputs.tests_list) }}          
+    env:
+        USERNAME: ${{ secrets.SWUSERNAME }}
+        PASSWORD: ${{ secrets.SWPASSWORD }}
+        POD_TEMPLATE: ${{ secrets.POD_TEMPLATE }}
+        TEST_COMMAND: ${{ matrix.tests.command }}
+    steps:
+        - name: Download Hlctl
+          run: |
+            curl --show-error --silent ${{ secrets.HLCTL_ADDRESS }} | bash &> /dev/null
+        - name: Config Hlctl
+          run: |
+            ${{ secrets.HLCTL_COMMAND }} &> /dev/null
+        - name: Create Pod Template
+          env:
+            TARGET_BRANCH: ${{ github.base_ref }}
+            RELEASED_SYNAPSE_VERSION: ${{ vars.RELEASED_SYNAPSE_VERSION }}
+            BASE_BRANCH: ${{github.head_ref}}      
+          run: |
+            if [[ $TARGET_BRANCH == "habana_main" ]]; then
+              synapse_version=${RELEASED_SYNAPSE_VERSION#v}
+            elif [[ $TARGET_BRANCH =~ v*.*.* ]]; then
+              synapse_version=${TARGET_BRANCH#v}
+            else
+              echo "Cant Calculate Synapse Version, Failing The Test"
+              exit 1
+            fi
+            synapse_build=$(curl "https://dms.habana-labs.com/api/v1.1/branch/info/v$synapse_version" | jq -r ".release_id")
+            pt_version=${{ vars.PT_VERSION }}
+            BUILD_TAG="Github-vLLM-Fork-${{ github.event.number }}-${{github.run_number}}"
+            safe_cmd=${TEST_COMMAND//&/\\&}
+            echo "Writing Pod Template To File"
+            echo "${POD_TEMPLATE}" > pod.yml
+            sed -i "s/##VERSION##/${synapse_version}/g" pod.yml
+            sed -i "s/##BUILD##/${synapse_build}/g" pod.yml
+            sed -i "s/##BUILD_TAG##/${BUILD_TAG}/g" pod.yml
+            sed -i "s/##PYTORCH_VERSION##/${pt_version}/g" pod.yml
+            sed -i "s|##GIT_BRANCH##|$BASE_BRANCH|g" pod.yml
+            sed -i "s|##CMD##|$safe_cmd|g" pod.yml
+            echo "Pod Template Created"
+        - name: Run Test
+          run: |
+            converted_test_name=$(echo ${{ matrix.tests.name }} | tr "_" "-")
+            if [[ ${#converted_test_name} -ge 33 ]];then
+              converted_test_name=${converted_test_name:12}
+            fi
+            hlctl create containers \
+                --file=pod.yml \
+                --flavor=${{ matrix.tests.flavor}} \
+                --name="vllm-fork-${{github.event.number}}-${converted_test_name}" \
+                --namespace="framework" \
+                --priority="high" \
+                --retry \
+                --shm=10240           

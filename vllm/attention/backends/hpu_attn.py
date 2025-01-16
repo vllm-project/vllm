@@ -125,6 +125,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         max_seq_len: int = 4096,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         super(AttentionImpl, self).__init__()
         self.kv_cache_dtype = kv_cache_dtype
@@ -163,6 +164,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
+        self.attn_type = attn_type
+        if (self.attn_type != AttentionType.DECODER
+                and self.attn_type != AttentionType.ENCODER_DECODER):
+            raise NotImplementedError("Encoder self-attention "
+                                      "is not implemented for "
+                                      "HPUAttentionImpl")
+
     def forward(
         self,
         query: torch.Tensor,
@@ -172,7 +180,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         attn_metadata: HPUAttentionMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
@@ -186,12 +193,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        if (attn_type != AttentionType.DECODER
-                and attn_type != AttentionType.ENCODER_DECODER):
-            raise NotImplementedError("Encoder self-attention "
-                                      "is not implemented for "
-                                      "HPUAttentionImpl")
-        if attn_type == AttentionType.ENCODER_DECODER:
+        if self.attn_type == AttentionType.ENCODER_DECODER:
             return self.forward_encoder_decoder(
                 query=query,
                 key=key,

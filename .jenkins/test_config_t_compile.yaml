@@ -26,3 +26,8 @@ stages:
       - name: gsm8k_lama2_g2_tp2_tc
         flavor: g2.s
         command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-llama2.txt -t 2
+  - name: tests_lora_compile
+    steps:
+      - name: test_multilora_compile
+        flavor: g2
+        command: PT_HPU_LAZY_MODE=0 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_multilora_hpu.py::test_llama_multilora_1x

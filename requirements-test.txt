@@ -37,7 +37,7 @@ audioread==3.0.1
     # via librosa
 awscli==1.35.23
     # via -r requirements-test.in
-bitsandbytes==0.44.1
+bitsandbytes>=0.45.0
     # via -r requirements-test.in
 black==24.10.0
     # via datamodel-code-generator
@@ -48,6 +48,8 @@ botocore==1.35.57
     #   awscli
     #   boto3
     #   s3transfer
+bounded-pool-executor==0.0.3
+    # via pqdm
 buildkite-test-collector==0.1.9
     # via -r requirements-test.in
 certifi==2024.8.30
@@ -342,6 +344,8 @@ pooch==1.8.2
     # via librosa
 portalocker==2.10.1
     # via sacrebleu
+pqdm==0.2.0
+    # via -r requirements-test.in
 propcache==0.2.0
     # via yarl
 protobuf==5.28.3
@@ -410,7 +414,7 @@ pyyaml==6.0.2
     #   ray
     #   timm
     #   transformers
-ray[adag]==2.35.0
+ray[adag]==2.40.0
     # via -r requirements-test.in
 redis==5.2.0
     # via tensorizer
@@ -506,7 +510,7 @@ tiktoken==0.7.0
     #   mistral-common
 timm==1.0.11
     # via -r requirements-test.in
-tokenizers==0.20.3
+tokenizers==0.21.0
     # via transformers
 torch==2.5.1
     # via
@@ -534,7 +538,7 @@ tqdm==4.66.6
     #   transformers
 tqdm-multiprocess==0.0.11
     # via lm-eval
-transformers==4.46.3
+transformers==4.47.0
     # via
     #   lm-eval
     #   peft

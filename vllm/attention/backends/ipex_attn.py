@@ -115,6 +115,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
@@ -146,6 +147,11 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
             raise NotImplementedError(
                 "IPEX backend does not support FP8 KV cache. "
                 "Please use xFormers backend instead.")
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "IpexAttnBackendImpl")
 
     def split_kv_cache(
         self,
@@ -172,7 +178,6 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         attn_metadata: IpexAttnMetadata,  # type: ignore
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with IPEX varlen_attention and PagedAttention.
@@ -189,11 +194,6 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
             shape = [num_tokens, num_heads * head_size]
         """
         assert k_scale == 1.0 and v_scale == 1.0
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "IpexAttnBackendImpl")
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)

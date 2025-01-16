@@ -15,9 +15,18 @@ if current_platform.is_hpu():
     ops.scaled_fp8_quant = scaled_fp8_quant
 
 
+def sparse_cutlass_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+
+    return ops.cutlass_sparse_scaled_mm_supported(capability)
+
+
 def cutlass_fp8_supported() -> bool:
-    # cutlass is not supported on Rocm
-    if current_platform.is_rocm():
+    if not current_platform.is_cuda():
         return False
 
     capability_tuple = current_platform.get_device_capability()
@@ -149,19 +158,12 @@ def apply_fp8_linear(
 
         if per_tensor_weights and per_tensor_activations:
             # Fused GEMM_DQ
-            if current_platform.is_hpu():
-                #hpu does not support torch._scaled_mm (SW-197036)
-                output = torch.ops.hpu.fp8_gemm_v2(qinput, False, weight,
-                                                   False, None, input.dtype,
-                                                   x_scale, weight_scale, None,
-                                                   False)
-            else:
-                output = torch._scaled_mm(qinput,
-                                          weight,
-                                          out_dtype=input.dtype,
-                                          scale_a=x_scale,
-                                          scale_b=weight_scale,
-                                          bias=bias)
+            output = torch._scaled_mm(qinput,
+                                      weight,
+                                      out_dtype=input.dtype,
+                                      scale_a=x_scale,
+                                      scale_b=weight_scale,
+                                      bias=bias)
 
             # A fix for discrepancy in scaled_mm which returns tuple
             # for torch < 2.5 and a single value in torch >= 2.5
@@ -214,44 +216,6 @@ def apply_fp8_linear(
             if bias is not None:
                 output = output + bias
             return output.to(dtype=input.dtype).view(*output_shape)
-
-
-def apply_int8_linear(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    input_scale: Optional[torch.Tensor] = None,
-    input_zero_point: Optional[torch.Tensor] = None,
-    azp_adj: Optional[torch.Tensor] = None,
-    bias: Optional[torch.Tensor] = None,
-):
-    # ops.scaled_int8_quant supports both dynamic and static quant.
-    # * dynamic, layer.input_scale is None and x_scale computed from x.
-    # * static, layer.input_scale is scalar and x_scale is input_scale.
-    symmetric = azp_adj is None
-    x_q, x_scale, x_zp = ops.scaled_int8_quant(input,
-                                               input_scale,
-                                               input_zero_point,
-                                               symmetric=symmetric)
-
-    if x_zp is not None:
-        # Currently, static is always per-tensor and dynamic is per-token
-        static = input_zero_point is not None
-        azp = None if static else x_zp
-        return ops.cutlass_scaled_mm_azp(x_q,
-                                         weight,
-                                         scale_a=x_scale,
-                                         scale_b=weight_scale,
-                                         out_dtype=input.dtype,
-                                         azp_adj=azp_adj,
-                                         azp=azp,
-                                         bias=bias)
-    return ops.cutlass_scaled_mm(x_q,
-                                 weight,
-                                 scale_a=x_scale,
-                                 scale_b=weight_scale,
-                                 out_dtype=input.dtype,
-                                 bias=bias)
 
 
 def normalize_e4m3fn_to_e4m3fnuz(

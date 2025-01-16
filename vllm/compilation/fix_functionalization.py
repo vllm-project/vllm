@@ -6,7 +6,8 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
 from vllm.logger import init_logger
 
-from .vllm_inductor_pass import VllmInductorPass, is_func
+from .fx_utils import is_func
+from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 
@@ -53,14 +54,16 @@ class FixFunctionalizationPass(VllmInductorPass):
                 self.insert_defunctionalized(graph, node)
                 self._remove(node)
 
-            # These 2 replacements avoid the most copies for LLaMa.
+            # rms_norm replacements avoid the most copies for LLaMa.
             elif at_target == torch.ops._C.fused_add_rms_norm.default:
                 mutated_args = {1: 'input', 2: 'residual'}
                 self.defunctionalize(graph, node, mutated_args)
             elif at_target == torch.ops._C.fused_add_rms_norm_static_fp8_quant.default:  # noqa: E501
                 mutated_args = {1: 'result', 2: 'residual'}
                 self.defunctionalize(graph, node, mutated_args)
-
+            elif at_target == torch.ops._C.rms_norm_dynamic_per_token_quant.default:  # noqa: E501
+                mutated_args = {1: 'result', 2: 'scale', 3: 'residual'}
+                self.defunctionalize(graph, node, mutated_args)
             elif at_target in [
                     torch.ops._C.rms_norm.default,
                     torch.ops._C.rms_norm_static_fp8_quant.default

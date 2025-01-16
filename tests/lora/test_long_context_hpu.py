@@ -115,7 +115,7 @@ def lora_llm(long_context_infos):
     ]
 
     llm = vllm.LLM(
-        "meta-llama/Llama-2-13b-chat-hf",
+        "/mnt/weka/data/pytorch/llama2/Llama-2-13b-chat-hf",
         enable_lora=True,
         max_num_seqs=16,
         max_loras=2,
@@ -138,7 +138,7 @@ def test_rotary_emb_replaced(dist_init):
         from vllm.worker.hpu_model_runner import HPUModelRunner as ModelRunner
     else:
         from vllm.worker.model_runner import ModelRunner
-    engine_args = EngineArgs("meta-llama/Llama-2-7b-hf",
+    engine_args = EngineArgs("/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf",
                              long_lora_scaling_factors=(4.0, ),
                              enable_lora=True)
     engine_config = engine_args.create_engine_config()

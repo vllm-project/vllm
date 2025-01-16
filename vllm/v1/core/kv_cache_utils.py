@@ -1,12 +1,27 @@
 """KV-Cache Utilities."""
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, List, NamedTuple, Optional, Tuple
 
 from vllm.logger import init_logger
+from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
-BlockHashType = Tuple[int, Tuple[int]]
+
+class BlockHashType(NamedTuple):
+    """Hash value of a block (int), the token IDs in the block, and extra keys.
+    We keep a tuple of token IDs and extra keys to reduce the likelihood of
+    hash collisions when the hash value is the same. But please note that 
+    hash collisions can still theoretically occur, albeit with an extremely 
+    low probability.
+    """
+    # Hash value of the block in an integer.
+    hash_value: int
+    # Token IDs in the block.
+    token_ids: Tuple[int, ...]
+    # Extra keys for the block.
+    extra_keys: Optional[Any] = None
 
 
 @dataclass
@@ -72,8 +87,8 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks = len(blocks)
 
         # Initialize the doubly linked list of free blocks.
-        self.free_list_head = blocks[0]
-        self.free_list_tail = blocks[-1]
+        self.free_list_head: Optional[KVCacheBlock] = blocks[0]
+        self.free_list_tail: Optional[KVCacheBlock] = blocks[-1]
         for i in range(self.num_free_blocks):
             if i > 0:
                 blocks[i].prev_free_block = blocks[i - 1]
@@ -151,8 +166,80 @@ class FreeKVCacheBlockQueue:
         return ret
 
 
-def hash_block_tokens(parent_block_hash: Optional[int],
-                      curr_block_token_ids: Tuple[int]) -> BlockHashType:
+def generate_block_hash_extra_keys(
+        request: Request, start_token_idx: int, end_token_idx: int,
+        start_mm_idx: int) -> Tuple[Optional[Tuple[Any, ...]], int]:
+    """Generate extra keys for the block hash. The extra keys can come from
+    the multi-modal inputs and request specific metadata (e.g., LoRA ID).
+    For multi-modal inputs, the extra keys are (mm_hash, start_offset) that
+    indicate a mm input contained in the block and its starting offset in
+    the block tokens.
+    
+    Args:
+        request: The request object.
+        start_token_idx: The start token index of the block.
+        end_token_idx: The end token index of the block.
+        start_mm_idx: The start multi-modal index of the block.
+    
+    Returns:
+        A tuple of extra keys and the next multi-modal index.
+    """
+
+    mm_positions, mm_hashes = request.mm_positions, request.mm_hashes
+    if not mm_positions:
+        return None, start_mm_idx
+
+    if mm_positions and len(mm_positions) != len(mm_hashes):
+        raise ValueError(
+            "The number of multi-modal positions and hashes must match. This "
+            "is likely because you do not enable MM preprocessor hashing. "
+            "Please set disable_mm_preprocessor_cache=False.")
+
+    # Note that we assume mm_positions is sorted by offset.
+    # We do not need to check all mm inputs if the start token index is out of
+    # range. This usually happens in the late prefill phase and decoding phase.
+    if mm_positions[-1]["offset"] + mm_positions[-1][
+            "length"] < start_token_idx:
+        return None, start_mm_idx
+
+    # Support start_mm_idx == -1 to indicate the last mm input.
+    if start_mm_idx < 0:
+        assert -start_mm_idx <= len(mm_positions)
+        start_mm_idx = len(mm_positions) + start_mm_idx
+
+    extra_keys = []
+    curr_mm_idx = start_mm_idx
+    while mm_positions and curr_mm_idx < len(mm_positions):
+        assert mm_hashes[curr_mm_idx] is not None
+        offset = mm_positions[curr_mm_idx]["offset"]
+        length = mm_positions[curr_mm_idx]["length"]
+        if end_token_idx > offset:
+            if start_token_idx > offset + length:
+                # This block has passed the current mm input.
+                curr_mm_idx += 1
+                continue
+
+            # The block contains the current mm input.
+            extra_keys.append(mm_hashes[curr_mm_idx])
+
+            if end_token_idx >= offset + length:
+                # If this block contains the end of the current mm input,
+                # move to the next mm input as this block may also contain
+                # the next mm input.
+                curr_mm_idx += 1
+            else:
+                # Otherwise this block is done with mm inputs.
+                break
+        else:
+            # This block has not reached the current mm input.
+            break
+    return tuple(extra_keys), curr_mm_idx
+
+
+def hash_block_tokens(
+        parent_block_hash: Optional[int],
+        curr_block_token_ids: Sequence[int],
+        extra_keys: Optional[Tuple[Any, ...]] = None) -> BlockHashType:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
     prefix caching. We use LRU cache for this function to avoid recomputing
@@ -164,38 +251,57 @@ def hash_block_tokens(parent_block_hash: Optional[int],
     Args:
         parent_block_hash: The hash of the parent block. None
             if this is the first block.
-        curr_block_token_ids: A tuple of token ids in the current
+        curr_block_token_ids: A list of token ids in the current
             block. The current block is assumed to be full.
+        extra_keys: Extra keys for the block.
 
     Returns:
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
     """
-    return (hash(
-        (parent_block_hash, *curr_block_token_ids)), curr_block_token_ids)
+    return BlockHashType(hash((parent_block_hash, *curr_block_token_ids)),
+                         tuple(curr_block_token_ids), extra_keys)
 
 
 def hash_request_tokens(block_size: int,
-                        token_ids: List[int]) -> List[BlockHashType]:
+                        request: Request) -> List[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
     Args:
         block_size: The size of each block.
-        token_ids: A sequence of token ids in the request.
+        request: The request object.
 
     Returns:
         The list of computed hash values.
     """
+    token_ids = request.all_token_ids
+    mm_positions, mm_hashes = request.mm_positions, request.mm_hashes
+    if mm_positions and len(mm_positions) != len(mm_hashes):
+        raise ValueError(
+            "The number of multi-modal positions and hashes must match.")
+
+    # TODO: Extend this to support other features such as LoRA.
+    need_extra_keys = bool(mm_positions)
+    extra_keys = None
+    curr_mm_idx = 0
+
     ret = []
-    parent_block_hash = None
+    parent_block_hash_value = None
     for start in range(0, len(token_ids), block_size):
         end = start + block_size
-        block_token_ids = tuple(token_ids[start:end])
+        block_token_ids = token_ids[start:end]
         # Do not hash the block if it is not full.
         if len(block_token_ids) < block_size:
             break
-        block_hash = hash_block_tokens(parent_block_hash, block_token_ids)
+
+        # Add extra keys if the block is a multi-modal block.
+        if need_extra_keys:
+            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                request, start, end, curr_mm_idx)
+
+        block_hash = hash_block_tokens(parent_block_hash_value,
+                                       block_token_ids, extra_keys)
         ret.append(block_hash)
-        parent_block_hash = block_hash
+        parent_block_hash_value = block_hash.hash_value
     return ret
