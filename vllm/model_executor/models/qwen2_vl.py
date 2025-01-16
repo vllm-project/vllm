@@ -1205,7 +1205,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             self.visual.dtype)
         video_embeds = self.visual(pixel_values_videos,
                                    grid_thw=video_input["video_grid_thw"])
-        print(video_embeds.shape)
         return video_embeds
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
@@ -1256,7 +1255,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 video_input = modalities["videos"]
                 video_embeddings = self._process_video_input(video_input)
                 multimodal_embeddings += tuple(video_embeddings)
-        #print(multimodal_embeddings)
+
         return multimodal_embeddings
 
     def get_input_embeddings(
