@@ -309,20 +309,18 @@ def test_memory_profiling():
         # Add some extra non-torch memory 256 MiB (simulate NCCL)
         handle2 = lib.cudaMalloc(256 * 1024 * 1024)
 
-    print(result)
     # this is an analytic value, it is exact,
     # we only have 256 MiB non-torch memory increase
     measured_diff = monitored_values.values[-1] - monitored_values.values[0]
     assert measured_diff == 256 * 1024 * 1024
 
     # Check that the memory usage is within 5% of the expected values
-    # 5% tolerance is caused by PyTorch caching allocator,
-    # we cannot control PyTorch's behavior of its internal buffers,
+    # 5% tolerance is caused by cuda runtime.
+    # we cannot control cuda runtime in the granularity of bytes,
     # which causes a small error (<10 MiB in practice)
     non_torch_ratio = result.non_torch_increase / (256 * 1024 * 1024) # noqa
-    torch_peak_ratio = result.torch_peak_increase / (1024 * 1024 * 1024) # noqa
     assert abs(non_torch_ratio - 1) <= 0.05
-    assert abs(torch_peak_ratio - 1) <= 0.05
+    assert result.torch_peak_increase == 1024 * 1024 * 1024
     del weights
     lib.cudaFree(handle1)
     lib.cudaFree(handle2)
