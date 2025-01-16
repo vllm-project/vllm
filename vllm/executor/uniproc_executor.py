@@ -68,6 +68,11 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model.
         """
+        assert self.vllm_config.parallel_config.pipeline_parallel_size == 1, \
+            "ExecutorWithExternalLauncher does not support pipeline parallelism."
+        assert self.vllm_config.scheduler_config.delay_factor == 0.0, \
+            ("ExecutorWithExternalLauncher needs deterministic execution, so it"
+            "does not support delay_factor in scheduling")
         self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
                                                rpc_rank=0)
         # engines are launched in torchrun-compatible launchers
