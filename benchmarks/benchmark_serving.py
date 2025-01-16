@@ -1228,13 +1228,12 @@ if __name__ == "__main__":
         'always use the slow tokenizer. \n* '
         '"mistral" will always use the `mistral_common` tokenizer.')
 
-    parser.add_argument(
-        "--served-model-name",
-        type=str,
-        default=None,
-        help="The model name used in the API. "
-             "If not specified, the model name will be the "
-             "same as the ``--model`` argument. ")
+    parser.add_argument("--served-model-name",
+                        type=str,
+                        default=None,
+                        help="The model name used in the API. "
+                        "If not specified, the model name will be the "
+                        "same as the ``--model`` argument. ")
 
     args = parser.parse_args()
     main(args)

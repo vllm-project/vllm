@@ -44,8 +44,8 @@ class RequestFuncOutput:
 
 
 async def async_request_tgi(
-        request_func_input: RequestFuncInput,
-        pbar: Optional[tqdm] = None,
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
@@ -116,8 +116,8 @@ async def async_request_tgi(
 
 
 async def async_request_trt_llm(
-        request_func_input: RequestFuncInput,
-        pbar: Optional[tqdm] = None,
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
@@ -183,8 +183,8 @@ async def async_request_trt_llm(
 
 
 async def async_request_deepspeed_mii(
-        request_func_input: RequestFuncInput,
-        pbar: Optional[tqdm] = None,
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert request_func_input.best_of == 1
@@ -226,8 +226,8 @@ async def async_request_deepspeed_mii(
 
 
 async def async_request_openai_completions(
-        request_func_input: RequestFuncInput,
-        pbar: Optional[tqdm] = None,
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
@@ -317,8 +317,8 @@ async def async_request_openai_completions(
 
 
 async def async_request_openai_chat_completions(
-        request_func_input: RequestFuncInput,
-        pbar: Optional[tqdm] = None,
+    request_func_input: RequestFuncInput,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
@@ -420,10 +420,10 @@ def get_model(pretrained_model_name_or_path: str) -> str:
 
 
 def get_tokenizer(
-        pretrained_model_name_or_path: str,
-        tokenizer_mode: str = "auto",
-        trust_remote_code: bool = False,
-        **kwargs,
+    pretrained_model_name_or_path: str,
+    tokenizer_mode: str = "auto",
+    trust_remote_code: bool = False,
+    **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     if pretrained_model_name_or_path is not None and not os.path.exists(
             pretrained_model_name_or_path):
