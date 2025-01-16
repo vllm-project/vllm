@@ -1026,13 +1026,11 @@ class EngineArgs:
             logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config)
 
-    def create_load_config(self, load_device=None) -> LoadConfig:
-        if load_device is None:
-            load_device = DeviceConfig(device=self.device).device
+    def create_load_config(self) -> LoadConfig:
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
-            device=load_device,
+            device=self.weights_load_device,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
         )
@@ -1245,9 +1243,7 @@ class EngineArgs:
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
-        load_device = device_config.device if self.weights_load_device is \
-            None else self.weights_load_device
-        load_config = self.create_load_config(load_device)
+        load_config = self.create_load_config()
 
         prompt_adapter_config = PromptAdapterConfig(
             max_prompt_adapters=self.max_prompt_adapters,
