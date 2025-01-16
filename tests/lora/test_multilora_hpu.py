@@ -1,3 +1,4 @@
+from multiprocessing import Process
 from typing import List, Optional, Tuple
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
@@ -107,12 +108,24 @@ def _test_llama_multilora(sql_lora_files, tp_size):
 
 
 def test_llama_multilora_1x(sql_lora_files):
-    _test_llama_multilora(sql_lora_files, 1)
+    # Work-around to resolve stalling issue in multi-card scenario
+    p = Process(target=_test_llama_multilora, args=(sql_lora_files, 1))
+    p.start()
+    p.join()
+    assert p.exitcode == 0
 
 
 def test_llama_multilora_2x(sql_lora_files):
-    _test_llama_multilora(sql_lora_files, 2)
+    # Work-around to resolve stalling issue in multi-card scenario
+    p = Process(target=_test_llama_multilora, args=(sql_lora_files, 2))
+    p.start()
+    p.join()
+    assert p.exitcode == 0
 
 
 def test_llama_multilora_4x(sql_lora_files):
-    _test_llama_multilora(sql_lora_files, 4)
+    # Work-around to resolve stalling issue in multi-card scenario
+    p = Process(target=_test_llama_multilora, args=(sql_lora_files, 4))
+    p.start()
+    p.join()
+    assert p.exitcode == 0
