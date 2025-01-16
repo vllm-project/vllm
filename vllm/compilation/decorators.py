@@ -18,12 +18,15 @@ from .monitor import start_monitoring_torch_compile
 logger = init_logger(__name__)
 
 _T = TypeVar("_T", bound=type[nn.Module])
+DimIndexes = Union[int, List[int]]
+DimIndexesSelector = Callable[[torch.Tensor], DimIndexes]
 
 
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: Optional[Dict[str, Union[int, List[int]]]],
+    dynamic_arg_dims: Optional[Dict[str, Union[DimIndexes,
+                                               DimIndexesSelector]]],
 ) -> Callable[[_T], _T]:
     ...
 
@@ -36,7 +39,8 @@ def support_torch_compile(cls: _T) -> _T:
 def support_torch_compile(
     cls: Optional[_T] = None,
     *,
-    dynamic_arg_dims: Optional[Dict[str, Union[int, List[int]]]] = None,
+    dynamic_arg_dims: Optional[Dict[str, Union[DimIndexes,
+                                               DimIndexesSelector]]] = None,
 ) -> Union[Callable[[_T], _T], _T]:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -78,6 +82,9 @@ def support_torch_compile(
 
     - if it is a single integer, the corresponding dimension of the argument
         will be marked as dynamic.
+    - if it is a function returns a single integer, it will be called with 
+        the tensor as argument, and the returned dimension will be marked 
+        as dynamic.
     - if it is `None`, ignored.
     - if it is `IntermediateTensors`, all the tensors in the intermediate
         tensors will be marked as dynamic.
@@ -129,7 +136,7 @@ def support_torch_compile(
 
 def _support_torch_compile(
     cls: _T,
-    dynamic_arg_dims: Dict[str, Union[int, List[int]]],
+    dynamic_arg_dims: Dict[str, Union[DimIndexes, DimIndexesSelector]],
 ) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -178,10 +185,12 @@ def _support_torch_compile(
                 arg = bound_args.arguments.get(k)
                 if arg is not None:
                     if isinstance(arg, torch.Tensor):
-                        torch._dynamo.mark_dynamic(arg, dims)
+                        dims_ = dims(arg) if callable(dims) else dims
+                        torch._dynamo.mark_dynamic(arg, dims_)
                     elif isinstance(arg, IntermediateTensors):
                         for tensor in arg.tensors.values():
-                            torch._dynamo.mark_dynamic(tensor, dims)
+                            dims_ = dims(tensor) if callable(dims) else dims
+                            torch._dynamo.mark_dynamic(tensor, dims_)
                     else:
                         raise ValueError(
                             "Unsupported dynamic dimensions"

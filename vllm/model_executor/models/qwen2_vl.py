@@ -67,7 +67,7 @@ from vllm.transformers_utils.config import uses_mrope
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper,
-                    init_vllm_registered_model, maybe_prefix)
+                    init_vllm_registered_model, maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
@@ -709,6 +709,7 @@ class Qwen2MultiModalDataParser(MultiModalDataParser):
         return super()._parse_video_data(data)
 
 
+
 class Qwen2VLProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self):
@@ -935,6 +936,7 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
 
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
                                  ):
+    _placeholder_map: Optional[dict[str, list[int]]] = None
 
     def _get_data_parser(self) -> MultiModalDataParser:
         return Qwen2MultiModalDataParser()
@@ -949,19 +951,23 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
         image_processor = self.info.get_image_processor(
             **hf_processor_mm_kwargs)
 
-        # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
-        # image_token and video_token registered
-        placeholder = {
-            "image": hf_processor.image_token,
-            "video": hf_processor.video_token,
-        }
+        if not self._placeholder_map:
+            # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
+            # image_token and video_token registered
+            encode_fn = hf_processor.tokenizer.encode
+            self._placeholder_map = {
+                "image": encode_fn(hf_processor.image_token),
+                "video": encode_fn(hf_processor.video_token),
+            }
+        placeholder = self._placeholder_map
+
         merge_length = image_processor.merge_size**2
 
         def get_replacement_qwen2vl(item_idx: int, modality: str):
             grid_thw = out_mm_kwargs[f"{modality}_grid_thw"][item_idx]
             assert isinstance(grid_thw, torch.Tensor)
 
-            num_tokens = grid_thw.prod() // merge_length
+            num_tokens = grid_thw.prod().item() // merge_length
             return placeholder[modality] * num_tokens
 
         return [
@@ -1038,6 +1044,16 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     embedding_modules = {}
     embedding_padding_modules = []
 
+    # BitandBytes specific attributes
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "q_proj": ("qkv_proj", 0),
+        "k_proj": ("qkv_proj", 1),
+        "v_proj": ("qkv_proj", 2),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
         "lm_head.": "language_model.lm_head.",
@@ -1047,11 +1063,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: Qwen2VLConfig = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        assert not cache_config.enable_prefix_caching, \
-            "Qwen2-VL currently does not support prefix caching"
 
         self.config = config
         self.multimodal_config = multimodal_config
@@ -1192,7 +1205,23 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             self.visual.dtype)
         video_embeds = self.visual(pixel_values_videos,
                                    grid_thw=video_input["video_grid_thw"])
+        print(video_embeds.shape)
         return video_embeds
+
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
+        modalities = {}
+
+        # Preserve the order of modalities if there are multiple of them
+        # from the order of kwargs.
+        for input_key in kwargs:
+            if input_key == "pixel_values" and "images" not in modalities:
+                modalities["images"] = self._parse_and_validate_image_input(
+                    **kwargs)
+            if input_key == "pixel_values_videos" and "videos" not in modalities:  # noqa E501
+                modalities["videos"] = self._parse_and_validate_video_input(
+                    **kwargs)
+
+        return modalities
 
     def _merge_multimodal_embeddings(
         self,
@@ -1208,25 +1237,26 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_multimodal_embeddings(
             self, **kwargs) -> Optional[List[Tuple[NestedTensors, str]]]:
 
-        image_input = self._parse_and_validate_image_input(**kwargs)
-        video_input = self._parse_and_validate_video_input(**kwargs)
-        if image_input is None and video_input is None:
+        modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
+        if not modalities:
             return None
 
-        # We make a tuple of each embedding with its modality string. This is a
-        # temporary workaround for models to handle mixed modalities when
-        # get_multimodal_embeddings and get_input_embeddings are called
-        # separately.
-        # TODO(ywang96): Add support for mixed-modality inference for v1.
-        multimodal_embeddings: List[Tuple[NestedTensors, str]] = []
+        # The result multimodal_embeddings is tuple of tensors, with each
+        # tensor correspoending to a multimodal data item (image or video).
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
-        if image_input is not None:
-            image_embeds = self._process_image_input(image_input)
-            multimodal_embeddings.append((image_embeds, "image"))
-        if video_input is not None:
-            video_embeds = self._process_video_input(video_input)
-            multimodal_embeddings.append((video_embeds, "video"))
-
+        # NOTE: It is important to iterate over the keys in this dictionary
+        # to preserve the order of the modalities.
+        for modality in modalities:
+            if modality == "images":
+                image_input = modalities["images"]
+                vision_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += tuple(vision_embeddings)
+            if modality == "videos":
+                video_input = modalities["videos"]
+                video_embeddings = self._process_video_input(video_input)
+                multimodal_embeddings += tuple(video_embeddings)
+        #print(multimodal_embeddings)
         return multimodal_embeddings
 
     def get_input_embeddings(
@@ -1237,21 +1267,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            for embeddings, modality in multimodal_embeddings:
-                if modality == "image":
-                    inputs_embeds = self._merge_multimodal_embeddings(
-                        input_ids,
-                        inputs_embeds,
-                        embeddings,
-                        placeholder_token_id=self.config.image_token_id,
-                    )
-                if modality == "video":
-                    inputs_embeds = self._merge_multimodal_embeddings(
-                        input_ids,
-                        inputs_embeds,
-                        embeddings,
-                        placeholder_token_id=self.config.video_token_id,
-                    )
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                [self.config.image_token_id, self.config.video_token_id])
         return inputs_embeds
 
     def forward(
