@@ -759,7 +759,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - Ultravox
   - T + A<sup>E+</sup>
   - `fixie-ai/ultravox-v0_3`
-  -
+  - ✅︎
   - ✅︎
   - ✅︎
 ```
