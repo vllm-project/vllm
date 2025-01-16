@@ -146,6 +146,7 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
         return (unpadded_features, newline_features)
 
     def get_image_size_with_most_features(self) -> ImageSize:
+        # NOTE: This hardcoded value is found via processor tests
         return ImageSize(width=1153, height=944)
 
     def _get_num_frame_tokens(
