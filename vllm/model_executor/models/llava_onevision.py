@@ -37,6 +37,7 @@ from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
+_MAX_IMAGE_SIZE = 8686
 
 
 class LlavaOnevisionVideoPixelInputs(TypedDict):
@@ -100,6 +101,18 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
+
+    def get_max_image_tokens(self) -> int:
+
+        target_width, target_height = self.get_image_size_with_most_features()
+
+        # FIXME: This is in fact not accurate and we compare with a known
+        # max image size.
+        return max(
+            self.get_num_image_tokens(
+                image_width=target_width,
+                image_height=target_height,
+            ), _MAX_IMAGE_SIZE)
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         return {
