@@ -176,3 +176,12 @@ for name, p in train_model.named_parameters():
 # check if the weights are updated.
 assert all(ray.get(
     llm.collective_rpc.remote("check_weights_changed")))
+
+# use the updated model to generate texts, they will be nonsense
+# because the weights are all zeros.
+outputs_updated = ray.get(llm.generate.remote(prompts, sampling_params))
+for output in outputs_updated:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, "
+          f"Generated text: {generated_text!r}")
