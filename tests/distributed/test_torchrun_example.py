@@ -1,9 +1,10 @@
 # unit test for `examples/offline_inference/torchrun_example.py`
 
+import random
+
 import torch.distributed as dist
 
 from vllm import LLM, SamplingParams
-import random
 from vllm.distributed.parallel_state import get_world_group
 
 # Create prompts

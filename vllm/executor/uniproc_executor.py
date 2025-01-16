@@ -116,10 +116,11 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         """
         Determine the number of available KV blocks.
         Add an additional all_reduce to get the min across all ranks.
-        note that even if we have the same `gpu_memory_utilization` and `swap_space`,
-        the available memory in every rank might still differ because NCCL can take
-        different amount of memory in different ranks, therefore it is necessary to
-        test if all ranks agree on the same kv cache configuration.
+        Note that even if we have the same `gpu_memory_utilization` and 
+        `swap_space`, the available memory in every rank might still 
+        differ because NCCL can take different amounts of memory in 
+        different ranks. Therefore, it is necessary to test if all ranks 
+        agree on the same KV cache configuration.
         """
         a, b = super().determine_num_available_blocks()
         from vllm.distributed.parallel_state import get_world_group
