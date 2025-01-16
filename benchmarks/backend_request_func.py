@@ -22,6 +22,7 @@ class RequestFuncInput:
     prompt_len: int
     output_len: int
     model: str
+    model_name: str = None
     best_of: int = 1
     logprobs: Optional[int] = None
     extra_body: Optional[dict] = None
@@ -43,8 +44,8 @@ class RequestFuncOutput:
 
 
 async def async_request_tgi(
-    request_func_input: RequestFuncInput,
-    pbar: Optional[tqdm] = None,
+        request_func_input: RequestFuncInput,
+        pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
@@ -78,7 +79,7 @@ async def async_request_tgi(
                             continue
                         chunk_bytes = chunk_bytes.decode("utf-8")
 
-                        #NOTE: Sometimes TGI returns a ping response without
+                        # NOTE: Sometimes TGI returns a ping response without
                         # any data, we should skip it.
                         if chunk_bytes.startswith(":"):
                             continue
@@ -115,8 +116,8 @@ async def async_request_tgi(
 
 
 async def async_request_trt_llm(
-    request_func_input: RequestFuncInput,
-    pbar: Optional[tqdm] = None,
+        request_func_input: RequestFuncInput,
+        pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
@@ -182,8 +183,8 @@ async def async_request_trt_llm(
 
 
 async def async_request_deepspeed_mii(
-    request_func_input: RequestFuncInput,
-    pbar: Optional[tqdm] = None,
+        request_func_input: RequestFuncInput,
+        pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         assert request_func_input.best_of == 1
@@ -225,8 +226,8 @@ async def async_request_deepspeed_mii(
 
 
 async def async_request_openai_completions(
-    request_func_input: RequestFuncInput,
-    pbar: Optional[tqdm] = None,
+        request_func_input: RequestFuncInput,
+        pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
@@ -235,7 +236,8 @@ async def async_request_openai_completions(
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         payload = {
-            "model": request_func_input.model,
+            "model": request_func_input.model_name \
+                if request_func_input.model_name else request_func_input.model,
             "prompt": request_func_input.prompt,
             "temperature": 0.0,
             "best_of": request_func_input.best_of,
@@ -315,8 +317,8 @@ async def async_request_openai_completions(
 
 
 async def async_request_openai_chat_completions(
-    request_func_input: RequestFuncInput,
-    pbar: Optional[tqdm] = None,
+        request_func_input: RequestFuncInput,
+        pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
@@ -328,7 +330,8 @@ async def async_request_openai_chat_completions(
         if request_func_input.multi_modal_content:
             content.append(request_func_input.multi_modal_content)
         payload = {
-            "model": request_func_input.model,
+            "model": request_func_input.model_name \
+                if request_func_input.model_name else request_func_input.model,
             "messages": [
                 {
                     "role": "user",
@@ -417,10 +420,10 @@ def get_model(pretrained_model_name_or_path: str) -> str:
 
 
 def get_tokenizer(
-    pretrained_model_name_or_path: str,
-    tokenizer_mode: str = "auto",
-    trust_remote_code: bool = False,
-    **kwargs,
+        pretrained_model_name_or_path: str,
+        tokenizer_mode: str = "auto",
+        trust_remote_code: bool = False,
+        **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     if pretrained_model_name_or_path is not None and not os.path.exists(
             pretrained_model_name_or_path):
