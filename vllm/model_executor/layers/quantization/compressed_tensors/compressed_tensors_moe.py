@@ -441,7 +441,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         device = layer.w13_weight_g_idx.device
 
         # when running models with grouped act order,
-        # resort g_idx values provided
+        # resort to g_idx values provided in checkpoint
         if self.actorder == "group":
             w13_g_idx_sort_indices = torch.empty_like(layer.w13_weight_g_idx)
             w2_g_idx_sort_indices = torch.empty_like(layer.w2_weight_g_idx)
