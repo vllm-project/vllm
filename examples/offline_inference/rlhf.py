@@ -1,4 +1,16 @@
-# a simple demonstration of RLHF with VLLM.
+"""
+a simple demonstration of RLHF with vLLM, inspired by
+the OpenRLHF framework https://github.com/OpenRLHF/OpenRLHF .
+It follows the design that, training processes and inference processes
+are different, and they live on different GPUs.
+Training processes send prompts to inference processes to generate data,
+and also synchronize the weights of the model by broadcasting the weights
+from the training process to the inference process.
+Note that this is a simple demonstration of one training instance and one
+inference instance. In practice, there could be multiple training instances
+and multiple inference instances. For the full implementation, please refer
+to the OpenRLHF framework.
+"""
 import os
 
 import ray
@@ -12,10 +24,15 @@ from vllm.utils import get_ip, get_open_port
 from vllm.worker.worker import Worker
 
 
-# recommended way to create data-plane communication
-# between external (train processes) and VLLM workers.
 def stateless_init_process_group(master_address, master_port, rank, world_size,
                                  device):
+    """
+    vLLM provides `StatelessProcessGroup` to create a process group
+    without considering the global process group in torch.distributed.
+    It is recommended to create `StatelessProcessGroup`, and then initialize
+    the data-plane communication (NCCL) between external (train processes) 
+    and vLLM workers.
+    """
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.utils import StatelessProcessGroup
     pg = StatelessProcessGroup.create(host=master_address,
@@ -26,9 +43,13 @@ def stateless_init_process_group(master_address, master_port, rank, world_size,
     return pynccl
 
 
-# inference code, inherit from Worker to provide custom functions
 class MyWorker(Worker):
-
+    """
+    The `MyWorker` class inherits from `Worker` to provide custom functions.
+    For simplicity, we define the `MyWorker` class in this self-contained script.
+    Normally, we should define the `MyWorker` class in a separate file and pass
+    the qualified name of the class to the `worker_cls` parameter.
+    """
     def init_weight_update_group(self, master_address, master_port,
                                  rank_offset, world_size):
         from vllm.distributed.parallel_state import get_world_group
@@ -51,30 +72,41 @@ class MyWorker(Worker):
 
         del weight
 
-    def get_weight_square_sum(self):
-        sum_value = 0.0
+    def check_weights_changed(self):
+        """
+        Check if the weights are updated to 0.
+        """
+        weights_updated = False
         for name, p in self.model_runner.model.named_parameters():
-            sum_value += p.square().sum().item()
-        return sum_value
-
+            weights_updated = weights_updated and torch.allclose(p, torch.zeros_like(p))
+        return weights_updated
 
 class MyLLM(LLM):
-
     def __init__(self, *args, **kwargs):
+        # a hack to make the script work.
         # stop ray from manipulating CUDA_VISIBLE_DEVICES
         # at the top-level
         del os.environ["CUDA_VISIBLE_DEVICES"]
         super().__init__(*args, **kwargs)
 
+"""
+Start the training process, here we use huggingface transformers 
+as an example to hold a model on GPU 0.
 
-# current process is a training process, and it takes 1 GPU.
-# important: set some common environment variables the same as vLLM workers.
+It is important for all the processes outside of vLLM to call
+`configure_as_vllm_process` to set some common environment variables
+the same as vLLM workers.
+"""
 configure_as_vllm_process()
 
 train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
 train_model.to("cuda:0")
 
-# start ray with 2 GPUs
+"""
+Start the inference process, here we use vLLM to hold a model on GPU 1 and GPU 2.
+For the details on how to use ray, please refer to the ray documentation
+https://docs.ray.io/en/latest/ .
+"""
 os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
 ray.init()
 
@@ -86,11 +118,10 @@ scheduling_inference = PlacementGroupSchedulingStrategy(
     placement_group_bundle_index=0,
 )
 
-# inferencing engine, it takes 2 GPUs.
-# for simplicity, we define the MyWorker class in this self-contained script.
-# normally, we should define the MyWorker class in a separate file and pass
-# the qualified name of the class to the worker_cls parameter.
-# here we use `enforce_eager` to reduce test time.
+"""
+launch the vLLM inference engine.
+here we use `enforce_eager` to reduce the start time.
+"""
 llm = ray.remote(
     num_cpus=0,
     num_gpus=0,
@@ -113,12 +144,18 @@ prompts = [
 
 sampling_params = SamplingParams(temperature=0)
 
-outputs_original = ray.get(llm.generate.remote(prompts, sampling_params))
+outputs = ray.get(llm.generate.remote(prompts, sampling_params))
 
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, "
+          f"Generated text: {generated_text!r}")
+
+# set up the communication between the training process and the inference engine.
 master_address = get_ip()
 master_port = get_open_port()
 
-# set up the connection between the training process and the inference engine.
 handle = llm.collective_rpc.remote("init_weight_update_group",
                                    args=(master_address, master_port, 1, 3))
 model_update_group = stateless_init_process_group(master_address, master_port,
@@ -137,16 +174,5 @@ for name, p in train_model.named_parameters():
     ray.get(handle)
 
 # check if the weights are updated.
-weight_square_sum_values = ray.get(
-    llm.collective_rpc.remote("get_weight_square_sum"))
-for x in weight_square_sum_values:
-    assert x == 0.0
-
-# use the updated model to generate texts.
-outputs_updated = ray.get(llm.generate.remote(prompts, sampling_params))
-
-# they should be different.
-for output_original, output_updated in zip(outputs_original, outputs_updated):
-    generated_text_original = output_original.outputs[0].text
-    generated_text_updated = output_updated.outputs[0].text
-    assert generated_text_original != generated_text_updated
+assert all(ray.get(
+    llm.collective_rpc.remote("check_weights_changed")))
