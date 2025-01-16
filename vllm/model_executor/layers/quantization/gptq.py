@@ -1,13 +1,14 @@
 import enum
 from enum import Enum
 from fractions import Fraction
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -30,11 +31,13 @@ class GPTQConfig(QuantizationConfig):
         group_size: int,
         desc_act: bool,
         lm_head_quantized: bool,
+        modules_to_not_convert: Optional[List[str]] = None,
     ) -> None:
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act
         self.lm_head_quantized = lm_head_quantized
+        self.modules_to_not_convert = modules_to_not_convert or []
         self.pack_factor = Fraction(32, self.weight_bits)
         if self.weight_bits not in [2, 3, 4, 8]:
             raise ValueError(
@@ -44,8 +47,9 @@ class GPTQConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return (f"GPTQConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
-                f"desc_act={self.desc_act}),"
-                f"lm_head_quantized={self.lm_head_quantized}")
+                f"desc_act={self.desc_act}), "
+                f"lm_head_quantized={self.lm_head_quantized}, "
+                f"modules_to_not_convert={self.modules_to_not_convert}")
 
     @classmethod
     def get_name(cls) -> str:
@@ -71,14 +75,25 @@ class GPTQConfig(QuantizationConfig):
         desc_act = cls.get_from_keys(config, ["desc_act"])
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
                                                  default=False)
-        return cls(weight_bits, group_size, desc_act, lm_head_quantized)
+        modules_to_not_convert = cls.get_from_keys_or(
+            config, ["modules_to_not_convert"], None)
+        return cls(weight_bits, group_size, desc_act, lm_head_quantized,
+                   modules_to_not_convert)
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["GPTQLinearMethod"]:
-        if (isinstance(layer, LinearBase) or
-            (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Optional[Union["GPTQLinearMethod", "UnquantizedLinearMethod"]]:
+        if isinstance(layer, ParallelLMHead) and self.lm_head_quantized:
             return GPTQLinearMethod(self)
+        elif isinstance(layer, LinearBase):
+            if not self.is_layer_skipped_gptq(prefix):
+                return GPTQLinearMethod(self)
+            return UnquantizedLinearMethod()
         return None
+
+    def is_layer_skipped_gptq(self, prefix: str):
+        return any(module_name in prefix
+                   for module_name in self.modules_to_not_convert)
 
 
 class ExllamaState(Enum):

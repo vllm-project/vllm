@@ -1,11 +1,12 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.parameter import (BasevLLMParameter,
@@ -35,6 +36,7 @@ class GPTQMarlin24Config(QuantizationConfig):
         self,
         weight_bits: int,
         group_size: int,
+        modules_to_not_convert: Optional[List[str]] = None,
     ) -> None:
         quant_type = {
             4: scalar_types.uint4b8,
@@ -42,6 +44,7 @@ class GPTQMarlin24Config(QuantizationConfig):
         }.get(weight_bits)
 
         self.group_size = group_size
+        self.modules_to_not_convert = modules_to_not_convert or []
 
         # Verify
         if quant_type is None or \
@@ -78,8 +81,9 @@ class GPTQMarlin24Config(QuantizationConfig):
         self.perm_len = 1024
 
     def __repr__(self) -> str:
-        return "Marlin24Config(quant_type={}, group_size={})".format(
-            self.quant_type, self.group_size)
+        return (f"Marlin24Config(quant_type={self.quant_type}, "
+                f"group_size={self.group_size}, "
+                f"modules_to_not_convert={self.modules_to_not_convert}")
 
     @classmethod
     def get_name(cls) -> str:
@@ -102,7 +106,9 @@ class GPTQMarlin24Config(QuantizationConfig):
     def from_config(cls, config: Dict[str, Any]) -> "GPTQMarlin24Config":
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
-        return cls(weight_bits, group_size)
+        modules_to_not_convert = cls.get_from_keys_or(
+            config, ["modules_to_not_convert"], None)
+        return cls(weight_bits, group_size, modules_to_not_convert)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -121,11 +127,19 @@ class GPTQMarlin24Config(QuantizationConfig):
 
         return None
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["GPTQMarlin24LinearMethod"]:
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Optional[Union["GPTQMarlin24LinearMethod",
+                        "UnquantizedLinearMethod"]]:
         if isinstance(layer, LinearBase):
-            return GPTQMarlin24LinearMethod(self)
+            if not self.is_layer_skipped_gptq_marlin_24(prefix):
+                return GPTQMarlin24LinearMethod(self)
+            return UnquantizedLinearMethod()
         return None
+
+    def is_layer_skipped_gptq_marlin_24(self, prefix: str):
+        return any(module_name in prefix
+                   for module_name in self.modules_to_not_convert)
 
 
 class GPTQMarlin24LinearMethod(LinearMethodBase):

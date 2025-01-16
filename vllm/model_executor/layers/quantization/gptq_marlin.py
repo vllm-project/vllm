@@ -8,6 +8,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -45,6 +46,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         desc_act: bool,
         is_sym: bool,
         lm_head_quantized: bool,
+        modules_to_not_convert: Optional[List[str]] = None,
     ) -> None:
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
@@ -55,6 +57,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.group_size = group_size
         self.desc_act = desc_act
         self.lm_head_quantized = lm_head_quantized
+        self.modules_to_not_convert = modules_to_not_convert or []
 
         if (weight_bits, is_sym) not in self.TYPE_MAP:
             raise ValueError("Unsupported quantization config: "
@@ -66,7 +69,8 @@ class GPTQMarlinConfig(QuantizationConfig):
         return (f"GPTQMarlinConfig(quant_type={self.quant_type}, "
                 f"group_size={self.group_size}, "
                 f"desc_act={self.desc_act}, "
-                f"lm_head_quantized={self.lm_head_quantized})")
+                f"lm_head_quantized={self.lm_head_quantized}), "
+                f"modules_to_not_convert={self.modules_to_not_convert}")
 
     @classmethod
     def get_name(cls) -> str:
@@ -92,8 +96,10 @@ class GPTQMarlinConfig(QuantizationConfig):
         is_sym = cls.get_from_keys(config, ["sym"])
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
                                                  default=False)
+        modules_to_not_convert = cls.get_from_keys_or(
+            config, ["modules_to_not_convert"], None)
         return cls(weight_bits, group_size, desc_act, is_sym,
-                   lm_head_quantized)
+                   lm_head_quantized, modules_to_not_convert)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -118,13 +124,21 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional[Union["GPTQMarlinLinearMethod", "GPTQMarlinMoEMethod"]]:
-        if isinstance(layer, LinearBase) or (isinstance(layer, ParallelLMHead)
-                                             and self.lm_head_quantized):
+    ) -> Optional[Union["GPTQMarlinLinearMethod", "UnquantizedLinearMethod",
+                        "GPTQMarlinMoEMethod"]]:
+        if isinstance(layer, ParallelLMHead) and self.lm_head_quantized:
             return GPTQMarlinLinearMethod(self)
+        elif isinstance(layer, LinearBase):
+            if not self.is_layer_skipped_gptq_marlin(prefix):
+                return GPTQMarlinLinearMethod(self)
+            return UnquantizedLinearMethod()
         elif isinstance(layer, FusedMoE):
             return GPTQMarlinMoEMethod(self)
         return None
+
+    def is_layer_skipped_gptq_marlin(self, prefix: str):
+        return any(module_name in prefix
+                   for module_name in self.modules_to_not_convert)
 
     @classmethod
     def is_gptq_marlin_compatible(cls, quant_config: Dict[str, Any]):
