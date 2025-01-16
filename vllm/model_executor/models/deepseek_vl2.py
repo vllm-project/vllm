@@ -356,13 +356,18 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
             )
 
+        if self.text_config.topk_method == "noaux_tc":
+            architectures = ["DeepseekV3ForCausalLM"]
+        elif not self.text_config.use_mla:
+            architectures = ["DeepseekForCausalLM"]
+        else:
+            architectures = ["DeepseekV2ForCausalLM"]
+
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=self.text_config,
             prefix=maybe_prefix(prefix, "language"),
-            architectures=["DeepseekV3ForCausalLM"]
-            if self.text_config.topk_method == "noaux_tc" else
-            ["DeepseekV2ForCausalLM"],
+            architectures=architectures,
         )
 
         self.make_empty_intermediate_tensors = (
