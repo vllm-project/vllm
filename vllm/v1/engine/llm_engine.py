@@ -45,6 +45,10 @@ class LLMEngine:
         self.model_config = vllm_config.model_config
 
         # Tokenizer (+ ensure liveness if running in another process).
+        # Create tokenizer, which is needed...
+        # Q1: Is tokenizer needed in the critical path?...
+        # If detokenizer is only needed for user outputs.  Then tokenizer is on the critical path.
+        # User input needs to be tokenized for further processing...
         self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,

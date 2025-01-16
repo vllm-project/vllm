@@ -224,6 +224,7 @@ class LLM:
         )
         # Logic to switch between engines is done at runtime instead of import
         # to avoid import order issues
+        # This function will decide which engine to use, V0 or V1
         self.engine_class = self.get_engine_class()
         self.llm_engine = self.engine_class.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)

@@ -90,13 +90,15 @@ class IPEXAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by FlashAttention. "
                 f"Supported head sizes are: {support_head_sizes}.")
 
+    # TODO(gc): implement this logic...
+    # Where to invoke this logic? what is attn_metadata?
     def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: IPEXAttentionBackend,
+        attn_metadata: FlashAttentionMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
@@ -264,7 +266,6 @@ def ipex_llm_chunked_prefill(
     seq_len = attn_metadata.seq_start_loc[1:] - attn_metadata.seq_start_loc[:-1]
     context_len = seq_len - query_len
     if using_gqa_kernel:
-        print("using gqa kernel")
         # if using_gqa_kernel, then only the v1 kernel can be used
         out = vllm._C.ops.context_attention_forward_v1(query[:num_actual_tokens], key_cache, value_cache, attn_metadata.block_table, attn_metadata.query_start_loc, seq_len, context_len, attn_metadata.max_seq_len, torch.amax(context_len).item())
     elif value is None:

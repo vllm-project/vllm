@@ -90,6 +90,7 @@ class XPUModelRunner(GPUModelRunner):
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
         # Persistent batch.
+        # It seems that each ModelRunner have a InputBatch
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -147,6 +148,7 @@ class XPUModelRunner(GPUModelRunner):
                                                dtype=torch.int32,
                                                device="cpu",
                                                pin_memory=self.pin_memory)
+        self.context_len_cpu = torch.zeros(self.max_num_reqs, dtype=torch.int32, device="cpu", pin_memory=self.pin_memory)
         self.query_start_loc_np = self.query_start_loc_cpu.numpy()
         self.seq_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
                                              dtype=torch.int32,
@@ -155,17 +157,21 @@ class XPUModelRunner(GPUModelRunner):
         self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
+        # Total scheduled tokens
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
+        # Num reqs
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
+        # It seems that the block table is stored in CPU at first...
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
+        # Scheduled tokens are stored in this, max is stored in max
         num_scheduled_tokens = []
         max_num_scheduled_tokens = 0
         for req_id in self.input_batch.req_ids[:num_reqs]:
@@ -230,8 +236,10 @@ class XPUModelRunner(GPUModelRunner):
         np.cumsum(num_scheduled_tokens,
                   out=self.query_start_loc_np[1:num_reqs + 1])
 
+        # Here we can get seq_lens
         seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
                     num_scheduled_tokens)
+        context_lens = self.input_batch.num_computed_tokens_cpu[:num_reqs]
         max_seq_len = seq_lens.max()
         self.seq_start_loc_np[0] = 0
         np.cumsum(seq_lens, out=self.seq_start_loc_np[1:num_reqs + 1])
