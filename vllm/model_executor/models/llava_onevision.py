@@ -19,8 +19,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
-from vllm.multimodal.parse import (MultiModalDataItems, VideoEmbeddingItems,
-                                   VideoProcessorItems)
+from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
+                                   VideoEmbeddingItems, VideoProcessorItems)
 from vllm.multimodal.processing import PromptReplacement
 from vllm.multimodal.profiling import ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -37,7 +37,6 @@ from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
-_MAX_IMAGE_SIZE_PLACEHOLDER = 12288
 
 
 class LlavaOnevisionVideoPixelInputs(TypedDict):
@@ -102,17 +101,6 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
 
-    def get_max_image_tokens(self) -> int:
-
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        # FIXME: This is in fact not accurate and we compare with a placeholder.
-        return max(
-            self.get_num_image_tokens(
-                image_width=target_width,
-                image_height=target_height,
-            ), _MAX_IMAGE_SIZE_PLACEHOLDER)
-
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         return {
             "image": self.get_max_image_tokens(),
@@ -156,6 +144,9 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
             newline_features = height_factor
 
         return (unpadded_features, newline_features)
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        return ImageSize(width=1153, height=944)
 
     def _get_num_frame_tokens(
         self,
