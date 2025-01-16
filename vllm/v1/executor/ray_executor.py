@@ -278,7 +278,7 @@ class RayExecutor(Executor):
         return ray.get(ray_worker_refs)
 
     def get_model(self) -> nn.Module:
-        return ray.get(self.workers[0].get_model.remote)
+        return self._run_workers("get_model")[0]
 
     def execute_model(
         self,
