@@ -27,6 +27,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
+from vllm.lora.sources import LoRASource, S3LoRASource
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -168,44 +169,44 @@ def is_regex_target_modules(load_modules: Union[str, List[str]],
     return False
 
 
-def get_adapter_absolute_path(lora_path: str) -> str:
+def get_adapter_absolute_path(lora_path: str) -> Union[str, LoRASource]:
     """
-    Resolves the given lora_path to an absolute local path.
-
-    If the lora_path is identified as a Hugging Face model identifier,
-    it will download the model and return the local snapshot path.
-    Otherwise, it treats the lora_path as a local file path and
-    converts it to an absolute path.
-
-    Parameters:
-    lora_path (str): The path to the lora model, which can be an absolute path,
-                     a relative path, or a Hugging Face model identifier.
-
+    Resolves the given lora_path to either an absolute local path or
+    a LoRASource.
+    
+    If the lora_path is:
+    - S3 path (s3://): Returns S3LoRASource for direct memory loading
+    - Local path: Returns absolute path
+    - HuggingFace model ID: Downloads and returns local path
+    
+    Args:
+        lora_path (str): The path to the lora model
+        
     Returns:
-    str: The resolved absolute local path to the lora model.
+        Union[str, LoRASource]: Either absolute path or appropriate LoRASource
     """
+    # Handle S3 paths
+    if lora_path.startswith('s3://'):
+        return S3LoRASource(lora_path)
 
-    # Check if the path is an absolute path. Return it no matter exists or not.
+    # Check if absolute path
     if os.path.isabs(lora_path):
         return lora_path
 
-    # If the path starts with ~, expand the user home directory.
+    # Handle user home directory
     if lora_path.startswith('~'):
         return os.path.expanduser(lora_path)
 
-    # Check if the expanded relative path exists locally.
+    # Check if relative path exists locally
     if os.path.exists(lora_path):
         return os.path.abspath(lora_path)
 
-    # If the path does not exist locally, assume it's a Hugging Face repo.
+    # Try HuggingFace
     try:
         local_snapshot_path = huggingface_hub.snapshot_download(
             repo_id=lora_path)
+        return local_snapshot_path
     except (HfHubHTTPError, RepositoryNotFoundError, EntryNotFoundError,
             HFValidationError):
-        # Handle errors that may occur during the download
-        # Return original path instead instead of throwing error here
         logger.exception("Error downloading the HuggingFace model")
         return lora_path
-
-    return local_snapshot_path

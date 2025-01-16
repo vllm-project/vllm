@@ -647,7 +647,8 @@ setup(
         "tensorizer": ["tensorizer>=2.9.0"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
-        "video": ["decord"]  # Required for video processing
+        "video": ["decord"],  # Required for video processing
+        "s3": ["boto3>=1.26.0"],  # Optional S3 support for LoRA adapters
     },
     cmdclass=cmdclass,
     package_data=package_data,

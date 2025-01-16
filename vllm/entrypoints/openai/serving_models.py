@@ -13,6 +13,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               UnloadLoraAdapterRequest)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.lora.sources import LoRASourceError, S3LoRASource
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.utils import AtomicCounter
 
@@ -85,13 +86,43 @@ class OpenAIServingModels:
         Raises if any fail to load"""
         if self.static_lora_modules is None:
             return
+
         for lora in self.static_lora_modules:
-            load_request = LoadLoraAdapterRequest(lora_path=lora.path,
-                                                  lora_name=lora.name)
-            load_result = await self.load_lora_adapter(
-                request=load_request, base_model_name=lora.base_model_name)
-            if isinstance(load_result, ErrorResponse):
-                raise ValueError(load_result.message)
+            try:
+                # Create LoRA source if S3 path
+                if lora.path.startswith("s3://"):
+                    source = S3LoRASource(lora.path)
+                    # Get local path after downloading
+                    lora_path = source.get_local_path()
+                else:
+                    lora_path = lora.path
+
+                load_request = LoadLoraAdapterRequest(lora_path=lora_path,
+                                                      lora_name=lora.name)
+
+                load_result = await self.load_lora_adapter(
+                    request=load_request, base_model_name=lora.base_model_name)
+
+                if isinstance(load_result, ErrorResponse):
+                    raise ValueError(load_result.message)
+
+            except LoRASourceError as e:
+                # Preserve original error details
+                if hasattr(e, 'original_error'):
+                    logger.error("Failed to load LoRA %s: %s, caused by: %s",
+                                 lora.name, str(e), str(e.original_error))
+                else:
+                    logger.error("Failed to load LoRA %s: %s", lora.name,
+                                 str(e))
+                raise ValueError(
+                    f"Failed to load LoRA adapter {lora.name}: {str(e)}"
+                ) from e
+            except Exception as e:
+                logger.error("Unexpected error loading LoRA %s: %s", lora.name,
+                             str(e))
+                raise ValueError(
+                    f"Failed to load LoRA adapter {lora.name}: {str(e)}"
+                ) from e
 
     def is_base_model(self, model_name):
         return any(model.name == model_name for model in self.base_model_paths)

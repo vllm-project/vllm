@@ -23,6 +23,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA,
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.lora.sources import LoRASource, LoRASourceError
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
@@ -178,7 +179,7 @@ class LoRAModel(AdapterModel):
     @classmethod
     def from_local_checkpoint(
         cls,
-        lora_dir: str,
+        lora_dir_or_source: Union[str, LoRASource],
         expected_lora_modules: List[str],
         *,
         max_position_embeddings: Optional[int] = None,
@@ -190,23 +191,77 @@ class LoRAModel(AdapterModel):
         embedding_padding_modules: Optional[List[str]] = None,
         weights_mapper: Optional[WeightsMapper] = None,
     ) -> "LoRAModel":
-        """Create a LoRAModel from a local checkpoint.
+        """Create a LoRAModel from a local checkpoint or source.
         
         Args:
-            lora_dir: The local path that has lora data.
-            expected_lora_modules: Name of modules that are expected to be
-                replaced by lora.
-            max_position_embeddings: Max position embedding length. Used to
-                scaling the largest context length. If None, the lora model's
-                context length is not scaled.
-            lora_model_id: Lora model id. If not given, automatically set by
-                a global counter.
-            device: Device where the lora model is loaded.
-            dtype: dtype of the lora model weights.
-
+            lora_dir_or_source: Either local path or LoRASource instance
+            expected_lora_modules: Name of modules expected to be replaced
+            max_position_embeddings: Max position embedding length
+            lora_model_id: Lora model id
+            device: Device where lora model is loaded
+            dtype: dtype of lora model weights
+            
         Returns:
-            Loaded LoRA Model.
+            Loaded LoRA Model
         """
+        if isinstance(lora_dir_or_source, LoRASource):
+            try:
+                # Direct loading from source
+                config = lora_dir_or_source.get_config()
+                config[
+                    "vllm_max_position_embeddings"] = max_position_embeddings
+                peft_helper = PEFTHelper.from_dict(config)
+
+                # Get tensors and validate modules
+                tensors = lora_dir_or_source.get_tensors()
+                embeddings = lora_dir_or_source.get_embeddings(
+                )  # Optional, can be None
+
+                # Validate modules (reuse existing validation logic)
+                validation_modules = []
+                for tensor_name in tensors:
+                    module_name, _, _ = parse_fine_tuned_lora_name(
+                        tensor_name, weights_mapper)
+                    part_name = module_name.split(".")[-1]
+                    if part_name not in expected_lora_modules:
+                        validation_modules.append(module_name)
+
+                if validation_modules and not is_regex_target_modules(
+                        peft_helper.target_modules, expected_lora_modules):
+                    raise ValueError(
+                        f"Expected target modules in {expected_lora_modules}"
+                        f" but received {validation_modules}."
+                        " Please verify that the loaded LoRA module is correct"
+                    )
+
+                return cls.from_lora_tensors(
+                    lora_model_id=get_lora_id()
+                    if lora_model_id is None else lora_model_id,
+                    tensors=tensors,
+                    peft_helper=peft_helper,
+                    device=device,
+                    dtype=dtype,
+                    embeddings=embeddings,
+                    target_embedding_padding=target_embedding_padding,
+                    embedding_modules=embedding_modules,
+                    embedding_padding_modules=embedding_padding_modules,
+                    weights_mapper=weights_mapper)
+            except LoRASourceError as e:
+                # Preserve the original error details
+                if hasattr(e, 'original_error') and e.original_error:
+                    logger.error("LoRA loading error: %s, caused by: %s",
+                                 str(e), str(e.original_error))
+                else:
+                    logger.error("LoRA loading error: %s", str(e))
+                raise ValueError(
+                    f"Failed to load LoRA adapter: {str(e)}") from e
+            except Exception as e:
+                logger.error("Unexpected error loading LoRA: %s", str(e))
+                raise ValueError(
+                    f"Failed to load LoRA adapter: {str(e)}") from e
+
+        # Existing local path logic
+        lora_dir = lora_dir_or_source
         lora_config_path = os.path.join(lora_dir, "adapter_config.json")
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
@@ -214,21 +269,22 @@ class LoRAModel(AdapterModel):
             lora_dir, "new_embeddings.safetensors")
         new_embeddings_bin_file_path = os.path.join(lora_dir,
                                                     "new_embeddings.bin")
+
         with open(lora_config_path) as f:
             config = json.load(f)
 
         config["vllm_max_position_embeddings"] = max_position_embeddings
         peft_helper = PEFTHelper.from_dict(config)
-        unexpected_modules: List[Union[list[str], str]]
+
         if os.path.isfile(lora_tensor_path):
-            tensors: Dict[str, torch.Tensor] = {}
+            model_tensors: Dict[str, torch.Tensor] = {}
             # Find unexpected modules.
             # Use safetensor key as a source of truth to find expected modules.
             # in peft if you have target_modules A, B, C and C does not exist
-            # in the model it won’t error and model will be trained with A, B
-            # loraified. C won’t exist in the safetensor but it will exist in
+            # in the model it won't error and model will be trained with A, B
+            # loraified. C won't exist in the safetensor but it will exist in
             # the target_modules of the adapter_config.json.
-            unexpected_modules = []
+            found_modules = []
             with safetensors.safe_open(lora_tensor_path,
                                        framework="pt") as f:  # type: ignore
                 for lora_module in f.keys():  # noqa
@@ -236,21 +292,21 @@ class LoRAModel(AdapterModel):
                         lora_module, weights_mapper)
                     part_name = module_name.split(".")[-1]
                     if part_name not in expected_lora_modules:
-                        unexpected_modules.append(module_name)
-                if unexpected_modules:
+                        found_modules.append(module_name)
+                if found_modules:
                     raise ValueError(
                         f"While loading {lora_dir}, expected"
                         f" target modules in {expected_lora_modules}"
-                        f" but received {unexpected_modules}."
+                        f" but received {found_modules}."
                         f" Please verify that the loaded LoRA module is correct"
                     )
                 # Load tensors if there are only expected modules.
                 for module in f.keys():  # noqa
-                    tensors[module] = f.get_tensor(module)
+                    model_tensors[module] = f.get_tensor(module)
         elif os.path.isfile(lora_bin_file_path):
             # When a bin file is provided, we rely on config to find unexpected
             # modules.
-            unexpected_modules = []
+            found_modules = []
             target_modules = peft_helper.target_modules
             if not isinstance(target_modules, list):
                 target_modules = [target_modules]
@@ -259,19 +315,19 @@ class LoRAModel(AdapterModel):
                 # such as:layers.11.self_attn.k_proj
                 part_name = module.split(".")[-1]
                 if part_name not in expected_lora_modules:
-                    unexpected_modules.append(module)
+                    found_modules.append(module)
             # loaded lora's target modules must be a subset of
             # expected_lora_modules. It is not reliable. See
             # https://github.com/vllm-project/vllm/pull/5909. But there's no
             # other better mechanism.
-            if unexpected_modules and not is_regex_target_modules(
+            if found_modules and not is_regex_target_modules(
                     peft_helper.target_modules, expected_lora_modules):
                 raise ValueError(
                     f"While loading {lora_dir}, expected"
                     f" target modules in {expected_lora_modules}"
-                    f" but received {unexpected_modules}."
+                    f" but received {found_modules}."
                     f" Please verify that the loaded LoRA module is correct")
-            tensors = torch.load(lora_bin_file_path, map_location=device)
+            model_tensors = torch.load(lora_bin_file_path, map_location=device)
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
@@ -286,7 +342,7 @@ class LoRAModel(AdapterModel):
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id()
             if lora_model_id is None else lora_model_id,
-            tensors=tensors,
+            tensors=model_tensors,
             peft_helper=peft_helper,
             device=device,
             dtype=dtype,

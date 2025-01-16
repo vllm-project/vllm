@@ -212,3 +212,38 @@ $ curl http://localhost:8000/v1/models
     ]
 }
 ```
+
+## S3 Support for LoRA Adapters
+
+vLLM now supports loading LoRA adapters directly from S3. You can specify S3 paths in the same way as local paths:
+
+```bash
+vllm serve meta-llama/Llama-2-7b-hf \
+    --enable-lora \
+    --lora-modules sql-lora=s3://my-bucket/path/to/lora-adapter
+```
+
+Or using the JSON format with base model specification:
+
+```bash
+vllm serve meta-llama/Llama-2-7b-hf \
+    --enable-lora \
+    --lora-modules '{"name": "sql-lora", "path": "s3://my-bucket/path/to/lora-adapter", "base_model_name": "meta-llama/Llama-2-7b"}'
+```
+
+For dynamic loading, you can use the S3 path directly:
+
+```bash
+curl -X POST http://localhost:8000/v1/load_lora_adapter \
+-H "Content-Type: application/json" \
+-d '{
+    "lora_name": "sql_adapter",
+    "lora_path": "s3://my-bucket/path/to/lora-adapter"
+}'
+```
+
+The S3 implementation:
+- Streams data directly from S3 to memory to avoid disk I/O
+- Handles large files efficiently with chunked downloading
+- Supports both safetensors and .bin formats
+- Requires proper AWS credentials configuration
