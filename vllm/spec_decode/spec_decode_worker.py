@@ -48,7 +48,7 @@ from vllm.spec_decode.util import (Timer, create_logprobs_output,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.utils import resolve_obj_by_qualname
-from vllm.worker.worker_base import WorkerBase, WorkerWrapperBase
+from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
