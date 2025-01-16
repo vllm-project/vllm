@@ -20,6 +20,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
+from vllm.utils import bind_kv_cache
 from vllm.worker.openvino_model_runner import OpenVINOModelRunner
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
@@ -210,16 +211,14 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
 
     def __init__(
         self,
-        ov_core: ov.Core,
         vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
-        kv_cache_dtype: Optional[ov.Type] = ov.Type.undefined,
         is_driver_worker: bool = False,
     ) -> None:
-        self.ov_core = ov_core
         WorkerBase.__init__(self, vllm_config)
+        self.ov_core = ov.Core()
         self.parallel_config.rank = rank
         self.local_rank = local_rank
         self.rank = rank
@@ -236,7 +235,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         self.model_runner = OpenVINOModelRunner(
             self.ov_core,
             vllm_config=self.vllm_config,
-            kv_cache_dtype=kv_cache_dtype,
+            kv_cache_dtype=self.vllm_config.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
         )
         # Uninitialized cache engine. Will be initialized by
@@ -339,6 +338,8 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
             ov_device,
         )
         self.kv_cache = self.cache_engine.kv_cache
+        bind_kv_cache(self.compilation_config.static_forward_context,
+                      [self.kv_cache])
         self.model_runner.block_size = self.cache_engine.block_size
 
         assert self.kv_cache is not None
@@ -489,7 +490,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
                 block_size = cache_config.block_size
                 seq_num_blocks = (seq_len + block_size - 1) // block_size
 
-                seq_data, dummy_multi_modal_data = input_registry \
+                dummy_data = input_registry \
                     .dummy_data_for_profiling(model_config,
                                               seq_len,
                                               mm_registry)
@@ -498,21 +499,27 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
                 seq = SequenceGroupMetadata(
                     request_id=str(group_id),
                     is_prompt=True,
-                    seq_data={group_id: seq_data},
+                    seq_data={group_id: dummy_data.seq_data},
                     sampling_params=sampling_params,
                     block_tables=block_tables,
                     lora_request=None,
-                    multi_modal_data=dummy_multi_modal_data)
+                    multi_modal_data=dummy_data.multi_modal_data)
                 seqs.append(seq)
 
             self.model_runner.block_size = tmp_cache_config.block_size
 
+            bind_kv_cache(self.compilation_config.static_forward_context,
+                          profiling_cache_engine.kv_cache)
             # Run the model with the dummy inputs.
             self.model_runner.execute_model(seqs,
                                             profiling_cache_engine.kv_cache)
 
-            # explicitly delete temporary KV cache manager to free KV cache
-            # when real inputs will be passed to OV
+            # Explicitly revert bind_kv_cache and delete temporary KV cache
+            # manager to free KV cache when real inputs will be passed to OV
+            bind_kv_cache(self.compilation_config.static_forward_context, [[
+                torch.tensor([])
+                for _ in range(len(profiling_cache_engine.kv_cache))
+            ]])
             del profiling_cache_engine
 
             logger.info(

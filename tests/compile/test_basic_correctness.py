@@ -55,10 +55,20 @@ test_settings = [
     # embedding model
     TestSetting(
         model="BAAI/bge-multilingual-gemma2",
-        model_args=["--task", "embedding"],
+        model_args=["--task", "embed"],
         pp_size=1,
         tp_size=1,
         attn_backend="FLASHINFER",
+        method="encode",
+        fullgraph=True,
+    ),
+    # encoder-based embedding model (BERT)
+    TestSetting(
+        model="BAAI/bge-base-en-v1.5",
+        model_args=["--task", "embed"],
+        pp_size=1,
+        tp_size=1,
+        attn_backend="XFORMERS",
         method="encode",
         fullgraph=True,
     ),

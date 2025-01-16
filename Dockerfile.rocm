@@ -168,4 +168,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     if ls libs/*.whl; then \
     python3 -m pip install libs/*.whl; fi
 
+# install development dependencies (for testing)
+RUN python3 -m pip install -e tests/vllm_test_utils
+
 CMD ["/bin/bash"]

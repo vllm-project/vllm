@@ -22,4 +22,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         -r requirements-tpu.txt
 RUN python3 setup.py develop
 
+# install development dependencies (for testing)
+RUN python3 -m pip install -e tests/vllm_test_utils
+
 CMD ["/bin/bash"]

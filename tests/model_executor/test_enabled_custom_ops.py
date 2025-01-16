@@ -2,13 +2,12 @@ from typing import List
 
 import pytest
 
-from vllm.config import CompilationConfig, VllmConfig
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import (GeluAndMul,
                                                    ReLUSquaredActivation,
                                                    SiluAndMul)
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.plugins import set_current_vllm_config
 
 
 # Registered subclass for test

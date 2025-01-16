@@ -1,5 +1,5 @@
 """A CPU worker class."""
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Set, Tuple, Type
 
 import torch
 import torch.distributed
@@ -11,14 +11,14 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.worker.cpu_embedding_model_runner import CPUEmbeddingModelRunner
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, bind_kv_cache
 from vllm.worker.cpu_enc_dec_model_runner import CPUEncoderDecoderModelRunner
 from vllm.worker.cpu_model_runner import CPUModelRunner, CPUModelRunnerBase
-from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
-                                     LoraNotSupportedWorkerBase, WorkerBase,
+from vllm.worker.cpu_pooling_model_runner import CPUPoolingModelRunner
+from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
 logger = init_logger(__name__)
@@ -111,7 +111,7 @@ class CPUCacheEngine:
         return dtype_size * total
 
 
-class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
+class CPUWorker(LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a CPU socket.
 
     Each worker is associated with a single CPU socket. The worker is 
@@ -128,6 +128,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         distributed_init_method: str,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
+        model_runner_cls: Optional[Type[CPUModelRunner]] = None,
     ) -> None:
         WorkerBase.__init__(self, vllm_config=vllm_config)
 
@@ -151,19 +152,33 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         else:
             self.local_omp_cpuid = omp_cpuids.split("|")[rank]
 
+        # Return hidden states from target model if the draft model is an
+        # mlp_speculator
+        speculative_config = self.speculative_config
+        model_config = self.model_config
+        speculative_args = {} if speculative_config is None \
+            or (speculative_config.draft_model_config.model ==
+                model_config.model) \
+            or (speculative_config.draft_model_config.hf_config.model_type
+                not in ["medusa", "mlp_speculator", "eagle"]) \
+                    else {"return_hidden_states": True}
         ModelRunnerClass: Type[CPUModelRunnerBase] = CPUModelRunner
-        if self.model_config.task == "embedding":
-            ModelRunnerClass = CPUEmbeddingModelRunner
+        if self.model_config.runner_type == "pooling":
+            ModelRunnerClass = CPUPoolingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = CPUEncoderDecoderModelRunner
         self.model_runner: CPUModelRunnerBase = ModelRunnerClass(
             vllm_config=vllm_config,
             kv_cache_dtype=kv_cache_dtype,
-            is_driver_worker=is_driver_worker)
+            is_driver_worker=is_driver_worker,
+            **speculative_args,
+        )
+        if model_runner_cls is not None:
+            self.model_runner = model_runner_cls(self.model_runner)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CPUCacheEngine]
-        # Initialize cpu_cache as embedding models don't initialize kv_caches
+        # Initialize cpu_cache as pooling models don't initialize kv_caches
         self.cpu_cache: Optional[List[List[torch.Tensor]]] = None
 
         # Torch profiler. Enabled and configured through env vars:
@@ -197,7 +212,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
-
+        self.device = torch.device("cpu")
         self.init_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)
@@ -251,6 +266,18 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # Initialize the cache.
         self._init_cache_engine()
 
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.model_runner.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_runner.remove_lora(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_runner.pin_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self.model_runner.list_loras()
+
     def _validate_num_cpu_blocks(self, num_cpu_blocks: int) -> None:
         """Raise errors if the num_cpu_blocks is invalid.
         """
@@ -278,6 +305,8 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             self.cache_engine[ve].cpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
+        bind_kv_cache(self.compilation_config.static_forward_context,
+                      self.cpu_cache)
         self.model_runner.block_size = self.cache_engine[0].block_size
 
         assert all(
@@ -297,6 +326,14 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
         return self.cpu_cache
 
+    @property
+    def vocab_size(self) -> int:
+        return self.model_runner.vocab_size
+
+    @property
+    def max_model_len(self) -> int:
+        return self.model_config.max_model_len
+
     def execute_worker(
         self,
         worker_input: WorkerInput,
@@ -310,9 +347,8 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def prepare_worker_input(
             self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
         assert execute_model_req is not None
-        virtual_engine = execute_model_req.virtual_engine
+        virtual_engine: int = execute_model_req.virtual_engine
         num_seq_groups: int = len(execute_model_req.seq_group_metadata_list)
-        blocks_to_copy = execute_model_req.blocks_to_copy
         blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                       device="cpu",
                                       dtype=torch.int64).view(-1, 2)

@@ -1,8 +1,9 @@
 from unittest.mock import patch
 
 import pytest
-import transformers
+from packaging.version import Version
 from transformers import PretrainedConfig
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm import LLM
 
@@ -11,16 +12,23 @@ from .registry import HF_EXAMPLE_MODELS
 
 @pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
 def test_can_initialize(model_arch):
-    if (model_arch == "Idefics3ForConditionalGeneration"
-            and transformers.__version__ < "4.46.0"):
-        pytest.skip(reason="Model introduced in HF >= 4.46.0")
-
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     if not model_info.is_available_online:
         pytest.skip("Model is not available online")
+    if model_info.min_transformers_version is not None:
+        current_version = TRANSFORMERS_VERSION
+        required_version = model_info.min_transformers_version
+        if Version(current_version) < Version(required_version):
+            pytest.skip(
+                f"You have `transformers=={current_version}` installed, but "
+                f"`transformers>={required_version}` is required to run this "
+                "model")
 
     # Avoid OOM
     def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
+        if hf_config.model_type == "deepseek_vl_v2":
+            hf_config.update({"architectures": ["DeepseekVLV2ForCausalLM"]})
+
         if hasattr(hf_config, "text_config"):
             text_config: PretrainedConfig = hf_config.text_config
         else:

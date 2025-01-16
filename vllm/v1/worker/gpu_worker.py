@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 import torch.distributed
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
@@ -13,7 +14,8 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, get_dtype_size
+from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -31,6 +33,7 @@ class Worker:
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        is_driver_worker: bool = False,
     ):
 
         # TODO: use WorkerBase.__init__(self, vllm_config=vllm_config)
@@ -46,6 +49,7 @@ class Worker:
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
+        self.parallel_config.rank = rank
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -55,9 +59,24 @@ class Worker:
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.model_runner = GPUModelRunner(vllm_config)
+        # Torch profiler. Enabled and configured through env vars:
+        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        torch_profiler_trace_dir)
+            self.profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                with_stack=True,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    torch_profiler_trace_dir, use_gzip=True))
+        else:
+            self.profiler = None
 
-    def initialize(self):
+    def init_device(self):
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
             # the synchronization point. This causes the memory usage to grow
@@ -86,6 +105,9 @@ class Worker:
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
+        # Construct the model runner
+        self.model_runner = GPUModelRunner(self.vllm_config, self.device)
+
     def load_model(self) -> None:
         self.model_runner.load_model()
 
@@ -111,7 +133,6 @@ class Worker:
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         self.model_runner.profile_run()
-        torch.cuda.synchronize()
 
         free_gpu_memory, _ = torch.cuda.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
@@ -179,10 +200,21 @@ class Worker:
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput:
+    ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
-        # TODO(woosuk): Send the output to the engine process.
-        return output
+        return output if self.rank == 0 else None
+
+    def profile(self, is_start: bool = True):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        if is_start:
+            self.profiler.start()
+        else:
+            self.profiler.stop()
+
+    def check_health(self) -> None:
+        # worker will always be healthy as long as it's running.
+        return
 
 
 def init_worker_distributed_environment(
@@ -228,8 +260,8 @@ def _get_cache_block_size(
 ) -> int:
     head_size = model_config.get_head_size()
     num_heads = model_config.get_num_kv_heads(parallel_config)
-    num_attention_layers = model_config.get_num_attention_layers(
-        parallel_config)
+    num_attention_layers = model_config.get_num_layers_by_block_type(
+        parallel_config, LayerBlockType.attention)
 
     key_cache_block = cache_config.block_size * num_heads * head_size
     value_cache_block = key_cache_block

@@ -20,6 +20,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
@@ -54,12 +55,12 @@ class HeadMajorColumnParallelLinear(MergedColumnParallelLinear):
         return load_column_parallel_weight(param, loaded_weight)
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def quick_gelu(x):
     return x * torch.sigmoid(1.702 * x)
 
 
-@torch.compile(dynamic=True)
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def gegelu(input, limit: Optional[float] = None):
     a_gelu, a_linear = input[..., ::2], input[..., 1::2]
     if limit is not None:
@@ -117,6 +118,7 @@ class Phi3SmallSelfAttention(nn.Module):
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
@@ -214,15 +216,14 @@ class Phi3SmallSelfAttention(nn.Module):
                 "homo_head": self.homo_heads
             }
 
-        self.attn = Attention(
-            self.num_heads_per_partition,
-            self.head_dim,
-            self.scale,
-            num_kv_heads=self.num_kv_heads_per_partion,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            blocksparse_params=bs_params,
-        )
+        self.attn = Attention(self.num_heads_per_partition,
+                              self.head_dim,
+                              self.scale,
+                              num_kv_heads=self.num_kv_heads_per_partion,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              blocksparse_params=bs_params,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -259,13 +260,15 @@ class Phi3SmallDecoderLayer(nn.Module):
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = Phi3SmallSelfAttention(config,
                                                 layer_idx,
                                                 cache_config=cache_config,
-                                                quant_config=quant_config)
+                                                quant_config=quant_config,
+                                                prefix=f"{prefix}.self_attn")
         self.mlp = Phi3SmallMLP(config, quant_config)
 
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
@@ -315,7 +318,9 @@ class Phi3SmallModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: Phi3SmallDecoderLayer(config,
                                                  int(prefix.split('.')[-1]),
-                                                 cache_config, quant_config),
+                                                 cache_config,
+                                                 quant_config,
+                                                 prefix=prefix),
             prefix=f"{prefix}.layers")
 
         self.final_layernorm = nn.LayerNorm(config.hidden_size,

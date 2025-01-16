@@ -13,8 +13,11 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.ipex_attn import PagedAttention
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
+from vllm.logger import init_logger
 from vllm.utils import make_tensor_with_pad
 from vllm.worker.cpu_model_runner import ModelInputForCPUBuilder
+
+logger = init_logger(__name__)
 
 
 class TorchSDPABackend(AttentionBackend):
@@ -141,7 +144,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     def get_seq_lens(
         self,
-        attn_type: AttentionType,
+        attn_type: str,
     ):
         '''
         Extract appropriate sequence lengths from attention metadata
@@ -174,7 +177,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     def get_attn_bias(
         self,
-        attn_type: AttentionType,
+        attn_type: str,
     ) -> Optional[List[torch.Tensor]]:
         '''
         Extract appropriate attention bias from attention metadata
@@ -203,7 +206,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
     def set_attn_bias(
         self,
         attn_bias: List[torch.Tensor],
-        attn_type: AttentionType,
+        attn_type: str,
     ) -> None:
         '''
         Update appropriate attention bias field of attention metadata,
@@ -229,7 +232,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     def get_seq_len_block_table_args(
         self,
-        attn_type: AttentionType,
+        attn_type: str,
     ) -> tuple:
         '''
         The particular choice of sequence-length- and block-table-related
@@ -341,7 +344,11 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
             )
         else:
             block_tables = torch.tensor([])
-            seq_lens_tensor = torch.tensor([])
+            seq_lens_tensor = torch.tensor(
+                input_data.seq_lens[:input_data.num_prefills],
+                dtype=torch.int32,
+                device="cpu",
+            )
 
         # For multi-modal models
         placeholder_index_maps = None
@@ -386,12 +393,14 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
                 "Torch SPDA does not support block-sparse attention.")
         if logits_soft_cap is not None:
-            raise ValueError("Torch SPDA does not support logits soft cap.")
+            logger.warning_once("Torch SPDA does not support logits soft cap. "
+                                "Outputs may be slightly off.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -416,6 +425,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             raise NotImplementedError(
                 "Torch SDPA backend does not support FP8 KV cache. "
                 "Please use xFormers backend instead.")
+        self.attn_type = attn_type
 
     def forward(
         self,
@@ -426,7 +436,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         attn_metadata: TorchSDPAMetadata,  # type: ignore
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with torch SDPA and PagedAttention.
 
@@ -442,6 +452,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             shape = [num_tokens, num_heads * head_size]
         """
         assert k_scale == 1.0 and v_scale == 1.0
+        attn_type = self.attn_type
         if (attn_type == AttentionType.ENCODER
                 and (not attn_metadata.is_all_encoder_attn_metadata_set)):
             raise AttributeError("Encoder attention requires setting "
@@ -574,7 +585,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         key: torch.Tensor,
         value: torch.Tensor,
         attn_metadata: TorchSDPAMetadata,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         if self.num_kv_heads != self.num_heads:
             key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
@@ -614,7 +625,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 value[None, :, start_kv:end_kv, :],
                 attn_mask=mask,
                 dropout_p=0.0,
-                is_causal=causal_attn and not self.need_mask,
+                is_causal=causal_attn and mask is None,
                 scale=self.scale).squeeze(0).movedim(query.dim() - 2, 0)
             output[start_q:end_q, :, :] = sub_out
             start_q, start_kv = end_q, end_kv

@@ -20,7 +20,7 @@ build-backend = "setuptools.build_meta"
 line-length = 80
 exclude = [
     # External file, leaving license intact
-    "examples/fp8/quantizer/quantize.py"
+    "examples/other/fp8/quantizer/quantize.py"
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -83,7 +83,7 @@ exclude = [
 ]
 
 [tool.codespell]
-ignore-words-list = "dout, te, indicies, subtile"
+ignore-words-list = "dout, te, indicies, subtile, ElementE"
 skip = "./tests/models/fixtures,./tests/prompts,./benchmarks/sonnet.txt,./tests/lora/data,./build"
 
 [tool.isort]
@@ -96,6 +96,14 @@ markers = [
     "core_model: enable this model test in each PR instead of only nightly",
     "cpu_model: enable this model test in CPU tests",
     "quant_model: run this model test under Quantized category",
-    "distributed_2_gpus: run this test only in distributed tests for 2 GPUs",
+    "split: run this test as part of a split",
+    "distributed: run this test only in distributed GPU tests",
     "skip_v1: do not run this test with v1",
+    "optional: optional tests that are automatically skipped, include --optional to run them",
 ]
+
+[tool.pymarkdown]
+plugins.md013.enabled = false # line-length
+plugins.md041.enabled = false # first-line-h1
+plugins.md033.enabled = false # inline-html
+plugins.md024.allow_different_nesting = true # no-duplicate-headers
