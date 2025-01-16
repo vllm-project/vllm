@@ -1,4 +1,5 @@
 import ast
+import os
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -113,7 +114,10 @@ def lora_llm(long_context_infos):
         context_len_to_scaling_factor[info["context_length"]]
         for info in long_context_infos.values()
     ]
-
+    # Since dist_init sets CUDA_VISIBLE_DEVICES and affects LLM initialization,
+    # remove this env if it exists.
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        del os.environ["CUDA_VISIBLE_DEVICES"]
     llm = vllm.LLM(
         "meta-llama/Llama-2-13b-chat-hf",
         enable_lora=True,

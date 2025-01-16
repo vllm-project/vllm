@@ -30,7 +30,7 @@ class FatreluAndMul(CustomOp):
     def __init__(self, threshold: float = 0.):
         super().__init__()
         self.threshold = threshold
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if current_platform.is_cuda_alike():
             self.op = torch.ops._C.fatrelu_and_mul
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
@@ -100,7 +100,7 @@ class MulAndSilu(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if current_platform.is_cuda_alike():
             self.op = torch.ops._C.mul_and_silu
         elif current_platform.is_xpu():
             from vllm._ipex_ops import ipex_ops
