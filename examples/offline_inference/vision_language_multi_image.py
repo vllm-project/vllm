@@ -186,7 +186,6 @@ def load_mllama(question, image_urls: List[str]) -> ModelRequestData:
         model=model_name,
         max_model_len=4096,
         max_num_seqs=16,
-        enforce_eager=True,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 

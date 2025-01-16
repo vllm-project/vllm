@@ -325,7 +325,6 @@ def run_mllama(question: str, modality: str):
         model=model_name,
         max_model_len=4096,
         max_num_seqs=16,
-        enforce_eager=True,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
