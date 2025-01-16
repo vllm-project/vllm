@@ -1,5 +1,8 @@
 # see https://github.com/vllm-project/vllm/issues/11400 for
 # the motivation and use case for this example.
+# this is a specialized implementation of tensor-parallel inference.
+# run the script with `torchrun --nproc-per-node=2 torchrun_example.py`,
+# the argument 2 should match the `tensor_parallel_size` below.
 
 import torch.distributed as dist
 
