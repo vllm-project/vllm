@@ -290,7 +290,7 @@ def test_memory_profiling():
 
     weights = torch.randn(128, 1024, 1024, device='cuda', dtype=torch.float32)
 
-    weights_memory_in_bytes = 128 * 1024 * 1024 * 4 # 512 MiB
+    weights_memory = 128 * 1024 * 1024 * 4 # 512 MiB
 
     def measure_current_non_torch():
         free, total = torch.cuda.mem_get_info()
@@ -300,7 +300,7 @@ def test_memory_profiling():
         return current_non_torch
 
     with memory_profiling(baseline_snapshot=baseline_snapshot,
-    weights_memory_in_bytes=weights_memory_in_bytes) as result, \
+    weights_memory=weights_memory) as result, \
         monitor(measure_current_non_torch) as monitored_values:
         # make a memory spike, 1 GiB
         spike = torch.randn(256, 1024, 1024, device='cuda', dtype=torch.float32)
@@ -318,8 +318,8 @@ def test_memory_profiling():
     # 5% tolerance is caused by PyTorch caching allocator,
     # we cannot control PyTorch's behavior of its internal buffers,
     # which causes a small error (<10 MiB in practice)
-    non_torch_ratio = result.non_torch_increase_in_bytes / (256 * 1024 * 1024) # noqa
-    torch_peak_ratio = result.torch_peak_increase_in_bytes / (1024 * 1024 * 1024) # noqa
+    non_torch_ratio = result.non_torch_increase / (256 * 1024 * 1024) # noqa
+    torch_peak_ratio = result.torch_peak_increase / (1024 * 1024 * 1024) # noqa
     assert abs(non_torch_ratio - 1) <= 0.05
     assert abs(torch_peak_ratio - 1) <= 0.05
     del weights
