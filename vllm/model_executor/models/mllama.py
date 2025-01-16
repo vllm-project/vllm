@@ -1432,8 +1432,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 loaded_weight = loaded_weight.view(loaded_weight.shape[0], -1)
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
-                # Loading kv cache scales for quark and
-                # compressed-tensors quantization
+                # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
