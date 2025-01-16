@@ -1876,6 +1876,10 @@ def direct_register_custom_op(
             "the required dependencies.")
         return
 
+    import torch
+    if dispatch_key == torch._C._get_privateuse1_backend_name().upper():
+        dispatch_key = "PrivateUse1"
+
     import torch.library
     if hasattr(torch.library, "infer_schema"):
         schema_str = torch.library.infer_schema(op_func,
