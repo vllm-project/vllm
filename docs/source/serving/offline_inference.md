@@ -59,6 +59,19 @@ or:
 ValueError: Model architectures ['<arch>'] are not supported for now. Supported architectures: [...]
 ```
 
+:::{note}
+The above error is distinct from the following similar but different error:
+
+```text
+  File "vllm/model_executor/models/registry.py", line xxx, in _raise_for_unsupported
+    raise ValueError(
+ValueError: Model architectures ['<arch>'] failed to be inspected. Please check the logs for more details.
+```
+
+This error means that vLLM failed to import the model file. Usually, it is related to missing dependencies or outdated
+binaries in the vLLM build. Please read the logs carefully to determine the real cause of the error.
+:::
+
 To fix this, explicitly specify the model architecture by passing `config.json` overrides to the `hf_overrides` option.
 For example:
 
