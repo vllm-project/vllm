@@ -19,8 +19,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
-from vllm.multimodal.parse import (MultiModalDataItems, VideoEmbeddingItems,
-                                   VideoProcessorItems)
+from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
+                                   VideoEmbeddingItems, VideoProcessorItems)
 from vllm.multimodal.processing import PromptReplacement
 from vllm.multimodal.profiling import ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -144,6 +144,10 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
             newline_features = height_factor
 
         return (unpadded_features, newline_features)
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        # NOTE: This hardcoded value is found via processor tests
+        return ImageSize(width=1153, height=944)
 
     def _get_num_frame_tokens(
         self,
