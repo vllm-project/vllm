@@ -58,14 +58,14 @@ def vllm_flash_attention_forward(
         query_length: int=None,
         kv_caches: torch.Tensor=None,
         attn_metadata: AttentionMetadata=None,
-        attention_interface=None,
+        attention_instances=None,
         **kwargs
     ):
     layer_idx = _module.layer_idx
     hidden = query.shape[-2]
     query, key, value = [x.transpose(1,2) for x in (query, key, value)]
     query, key, value = [x.reshape(hidden,-1) for x in (query, key, value)]
-    return attention_interface(query, key, value, _kv_cache=kv_caches[layer_idx],_attn_metadata=attn_metadata), None
+    return attention_instances[layer_idx].forward(query, key, value, _kv_cache=kv_caches[layer_idx],_attn_metadata=attn_metadata), None
 
 
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
@@ -116,23 +116,30 @@ class TransformersModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
         self.config = config
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
 
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.attention_interface = Attention(
-            divide(config.num_attention_heads, self.tp_size),
-            config.head_dim,
-            config.head_dim**-0.5, # ish, the sacling is different for every attn layer
-            num_kv_heads=divide(config.num_key_value_heads, self.tp_size),
-            cache_config=vllm_config.cache_config,
-            quant_config=vllm_config.quant_config,
-        )
-        config._attn_implementation_internal="vllm"
+        tp_size = get_tensor_model_parallel_world_size()
+        # Assumes 1 attention operation per hidden layer
+        self.attention_instances = [
+            Attention(
+                divide(config.num_attention_heads, tp_size),
+                config.head_dim,
+                config.head_dim**-0.5, # ish, the sacling is different for every attn layer
+                num_kv_heads=divide(config.num_key_value_heads, tp_size),
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, f"{i}.attn")
+            ) for i in range(config.num_hidden_layers)
+
+        ]
+        self.config._attn_implementation_internal="vllm"
 
         self.tp_plan = self.config.base_model_tp_plan
-        self.model = AutoModel.from_config(config)
+        self.model = AutoModel.from_config(self.config)
         self.tensor_parallelize(self.model)
 
         # TODO(Isotr0py): Find a better method to parallelize VocabEmbedding
@@ -192,7 +199,7 @@ class TransformersModel(nn.Module):
             position_ids=positions[None,...],
             kv_caches=kv_caches, attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
-            attention_interface = self.attention_interface.forward, 
+            attention_instances = self.attention_instances, 
             return_dict=False
         )[0][0,...] # we remove batch dimension for now
         return model_output
