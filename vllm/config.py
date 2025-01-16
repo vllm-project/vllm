@@ -357,6 +357,10 @@ class ModelConfig:
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
         self.task: Final = task
+        if self.task in ("draft", "generate"):
+            self.truncation_side = "left"
+        else:
+            self.truncation_side = "right"
 
         self.pooler_config = self._init_pooler_config(override_pooler_config)
         self.logits_processor_pattern = logits_processor_pattern
@@ -553,7 +557,7 @@ class ModelConfig:
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
-            "compressed-tensors", "experts_int8"
+            "compressed-tensors", "experts_int8", "quark"
         ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
@@ -729,9 +733,12 @@ class ModelConfig:
         if hasattr(self.hf_text_config,
                    "model_type") and (self.hf_text_config.model_type
                                       in ('deepseek_v2', 'deepseek_v3')):
-            # FlashAttention supports only head_size 32, 64, 128, 256,
-            # we need to pad head_size 192 to 256
-            return 256
+            qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim",
+                                       0)
+            qk_nope_head_dim = getattr(self.hf_text_config, "qk_nope_head_dim",
+                                       0)
+            if qk_rope_head_dim and qk_nope_head_dim:
+                return qk_rope_head_dim + qk_nope_head_dim
 
         if self.is_attention_free:
             return 0
@@ -1383,13 +1390,15 @@ class SchedulerConfig:
 
     is_multimodal_model: bool = False
 
-    # FIXME(woosuk & ywang96): Below are placeholder values. We need to
-    # calculate the actual values from the configurations.
-    # Multimodal encoder run compute budget, only used in V1
-    max_num_encoder_input_tokens = 16384
+    # NOTE: The following multimodal encoder budget will be initialized to
+    # max_num_batched_tokens and overridden in case max multimodal embedding
+    # size is larger.
+    # TODO (ywang96): Make these configurable.
+    # Multimodal encoder compute budget, only used in V1
+    max_num_encoder_input_tokens: int = field(default=None)  # type: ignore
 
     # Multimodal encoder cache size, only used in V1
-    encoder_cache_size = 16384
+    encoder_cache_size: int = field(default=None)  # type: ignore
 
     # Whether to perform preemption by swapping or
     # recomputation. If not specified, we determine the mode as follows:
@@ -1462,6 +1471,9 @@ class SchedulerConfig:
                     self.max_num_batched_tokens,
                     _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
+
+        self.max_num_encoder_input_tokens = self.max_num_batched_tokens
+        self.encoder_cache_size = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
             logger.info(

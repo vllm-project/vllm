@@ -216,6 +216,11 @@ See [this page](#generative-models) for more information on how to use generativ
   - `internlm/internlm2-7b`, `internlm/internlm2-chat-7b`, etc.
   - ✅︎
   - ✅︎
+* - `InternLM3ForCausalLM`
+  - InternLM3
+  - `internlm/internlm3-8b-instruct`, etc.
+  - ✅︎
+  - ✅︎
 * - `JAISLMHeadModel`
   - Jais
   - `inceptionai/jais-13b`, `inceptionai/jais-13b-chat`, `inceptionai/jais-30b-v3`, `inceptionai/jais-30b-chat-v3`, etc.
