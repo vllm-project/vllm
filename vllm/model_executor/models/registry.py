@@ -179,6 +179,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "MedusaModel": ("medusa", "Medusa"),
     "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
 }
+
+_FALLBACK_MODEL = {
+    "TransformersModel": ("transformers", "TransformersModel"),
+}
 # yapf: enable
 
 _VLLM_MODELS = {
@@ -187,7 +191,7 @@ _VLLM_MODELS = {
     **_CROSS_ENCODER_MODELS,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
-    "TransformersModel": ("transformers", "TransformersModel"),
+    **_FALLBACK_MODEL,
 }
 
 
@@ -354,16 +358,18 @@ class _ModelRegistry:
 
     def _try_load_model_cls(self,
                             model_arch: str) -> Optional[Type[nn.Module]]:
-        if model_arch not in self.models:
-            return _try_load_model_cls(model_arch, self.models["TransformersModel"])
+        model = self.models.get(model_arch)
+        if model is None:
+            model = self.models[next(iter(_FALLBACK_MODEL))]
 
-        return _try_load_model_cls(model_arch, self.models[model_arch])
+        return _try_load_model_cls(model_arch, model)
 
     def _try_inspect_model_cls(self, model_arch: str) -> Optional[_ModelInfo]:
-        if model_arch not in self.models:
-            return _try_inspect_model_cls(model_arch, self.models["TransformersModel"])
+        model = self.models.get(model_arch)
+        if model is None:
+            model = self.models[next(iter(_FALLBACK_MODEL))]
 
-        return _try_inspect_model_cls(model_arch, self.models[model_arch])
+        return _try_inspect_model_cls(model_arch, model)
 
     def _normalize_archs(
         self,
