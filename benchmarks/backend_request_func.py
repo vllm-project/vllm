@@ -22,7 +22,7 @@ class RequestFuncInput:
     prompt_len: int
     output_len: int
     model: str
-    model_name: str = None
+    model_name: Optional[str] = None
     best_of: int = 1
     logprobs: Optional[int] = None
     extra_body: Optional[dict] = None
