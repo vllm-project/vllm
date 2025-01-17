@@ -1914,15 +1914,6 @@ class HabanaProfilerCounterHelper:
         return counters
 
 
-def unwrap_model(model):
-    if isinstance(model, torch._dynamo.eval_frame.OptimizedModule):
-        return unwrap_model(model._orig_mod)
-    else:
-        model = list(vars(model)['_modules'].values())[0]
-        modules = list(vars(model)['_modules'].values())
-        return modules
-
-
 class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     """
     GPU model runner with sampling step.
