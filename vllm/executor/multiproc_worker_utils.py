@@ -1,5 +1,4 @@
 import asyncio
-import multiprocessing
 import os
 import sys
 import threading
@@ -13,10 +12,10 @@ from typing import (Any, Callable, Dict, Generic, List, Optional, TextIO,
 
 import torch
 
-import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.triton_utils.importing import HAS_TRITON
-from vllm.utils import cuda_is_initialized
+from vllm.utils import _check_multiproc_method, get_mp_context
 
 if HAS_TRITON:
     from vllm.triton_utils import maybe_set_triton_cache_manager
@@ -149,7 +148,8 @@ class ProcessWorkerWrapper:
     for handling single-node multi-GPU tensor parallel."""
 
     def __init__(self, result_handler: ResultHandler,
-                 worker_factory: Callable[[], Any]) -> None:
+                 worker_factory: Callable[[VllmConfig, int], Any],
+                 vllm_config: VllmConfig, rank: int) -> None:
         self.mp = get_mp_context()
         self._task_queue = self.mp.Queue()
         self.result_queue = result_handler.result_queue
@@ -161,6 +161,8 @@ class ProcessWorkerWrapper:
                 worker_factory=worker_factory,
                 task_queue=self._task_queue,
                 result_queue=self.result_queue,
+                vllm_config=vllm_config,
+                rank=rank,
             ),
             daemon=True)
 
@@ -201,9 +203,11 @@ class ProcessWorkerWrapper:
 
 
 def _run_worker_process(
-    worker_factory: Callable[[], Any],
+    worker_factory: Callable[[VllmConfig, int], Any],
     task_queue: Queue,
     result_queue: Queue,
+    vllm_config: VllmConfig,
+    rank: int,
 ) -> None:
     """Worker process event loop"""
 
@@ -214,7 +218,7 @@ def _run_worker_process(
     _add_prefix(sys.stderr, process_name, pid)
 
     # Initialize worker
-    worker = worker_factory()
+    worker = worker_factory(vllm_config, rank)
     del worker_factory
 
     # Accept tasks from the engine in task_queue
@@ -272,24 +276,6 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
 
     file.start_new_line = True  # type: ignore[attr-defined]
     file.write = write_with_prefix  # type: ignore[method-assign]
-
-
-def _check_multiproc_method():
-    if (cuda_is_initialized()
-            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
-        logger.warning("CUDA was previously initialized. We must use "
-                       "the `spawn` multiprocessing start method. Setting "
-                       "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-                       "See https://docs.vllm.ai/en/latest/getting_started/"
-                       "debugging.html#python-multiprocessing "
-                       "for more information.")
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
-
-def get_mp_context():
-    _check_multiproc_method()
-    mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
-    return multiprocessing.get_context(mp_method)
 
 
 def set_multiprocessing_worker_envs(parallel_config):

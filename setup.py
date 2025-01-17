@@ -1,3 +1,4 @@
+import ctypes
 import importlib.util
 import logging
 import os
@@ -13,7 +14,7 @@ from packaging.version import Version, parse
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from setuptools_scm import get_version
-from torch.utils.cpp_extension import CUDA_HOME
+from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
 
 def load_module_from_path(module_name, path):
@@ -33,9 +34,14 @@ envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
-if not sys.platform.startswith("linux"):
+if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
     logger.warning(
-        "vLLM only supports Linux platform (including WSL). "
+        "VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
+    VLLM_TARGET_DEVICE = "cpu"
+elif not (sys.platform.startswith("linux")
+          or sys.platform.startswith("darwin")):
+    logger.warning(
+        "vLLM only supports Linux platform (including WSL) and MacOS."
         "Building on %s, "
         "so vLLM may not be able to run correctly", sys.platform)
     VLLM_TARGET_DEVICE = "empty"
@@ -251,7 +257,7 @@ class cmake_build_ext(build_ext):
 
 class repackage_wheel(build_ext):
     """Extracts libraries and other files from an existing wheel."""
-    default_wheel = "https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+    default_wheel = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
 
     def run(self) -> None:
         wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION",
@@ -318,21 +324,26 @@ class repackage_wheel(build_ext):
 
 
 def _is_hpu() -> bool:
-    is_hpu_available = True
+    # if VLLM_TARGET_DEVICE env var was set explicitly, skip HPU autodetection
+    if os.getenv("VLLM_TARGET_DEVICE", None) == VLLM_TARGET_DEVICE:
+        return VLLM_TARGET_DEVICE == "hpu"
+
+    # if VLLM_TARGET_DEVICE was not set explicitly, check if hl-smi succeeds,
+    # and if it doesn't, check if habanalabs driver is loaded
+    is_hpu_available = False
     try:
-        subprocess.run(["hl-smi"], capture_output=True, check=True)
+        out = subprocess.run(["hl-smi"], capture_output=True, check=True)
+        is_hpu_available = out.returncode == 0
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
-        if not os.path.exists('/dev/accel/accel0') and not os.path.exists(
-                '/dev/accel/accel_controlD0'):
-            # last resort...
+        if sys.platform.startswith("linux"):
             try:
                 output = subprocess.check_output(
                     'lsmod | grep habanalabs | wc -l', shell=True)
                 is_hpu_available = int(output) > 0
             except (ValueError, FileNotFoundError, PermissionError,
                     subprocess.CalledProcessError):
-                is_hpu_available = False
-    return is_hpu_available or VLLM_TARGET_DEVICE == "hpu"
+                pass
+    return is_hpu_available
 
 
 def _no_device() -> bool:
@@ -379,25 +390,31 @@ def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip() or _is_cpu()
 
 
-def get_hipcc_rocm_version():
-    # Run the hipcc --version command
-    result = subprocess.run(['hipcc', '--version'],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True)
+def get_rocm_version():
+    # Get the Rocm version from the ROCM_HOME/bin/librocm-core.so
+    # see https://github.com/ROCm/rocm-core/blob/d11f5c20d500f729c393680a01fa902ebf92094b/rocm_version.cpp#L21
+    try:
+        librocm_core_file = Path(ROCM_HOME) / "lib" / "librocm-core.so"
+        if not librocm_core_file.is_file():
+            return None
+        librocm_core = ctypes.CDLL(librocm_core_file)
+        VerErrors = ctypes.c_uint32
+        get_rocm_core_version = librocm_core.getROCmVersion
+        get_rocm_core_version.restype = VerErrors
+        get_rocm_core_version.argtypes = [
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        major = ctypes.c_uint32()
+        minor = ctypes.c_uint32()
+        patch = ctypes.c_uint32()
 
-    # Check if the command was executed successfully
-    if result.returncode != 0:
-        print("Error running 'hipcc --version'")
+        if (get_rocm_core_version(ctypes.byref(major), ctypes.byref(minor),
+                                  ctypes.byref(patch)) == 0):
+            return "%d.%d.%d" % (major.value, minor.value, patch.value)
         return None
-
-    # Extract the version using a regular expression
-    match = re.search(r'HIP version: (\S+)', result.stdout)
-    if match:
-        # Return the version string
-        return match.group(1)
-    else:
-        print("Could not find HIP version in the output")
+    except Exception:
         return None
 
 
@@ -475,11 +492,10 @@ def get_vllm_version() -> str:
                 if "sdist" not in sys.argv:
                     version += f"{sep}cu{cuda_version_str}"
     elif _is_hip():
-        # Get the HIP version
-        hipcc_version = get_hipcc_rocm_version()
-        if hipcc_version != MAIN_CUDA_VERSION:
-            rocm_version_str = hipcc_version.replace(".", "")[:3]
-            version += f"{sep}rocm{rocm_version_str}"
+        # Get the Rocm Version
+        rocm_version = get_rocm_version() or torch.version.hip
+        if rocm_version and rocm_version != MAIN_CUDA_VERSION:
+            version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
     elif _is_neuron():
         # Get the Neuron version
         neuron_version = str(get_neuronxcc_version())

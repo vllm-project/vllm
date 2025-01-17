@@ -963,6 +963,10 @@ class EmbeddingChatRequest(OpenAIBaseModel):
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
 
+PoolingCompletionRequest = EmbeddingCompletionRequest
+PoolingChatRequest = EmbeddingChatRequest
+PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest]
+
 
 class ScoreRequest(OpenAIBaseModel):
     model: str
@@ -1055,6 +1059,21 @@ class EmbeddingResponse(OpenAIBaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     data: List[EmbeddingResponseData]
+    usage: UsageInfo
+
+
+class PoolingResponseData(OpenAIBaseModel):
+    index: int
+    object: str = "pooling"
+    data: Union[List[List[float]], List[float], str]
+
+
+class PoolingResponse(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"pool-{random_uuid()}")
+    object: str = "list"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    data: List[PoolingResponseData]
     usage: UsageInfo
 
 
