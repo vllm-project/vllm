@@ -12,6 +12,7 @@ from vllm.config import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.models import (LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, create_lora_manager)
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 
@@ -95,6 +96,13 @@ class WorkerLoRAManager(AbstractWorkerManager):
             expected_lora_modules = list(set(expected_lora_modules))
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
+            peft_helper = PEFTHelper.from_local_dir(
+                lora_path, self.max_position_embeddings)
+
+            # Validates the LoRA configuration against requirements before
+            # loading weights, throwing an exception if validation fails.
+            peft_helper.validate_legal(self.lora_config)
+
             # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
             # to ensure correct loading of lora weights.
             hf_to_vllm_mapper = None
@@ -105,7 +113,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_path,
                 expected_lora_modules,
-                max_position_embeddings=self.max_position_embeddings,
+                peft_helper=peft_helper,
                 lora_model_id=lora_request.lora_int_id,
                 device="cpu",
                 dtype=self.lora_config.lora_dtype,
@@ -120,15 +128,14 @@ class WorkerLoRAManager(AbstractWorkerManager):
             # - No adapter found to download from huggingface (or in
             #       offline mode)
             # - No local adapter files found at `lora_request.lora_path`
+            # For NotFoundError
             raise ValueError(
                 f"Loading lora {lora_request.lora_name} failed: No adapter "
                 f"found for {lora_path}") from e
         except Exception as e:
-            raise RuntimeError(f"Loading lora {lora_path} failed") from e
-        if lora.rank > self.lora_config.max_lora_rank:
-            raise ValueError(
-                f"LoRA rank {lora.rank} is greater than max_lora_rank "
-                f"{self.lora_config.max_lora_rank}.")
+            # For BadRequestError
+            raise e
+
         if lora.extra_vocab_size > self.lora_config.lora_extra_vocab_size:
             raise ValueError(f"LoRA added vocab size {lora.extra_vocab_size} "
                              f"is greater than lora_extra_vocab_size "
