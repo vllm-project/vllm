@@ -106,7 +106,7 @@ steps:
   source_file_dependencies:
   - vllm/
   commands:
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
@@ -465,7 +465,9 @@ steps:
   - vllm/worker/worker_base.py
   - vllm/worker/worker.py
   - vllm/worker/model_runner.py
+  - entrypoints/llm/test_collective_rpc.py
   commands:
+  - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
