@@ -135,6 +135,7 @@ class TransformersModel(nn.Module, SupportsLoRA):
         super().__init__()
         logger.info("Using Transformers backend.")
 
+        self.vllm_config = vllm_config
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
@@ -142,10 +143,10 @@ class TransformersModel(nn.Module, SupportsLoRA):
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
 
-        # MLP modifications
-        self.tp_plan = self.config.base_model_tp_plan
         self.model: PreTrainedModel = AutoModel.from_config(
             self.config, torch_dtype=vllm_config.model_config.dtype)
+
+        # MLP modifications
         self.tensor_parallelize(self.model)
 
         # Attention modifications (assumes 1 attention op per hidden layer)
@@ -182,21 +183,20 @@ class TransformersModel(nn.Module, SupportsLoRA):
                                                 config.vocab_size, logit_scale)
         self.sampler = get_sampler()
 
-    def log_replacement(
-            self, name: str, old_module: nn.Module, new_module: nn.Module):
-        logger.debug("%s: %s -> %s", name,
-                     old_module.__class__.__name__,
-                     new_module.__class__.__name__)
+    def log_replacement(self, name: str, old_module: nn.Module,
+                        new_module: nn.Module):
+        logger.debug("%s: %s -> %s", name, old_module, new_module)
 
     def tensor_parallelize(self, module: nn.Module, prefix: str = ""):
-        if self.tp_plan is None:
+        if (self.config.base_model_tp_plan is None
+                and self.vllm_config.parallel_config.tensor_parallel_size > 1):
             raise ValueError(
                 "Trying to run tensor parallelization but the model does not "
                 "support it yet!")
 
         for child_name, child_module in module.named_children():
             qual_name = prefix + child_name
-            for pattern, style in self.tp_plan.items():
+            for pattern, style in self.config.base_model_tp_plan.items():
                 if re.match(pattern, qual_name) and isinstance(
                         child_module, nn.Linear):
                     new_module = replace_tp_linear_class(child_module, style)
