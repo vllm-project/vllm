@@ -19,14 +19,13 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
+from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.multiproc_worker_utils import (
     _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_mp_context,
                         get_open_port, get_open_zmq_ipc_path, zmq_socket_ctx)
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -35,9 +34,9 @@ POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
 
 
-class MultiprocExecutor(Executor):
+class MultiprocExecutor(ExecutorBase, Executor):
 
-    def __init__(self, vllm_config: VllmConfig) -> None:
+    def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
@@ -54,9 +53,6 @@ class MultiprocExecutor(Executor):
             self.shutdown()
 
         signal.signal(signal.SIGUSR1, sigusr1_handler)
-
-        self.vllm_config = vllm_config
-        self.parallel_config = vllm_config.parallel_config
 
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -82,7 +78,8 @@ class MultiprocExecutor(Executor):
         # Create workers
         self.workers: List[WorkerProcHandle] = []
         for rank in range(self.world_size):
-            worker = WorkerProc.make_worker_process(vllm_config, rank, rank,
+            worker = WorkerProc.make_worker_process(self.vllm_config, rank,
+                                                    rank,
                                                     distributed_init_method,
                                                     scheduler_output_handle)
             self.workers.append(worker)
@@ -92,34 +89,6 @@ class MultiprocExecutor(Executor):
         self.rpc_broadcast_mq.wait_until_ready()
         for w in self.workers:
             w.worker_response_mq.wait_until_ready()
-
-    def initialize(self, kv_cache_config: KVCacheConfig) -> None:
-        """
-        Initialize the KV caches and begin the model execution loop of the
-        underlying workers.
-        """
-        self.collective_rpc("initialize_cache", args=(kv_cache_config, ))
-        self.collective_rpc("compile_or_warm_up_model")
-
-    def determine_available_memory(self) -> int:
-        """
-        Determine the available memory (in bytes) for KV cache by invoking the
-        underlying worker.
-        """
-        memory_sizes = self.collective_rpc("determine_available_memory")
-
-        # Since we use a shared centralized controller, we take the minimum
-        # memory size across all workers to make sure all the memory
-        # operators can be applied to all workers.
-        return min(memory_sizes)
-
-    def get_kv_cache_spec(self) -> KVCacheSpec:
-        """
-        Get all kv cache needed by the model by invoking the underlying worker.
-        """
-        kv_cache_specs = self.collective_rpc("get_kv_cache_spec")
-        assert all(s == kv_cache_specs[0] for s in kv_cache_specs)
-        return kv_cache_specs[0]
 
     def collective_rpc(self,
                        method: Union[str, Callable],
@@ -171,18 +140,6 @@ class MultiprocExecutor(Executor):
         except Exception as e:
             # Re-raise any other exceptions
             raise e
-
-    def execute_model(
-        self,
-        scheduler_output,
-    ) -> ModelRunnerOutput:
-        model_output = self.collective_rpc("execute_model",
-                                           args=(scheduler_output, ))[0]
-        return model_output
-
-    def profile(self, is_start: bool = True):
-        self.collective_rpc("profile", args=(is_start, ))
-        return
 
     def _ensure_worker_termination(self):
         """Ensure that all worker processes are terminated. Assumes workers have
