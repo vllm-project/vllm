@@ -203,7 +203,23 @@ class OpenAIServing:
     ) -> TextTokensPrompt:
         token_num = len(input_ids)
 
-        # Note: EmbeddingRequest doesn't have max_tokens
+        # Note: EmbeddingRequest and ScoreRequest doesn't have max_tokens
+        if isinstance(
+                request,
+            (EmbeddingChatRequest, EmbeddingCompletionRequest, ScoreRequest)):
+
+            operation = "score" if isinstance(request, ScoreRequest) \
+                else "embedding generation"
+            if token_num > self.max_model_len:
+                raise ValueError(
+                    f"This model's maximum context length is "
+                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{token_num} tokens in the input for {operation}. "
+                    f"Please reduce the length of the input.")
+            return TextTokensPrompt(prompt=input_text,
+                                    prompt_token_ids=input_ids)
+
+        # Score API
         if isinstance(request,
                       (EmbeddingChatRequest, EmbeddingCompletionRequest)):
             if token_num > self.max_model_len:
