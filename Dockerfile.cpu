@@ -26,10 +26,10 @@ RUN pip install intel_extension_for_pytorch==2.5.0
 
 WORKDIR /workspace
 
-COPY requirements-build.txt requirements-build.txt
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,src=requirements-build.txt,target=requirements-build.txt \
     pip install --upgrade pip && \
     pip install -r requirements-build.txt
 
@@ -37,9 +37,9 @@ FROM cpu-test-1 AS build
 
 WORKDIR /workspace/vllm
 
-COPY requirements-common.txt requirements-common.txt
-COPY requirements-cpu.txt requirements-cpu.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,src=requirements-common.txt,target=requirements-common.txt \
+    --mount=type=bind,src=requirements-cpu.txt,target=requirements-cpu.txt \
     pip install -v -r requirements-cpu.txt
 
 COPY . .

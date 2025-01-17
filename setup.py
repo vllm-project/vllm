@@ -472,13 +472,9 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
-    # TODO: Revisit this temporary approach: https://github.com/vllm-project/vllm/issues/9182#issuecomment-2404860236
-    try:
-        version = get_version(
-            write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
-        )
-    except LookupError:
-        version = "0.0.0"
+    version = get_version(
+        write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
+    )
 
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
