@@ -34,7 +34,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-
+from .interfaces import SupportsLoRA
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -113,8 +113,21 @@ def replace_tp_linear_class(orig_module: nn.Linear, style: str):
         raise ValueError(f"Unsupported parallel style value: {style}")
 
 
-class TransformersModel(nn.Module):
+class TransformersModel(nn.Module, SupportsLoRA):
     embedding_padding_modules = ["lm_head"]
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
+    # BitandBytes specific attributes. No remapping needed
+    bitsandbytes_stacked_params_mapping = {}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
