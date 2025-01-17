@@ -44,7 +44,8 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.sampling_metadata import SequenceGroupToSample
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalKwargs, MultiModalRegistry)
+                             MultiModalKwargs, MultiModalPlaceholderMap,
+                             MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceData, SequenceGroupMetadata,
@@ -821,6 +822,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         query_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
         multi_modal_kwargs_list: List[MultiModalKwargs] = []
+        multi_modal_placeholder_maps: Dict[
+            str, MultiModalPlaceholderMap] = collections.defaultdict(
+                MultiModalPlaceholderMap)
 
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
@@ -878,10 +882,25 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # is always the first token in the sequence.
             input_positions.append(list(range(context_len, seq_len)))
 
-            mm_data = seq_group_metadata.multi_modal_data
-            if mm_data:
-                mm_kwargs = self.multi_modal_input_mapper(mm_data)
+            if seq_group_metadata.multi_modal_data:
+                positions = input_positions[0]
+                mm_data, placeholder_maps = MultiModalPlaceholderMap \
+                    .from_seq_group(seq_group_metadata,
+                      range(positions[0], positions[0] + len(positions)))
+
+                if self.mm_registry.has_processor(self.model_config):
+                    mm_kwargs = mm_data
+                else:
+                    mm_kwargs = self.multi_modal_input_mapper(
+                        mm_data,
+                        seq_group_metadata.mm_processor_kwargs,
+                    )
+
                 multi_modal_kwargs_list.append(mm_kwargs)
+
+                for modality, placeholder_map in placeholder_maps.items():
+                    multi_modal_placeholder_maps[modality].extend(
+                        placeholder_map)
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -985,6 +1004,12 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                            dtype=torch.long,
                                            device='cpu')
 
+        placeholder_index_maps = {
+            modality: placeholder_map.index_map()
+            for modality, placeholder_map in
+            multi_modal_placeholder_maps.items()
+        }
+
         # Note: num_prefill_tokens is calculated using the length of
         # input_tokens after padding.
         num_prefill_tokens = input_tokens_tensor.numel()
@@ -1018,9 +1043,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=
-            None  # FIXME(kzawora): mutli-modality will not work here
-        )
+            multi_modal_placeholder_index_maps=placeholder_index_maps)
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
         for t in multi_modal_kwargs:
             if torch.is_tensor(multi_modal_kwargs[t]):
