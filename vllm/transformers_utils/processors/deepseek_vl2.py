@@ -240,13 +240,16 @@ class DeepseekVLV2Processor(ProcessorMixin):
         input_ids = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0)
         pixel_values = pixel_values.unsqueeze(0)
 
-        prepare = BatchFeature(data=dict(
-            input_ids=input_ids,
-            pixel_values=images,
-            images_seq_mask=images_seq_mask,
-            images_spatial_crop=images_spatial_crop,
-            num_image_tokens=num_image_tokens,
-        ))
+        prepare = BatchFeature(
+            data=dict(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                images_seq_mask=images_seq_mask,
+                images_spatial_crop=images_spatial_crop,
+                num_image_tokens=num_image_tokens,
+            ), 
+            tensor_type="pt",
+        )
         return prepare
 
     def __call__(

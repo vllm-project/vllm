@@ -216,7 +216,7 @@ class DeepseekVL2MultiModalProcessor(
             )
             target_dtype = self.info.ctx.model_config.dtype
             processed_outputs["pixel_values"] = (
-                processed_outputs["pixel_values"].unsqueeze(0).to(target_dtype)
+                processed_outputs["pixel_values"].to(target_dtype)
             )
         else:
             tokenizer = self.info.get_tokenizer()
