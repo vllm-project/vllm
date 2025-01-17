@@ -718,7 +718,6 @@ class Qwen2MultiModalDataParser(MultiModalDataParser):
         return super()._parse_video_data(data)
 
 
-
 class Qwen2VLProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self):
