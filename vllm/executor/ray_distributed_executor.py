@@ -2,8 +2,9 @@ import asyncio
 import os
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
+import cloudpickle
 import msgspec
 
 import vllm.envs as envs
@@ -410,7 +411,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _run_workers(
         self,
-        method: str,
+        method: Union[str, Callable],
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,
@@ -426,6 +427,11 @@ class RayDistributedExecutor(DistributedExecutorBase):
           rather than blocking on the results.
         - args/kwargs: All workers share the same args/kwargs
         """
+        if isinstance(method, str):
+            sent_method = method
+        else:
+            sent_method = cloudpickle.dumps(method)
+        del method
         if self.use_ray_spmd_worker:
             assert not async_run_tensor_parallel_workers_only, (
                 "async_run_tensor_parallel_workers_only is not supported for "
@@ -440,7 +446,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         if async_run_tensor_parallel_workers_only:
             ray_workers = self.non_driver_workers
         ray_worker_outputs = [
-            worker.execute_method.remote(method, *args, **kwargs)
+            worker.execute_method.remote(sent_method, *args, **kwargs)
             for worker in ray_workers
         ]
 
@@ -455,7 +461,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         if not self.use_ray_spmd_worker:
             # Start the driver worker after all the ray workers.
             driver_worker_output = [
-                self.driver_worker.execute_method(method, *args, **kwargs)
+                self.driver_worker.execute_method(sent_method, *args, **kwargs)
             ]
 
         # Get the results of the ray workers.

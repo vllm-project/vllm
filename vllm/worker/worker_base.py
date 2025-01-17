@@ -14,7 +14,8 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import (enable_trace_function_call_for_thread,
-                        resolve_obj_by_qualname, update_environment_variables)
+                        resolve_obj_by_qualname, run_method,
+                        update_environment_variables)
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
@@ -539,17 +540,16 @@ class WorkerWrapperBase:
         self.worker = worker_class(**kwargs)
         assert self.worker is not None
 
-    def execute_method(self, method: str, *args, **kwargs):
+    def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         try:
             target = self if self.worker is None else self.worker
-            executor = getattr(target, method)
-            return executor(*args, **kwargs)
+            return run_method(target, method, args, kwargs)
         except Exception as e:
             # if the driver worker also execute methods,
             # exceptions in the rest worker may cause deadlock in rpc like ray
             # see https://github.com/vllm-project/vllm/issues/3455
             # print the error and inform the user to solve the error
-            msg = (f"Error executing method {method}. "
+            msg = (f"Error executing method {method!r}. "
                    "This might cause deadlock in distributed execution.")
             logger.exception(msg)
             raise e
