@@ -358,13 +358,13 @@ class _ModelRegistry:
 
     def _try_load_model_cls(self,
                             model_arch: str) -> Optional[Type[nn.Module]]:
-        model = self.models.get(model_arch)
-        if model is None:
-            model = self.models[next(iter(_FALLBACK_MODEL))]
+        if model_arch not in self.models:
+            return None
 
-        return _try_load_model_cls(model_arch, model)
+        return _try_load_model_cls(model_arch, self.models[model_arch])
 
     def _try_inspect_model_cls(self, model_arch: str) -> Optional[_ModelInfo]:
+        # A model will always be inspected even if it cannot be loaded
         model = self.models.get(model_arch)
         if model is None:
             model = self.models[next(iter(_FALLBACK_MODEL))]

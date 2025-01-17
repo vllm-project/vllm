@@ -80,6 +80,12 @@ class SupportsHash(Protocol):
         ...
 
 
+class ModelImpl(str, enum.Enum):
+    AUTO = "auto"
+    VLLM = "vllm"
+    TRANSFORMERS = "transformers"
+
+
 class ModelConfig:
     """Configuration for the model.
 
@@ -169,6 +175,12 @@ class ModelConfig:
             `logits_processors` extra completion argument. Defaults to None,
             which allows no processors.
         generation_config: Configuration parameter file for generation.
+        model_impl: Which implementation of the model to use:
+            "auto" will try to use the vLLM implementation if it exists and
+                fall back to the Transformers implementation if no vLLM
+                implementation is available.
+            "vllm" will use the vLLM model implementation.
+            "transformers" will use the Transformers model implementation.
     """
 
     def compute_hash(self) -> str:
@@ -228,7 +240,8 @@ class ModelConfig:
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  override_pooler_config: Optional["PoolerConfig"] = None,
                  logits_processor_pattern: Optional[str] = None,
-                 generation_config: Optional[str] = None) -> None:
+                 generation_config: Optional[str] = None,
+                 model_impl: Union[str, ModelImpl] = ModelImpl.AUTO) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -239,6 +252,7 @@ class ModelConfig:
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
         self.rope_theta = rope_theta
+        self.model_impl = model_impl
 
         if hf_overrides is None:
             hf_overrides = {}

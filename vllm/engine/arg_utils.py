@@ -11,10 +11,10 @@ import vllm.envs as envs
 from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          DecodingConfig, DeviceConfig, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PoolerConfig, PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
-                         VllmConfig)
+                         ModelConfig, ModelImpl, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PromptAdapterConfig,
+                         SchedulerConfig, SpeculativeConfig, TaskOption,
+                         TokenizerPoolConfig, VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -197,6 +197,7 @@ class EngineArgs:
     kv_transfer_config: Optional[KVTransferConfig] = None
 
     generation_config: Optional[str] = None
+    model_impl: str = "auto"
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -385,6 +386,18 @@ class EngineArgs:
             'qualified names that can be passed with the `logits_processors` '
             'extra completion argument. Defaults to None, which allows no '
             'processors.')
+        parser.add_argument(
+            '--model-impl',
+            type=str,
+            default=EngineArgs.model_impl,
+            choices=[f.value for f in ModelImpl],
+            help='Which implementation of the model to use.\n\n'
+                '* "auto" will try to use the vLLM implementation if it '
+                'exists and fall back to the Transformers implementation if '
+                'no vLLM implementation is available.\n'
+                '* "vllm" will use the vLLM model implementation.\n'
+                '* "transformers" will use the Transformers model '
+                'implementation.\n')
         # Parallel arguments
         parser.add_argument(
             '--distributed-executor-backend',
@@ -999,7 +1012,8 @@ class EngineArgs:
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
-            generation_config=self.generation_config)
+            generation_config=self.generation_config,
+            model_impl=self.model_impl)
 
     def create_load_config(self) -> LoadConfig:
         return LoadConfig(
