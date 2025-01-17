@@ -10,11 +10,12 @@ import psutil
 import zmq
 import zmq.asyncio
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
+from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
                             EngineCoreRequest, EngineCoreRequestType,
@@ -48,7 +49,7 @@ class EngineCore:
 
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks = self._initialize_kv_caches(
-            vllm_config.cache_config)
+            vllm_config)
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
@@ -64,21 +65,25 @@ class EngineCore:
             vllm_config.model_config)
 
     def _initialize_kv_caches(self,
-                              cache_config: CacheConfig) -> Tuple[int, int]:
+                              vllm_config: VllmConfig) -> Tuple[int, int]:
         start = time.time()
-        num_gpu_blocks, _ = self.model_executor.determine_num_available_blocks(
-        )
 
-        if cache_config.num_gpu_blocks_override is not None:
-            num_gpu_blocks_override = cache_config.num_gpu_blocks_override
-            logger.info(
-                "Overriding num_gpu_blocks=%d with "
-                "num_gpu_blocks_override=%d", num_gpu_blocks,
-                num_gpu_blocks_override)
-            num_gpu_blocks = num_gpu_blocks_override
+        # Get all kv cache needed by the model
+        kv_cache_spec = self.model_executor.get_kv_cache_spec()
 
+        # Profiles the peak memory usage of the model to determine how much
+        # memory can be allocated for kv cache.
+        availble_gpu_memory = self.model_executor.determine_available_memory()
+
+        # Get the kv cache tensor size
+        kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
+                                              availble_gpu_memory)
+        num_gpu_blocks = kv_cache_config.num_blocks
         num_cpu_blocks = 0
-        self.model_executor.initialize(num_gpu_blocks)
+
+        # Initialize kv cache and warmup the execution
+        self.model_executor.initialize(kv_cache_config)
+
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
