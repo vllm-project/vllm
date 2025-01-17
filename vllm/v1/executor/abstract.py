@@ -2,9 +2,12 @@ from typing import Type
 
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
-from vllm.executor.ray_distributed_executor import RayDistributedExecutor as RayDistributedExecutorV0 # noqa
-from vllm.executor.uniproc_executor import ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0 # noqa
-from vllm.executor.uniproc_executor import UniProcExecutor as UniProcExecutorV0 # noqa
+from vllm.executor.ray_distributed_executor import (  # noqa
+    RayDistributedExecutor as RayDistributedExecutorV0)
+from vllm.executor.uniproc_executor import (  # noqa
+    ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0)
+from vllm.executor.uniproc_executor import (  # noqa
+    UniProcExecutor as UniProcExecutorV0)
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 
