@@ -192,7 +192,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
             outputs (BaseProcessorOutput): the output of the processor,
                 - input_ids (torch.LongTensor): [N + image tokens]
                 - target_ids (torch.LongTensor): [N + image tokens]
-                - images (torch.FloatTensor): [n_images, 3, H, W]
+                - pixel_values (torch.FloatTensor): [n_patches, 3, H, W]
                 - image_id (int): the id of the image token
                 - num_image_tokens (List[int]): the number of image tokens
         """
@@ -237,8 +237,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
             pixel_values = torch.stack(images_list, dim=0)
             images_spatial_crop = torch.tensor(images_spatial_crop, dtype=torch.long)
 
-        input_ids = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0)
-        pixel_values = pixel_values.unsqueeze(0)
+        input_ids = input_ids.unsqueeze(0)
 
         prepare = BatchFeature(
             data=dict(
@@ -247,7 +246,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
                 images_seq_mask=images_seq_mask,
                 images_spatial_crop=images_spatial_crop,
                 num_image_tokens=num_image_tokens,
-            ), 
+            ),
             tensor_type="pt",
         )
         return prepare

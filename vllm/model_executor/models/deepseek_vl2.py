@@ -215,9 +215,15 @@ class DeepseekVL2MultiModalProcessor(
                 mm_kwargs,
             )
             target_dtype = self.info.ctx.model_config.dtype
-            processed_outputs["pixel_values"] = (
-                processed_outputs["pixel_values"].to(target_dtype)
-            )
+            pixel_values = processed_outputs.pop("pixel_values").to(
+                target_dtype)
+            # split pixel values into patches corresponding to each image
+            images_spatial_crop = processed_outputs["images_spatial_crop"]
+            patches_per_image = [
+                x.prod().item() + 1 for x in images_spatial_crop
+            ]
+            pixel_values = pixel_values.split(patches_per_image)
+            processed_outputs["pixel_values"] = pixel_values
         else:
             tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
@@ -324,7 +330,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             raise ValueError(
                 f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
             )
-        
+
         if self.text_config.topk_method == "noaux_tc":
             architectures = ["DeepseekV3ForCausalLM"]
         elif not self.text_config.use_mla:
