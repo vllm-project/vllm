@@ -26,6 +26,7 @@ def test_collective_rpc(tp_size, backend):
         backend = None
     llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct",
               enforce_eager=True,
+              load_format="dummy",
               tensor_parallel_size=tp_size,
               distributed_executor_backend=backend,
               worker_cls=MyWorker)
