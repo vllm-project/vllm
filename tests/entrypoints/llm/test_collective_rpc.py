@@ -1,19 +1,12 @@
 import pytest
 
 from vllm import LLM
-from vllm.worker.worker import Worker
 
 from ...utils import fork_new_process_for_each_test
 
 
 def echo_rank(self):
     return self.rank
-
-
-class MyWorker(Worker):
-
-    def echo_rank(self):
-        return self.rank
 
 
 @pytest.mark.parametrize("tp_size", [1, 2])
@@ -24,6 +17,14 @@ def test_collective_rpc(tp_size, backend):
         pytest.skip("Skip duplicate test case")
     if tp_size == 1:
         backend = None
+
+    from vllm.worker.worker import Worker
+
+    class MyWorker(Worker):
+
+        def echo_rank(self):
+            return self.rank
+
     llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct",
               enforce_eager=True,
               load_format="dummy",
