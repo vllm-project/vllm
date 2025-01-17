@@ -10,7 +10,7 @@ from vllm.sampling_params import SamplingParams
 
 from ...utils import check_outputs_equal
 
-MODELS = ["state-spaces/mamba-130m-hf", "tiiuae/falcon-mamba-tiny-dev"]
+MODELS = ["state-spaces/mamba-130m-hf", "tiiuae/falcon-mamba-tiny-dev", "mistralai/Mamba-Codestral-7B-v0.1"]
 
 
 # Use lower-level interfaces to create this greedy generator, as mamba will
@@ -38,7 +38,7 @@ def generate_greedy(model_name, example_prompts, max_tokens):
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [96])
 def test_models(
     vllm_runner,
