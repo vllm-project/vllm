@@ -67,10 +67,14 @@ from vllm.transformers_utils.config import uses_mrope
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper,
-                    init_vllm_registered_model, maybe_prefix, merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings)
 from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
+
+# For profile run
+_MAX_FRAMES_PER_VIDEO = 16
 
 # === Vision Inputs === #
 
@@ -611,6 +615,11 @@ class Qwen2VisionTransformer(nn.Module):
 
         # adapter
         x = self.merger(x)
+
+        # split by individual data items
+        sizes = grid_thw.prod(
+            -1) // self.spatial_merge_size // self.spatial_merge_size
+        x = x.split(sizes.tolist())
         return x
 
     def load_weights(self, weights: Iterable[Tuple[str,
@@ -875,8 +884,8 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = self._get_max_video_frames(seq_len -
                                                       max_image_tokens)
-
-        num_frames = max(max_total_frames // max(max_videos, 1), 1)
+        num_frames = min(max(max_total_frames // max(max_videos, 1), 1),
+                         _MAX_FRAMES_PER_VIDEO)
 
         # Temporary workaround for https://github.com/huggingface/transformers/issues/35412
         if num_frames > 1 and num_frames % 2 == 1:
@@ -1250,11 +1259,11 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             if modality == "images":
                 image_input = modalities["images"]
                 vision_embeddings = self._process_image_input(image_input)
-                multimodal_embeddings += tuple(vision_embeddings)
+                multimodal_embeddings += vision_embeddings
             if modality == "videos":
                 video_input = modalities["videos"]
                 video_embeddings = self._process_video_input(video_input)
-                multimodal_embeddings += tuple(video_embeddings)
+                multimodal_embeddings += video_embeddings
 
         return multimodal_embeddings
 
