@@ -222,7 +222,6 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> Optional[List[SamplerOutput]]:
-        assert execute_model_req is not None
         # VLLM_HPU_LOG_STEP_GRAPH_COMPILATION     - will log graph compilations per engine step, only when there was any - highly recommended to use alongside PT_HPU_METRICS_GC_DETAILS! # noqa:E501
         # VLLM_HPU_LOG_STEP_GRAPH_COMPILATION_ALL - will log graph compilations per engine step, always, even if there were none # noqa:E501
         # VLLM_HPU_LOG_STEP_CPU_FALLBACKS         - will log cpu fallbacks per engine step, only when there was any # noqa:E501
