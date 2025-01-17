@@ -1,5 +1,4 @@
 import os
-from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -8,7 +7,8 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
+                        run_method)
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -47,14 +47,10 @@ class UniProcExecutor(ExecutorBase):
         if kwargs is None:
             kwargs = {}
         try:
-            if isinstance(method, str):
-                func = getattr(self.driver_worker, method)
-            else:
-                func = partial(method, self.driver_worker)
+            answer = run_method(self.driver_worker, method, args, kwargs)
         except AttributeError:
-            raise NotImplementedError(f"Method {method} is not implemented.") \
-                from None
-        answer = func(*args, **kwargs)
+            raise NotImplementedError(f"Method {method!r} is not"
+                                      " implemented.") from None
         return [answer]
 
     def check_health(self) -> None:
