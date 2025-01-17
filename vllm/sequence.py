@@ -200,6 +200,12 @@ class SequenceData:
     def stage(self) -> SequenceStage:
         return self._stage
 
+    def __deepcopy__(self, memodict={}) -> "SequenceData":
+        import pickle
+        new_data = copy.copy(self)
+        new_data.output_token_ids = pickle.loads(pickle.dumps(self.output_token_ids, -1))
+        return new_data
+
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self.prompt_token_ids}, "
@@ -367,7 +373,10 @@ class Sequence:
         return SequenceStatus.is_finished(self.status)
 
     def fork(self, new_seq_id: int) -> "Sequence":
-        new_seq = copy.deepcopy(self)
+        import pickle 
+        new_seq = copy.copy(self)
+        new_seq.data = copy.deepcopy(self.data)
+        new_seq.logical_token_blocks = pickle.loads(pickle.dumps(self.logical_token_blocks, -1))
         new_seq.seq_id = new_seq_id
         return new_seq
 

@@ -156,8 +156,23 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         # Tuple of (seq, parent, is_new)
         existing_finished_seqs = [(seq, None, False)
                                   for seq in existing_finished_seqs]
-        new_finished_seqs = [(seq, parent, True) for seq, parent in child_seqs
-                             if seq.is_finished()]
+        child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
+            length_penalty=length_penalty, eos_token_id=x[0].eos_token_id), reverse=True)
+
+        running_child_seqs = []
+        new_finished_seqs = []
+        # Add to finished seqs if running seqs have not reached beam width
+        for i, (seq, parent) in enumerate(child_seqs):
+            if seq.is_finished():
+                if i<beam_width:
+                    new_finished_seqs.append((seq, parent, True))
+                else:
+                    unselected_child_seqs.append((seq, parent))
+            elif not seq.is_finished():
+                running_child_seqs.append((seq, parent))
+
+        #new_finished_seqs = [(seq, parent, True) for seq, parent in child_seqs
+        #                     if seq.is_finished()]
         all_finished_seqs = existing_finished_seqs + new_finished_seqs
         # Sort the finished sequences by their scores.
         all_finished_seqs.sort(key=lambda x: x[0].get_beam_search_score(
@@ -184,12 +199,13 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         # select the top beam_width sequences from the running
         # sequences for the next iteration to continue the beam
         # search.
-        running_child_seqs = [(seq, parent) for seq, parent in child_seqs
-                              if not seq.is_finished()]
+        #running_child_seqs = [(seq, parent) for seq, parent in child_seqs
+        #                      if not seq.is_finished()]
         # Sort the running sequences by their scores.
-        running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
-            length_penalty=length_penalty, eos_token_id=x[0].eos_token_id),
-                                reverse=True)
+        #print("Sort running seqs")
+        #running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
+        #    length_penalty=length_penalty, eos_token_id=x[0].eos_token_id),
+        #                        reverse=True)
 
         # Check if we can stop the beam search.
         if len(running_child_seqs) == 0:
