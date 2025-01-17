@@ -1,5 +1,6 @@
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from functools import partial
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -39,14 +40,17 @@ class UniProcExecutor(ExecutorBase):
         self.collective_rpc("load_model")
 
     def collective_rpc(self,
-                       method: str,
+                       method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
         if kwargs is None:
             kwargs = {}
         try:
-            func = getattr(self.driver_worker, method)
+            if isinstance(method, str):
+                func = getattr(self.driver_worker, method)
+            else:
+                func = partial(method, self.driver_worker)
         except AttributeError:
             raise NotImplementedError(f"Method {method} is not implemented.") \
                 from None
