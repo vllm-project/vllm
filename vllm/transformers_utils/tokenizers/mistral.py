@@ -240,7 +240,8 @@ class MistralTokenizer:
             input_ids = prompt
         else:
             # Mistral Tokenizers should not add special tokens
-            input_ids = self.encode_one(prompt, truncation, max_length)
+            input_ids = self.encode_one(prompt, truncation,
+                                        max_length)  # type: ignore[assignment]
         return Encoding(input_ids=input_ids)
 
     def get_vocab(self) -> Dict[str, int]:
