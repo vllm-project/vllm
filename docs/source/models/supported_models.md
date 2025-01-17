@@ -40,6 +40,19 @@ If vLLM successfully returns text (for generative models) or hidden states (for 
 Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
+### Transformers fallback
+After the merge of #11330, `vllm` can fallback to models that are avaialble in `transformers`. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
+
+To check if the backend is `transformers`, you can simply do this: 
+
+```python 
+from vllm import LLM
+llm = LLM(model=..., task="generate")  # Name or path of your model
+print(llm.model.__class__)
+```
+
+If it is `TransformersModel` then it means it's based on `transformers`! 
+
 ### ModelScope
 
 To use models from [ModelScope](https://www.modelscope.cn) instead of HuggingFace Hub, set an environment variable:
