@@ -2169,16 +2169,19 @@ def bind_kv_cache(
             forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
 
 
-def run_method(obj: Any, method: Union[str, bytes], args: Tuple[Any],
+def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
                kwargs: Dict[str, Any]) -> Any:
     """
     Run a method of an object with the given arguments and keyword arguments.
     If the method is string, it will be converted to a method using getattr.
-    Else, the method should be serialized bytes and will be deserialized using
+    If the method is serialized bytes and will be deserialized using
     cloudpickle.
+    If the method is a callable, it will be called directly.
     """
     if isinstance(method, bytes):
         func = partial(cloudpickle.loads(method), obj)
-    else:
+    elif isinstance(method, str):
         func = getattr(obj, method)
+    else:
+        func = method # type: ignore
     return func(*args, **kwargs)
