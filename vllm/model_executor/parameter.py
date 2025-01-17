@@ -91,6 +91,7 @@ def wrap_base_vllm_parameter(param: Parameter, weight_loader: Callable,
         assert param.data.shape == loaded_weight.shape
         param.data.copy_(loaded_weight)
 
+<<<<<<< HEAD
     from vllm.platforms import current_platform
     if current_platform.is_tpu():
         weight_loader = _make_synced_weight_loader(weight_loader)
@@ -105,6 +106,59 @@ def wrap_base_vllm_parameter(param: Parameter, weight_loader: Callable,
     param.load_qkv_weight = lambda loaded_weight, **kwargs: _assert_and_load(
         param, loaded_weight)
     add_param_feature(param, vLLMParameterFeatures.Base)
+=======
+        return super().__new__(cls, data=data, requires_grad=False)
+
+    def __init__(self, data: torch.Tensor, weight_loader: Callable):
+        """
+        Initialize the BasevLLMParameter
+
+        :param data: torch tensor with the parameter data
+        :param weight_loader: weight loader callable
+
+        :returns: a torch.nn.parameter
+        """
+
+        # During weight loading, we often do something like:
+        # narrowed_tensor = param.data.narrow(0, offset, len)
+        # narrowed_tensor.copy_(real_weight)
+        # expecting narrowed_tensor and param.data to share the same storage.
+        # However, on TPUs, narrowed_tensor will lazily propagate to the base
+        # tensor, which is param.data, leading to the redundant memory usage.
+        # This sometimes causes OOM errors during model loading. To avoid this,
+        # we sync the param tensor after its weight loader is called.
+        from vllm.platforms import current_platform
+        if current_platform.is_tpu():
+            weight_loader = _make_synced_weight_loader(weight_loader)
+
+        self._weight_loader = weight_loader
+
+    @property
+    def weight_loader(self):
+        return self._weight_loader
+
+    def _is_1d_and_scalar(self, loaded_weight: torch.Tensor):
+        cond1 = self.data.ndim == 1 and self.data.numel() == 1
+        cond2 = loaded_weight.ndim == 0 and loaded_weight.numel() == 1
+        return (cond1 and cond2)
+
+    def _assert_and_load(self, loaded_weight: torch.Tensor):
+        assert (self.data.shape == loaded_weight.shape
+                or self._is_1d_and_scalar(loaded_weight))
+        self.data.copy_(loaded_weight)
+
+    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
+        self._assert_and_load(loaded_weight)
+
+    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+        self._assert_and_load(loaded_weight)
+
+    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        self._assert_and_load(loaded_weight)
+
+    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        self._assert_and_load(loaded_weight)
+>>>>>>> 69d765f5a5bbbe1ea9843be19b9480660fc5bc8b
 
 
 def wrap_column_vllm_parameter(param: Parameter, output_dim: int,
