@@ -2705,7 +2705,7 @@ class CompilationConfig(BaseModel):
     custom_ops: List[str] = Field(default_factory=list)
     splitting_ops: List[str] = Field(default=None)  # type: ignore
 
-    use_inductor: bool = True
+    use_inductor: bool = False 
     candidate_compile_sizes: Optional[List[int]] = Field(default=None)
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
@@ -3181,8 +3181,7 @@ class VllmConfig:
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_reshape = False
-#            self.compilation_config.level = CompilationLevel.PIECEWISE
-            self.compilation_config.level = CompilationLevel.NO_COMPILATION
+            self.compilation_config.level = CompilationLevel.PIECEWISE
 
         self._set_cudagraph_sizes()
 
@@ -3263,8 +3262,7 @@ class VllmConfig:
             batch_size_capture_list = []
             if self.model_config is not None and \
                 not self.model_config.enforce_eager:
-                batch_size_capture_list = [1, 2, 4
-                                           ] + [i for i in range(8, 513, 8)]
+                batch_size_capture_list = [1, 2, 4] + [i for i in range(8, 513, 8)]
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)

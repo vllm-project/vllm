@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Tuple, cast
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
 
 import numpy as np
 import torch
@@ -110,9 +110,10 @@ class GPUModelRunner:
             vocab_size=model_config.get_vocab_size(),
         )
 
-        self.use_cuda_graph = (self.vllm_config.compilation_config.level
-                               == CompilationLevel.PIECEWISE
-                               and not self.model_config.enforce_eager)
+#        self.use_cuda_graph = (self.vllm_config.compilation_config.level
+#                               == CompilationLevel.PIECEWISE
+#                               and not self.model_config.enforce_eager)
+        self.use_cuda_graph = not self.model_config.enforce_eager
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
@@ -149,6 +150,7 @@ class GPUModelRunner:
             # this one must be int64
             dtype=torch.int64,
             device=self.device)
+        self.tokenshape = torch.zeros(4, dtype=torch.int32, device=self.device)
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
         self.arange_np = np.arange(max(self.max_num_reqs + 1,
@@ -182,6 +184,10 @@ class GPUModelRunner:
                                              device="cpu",
                                              pin_memory=self.pin_memory)
         self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
+
+        self.tokenshape_cpu = torch.zeros(4, dtype=torch.int32,
+                                            device="cpu",
+                                            pin_memory=self.pin_memory)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
@@ -379,6 +385,12 @@ class GPUModelRunner:
             self.slot_mapping_cpu[:total_num_scheduled_tokens],
             non_blocking=True)
 
+        self.tokenshape_cpu[0] = total_num_scheduled_tokens  # Actual number of tokens to process
+        self.tokenshape_cpu[1] = num_reqs                    # Number of requests
+        self.tokenshape_cpu[2] = max_num_scheduled_tokens    # Maximum query length
+        self.tokenshape_cpu[3] = max_seq_len                 # Maximum sequence length
+        self.tokenshape.copy_(self.tokenshape_cpu, non_blocking=True)
+
         # Prepare for cascade attention if needed.
         common_prefix_len = (scheduler_output.num_common_prefix_blocks *
                              self.block_size)
@@ -468,6 +480,7 @@ class GPUModelRunner:
             seq_start_loc=self.seq_start_loc,
             block_table=self.input_batch.block_table[:num_reqs],
             slot_mapping=self.slot_mapping,
+            tokenshape=self.tokenshape,
             # Cascade stuff
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
@@ -710,6 +723,7 @@ class GPUModelRunner:
         model: nn.Module,
         num_tokens: int,
         kv_caches: List[torch.Tensor],
+        attn_metadata: Optional[FlashAttentionMetadata],
     ) -> torch.Tensor:
         if self.is_multimodal_model:
             input_ids = None
@@ -717,7 +731,7 @@ class GPUModelRunner:
         else:
             input_ids = self.input_ids[:num_tokens]
             inputs_embeds = None
-        with set_forward_context(None, self.vllm_config):
+        with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = model(
                 input_ids=input_ids,
                 positions=self.positions[:num_tokens],
@@ -726,6 +740,28 @@ class GPUModelRunner:
                 inputs_embeds=inputs_embeds,
             )
         return hidden_states
+    
+    def metadata_for_dummy_run(self, num_tokens) -> FlashAttentionMetadata:
+        # Create placeholder metadata
+        num_reqs = num_tokens
+        max_query_len = num_tokens
+        max_seq_len = num_tokens
+        return FlashAttentionMetadata(
+            num_actual_tokens=num_tokens,
+            max_query_len=max_query_len,
+            query_start_loc=self.query_start_loc,
+            max_seq_len=max_seq_len,
+            seq_start_loc=self.seq_start_loc,
+            block_table=self.input_batch.block_table[:num_reqs],
+            slot_mapping=self.slot_mapping,
+            tokenshape=self.tokenshape,
+            # Cascade stuff. Non-piecewise CUDA graphs NYI
+            use_cascade=None,
+            common_prefix_len=0,
+            cu_prefix_query_lens=None,
+            cu_prefix_kv_lens=None,
+            cu_suffix_kv_lens=None,
+        )
 
     def profile_run(self) -> None:
         # use an empty tensor instead of `None`` to force Dynamo to pass
@@ -831,7 +867,7 @@ class GPUModelRunner:
 
         # Trigger compilation for general shape.
         hidden_states = self._dummy_run(self.model, self.max_num_tokens,
-                                        dummy_kv_caches)
+                                        dummy_kv_caches, None)
         logits = self.model.compute_logits(hidden_states, None)
         logits = logits[:self.max_num_tokens]
         # TODO(woosuk): Consider the memory usage of the sampler.
@@ -849,10 +885,11 @@ class GPUModelRunner:
         # can reuse the memory pool allocated for the large shapes.
         with graph_capture():
             for num_tokens in reversed(self.cudagraph_batch_sizes):
+                attn_metadata = self.metadata_for_dummy_run(num_tokens)
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(self.model, num_tokens, self.kv_caches)
-                self._dummy_run(self.model, num_tokens, self.kv_caches)
+                    self._dummy_run(self.model, num_tokens, self.kv_caches, attn_metadata)
+                self._dummy_run(self.model, num_tokens, self.kv_caches, attn_metadata)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]

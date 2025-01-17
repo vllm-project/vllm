@@ -65,6 +65,9 @@ class FlashAttentionMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
+    # [num_actual_tokens, batch_size, max_query_len, max_seq_len]
+    tokenshape: torch.Tensor
+
     # For cascade attention.
     use_cascade: bool
     common_prefix_len: int
@@ -155,7 +158,7 @@ class FlashAttentionImpl(AttentionImpl):
         assert output is not None, "Output tensor must be provided."
 
         if attn_metadata is None:
-            # Profiling run.
+            # Dynamic shape profiling run.
             return output
 
         # IMPORTANT!
@@ -167,19 +170,17 @@ class FlashAttentionImpl(AttentionImpl):
         # Whenever making a change in this method, please benchmark the
         # performance to make sure it does not introduce any overhead.
 
-        num_actual_tokens = attn_metadata.num_actual_tokens
+        tokenshape = attn_metadata.tokenshape
+        num_padded_tokens = key.shape[0]
         # Reshape the input keys and values and store them in the cache.
-        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-        # not padded. However, we don't need to do key[:num_actual_tokens] and
-        # value[:num_actual_tokens] because the reshape_and_cache_flash op uses
-        # the slot_mapping's shape to determine the number of actual tokens.
         key_cache, value_cache = kv_cache.unbind(0)
-        torch.ops._C_cache_ops.reshape_and_cache_flash(
+        torch.ops._C_cache_ops.reshape_and_cache_flash_full_cuda(
+            tokenshape,
             key,
             value,
             key_cache,
             value_cache,
-            attn_metadata.slot_mapping[:num_actual_tokens],
+            attn_metadata.slot_mapping[:num_padded_tokens],
             self.kv_cache_dtype,
             k_scale,
             v_scale,
@@ -188,13 +189,15 @@ class FlashAttentionImpl(AttentionImpl):
         # Compute attention and update output up to `num_actual_tokens`.
         if not attn_metadata.use_cascade:
             # Regular attention (common case).
+            num_actual_tokens = attn_metadata.num_actual_tokens
             batch_size = attn_metadata.block_table.shape[0]
+            print(f"q, k v shapes: {query.shape}")
 
             flash_attn_varlen_func(
-                q=query[:num_actual_tokens],
+                q=query[:num_padded_tokens],
                 k=key_cache,
                 v=value_cache,
-                out=output[:num_actual_tokens],
+                out=output[:num_padded_tokens],
                 cu_seqlens_q=attn_metadata.query_start_loc[:batch_size+1],
                 max_seqlen_q=attn_metadata.max_query_len,
                 cu_seqlens_k=attn_metadata.seq_start_loc[:batch_size+1],
