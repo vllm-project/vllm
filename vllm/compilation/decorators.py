@@ -76,11 +76,8 @@ def support_torch_compile(
     During runtime, when we actually mark dimensions of tensors,
      it depends on the value of arguments:
 
-    - if it is a single integer, the corresponding dimension of the argument
-        will be marked as dynamic.
-    - if it is a function returns a single integer, it will be called with 
-        the tensor as argument, and the returned dimension will be marked 
-        as dynamic.
+    - if it is a single integer (can be negative), the corresponding dimension 
+        of the argument will be marked as dynamic.
     - if it is `None`, ignored.
     - if it is `IntermediateTensors`, all the tensors in the intermediate
         tensors will be marked as dynamic.
