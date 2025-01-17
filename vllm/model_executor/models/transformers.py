@@ -139,7 +139,7 @@ class TransformersModel(nn.Module):
         self.config._attn_implementation_internal = "vllm"
 
         self.tp_plan = self.config.base_model_tp_plan
-        self.model = AutoModel.from_config(self.config)
+        self.model = AutoModel.from_config(self.config, torch_dtype=vllm_config.model_config.dtype)
         self.tensor_parallelize(self.model)
 
         # TODO(Isotr0py): Find a better method to parallelize VocabEmbedding
@@ -151,7 +151,7 @@ class TransformersModel(nn.Module):
         # )
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
-                                      quant_config=None,
+                                      quant_config=quant_config,
                                       prefix=maybe_prefix(prefix, "lm_head"))
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.get_input_embeddings().weight
@@ -162,6 +162,9 @@ class TransformersModel(nn.Module):
         self.sampler = get_sampler()
 
     def tensor_parallelize(self, module: nn.Module, prefix: str = ""):
+        if self.tp_plan is None:
+            raise ValueError("Trying to run tensor parallelization but the model does not support it yet!")
+
         for child_name, child_module in module.named_children():
             qual_name = prefix + child_name
             for pattern, style in self.tp_plan.items():
