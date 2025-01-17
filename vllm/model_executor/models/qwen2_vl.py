@@ -1230,17 +1230,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return modalities
 
-    def _merge_multimodal_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        inputs_embeds: torch.Tensor,
-        multimodal_embeddings: torch.Tensor,
-        placeholder_token_id: int,
-    ) -> torch.Tensor:
-        mask = (input_ids == placeholder_token_id)
-        inputs_embeds[mask, :] = multimodal_embeddings
-        return inputs_embeds
-
     def get_multimodal_embeddings(
             self, **kwargs) -> Optional[List[Tuple[NestedTensors, str]]]:
 
