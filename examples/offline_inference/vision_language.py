@@ -70,7 +70,7 @@ def run_chameleon(question: str, modality: str):
 def run_deepseek_vl2(question: str, modality: str):
     assert modality == "image"
 
-    model_name = "deepseek-ai/deepseek-vl2-small"
+    model_name = "deepseek-ai/deepseek-vl2-tiny"
 
     llm = LLM(model=model_name,
               max_model_len=4096,
@@ -325,7 +325,6 @@ def run_mllama(question: str, modality: str):
         model=model_name,
         max_model_len=4096,
         max_num_seqs=16,
-        enforce_eager=True,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
