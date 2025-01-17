@@ -37,6 +37,7 @@ from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     overload)
 from uuid import uuid4
 
+import cloudpickle
 import numpy as np
 import numpy.typing as npt
 import psutil
@@ -729,13 +730,7 @@ class DeviceMemoryProfiler:
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
         from vllm.platforms import current_platform
-        if current_platform.is_cuda_alike():
-            torch.cuda.reset_peak_memory_stats(self.device)
-            mem = torch.cuda.max_memory_allocated(self.device)
-        elif current_platform.is_xpu():
-            torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
-            mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
-        return mem
+        return current_platform.get_current_memory_usage(self.device)
 
     def __enter__(self):
         self.initial_memory = self.current_memory_usage()
@@ -2269,3 +2264,25 @@ def bind_kv_cache(
         assert len(forward_ctx.kv_cache) == len(kv_cache)
         for ve, ve_kv_cache in enumerate(kv_cache):
             forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
+
+
+def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
+               kwargs: Dict[str, Any]) -> Any:
+    """
+    Run a method of an object with the given arguments and keyword arguments.
+    If the method is string, it will be converted to a method using getattr.
+    If the method is serialized bytes and will be deserialized using
+    cloudpickle.
+    If the method is a callable, it will be called directly.
+    """
+    if isinstance(method, bytes):
+        func = partial(cloudpickle.loads(method), obj)
+    elif isinstance(method, str):
+        try:
+            func = getattr(obj, method)
+        except AttributeError:
+            raise NotImplementedError(f"Method {method!r} is not"
+                                      " implemented.") from None
+    else:
+        func = partial(method, obj)  # type: ignore
+    return func(*args, **kwargs)
