@@ -1,0 +1,14 @@
+name: dummy-checks
+
+on:
+  pull_request:
+
+jobs:
+  mypy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "This is a dummy step that always passes"
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "This is a dummy step that always passes"
