@@ -24,6 +24,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
+from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -34,6 +35,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .utils import maybe_prefix
+
+logger = init_logger(__name__)
 
 
 class VllmKwargsForCausalLM(TypedDict, total=False):
@@ -114,6 +117,7 @@ class TransformersModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+        logger.info("Using Transformers backend.")
 
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -139,16 +143,16 @@ class TransformersModel(nn.Module):
         self.config._attn_implementation_internal = "vllm"
 
         self.tp_plan = self.config.base_model_tp_plan
-        self.model = AutoModel.from_config(self.config, torch_dtype=vllm_config.model_config.dtype)
+        self.model = AutoModel.from_config(
+            self.config, torch_dtype=vllm_config.model_config.dtype)
         self.tensor_parallelize(self.model)
 
-        # TODO(Isotr0py): Find a better method to parallelize VocabEmbedding
-        # self.model.embed_tokens = VocabParallelEmbedding(
-        #     self.vocab_size,
-        #     config.hidden_size,
-        #     org_num_embeddings=config.vocab_size,
-        #     quant_config=None,
-        # )
+        self.model.embed_tokens = VocabParallelEmbedding(
+            self.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            quant_config=None,
+        )
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config,
@@ -163,7 +167,9 @@ class TransformersModel(nn.Module):
 
     def tensor_parallelize(self, module: nn.Module, prefix: str = ""):
         if self.tp_plan is None:
-            raise ValueError("Trying to run tensor parallelization but the model does not support it yet!")
+            raise ValueError(
+                "Trying to run tensor parallelization but the model does not support it yet!"
+            )
 
         for child_name, child_module in module.named_children():
             qual_name = prefix + child_name

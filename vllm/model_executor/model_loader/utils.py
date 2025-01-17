@@ -46,15 +46,17 @@ def get_model_architecture(
 
     vllm_supported_archs = ModelRegistry.get_supported_archs()
     for i, arch in enumerate(architectures):
+        if arch == "TransformersModel":
+            continue
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
-            if not is_transformers_impl_compatible:
+            if not is_transformers_impl_compatible(arch):
                 raise ValueError(
                     "The Transformers implementation of %s is not compatible "
                     "with vLLM.", arch)
             architectures[i] = "TransformersModel"
         if (model_config.model_impl == ModelImpl.AUTO
                 and arch not in vllm_supported_archs):
-            if not is_transformers_impl_compatible:
+            if not is_transformers_impl_compatible(arch):
                 raise ValueError(
                     "%s has no vLLM implementation and the Transformers "
                     "implementationis not compatible with vLLM.", arch)
