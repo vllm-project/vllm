@@ -6,9 +6,15 @@ on:
 jobs:
   mypy:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
     steps:
       - run: echo "This is a dummy step that always passes"
   ruff:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
     steps:
       - run: echo "This is a dummy step that always passes"
