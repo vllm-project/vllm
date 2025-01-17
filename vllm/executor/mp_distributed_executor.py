@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import Any, Callable, List, Optional, Union
 
 import cloudpickle
@@ -10,8 +11,9 @@ from vllm.executor.multiproc_worker_utils import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
-                        get_ip, get_open_port, make_async, run_method)
+from vllm.utils import (_run_task_with_lock, cuda_device_count_stateless,
+                        get_distributed_init_method, get_ip, get_open_port,
+                        make_async, run_method, update_environment_variables)
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -22,7 +24,37 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
 
     uses_ray: bool = False
 
+    def _check_cuda(self) -> None:
+        """Check that the number of GPUs is sufficient for the parallel
+        configuration. Separate from _init_executor to reduce the number of
+        indented blocks.
+        """
+        parallel_config = self.parallel_config
+        world_size = parallel_config.world_size
+        tensor_parallel_size = parallel_config.tensor_parallel_size
+
+        cuda_device_count = cuda_device_count_stateless()
+        # Use confusing message for more common TP-only case.
+        assert tensor_parallel_size <= cuda_device_count, (
+            f"please set tensor_parallel_size ({tensor_parallel_size}) "
+            f"to less than max local gpu count ({cuda_device_count})")
+
+        assert world_size <= cuda_device_count, (
+            f"please ensure that world_size ({world_size}) "
+            f"is less than than max local gpu count ({cuda_device_count})")
+
+        # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
+        if "CUDA_VISIBLE_DEVICES" not in os.environ:
+            update_environment_variables({
+                "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
+            })
+
     def _init_executor(self) -> None:
+
+        from vllm.platforms import current_platform
+        if current_platform.is_cuda_alike():
+            self._check_cuda()
+
         # Create the parallel GPU workers.
         world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
