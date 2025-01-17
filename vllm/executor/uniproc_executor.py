@@ -46,11 +46,7 @@ class UniProcExecutor(ExecutorBase):
                        kwargs: Optional[Dict] = None) -> List[Any]:
         if kwargs is None:
             kwargs = {}
-        try:
-            answer = run_method(self.driver_worker, method, args, kwargs)
-        except AttributeError:
-            raise NotImplementedError(f"Method {method!r} is not"
-                                      " implemented.") from None
+        answer = run_method(self.driver_worker, method, args, kwargs)
         return [answer]
 
     def check_health(self) -> None:

@@ -2181,7 +2181,11 @@ def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
     if isinstance(method, bytes):
         func = partial(cloudpickle.loads(method), obj)
     elif isinstance(method, str):
-        func = getattr(obj, method)
+        try:
+            func = getattr(obj, method)
+        except AttributeError:
+            raise NotImplementedError(f"Method {method!r} is not"
+                                      " implemented.") from None
     else:
         func = method  # type: ignore
     return func(*args, **kwargs)
