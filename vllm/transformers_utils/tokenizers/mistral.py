@@ -229,19 +229,20 @@ class MistralTokenizer:
         truncation: bool = False,
         max_length: Optional[int] = None,
     ):
+        input_ids: Union[List[int], List[List[int]]]
         # For List[str], original prompt text
         if is_list_of(prompt, str):
-            input_ids = []
+            input_ids_: List[List[int]] = []
             for p in prompt:
                 each_input_ids = self.encode_one(p, truncation, max_length)
-                input_ids.append(each_input_ids)
+                input_ids_.append(each_input_ids)
+            input_ids = input_ids_
         # For List[int], apply chat template output, already tokens.
         elif is_list_of(prompt, int):
             input_ids = prompt
+        # For str, single prompt text
         else:
-            # Mistral Tokenizers should not add special tokens
-            input_ids = self.encode_one(prompt, truncation,
-                                        max_length)  # type: ignore[assignment]
+            input_ids = self.encode_one(prompt, truncation, max_length)
         return Encoding(input_ids=input_ids)
 
     def get_vocab(self) -> Dict[str, int]:
@@ -259,6 +260,7 @@ class MistralTokenizer:
         truncation: bool = False,
         max_length: Optional[int] = None,
     ) -> List[int]:
+        # Mistral Tokenizers should not add special tokens
         assert isinstance(prompt, str), f"Invalid prompt: {prompt}"
         input_ids = self.encode(prompt)
 
