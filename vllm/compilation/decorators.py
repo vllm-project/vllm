@@ -18,15 +18,12 @@ from .monitor import start_monitoring_torch_compile
 logger = init_logger(__name__)
 
 _T = TypeVar("_T", bound=type[nn.Module])
-DimIndexes = Union[int, List[int]]
-DimIndexesSelector = Callable[[torch.Tensor], DimIndexes]
 
 
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: Optional[Dict[str, Union[DimIndexes,
-                                               DimIndexesSelector]]],
+    dynamic_arg_dims: Optional[Dict[str, Union[int, List[int]]]],
 ) -> Callable[[_T], _T]:
     ...
 
@@ -39,8 +36,7 @@ def support_torch_compile(cls: _T) -> _T:
 def support_torch_compile(
     cls: Optional[_T] = None,
     *,
-    dynamic_arg_dims: Optional[Dict[str, Union[DimIndexes,
-                                               DimIndexesSelector]]] = None,
+    dynamic_arg_dims: Optional[Dict[str, Union[int, List[int]]]] = None,
 ) -> Union[Callable[[_T], _T], _T]:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -136,7 +132,7 @@ def support_torch_compile(
 
 def _support_torch_compile(
     cls: _T,
-    dynamic_arg_dims: Dict[str, Union[DimIndexes, DimIndexesSelector]],
+    dynamic_arg_dims: Dict[str, Union[int, List[int]]],
 ) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -184,13 +180,21 @@ def _support_torch_compile(
             for k, dims in dynamic_arg_dims.items():
                 arg = bound_args.arguments.get(k)
                 if arg is not None:
+                    dims = [dims] if isinstance(dims, int) else dims
                     if isinstance(arg, torch.Tensor):
-                        dims_ = dims(arg) if callable(dims) else dims
-                        torch._dynamo.mark_dynamic(arg, dims_)
+                        # In case dims is specified with negative indexing
+                        dims = [
+                            arg.ndim + dim if dim < 0 else dim for dim in dims
+                        ]
+                        torch._dynamo.mark_dynamic(arg, dims)
                     elif isinstance(arg, IntermediateTensors):
                         for tensor in arg.tensors.values():
-                            dims_ = dims(tensor) if callable(dims) else dims
-                            torch._dynamo.mark_dynamic(tensor, dims_)
+                            # In case dims is specified with negative indexing
+                            dims = [
+                                tensor.ndim + dim if dim < 0 else dim
+                                for dim in dims
+                            ]
+                            torch._dynamo.mark_dynamic(tensor, dims)
                     else:
                         raise ValueError(
                             "Unsupported dynamic dimensions"
