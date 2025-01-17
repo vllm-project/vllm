@@ -18,6 +18,7 @@ from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
                                                      Tekkenizer)
 
 from vllm.logger import init_logger
+from vllm.utils import is_list_of
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
@@ -229,11 +230,9 @@ class MistralTokenizer:
         max_length: Optional[int] = None,
     ):
         # For List[str], original prompt text
-        if isinstance(prompt, list) and len(prompt) > 0 and isinstance(
-                prompt[0], str):
+        if is_list_of(prompt, str):
             all_input_ids = []
             for p in prompt:
-                assert isinstance(p, str), f"Invalid prompt: {p}"
                 input_ids = self.encode(p)
                 if truncation:
                     input_ids = input_ids[:max_length]
@@ -241,11 +240,8 @@ class MistralTokenizer:
             return Encoding(input_ids=all_input_ids)
 
         # For List[int], apply chat template output
-        if isinstance(prompt, list) and len(prompt) > 0 and isinstance(
-                prompt[0], int):
-            assert all(isinstance(p, int)
-                       for p in prompt), (f"Invalid prompt: {prompt}")
-            return Encoding(input_ids=prompt)  # type: ignore[arg-type]
+        if is_list_of(prompt, int):
+            return Encoding(input_ids=prompt)
 
         # Mistral Tokenizers should not add special tokens
         assert isinstance(prompt, str), f"Invalid prompt: {prompt}"
