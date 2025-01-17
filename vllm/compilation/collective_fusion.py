@@ -1,3 +1,4 @@
+import contextlib
 import operator
 from typing import Any, Callable, List, Optional, Sequence, Tuple
 
@@ -8,7 +9,7 @@ from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
 
 import vllm.envs as envs
 from vllm.compilation.fx_utils import (find_auto_fn, find_fn, find_getitem,
-                                       find_op, last_node_in_match)
+                                       last_node_in_match)
 from vllm.config import CompilationConfig
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
@@ -18,9 +19,8 @@ from vllm.logger import init_logger
 from vllm.utils import direct_register_custom_op
 
 from .inductor_pass import get_pass_context
-from .vllm_inductor_pass import VllmInductorPass
 from .utils import use_cc_kernels
-
+from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 
@@ -73,8 +73,7 @@ def match_gemm_rs_ag_gemm(
 
 def get_gemm_rs_ag_gemm(max_m: int, gemm_1_type: torch.dtype,
                         gemm_1_weights: torch.Size, gemm_2_type: torch.dtype,
-                        gemm_2_weights: torch.Size,
-                        tp_group_name: str,
+                        gemm_2_weights: torch.Size, tp_group_name: str,
                         is_static_shape: bool) -> Tuple[Callable, Callable]:
 
     group = get_group_from_group_name(tp_group_name)
@@ -95,9 +94,9 @@ def get_gemm_rs_ag_gemm(max_m: int, gemm_1_type: torch.dtype,
                 1,  # One node
                 max_m,  # max M
                 gemm_1_weights[0],  # N
-                # TODO: It would be nicer to modify flux to dispatch based on dtype
-                # at run time, but I don't know what the downside would be.
-                # Similar comment for max m.
+                # TODO: It would be nicer to modify flux to dispatch based on
+                # dtype at run time, but I don't know what the downside would
+                # be. Similar comment for max m.
                 gemm_1_type,
                 # Note: transpose_weight=False means that B is transposed
                 transpose_weight=False,
@@ -111,16 +110,16 @@ def get_gemm_rs_ag_gemm(max_m: int, gemm_1_type: torch.dtype,
                 max_m,  # max M
                 gemm_2_weights[0],  # N
                 gemm_2_weights[1],  # K
-                # TODO: It would be nicer to modify flux to dispatch based on dtype
-                # at run time, but I don't know what the downside would be.
-                # Similar comment for max m.
+                # TODO: It would be nicer to modify flux to dispatch based on
+                # dtype at run time, but I don't know what the downside would
+                # be. Similar comment for max m.
                 gemm_2_type,
                 gemm_2_type,
                 # Note: transpose_weight=False means that B is transposed
                 transpose_weight=False,
                 # Note: if local_copy=True, I hit the following runtime error:
                 # /flux/src/all_gather/ths_op/all_gather_gemm_kernel.cc:648
-                #   Check failed: 33554432((input.numel() * input.element_size()))
+                # Check failed: 33554432((input.numel() * input.element_size()))
                 #                 == 139836453421056((this->chunk_size))
                 local_copy=False,
             )
@@ -148,13 +147,13 @@ def get_gemm_rs_ag_gemm(max_m: int, gemm_1_type: torch.dtype,
                 return out[0]
 
     def gemm_rs_ag_gemm(
-            residual: torch.Tensor,
-            old_my_residual: torch.Tensor,
-            gemm_1_weights: torch.Tensor,
-            gemm_1_activations: torch.Tensor,
-            rms_norm_weights: torch.Tensor,
-            gemm_2_weights: torch.Tensor,
-            first_layer: bool,
+        residual: torch.Tensor,
+        old_my_residual: torch.Tensor,
+        gemm_1_weights: torch.Tensor,
+        gemm_1_activations: torch.Tensor,
+        rms_norm_weights: torch.Tensor,
+        gemm_2_weights: torch.Tensor,
+        first_layer: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
         do_split = use_cc_kernels(residual.size(0))
@@ -200,10 +199,13 @@ def get_gemm_rs_ag_gemm(max_m: int, gemm_1_type: torch.dtype,
             return mm_2, new_residual, slice_scatter
 
     def gemm_rs_ag_gemm_static(
-            residual: torch.Tensor, old_my_residual: torch.Tensor,
-            gemm_1_weights: torch.Tensor, gemm_1_activations: torch.Tensor,
-            rms_norm_weights: torch.Tensor, gemm_2_weights: torch.Tensor,
-            first_layer: bool,
+        residual: torch.Tensor,
+        old_my_residual: torch.Tensor,
+        gemm_1_weights: torch.Tensor,
+        gemm_1_activations: torch.Tensor,
+        rms_norm_weights: torch.Tensor,
+        gemm_2_weights: torch.Tensor,
+        first_layer: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if first_layer:
             slice_shape = residual_slice_shape(residual, rank)
@@ -312,7 +314,8 @@ def gemm_ag_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
     return reduced
 
 
-def gemm_ag_final_static(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
+def gemm_ag_final_static(my_residual: torch.Tensor,
+                         gemm_1_weights: torch.Tensor,
                          gemm_1_activations: torch.Tensor,
                          rms_norm_weights: torch.Tensor) -> torch.Tensor:
     mm_1 = torch.ops.aten.mm.default(gemm_1_activations,
@@ -333,7 +336,8 @@ def gemm_ag_final_static(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor
 def gemm_ag_final_fake(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
                        gemm_1_activations: torch.Tensor,
                        rms_norm_weights: torch.Tensor) -> torch.Tensor:
-    return torch.empty([gemm_1_activations.size(0), my_residual.size(1)],
+    return torch.empty([gemm_1_activations.size(0),
+                        my_residual.size(1)],
                        dtype=my_residual.dtype,
                        device=my_residual.device)
 
@@ -350,14 +354,10 @@ direct_register_custom_op("gemm_ag_final",
 
 
 def trace_fn(fn: Any, args: Sequence[Any]) -> fx.GraphModule:
-    from torch._guards import detect_fake_mode
-
     from torch._inductor.virtualized import NullHandler, V
-    context = (
-        V.fake_mode
-        if (not isinstance(V.fake_mode, NullHandler) or (V.fake_mode is None))
-        else contextlib.nullcontext()
-    )
+    context = (V.fake_mode if
+               (not isinstance(V.fake_mode, NullHandler) or
+                (V.fake_mode is None)) else contextlib.nullcontext())
 
     with context:
         return fwd_only(fn, args)
@@ -404,8 +404,7 @@ class CollectiveFusionPass(VllmInductorPass):
                              extra_check=lambda m: self.record_match(m))
 
         # Nice TODO: handle static shape
-        register_replacement(match_final,
-                             torch.ops.vllm.gemm_ag_final,
+        register_replacement(match_final, torch.ops.vllm.gemm_ag_final,
                              final_inputs, fwd_only, [self.final_pattern])
 
     def is_static_shape(self):
@@ -428,18 +427,19 @@ class CollectiveFusionPass(VllmInductorPass):
         # Return False to prevent automatic replacement.
         return False
 
-    def collect_args(self, kwargs) -> List[Any]:
-        arg_names = {"residual": 0,
-                     "old_my_residual":1,
-                     "gemm_1_weights":2,
-                     "gemm_1_activations":3,
-                     "rms_norm_weights":4,
-                     "gemm_2_weights":5,
-                     "first_layer":6,
-                     }
-        args = [None]*len(arg_names)
-        node_args = [None]*len(arg_names)
-        for k,v in kwargs.items():
+    def collect_args(self, kwargs) -> Tuple[List[Any], List[Any]]:
+        arg_names = {
+            "residual": 0,
+            "old_my_residual": 1,
+            "gemm_1_weights": 2,
+            "gemm_1_activations": 3,
+            "rms_norm_weights": 4,
+            "gemm_2_weights": 5,
+            "first_layer": 6,
+        }
+        args = [None] * len(arg_names)
+        node_args = [None] * len(arg_names)
+        for k, v in kwargs.items():
             idx = arg_names[k]
             if isinstance(v, torch.fx.Node):
                 if v.meta.get("val") is not None:
@@ -450,6 +450,7 @@ class CollectiveFusionPass(VllmInductorPass):
         return node_args, args
 
     def process_matches(self, graph: fx.Graph) -> None:
+
         def find_min_index(match: Match) -> int:
             return min(match.nodes, key=lambda x: nodes.index(x))
 
@@ -547,12 +548,13 @@ class CollectiveFusionPass(VllmInductorPass):
     def __call__(self, graph: fx.Graph):
         pass_context = get_pass_context()
 
-        if (pass_context.runtime_shape is None and
-            not self.config.enable_dynamic_collective_fusion):
+        if (pass_context.runtime_shape is None
+                and not self.config.enable_dynamic_collective_fusion):
             logger.info("CollectiveFusionPass disabled for general shape.")
             return
         else:
-            logger.info("CollectiveFusionPass shape=%s", pass_context.runtime_shape)
+            logger.info("CollectiveFusionPass shape=%s",
+                        pass_context.runtime_shape)
 
         #
         # TODO: would be nice to disable/assert if chunk prefill size is too

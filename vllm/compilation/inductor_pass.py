@@ -1,4 +1,3 @@
-
 import hashlib
 import inspect
 import types
@@ -9,14 +8,18 @@ from typing import Any, Callable, Optional, Union
 import torch
 from torch import fx
 
-_pass_context: "PassContext" = None
+_pass_context = None
+
 
 class PassContext:
+
     def __init__(self, runtime_shape: Optional[int]):
         self.runtime_shape = runtime_shape
 
+
 def get_pass_context() -> PassContext:
     """Get the current pass context."""
+    assert _pass_context is not None
     return _pass_context
 
 

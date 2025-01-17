@@ -3,8 +3,8 @@ from typing import Iterable, Optional
 
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
-from torch._ops import OpOverload
 from torch._inductor.pattern_matcher import Match
+from torch._ops import OpOverload
 
 
 def is_func(node: fx.Node, target) -> bool:
@@ -64,4 +64,3 @@ def last_node_in_match(match: Match) -> fx.Node:
             if n in reversed(match.nodes):
                 return n
     raise ValueError("No nodes in graph")
-

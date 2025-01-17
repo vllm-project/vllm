@@ -9,9 +9,10 @@ from vllm.distributed import get_tensor_model_parallel_rank as get_tp_rank
 from vllm.distributed import (
     get_tensor_model_parallel_world_size as get_tp_world_size)
 from vllm.distributed import model_parallel_is_initialized as p_is_init
+from vllm.logger import init_logger
+
 # yapf: disable
 
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 

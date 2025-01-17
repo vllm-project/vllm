@@ -18,10 +18,10 @@ from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
 from .counter import compilation_counter
+from .dump_graph import dump_graph
 from .inductor_pass import InductorPass, pass_context
 from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
-from .dump_graph import dump_graph
 
 logger = init_logger(__name__)
 
@@ -71,7 +71,8 @@ class InductorHashCache:
             for runtime_shape, graph_index, hash_str in list_data:
                 self.cache[runtime_shape][graph_index] = hash_str
         except Exception as ex:
-            logger.warning("Unable to read cache: %s, error: %s", self.cache_file_path, ex)
+            logger.warning("Unable to read cache: %s, error: %s",
+                           self.cache_file_path, ex)
             self.cache.clear()
             self.disabled = True
 
@@ -272,11 +273,11 @@ def wrap_inductor(graph: fx.GraphModule,
                  _get_shape_env), \
             patch(# for forcing the graph to be cached
                 "torch._inductor.codecache.FxGraphCache._check_can_cache",
-                _check_can_cache):
-            with pass_context(runtime_shape):
-                compiled_graph = compile_fx(graph,
-                                            example_inputs,
-                                            config_patches=current_config)
+                _check_can_cache), \
+            pass_context(runtime_shape):
+            compiled_graph = compile_fx(graph,
+                                        example_inputs,
+                                        config_patches=current_config)
 
     # after compiling the last graph, record the end time
     if graph_index == num_graphs - 1:

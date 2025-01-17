@@ -5,8 +5,8 @@ import torch
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
-from .inductor_pass import InductorPass
 from .dump_graph import dump_graph as utils_dump_graph
+from .inductor_pass import InductorPass
 
 logger = init_logger(__name__)
 

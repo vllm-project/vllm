@@ -1694,7 +1694,8 @@ def direct_register_custom_op(
         else:
             # for pytorch 2.4
             import torch._custom_op.impl
-            schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
+            schema_str = torch._custom_op.impl.infer_schema(
+                op_func, mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str)
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)

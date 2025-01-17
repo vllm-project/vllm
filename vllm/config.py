@@ -2723,8 +2723,8 @@ class CompilationConfig(BaseModel):
         - dump_graph_dir: directory to dump the graphs. Default is .
         - enable_collective_fusion: whether to enable the custom collective
              communication fusion pass.
-        - enable_dynamic_collective_fusion: whether to enable the custom collective
-             communication fusion pass for general shapes.
+        - enable_dynamic_collective_fusion: whether to enable the custom
+             collective communication fusion pass for general shapes.
         - enable_fusion: whether to enable the custom fusion pass.
         - enable_reshape: whether to enable the custom reshape elimination pass.
             TODO better pass enabling system.
@@ -2747,7 +2747,8 @@ class CompilationConfig(BaseModel):
             dict_ = self.model_dump(
                 include={
                     "enable_collective_fusion",
-                    "enable_dynamic_collective_fusion", "enable_fusion",
+                    "enable_dynamic_collective_fusion",
+                    "enable_fusion",
                     "enable_reshape",
                     "max_num_batched_tokens",
                 })
@@ -2934,24 +2935,10 @@ class CompilationConfig(BaseModel):
                          " %s is overridden by config %s"),
                         sizes_to_specialize, self.cudagraph_capture_sizes)
 
-        if False:
-            if self.candidate_compile_sizes is None:
-                self.candidate_compile_sizes = []
-            self.compile_sizes = [
-                x for x in self.candidate_compile_sizes if x in self.capture_sizes
-            ]
-            ignored_sizes = [
-                x for x in self.candidate_compile_sizes
-                if x not in self.capture_sizes
-            ]
-            if ignored_sizes:
-                logger.warning(("candidate_compile_sizes %s are ignored "
-                                "because they are not cudagraph capture sizes."),
-                               ignored_sizes)
-        else:
-            if self.inductor_compile_sizes is None:
-                self.inductor_compile_sizes = []
-            self.compile_sizes = self.inductor_compile_sizes
+        if self.inductor_compile_sizes is None:
+            self.inductor_compile_sizes = []
+
+        self.compile_sizes = self.inductor_compile_sizes
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.capture_sizes.sort(reverse=True)
@@ -3216,7 +3203,7 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         assert (not self.compilation_config.pass_config.enable_dynamic_collective_fusion) or \
-            self.compilation_config.pass_config.enable_dynamic_collective_fusion
+            self.compilation_config.pass_config.enable_dynamic_collective_fusion # noqa
 
         if self.compilation_config.pass_config.enable_collective_fusion:
             n_slices = self.parallel_config.world_size
@@ -3228,14 +3215,14 @@ class VllmConfig:
                 self.compilation_config.pass_config.enable_collective_fusion = \
                     False
                 self.compilation_config.pass_config.enable_dynamic_collective_fusion = \
-                    False
+                    False # noqa
             if n_slices == 1:
                 logger.info("Disabling collective fusion pass since tensor "
                             "parallelism is not enabled.")
                 self.compilation_config.pass_config.enable_collective_fusion = \
                     False
                 self.compilation_config.pass_config.enable_dynamic_collective_fusion = \
-                    False
+                    False # noqa
 
         current_platform.check_and_update_config(self)
 

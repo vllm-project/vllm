@@ -1,4 +1,8 @@
 from typing import Optional
+
+import vllm.envs as envs
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -6,7 +10,7 @@ logger = init_logger(__name__)
 use_flux = False
 if envs.VLLM_USE_FLUX:
     try:
-        import flux
+        import flux  # noqa
         use_flux = True
         logger.info("Using flux kernels for collective communication fusion.")
     except ImportError:
@@ -23,7 +27,7 @@ FLUX_TILE_SIZE: int = 128
 def use_cc_kernels(m_shape: int, n_slices: Optional[int] = None) -> bool:
     if use_flux:
         if n_slices is None:
-            n_slices = get_tp_world_size()
+            n_slices = get_tensor_model_parallel_world_size()
         return (m_shape % (FLUX_TILE_SIZE * n_slices) == 0
                 and m_shape >= FLUX_TILE_SIZE * n_slices)
     else:

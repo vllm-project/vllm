@@ -1,5 +1,8 @@
-import torch
 from typing import Any, Dict, Tuple
+
+import torch
+from torch.fx.Node import Target
+
 
 #from torch.fx.passes.shape_prop import ShapeProp
 class ShapeProp(torch.fx.Interpreter):
@@ -39,36 +42,43 @@ class ShapeProp(torch.fx.Interpreter):
         else:
             return v
 
-    def run_node(self, n : torch.fx.Node) -> Any:
+    def run_node(self, n: torch.fx.Node) -> Any:
         self.curr_node = n
         return super().run_node(n)
 
-    def placeholder(self, target : 'Target', args : Tuple[torch.fx.node.Argument, ...], kwargs : Dict[str, Any]) -> Any:
+    def placeholder(self, target: 'Target', args: Tuple[torch.fx.node.Argument,
+                                                        ...],
+                    kwargs: Dict[str, Any]) -> Any:
         #print(f"PH {args} {self.curr_node} {target}")
         #self.curr_node.meta["val"] = self.metafy(args)
         return super().placeholder(target, args, kwargs)
 
-    #def get_attr(self, target : 'Target', args : Tuple[torch.fx.node.Argument, ...], kwargs : Dict[str, Any]) -> Any:
-    #    return super().get_attr(target, args, kwargs)
-
-    def call_function(self, target : 'Target', args : Tuple[torch.fx.node.Argument, ...], kwargs : Dict[str, Any]) -> Any:
+    def call_function(self, target: 'Target',
+                      args: Tuple[torch.fx.node.Argument,
+                                  ...], kwargs: Dict[str, Any]) -> Any:
         res = super().call_function(target, args, kwargs)
         #print(f"CF {res}")
         self.curr_node.meta["val"] = self.metafy(res)
         return res
 
-    def call_method(self, target : 'Target', args : Tuple[torch.fx.node.Argument, ...], kwargs : Dict[str, Any]) -> Any:
+    def call_method(self, target: 'Target', args: Tuple[torch.fx.node.Argument,
+                                                        ...],
+                    kwargs: Dict[str, Any]) -> Any:
         res = super().call_method(target, args, kwargs)
         #print(f"CM {res}")
         self.curr_node.meta["val"] = self.metafy(res)
         return res
 
-    def output(self, target : 'Target', args : Tuple[torch.fx.node.Argument, ...], kwargs : Dict[str, Any]) -> Any:
+    def output(self, target: 'Target', args: Tuple[torch.fx.node.Argument,
+                                                   ...],
+               kwargs: Dict[str, Any]) -> Any:
         self.curr_node.meta["val"] = self.metafy(args)
         #print(f"OUT {args}, {self.curr_node}, {self.curr_node.meta}")
         return super().output(target, args, kwargs)
 
-    def call_module(self, target : 'Target', args : Tuple[torch.fx.node.Argument, ...], kwargs : Dict[str, Any]) -> Any:
+    def call_module(self, target: 'Target', args: Tuple[torch.fx.node.Argument,
+                                                        ...],
+                    kwargs: Dict[str, Any]) -> Any:
         self.curr_node.meta["val"] = self.metafy(args)
         res = super().call_module(target, args, kwargs)
         self.curr_node.meta["val"] = self.metafy(res)
