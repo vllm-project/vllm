@@ -5,6 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
+from vllm.platforms import current_platform
+
 
 def apply_w8a8_block_fp8_linear(
     input: torch.Tensor,
@@ -33,11 +35,14 @@ def apply_w8a8_block_fp8_linear(
 
 
 def input_to_float8(
-    x: torch.Tensor,
-    dtype: torch.dtype = torch.float8_e4m3fn
+        x: torch.Tensor,
+        dtype: Optional[torch.dtype] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """This function quantizes input values to float8 values "
     "with tensor-wise quantization."""
+    if dtype is None:
+        dtype = (torch.float8_e4m3fnuz
+                 if current_platform.is_rocm() else torch.float8_e4m3fn)
     finfo = torch.finfo(dtype)
     min_val, max_val = x.aminmax()
     amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
@@ -125,7 +130,7 @@ def per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
     eps: float = 1e-10,
-    dtype: torch.dtype = torch.float8_e4m3fn,
+    dtype: Optional[torch.dtype] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
     It converts the tensor values into signed float8 values and returns the
@@ -140,6 +145,9 @@ def per_token_group_quant_fp8(
         Tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
         scaling factor for quantization.
     """
+    if dtype is None:
+        dtype = (torch.float8_e4m3fnuz
+                 if current_platform.is_rocm() else torch.float8_e4m3fn)
     assert (x.shape[-1] % group_size == 0), (
         f"the last dimension of `x` {x.shape[-1]} must be divisible "
         f"by `group_size` {group_size}")
