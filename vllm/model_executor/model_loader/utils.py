@@ -61,7 +61,7 @@ def get_model_architecture(
                     "%s has no vLLM implementation and the Transformers "
                     "implementationis not compatible with vLLM.", arch)
             logger.info(
-                "%s has no vLLM implementation, falling back to use "
+                "%s has no vLLM implementation, falling back to "
                 "Transformers implementation", arch)
             architectures[i] = "TransformersModel"
 
