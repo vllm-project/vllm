@@ -15,7 +15,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.triton_utils.importing import HAS_TRITON
-from vllm.utils import _check_multiproc_method, get_mp_context
+from vllm.utils import _check_multiproc_method, get_mp_context, run_method
 
 if HAS_TRITON:
     from vllm.triton_utils import maybe_set_triton_cache_manager
@@ -169,7 +169,7 @@ class ProcessWorkerWrapper:
         self.process.start()
 
     def _enqueue_task(self, future: Union[ResultFuture, asyncio.Future],
-                      method: str, args, kwargs):
+                      method: Union[str, bytes], args, kwargs):
         task_id = uuid.uuid4()
         self.tasks[task_id] = future
         try:
@@ -180,12 +180,13 @@ class ProcessWorkerWrapper:
             del self.tasks[task_id]
             raise ChildProcessError("worker died") from e
 
-    def execute_method(self, method: str, *args, **kwargs):
+    def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         future: ResultFuture = ResultFuture()
         self._enqueue_task(future, method, args, kwargs)
         return future
 
-    async def execute_method_async(self, method: str, *args, **kwargs):
+    async def execute_method_async(self, method: Union[str, bytes], *args,
+                                   **kwargs):
         future = asyncio.get_running_loop().create_future()
         self._enqueue_task(future, method, args, kwargs)
         return await future
@@ -230,8 +231,7 @@ def _run_worker_process(
             exception = None
             task_id, method, args, kwargs = items
             try:
-                executor = getattr(worker, method)
-                output = executor(*args, **kwargs)
+                output = run_method(worker, method, args, kwargs)
             except SystemExit:
                 raise
             except KeyboardInterrupt:

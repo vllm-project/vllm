@@ -1,6 +1,7 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Awaitable, Dict, List, Optional, Set, Tuple, Union
+from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
+                    Union)
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -47,7 +48,7 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def collective_rpc(self,
-                       method: str,
+                       method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
@@ -260,7 +261,7 @@ class DistributedExecutorBase(ExecutorBase):
         raise NotImplementedError
 
     def collective_rpc(self,
-                       method: str,
+                       method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
@@ -269,7 +270,7 @@ class DistributedExecutorBase(ExecutorBase):
     @abstractmethod
     def _run_workers(
         self,
-        method: str,
+        method: Union[str, Callable],
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,

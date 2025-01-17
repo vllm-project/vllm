@@ -36,6 +36,7 @@ from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     overload)
 from uuid import uuid4
 
+import cloudpickle
 import numpy as np
 import numpy.typing as npt
 import psutil
@@ -2166,3 +2167,25 @@ def bind_kv_cache(
         assert len(forward_ctx.kv_cache) == len(kv_cache)
         for ve, ve_kv_cache in enumerate(kv_cache):
             forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
+
+
+def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
+               kwargs: Dict[str, Any]) -> Any:
+    """
+    Run a method of an object with the given arguments and keyword arguments.
+    If the method is string, it will be converted to a method using getattr.
+    If the method is serialized bytes and will be deserialized using
+    cloudpickle.
+    If the method is a callable, it will be called directly.
+    """
+    if isinstance(method, bytes):
+        func = partial(cloudpickle.loads(method), obj)
+    elif isinstance(method, str):
+        try:
+            func = getattr(obj, method)
+        except AttributeError:
+            raise NotImplementedError(f"Method {method!r} is not"
+                                      " implemented.") from None
+    else:
+        func = partial(method, obj)  # type: ignore
+    return func(*args, **kwargs)
