@@ -12,7 +12,6 @@ from torch import is_tensor
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 
 if TYPE_CHECKING:
@@ -265,13 +264,13 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
-    @current_platform.inference_mode()
     def execute_model(
         self,
         model_input: T,
         kv_caches: Optional[List[torch.Tensor]],
-        intermediate_tensors: Optional[IntermediateTensors],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs,
     ) -> Optional[List[SamplerOutput]]:
         """
         Execute the model on the given input.

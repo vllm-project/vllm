@@ -21,7 +21,7 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.utils import GiB_bytes, memory_profiling
+from vllm.utils import GiB_bytes, bind_kv_cache, memory_profiling
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -55,9 +55,6 @@ class Worker(LocalOrDistributedWorkerBase):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
-        if is_driver_worker:
-            assert rank % self.parallel_config.tensor_parallel_size == 0, \
-                   "Driver worker should be rank 0 of tensor parallel group."
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -200,7 +197,6 @@ class Worker(LocalOrDistributedWorkerBase):
                               weights_memory_in_bytes=self.model_runner.
                               model_memory_usage) as result:
             self.model_runner.profile_run()
-            torch.cuda.synchronize()
 
         self._assert_memory_footprint_increased_during_profiling()
 
@@ -285,6 +281,8 @@ class Worker(LocalOrDistributedWorkerBase):
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
+        bind_kv_cache(self.compilation_config.static_forward_context,
+                      self.gpu_cache)
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
