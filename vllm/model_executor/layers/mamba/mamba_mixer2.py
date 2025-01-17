@@ -5,6 +5,8 @@ from torch import nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.attention.backends.placeholder_attn import (
+    PlaceholderAttentionMetadata)
 from vllm.attention.backends.xformers import XFormersMetadata
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -348,7 +350,8 @@ class MambaMixer2(CustomOp):
         # - currently we really only support the FlashAttention backend
         has_initial_states = None
         if (isinstance(attn_metadata,
-                       (FlashAttentionMetadata, XFormersMetadata))
+                       (FlashAttentionMetadata, XFormersMetadata,
+                        PlaceholderAttentionMetadata))
                 and attn_metadata.context_lens_tensor is not None):
             has_initial_states = attn_metadata.context_lens_tensor > 0
 
