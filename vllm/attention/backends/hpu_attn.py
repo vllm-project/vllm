@@ -215,7 +215,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if attn_metadata.is_prompt:
             key = key.unflatten(0, (block_indices.size(0), -1))
             value = value.unflatten(0, (block_indices.size(0), -1))
-        if kv_cache is not None:
+        if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache = HPUPagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
@@ -342,7 +342,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
         block_indices = attn_metadata.cross_block_indices
         block_offsets = attn_metadata.cross_block_offsets
-        if kv_cache is not None:
+        if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache = HPUPagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
