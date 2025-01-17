@@ -209,31 +209,15 @@ class DeepseekVL2MultiModalProcessor(
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
-            outputs = self.info.ctx.call_hf_processor(
+            processed_outputs = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**mm_kwargs),
                 dict(prompt=prompt, **mm_data),
                 mm_kwargs,
             )
-
-            # Deepseek-vl2 processor don't return BatchFeature,
-            # we need to manually create it
-            processed_outputs = dict(input_ids=outputs["input_ids"])
-            processed_outputs = BatchFeature(data=dict(processed_outputs),
-                                             tensor_type="pt")
-
-            # Remove batch dimension from processor outputs,
-            # because we will try batch to create NestedTensors
             target_dtype = self.info.ctx.model_config.dtype
-            pixel_values = outputs["images"].to(target_dtype).squeeze(0)
-            images_spatial_crop = outputs["images_spatial_crop"].squeeze(0)
-            patches_per_image = [
-                x.prod().item() + 1 for x in images_spatial_crop
-            ]
-
-            # Rename `images` -> `pixel_values` to avoid confusion
-            processed_outputs["pixel_values"] = list(
-                pixel_values.split(patches_per_image))
-            processed_outputs["images_spatial_crop"] = images_spatial_crop
+            processed_outputs["pixel_values"] = (
+                processed_outputs["pixel_values"].unsqueeze(0).to(target_dtype)
+            )
         else:
             tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
@@ -341,18 +325,13 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
             )
 
-        if self.text_config.topk_method == "noaux_tc":
-            architectures = ["DeepseekV3ForCausalLM"]
-        elif not self.text_config.use_mla:
-            architectures = ["DeepseekForCausalLM"]
-        else:
-            architectures = ["DeepseekV2ForCausalLM"]
-
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=self.text_config,
             prefix=maybe_prefix(prefix, "language"),
-            architectures=architectures,
+            architectures=["DeepseekV3ForCausalLM"]
+            if self.text_config.topk_method == "noaux_tc" else
+            ["DeepseekV2ForCausalLM"],
         )
 
         self.make_empty_intermediate_tensors = (

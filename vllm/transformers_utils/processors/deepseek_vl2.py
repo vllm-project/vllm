@@ -1,4 +1,7 @@
-# adapted from 
+# yapf: disable
+# ruff: noqa: E501
+# coding=utf-8
+# adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/ff23960c5cf9e6874b44be38af930cfb0ccbb620/deepseek_vl2/models/processing_deepseek_vl_v2.py
 # Copyright (c) 2023-2024 DeepSeek.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy of
@@ -18,31 +21,27 @@
 # IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-from typing import Dict, Tuple, List, Literal, Optional
 import math
+from typing import List, Tuple
 
 import torch
-from torch.nn.utils.rnn import pad_sequence
 import torchvision.transforms as T
-from transformers import LlamaTokenizerFast, BatchFeature, AutoProcessor
-from transformers.processing_utils import ProcessorMixin
 from PIL import Image, ImageOps
+from transformers import AutoProcessor, BatchFeature, LlamaTokenizerFast
+from transformers.processing_utils import ProcessorMixin
 
 
-class ImageTransform(object):
-    def __init__(
-            self,
-            mean: Tuple[float, float, float] = (0.5, 0.5, 0.5),
-            std: Tuple[float, float, float] = (0.5, 0.5, 0.5),
-            normalize: bool = True
-    ):
+class ImageTransform:
+
+    def __init__(self,
+                 mean: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+                 std: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+                 normalize: bool = True):
         self.mean = mean
         self.std = std
         self.normalize = normalize
 
-        transform_pipelines = [
-            T.ToTensor()
-        ]
+        transform_pipelines = [T.ToTensor()]
 
         if normalize:
             transform_pipelines.append(T.Normalize(mean, std))
@@ -54,25 +53,26 @@ class ImageTransform(object):
         return x
 
 
-
 class DeepseekVLV2Processor(ProcessorMixin):
     tokenizer_class = ("LlamaTokenizer", "LlamaTokenizerFast")
     attributes = ["tokenizer"]
 
     def __init__(
-            self,
-            tokenizer: LlamaTokenizerFast,
-            candidate_resolutions: Tuple[Tuple[int, int]],
-            patch_size: int,
-            downsample_ratio: int,
-            image_mean: Tuple[float, float, float] = (0.5, 0.5, 0.5),
-            image_std: Tuple[float, float, float] = (0.5, 0.5, 0.5),
-            normalize: bool = True,
-            image_token: str = "<image>",
-            pad_token: str = "<｜▁pad▁｜>",
-            add_special_token: bool = False,
-            ignore_id: int = -100,
-            **kwargs,
+        self,
+        tokenizer: LlamaTokenizerFast,
+        candidate_resolutions: Tuple[Tuple[int, int]],
+        patch_size: int,
+        downsample_ratio: int,
+        image_mean: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+        image_std: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+        normalize: bool = True,
+        image_token: str = "<image>",
+        pad_token: str = "<｜▁pad▁｜>",
+        add_special_token: bool = False,
+        sft_format: str = "deepseek",
+        mask_prompt: bool = True,
+        ignore_id: int = -100,
+        **kwargs,
     ):
 
         self.candidate_resolutions = candidate_resolutions
@@ -113,13 +113,15 @@ class DeepseekVLV2Processor(ProcessorMixin):
         self.image_token = image_token
         self.pad_token = pad_token
         self.add_special_token = add_special_token
+        self.sft_format = sft_format
+        self.mask_prompt = mask_prompt
         self.ignore_id = ignore_id
 
         super().__init__(
             tokenizer,
             **kwargs,
         )
-    
+
     def select_best_resolution(self, image_size):
         # used for cropping
         original_width, original_height = image_size
@@ -129,11 +131,15 @@ class DeepseekVLV2Processor(ProcessorMixin):
 
         for width, height in self.candidate_resolutions:
             scale = min(width / original_width, height / original_height)
-            downscaled_width, downscaled_height = int(original_width * scale), int(original_height * scale)
-            effective_resolution = min(downscaled_width * downscaled_height, original_width * original_height)
+            downscaled_width, downscaled_height = int(
+                original_width * scale), int(original_height * scale)
+            effective_resolution = min(downscaled_width * downscaled_height,
+                                       original_width * original_height)
             wasted_resolution = (width * height) - effective_resolution
 
-            if effective_resolution > max_effective_resolution or (effective_resolution == max_effective_resolution and wasted_resolution < min_wasted_resolution):
+            if effective_resolution > max_effective_resolution or (
+                    effective_resolution == max_effective_resolution
+                    and wasted_resolution < min_wasted_resolution):
                 max_effective_resolution = effective_resolution
                 min_wasted_resolution = wasted_resolution
                 best_fit = (width, height)
@@ -166,11 +172,11 @@ class DeepseekVLV2Processor(ProcessorMixin):
         return self.tokenizer.decode(t, **kwargs)
 
     def process_one(
-            self,
-            prompt: str,
-            images: List[Image.Image],
-            inference_mode: bool = True,
-            **kwargs,
+        self,
+        prompt: str,
+        images: List[Image.Image],
+        inference_mode: bool = True,
+        **kwargs,
     ):
         """
 
@@ -191,9 +197,8 @@ class DeepseekVLV2Processor(ProcessorMixin):
                 - num_image_tokens (List[int]): the number of image tokens
         """
 
-        assert (
-                prompt is not None and images is not None
-        ), "prompt and images must be used at the same time."
+        assert (prompt is not None and images is not None
+                ), "prompt and images must be used at the same time."
 
         sft_format = prompt
         tokenized_str, images_list, images_seq_mask, images_spatial_crop, num_image_tokens = self.tokenize_with_images(
@@ -214,7 +219,8 @@ class DeepseekVLV2Processor(ProcessorMixin):
         images_seq_mask = torch.tensor(images_seq_mask, dtype=torch.bool)
 
         # set input_ids < 0 | input_ids == self.image_token_id as ignore_id
-        target_ids[(input_ids < 0) | (input_ids == self.image_token_id)] = self.ignore_id
+        target_ids[(input_ids < 0) |
+                   (input_ids == self.image_token_id)] = self.ignore_id
         input_ids[input_ids < 0] = self.pad_id
 
         if inference_mode:
@@ -225,42 +231,38 @@ class DeepseekVLV2Processor(ProcessorMixin):
             images_seq_mask = images_seq_mask[:-1]
 
         if len(images_list) == 0:
-            images = torch.zeros((1, 3, self.image_size, self.image_size))
+            pixel_values = torch.zeros((1, 3, self.image_size, self.image_size))
             images_spatial_crop = torch.zeros((1, 2), dtype=torch.long)
         else:
-            images = torch.stack(images_list, dim=0)
+            pixel_values = torch.stack(images_list, dim=0)
             images_spatial_crop = torch.tensor(images_spatial_crop, dtype=torch.long)
 
-        prepare = BatchFeature(
-            sft_format=sft_format,
+        input_ids = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0)
+        pixel_values = pixel_values.unsqueeze(0)
+
+        prepare = BatchFeature(data=dict(
             input_ids=input_ids,
-            target_ids=target_ids,
-            images=images,
+            pixel_values=images,
             images_seq_mask=images_seq_mask,
             images_spatial_crop=images_spatial_crop,
             num_image_tokens=num_image_tokens,
-            tensor_type="pt",
-        )
-
+        ))
         return prepare
 
     def __call__(
-            self,
-            *,
-            prompt: str,
-            images: List[Image.Image],
-            inference_mode: bool = True,
-            **kwargs,
+        self,
+        *,
+        prompt: str,
+        images: List[Image.Image],
+        inference_mode: bool = True,
+        **kwargs,
     ):
         """
 
         Args:
             prompt (str): the formatted prompt;
-            conversations (List[Dict]): conversations with a list of messages;
             images (List[ImageType]): the list of images;
-            force_batchify (bool): force batchify the inputs;
             inference_mode (bool): if True, then remove the last eos token;
-            system_prompt (str): the system prompt;
             **kwargs:
 
         Returns:
@@ -280,12 +282,12 @@ class DeepseekVLV2Processor(ProcessorMixin):
         return prepare
 
     def tokenize_with_images(
-            self,
-            conversation: str,
-            images: List[Image.Image],
-            bos: bool = True,
-            eos: bool = True,
-            cropping: bool = True,
+        self,
+        conversation: str,
+        images: List[Image.Image],
+        bos: bool = True,
+        eos: bool = True,
+        cropping: bool = True,
     ):
         """Tokenize text with <image> tags."""
         assert conversation.count(self.image_token) == len(images)
@@ -324,9 +326,9 @@ class DeepseekVLV2Processor(ProcessorMixin):
 
             """add image tokens"""
             h = w = math.ceil((self.image_size // self.patch_size) / self.downsample_ratio)
-            # global views tokens h * (w + 1), 1 is for line seperator
+            # global views tokens h * (w + 1), 1 is for line separator
             tokenized_image = [self.image_token_id] * h * (w + 1)
-            # add a seperator between global and local views
+            # add a separator between global and local views
             tokenized_image += [self.image_token_id]
             # local views tokens, (num_height_tiles * h) * (num_width_tiles * w + 1)
             tokenized_image += [self.image_token_id] * (num_height_tiles * h) * (num_width_tiles * w + 1)
@@ -354,5 +356,4 @@ class DeepseekVLV2Processor(ProcessorMixin):
         return tokenized_str, images_list, images_seq_mask, images_spatial_crop, num_image_tokens
 
 
-AutoProcessor.register("DeepseekVLV2Processor",
-                                   DeepseekVLV2Processor)
+AutoProcessor.register("DeepseekVLV2Processor", DeepseekVLV2Processor)
