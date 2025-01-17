@@ -190,7 +190,7 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
     ),
     "deepseek_vl_v2": VLMTestInfo(
-        models=["deepseek-ai/deepseek-vl2-tiny"],
+        models=["Isotr0py/deepseek-vl2-tiny"], # model repo using dynamic module
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|User|>: {img_prompt}\n\n<|Assistant|>: ", # noqa: E501
         max_model_len=4096,
