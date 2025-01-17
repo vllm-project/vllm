@@ -17,7 +17,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 from torch import nn
-from transformers import AutoModel
+from transformers import AutoModel, PreTrainedModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.attention import Attention, AttentionMetadata
@@ -25,6 +25,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
 from vllm.logger import init_logger
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -140,8 +141,14 @@ class TransformersModel(nn.Module, SupportsLoRA):
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
 
+        # MLP modifications
+        self.tp_plan = self.config.base_model_tp_plan
+        self.model: PreTrainedModel = AutoModel.from_config(
+            self.config, torch_dtype=vllm_config.model_config.dtype)
+        self.tensor_parallelize(self.model)
+
+        # Attention modifications (assumes 1 attention op per hidden layer)
         tp_size = get_tensor_model_parallel_world_size()
-        # Assumes 1 attention operation per hidden layer
         self.attention_instances = [
             Attention(
                 divide(config.num_attention_heads, tp_size),
@@ -155,18 +162,12 @@ class TransformersModel(nn.Module, SupportsLoRA):
             for i in range(config.num_hidden_layers)
         ]
         self.config._attn_implementation_internal = "vllm"
+            
+        # Model modifications
+        self.replace_vocab_embed_class(self.model)
+        self.replace_rms_norm_class(self.model)
 
-        self.tp_plan = self.config.base_model_tp_plan
-        self.model = AutoModel.from_config(
-            self.config, torch_dtype=vllm_config.model_config.dtype)
-        self.tensor_parallelize(self.model)
-
-        self.model.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            quant_config=None,
-        )
+        # ForCausalLM modifications
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config,
@@ -178,6 +179,12 @@ class TransformersModel(nn.Module, SupportsLoRA):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
         self.sampler = get_sampler()
+
+    def log_replacement(
+            self, name: str, old_module: nn.Module, new_module: nn.Module):
+        logger.debug("%s: %s -> %s", name,
+                     old_module.__class__.__name__,
+                     new_module.__class__.__name__)
 
     def tensor_parallelize(self, module: nn.Module, prefix: str = ""):
         if self.tp_plan is None:
@@ -191,10 +198,38 @@ class TransformersModel(nn.Module, SupportsLoRA):
                 if re.match(pattern, qual_name) and isinstance(
                         child_module, nn.Linear):
                     new_module = replace_tp_linear_class(child_module, style)
-                    print(f"{qual_name}: {child_module} -> {new_module}")
                     setattr(module, child_name, new_module)
+                    self.log_replacement(qual_name, child_module, new_module)
             else:
                 self.tensor_parallelize(child_module, prefix=f"{qual_name}.")
+
+    def replace_vocab_embed_class(self, module: nn.Module):
+        # Sorted by most frequently use (most frequent first)
+        vocab_embed_names = (
+            "embed_tokens", "word_embeddings", "wte", "embed_in")
+        for vocab_embed_name in vocab_embed_names:
+            if hasattr(module, vocab_embed_name):
+                old_module = getattr(module, vocab_embed_name)
+                new_module = VocabParallelEmbedding(
+                    self.vocab_size,
+                    self.config.hidden_size,
+                    org_num_embeddings=self.config.vocab_size,
+                    quant_config=None,
+                )
+                setattr(module, vocab_embed_name, new_module)
+                self.log_replacement(vocab_embed_name, old_module, new_module)
+                break
+
+    def replace_rms_norm_class(self, module: nn.Module, prefix: str = ""):
+        for child_name, child_module in module.named_children():
+            qual_name = prefix + child_name
+            if "RMSNorm" in child_module.__class__.__name__:
+                rms_norm = RMSNorm(
+                    self.config.hidden_size, eps=self.config.rms_norm_eps)
+                setattr(module, child_name, rms_norm)
+                self.log_replacement(qual_name, child_module, rms_norm)
+            self.replace_rms_norm_class(child_module, prefix=f"{qual_name}.")
+
 
     def _autoset_attn_implementation(
         self,
