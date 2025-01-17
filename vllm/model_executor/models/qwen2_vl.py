@@ -594,7 +594,7 @@ class Qwen2VisionTransformer(nn.Module):
         self,
         x: torch.Tensor,
         grid_thw: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, ...]:
         # patchify
         x = x.to(device=self.device, dtype=self.dtype)
         x = self.patch_embed(x)
