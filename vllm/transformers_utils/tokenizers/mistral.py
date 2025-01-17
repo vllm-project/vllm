@@ -231,25 +231,16 @@ class MistralTokenizer:
     ):
         # For List[str], original prompt text
         if is_list_of(prompt, str):
-            all_input_ids = []
+            input_ids = []
             for p in prompt:
-                input_ids = self.encode(p)
-                if truncation:
-                    input_ids = input_ids[:max_length]
-                all_input_ids.append(input_ids)
-            return Encoding(input_ids=all_input_ids)
-
-        # For List[int], apply chat template output
-        if is_list_of(prompt, int):
-            return Encoding(input_ids=prompt)
-
-        # Mistral Tokenizers should not add special tokens
-        assert isinstance(prompt, str), f"Invalid prompt: {prompt}"
-        input_ids = self.encode(prompt)
-
-        if truncation:
-            input_ids = input_ids[:max_length]
-
+                each_input_ids = self.encode_one(p, truncation, max_length)
+                input_ids.append(each_input_ids)
+        # For List[int], apply chat template output, already tokens.
+        elif is_list_of(prompt, int):
+            input_ids = prompt
+        else:
+            # Mistral Tokenizers should not add special tokens
+            input_ids = self.encode_one(prompt, truncation, max_length)
         return Encoding(input_ids=input_ids)
 
     def get_vocab(self) -> Dict[str, int]:
@@ -260,6 +251,19 @@ class MistralTokenizer:
     def get_added_vocab(self) -> Dict[str, int]:
         # Mistral tokenizers have no added vocabulary
         return {}
+
+    def encode_one(
+        self,
+        prompt: str,
+        truncation: bool = False,
+        max_length: Optional[int] = None,
+    ) -> List[int]:
+        assert isinstance(prompt, str), f"Invalid prompt: {prompt}"
+        input_ids = self.encode(prompt)
+
+        if truncation:
+            input_ids = input_ids[:max_length]
+        return input_ids
 
     def encode(self, prompt: str) -> List[int]:
         # `encode` should only be used for prompt completion
