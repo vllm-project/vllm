@@ -272,7 +272,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
         assert params_dtype == torch.float16, (
-            "float16 is required for MoE compressd models. Set dtype=torch.float16"  # noqa: E501
+            "float16 is required for MoE compressed models. Set dtype=torch.float16"  # noqa: E501
         )
 
         # Will transpose the loaded weight along the
@@ -306,7 +306,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         load_full_w2 = self.actorder and self.group_size != -1
         w2_scales_size = (intermediate_full
                           if load_full_w2 else intermediate_size)
-        # @eliza TODO: is this condition actually needed/is it doing anything?
+
         self.is_k_full = (not self.actorder) or (intermediate_size
                                                  == intermediate_full)
 
