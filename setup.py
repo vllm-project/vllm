@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
+VLLM_BUILD_EXT = envs.VLLM_BUILD_EXT
 
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
     logger.warning(
@@ -387,7 +388,11 @@ def _is_xpu() -> bool:
 
 
 def _build_custom_ops() -> bool:
-    return _is_cuda() or _is_hip() or _is_cpu()
+    if not VLLM_BUILD_EXT:
+        logger.warning("Building of custom op is disabled,"
+                       "this is only used in a out-of-tree device situation."
+                       "Set VLLM_BUILD_EXT as true if this is unexpected.")
+    return VLLM_BUILD_EXT and (_is_cuda() or _is_hip() or _is_cpu())
 
 
 def get_rocm_version():

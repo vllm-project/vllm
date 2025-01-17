@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
     VLLM_TARGET_DEVICE: str = "cuda"
+    VLLM_BUILD_EXT: bool = True
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -101,6 +102,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # rocm, neuron, cpu, openvino]
     "VLLM_TARGET_DEVICE":
     lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
+
+    # Whether to build custom op, disable me if building an oot vllm
+    # It only makes sense when the device is cuda, cpu or hip(rocm)
+    "VLLM_BUILD_EXT":
+    lambda: os.environ.get("VLLM_BUILD_EXT", "True").lower() == "true",
 
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
