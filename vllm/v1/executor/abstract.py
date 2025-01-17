@@ -10,7 +10,9 @@ from vllm.v1.outputs import ModelRunnerOutput
 
 
 class Executor(ExecutorBase):
-    """Abstract class for v1 executors, mainly define some new methods."""
+    """
+    Abstract class for v1 executors, mainly define some methods for v1.
+    For methods shared by v0 and v1, define them in ExecutorBase"""
 
     @staticmethod
     def get_class(vllm_config: VllmConfig) -> Type["Executor"]:
