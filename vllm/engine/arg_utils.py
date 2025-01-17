@@ -392,12 +392,12 @@ class EngineArgs:
             default=EngineArgs.model_impl,
             choices=[f.value for f in ModelImpl],
             help='Which implementation of the model to use.\n\n'
-                '* "auto" will try to use the vLLM implementation if it '
-                'exists and fall back to the Transformers implementation if '
-                'no vLLM implementation is available.\n'
-                '* "vllm" will use the vLLM model implementation.\n'
-                '* "transformers" will use the Transformers model '
-                'implementation.\n')
+            '* "auto" will try to use the vLLM implementation if it exists '
+            'and fall back to the Transformers implementation if no vLLM '
+            'implementation is available.\n'
+            '* "vllm" will use the vLLM model implementation.\n'
+            '* "transformers" will use the Transformers model '
+            'implementation.\n')
         # Parallel arguments
         parser.add_argument(
             '--distributed-executor-backend',

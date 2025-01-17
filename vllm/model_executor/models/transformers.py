@@ -25,11 +25,12 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
 from vllm.logger import init_logger
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding, ParallelLMHead
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
@@ -62,8 +63,8 @@ def vllm_flash_attention_forward(_module,
                                  **kwargs):
     layer_idx = _module.layer_idx
     hidden = query.shape[-2]
-    query, key, value = [x.transpose(1, 2) for x in (query, key, value)]
-    query, key, value = [x.reshape(hidden, -1) for x in (query, key, value)]
+    query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+    query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
     return attention_instances[layer_idx].forward(
         query,
         key,
@@ -168,8 +169,8 @@ class TransformersModel(nn.Module):
     def tensor_parallelize(self, module: nn.Module, prefix: str = ""):
         if self.tp_plan is None:
             raise ValueError(
-                "Trying to run tensor parallelization but the model does not support it yet!"
-            )
+                "Trying to run tensor parallelization but the model does not "
+                "support it yet!")
 
         for child_name, child_module in module.named_children():
             qual_name = prefix + child_name
