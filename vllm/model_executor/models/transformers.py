@@ -148,12 +148,22 @@ class TransformersModel(nn.Module):
             self.config, torch_dtype=vllm_config.model_config.dtype)
         self.tensor_parallelize(self.model)
 
-        self.model.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            quant_config=None,
-        )
+        # Sorted by most frequently use (most frequent first)
+        vocab_embed_names = (
+            "embed_tokens", "word_embeddings", "wte", "embed_in")
+        for vocab_embed_name in vocab_embed_names:
+            if hasattr(self.model, vocab_embed_name):
+                setattr(
+                    self.model,
+                    vocab_embed_name,
+                    VocabParallelEmbedding(
+                        self.vocab_size,
+                        config.hidden_size,
+                        org_num_embeddings=config.vocab_size,
+                        quant_config=None,
+                    ),
+                )
+                break
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config,
