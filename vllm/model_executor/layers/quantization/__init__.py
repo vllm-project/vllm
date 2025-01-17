@@ -26,7 +26,7 @@ QUANTIZATION_METHODS: List[str] = [
     "experts_int8",
     "neuron_quant",
     "ipex",
-    "inc"
+    "inc",
     "quark"
 ]
 
