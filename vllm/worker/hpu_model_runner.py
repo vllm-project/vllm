@@ -347,7 +347,7 @@ class HpuModelAdapter:
         metadata = metadata._replace(block_mapping=block_mapping,
                                      attn_bias=attn_bias)
         return metadata
-    
+
     def _set_block_scales(self, metadata, device):
         block_mapping = metadata.block_mapping
         ones = torch.ones((block_mapping.size(0), ),
@@ -1540,7 +1540,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         msg = (f"Generated {len(self.bucketing_global_state.prompt_buckets)} "
                f"prompt buckets [bs, seq]: \
-                {list(sorted(self.bucketing_global_state.prompt_buckets))}")
+                {list(sorted(self.bucketing_global_state.prompt_buckets))}"                                                                           )
         logger.info(msg)
 
         msg = (f"Omitted {len(prompt_omitted_buckets)} "
