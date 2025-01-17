@@ -14,6 +14,8 @@ def test_collective_rpc(tp_size, backend):
     if tp_size == 1:
         backend = None
 
+    # intentionally define the method and class in the test function,
+    # to test if they can be serialized and sent to the workers
     def echo_rank(self):
         return self.rank
 
