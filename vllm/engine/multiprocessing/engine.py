@@ -296,6 +296,7 @@ class MQLLMEngine:
                                is_engine_errored=False,
                                exception=e)
             self._send_outputs(rpc_err)
+            return
         # Otherwise, send back the successful load message
         self._send_outputs(
             RPCAdapterLoadedResponse(request_id=request.request_id))
