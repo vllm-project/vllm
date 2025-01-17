@@ -9,7 +9,7 @@ import torch
 from transformers import GenerationConfig, GenerationMixin
 
 import vllm.envs as envs
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import ApplyToppTopkScalar, Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
@@ -754,3 +754,63 @@ def test_sampler_include_gpu_probs_tensor(device: str):
     assert sampler_output.sampled_token_probs is not None
     assert sampler_output.logprobs is not None
     assert sampler_output.sampled_token_ids is not None
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_topk_topk_scalar():
+    obj1 = ApplyToppTopkScalar(2)
+    assert ApplyToppTopkScalar._padded_k == 0
+    x = torch.tensor([[9, 9, 8, 8, 8, 8, 7, 7, 7.0],
+                      [10, 10, 9, 9, 9, 8, 5, 5, 5]])
+
+    retval1 = obj1(x, p=0.9, k=5)
+    ninf = -float("inf")
+    expected1 = torch.tensor([[9., 9., 8., 8., 8., 8., ninf, ninf, ninf],
+                              [10., 10., 9., 9., 9., ninf, ninf, ninf, ninf]])
+    assert torch.all(retval1 == expected1).item()
+    assert ApplyToppTopkScalar._padded_k == 9
+
+    obj2 = ApplyToppTopkScalar(2)
+    assert obj2._padded_k == 9
+
+    x = torch.tensor([[2, 2, 9, 9, 2, 2, 1, 1, 1.0],
+                      [10, 9, 9, 5, 9, 9, 5, 9, 10]])
+    retval2 = obj2(x, p=0.9, k=5)
+    expected2 = torch.tensor(
+        [[ninf, ninf, 9., 9., ninf, ninf, ninf, ninf, ninf],
+         [10., ninf, 9., ninf, 9., 9., ninf, 9., 10.]])
+    assert torch.all(retval2 == expected2).item()
+    assert obj2._padded_k == 9
+
+    retval3 = obj2(x, p=1.0, k=5)
+    expected3 = torch.tensor([[2., 2., 9., 9., 2., 2., ninf, ninf, ninf],
+                              [10., 9., 9., ninf, 9., 9., ninf, 9., 10.]])
+
+    assert torch.all(retval3 == expected3).item()
+
+    # this should not be done in general, doing it here for testing purposes
+    ApplyToppTopkScalar._padded_k = 0
+    x = torch.tensor([[1, 1, 1, 9, 8, 1, 1, 1, 1.0],
+                      [2, 1, 2, 2, 1, 1, 1, 1, 1]])
+    obj3 = ApplyToppTopkScalar(2)
+    retval4 = obj3(x, p=0.9, k=2)
+    expected4 = torch.tensor(
+        [[ninf, ninf, ninf, 9., 8., ninf, ninf, ninf, ninf],
+         [2., ninf, 2., 2., ninf, ninf, ninf, ninf, ninf]])
+    assert torch.all(retval4 == expected4).item()
+    assert obj3._padded_k == 4
+    y = torch.tensor([[8, 8, 8, 9, 8, 1, 1, 1, 1.0],
+                      [2, 1, 2, 2, 1, 1, 1, 1, 1]])
+    retval5 = obj3(y, p=0.9, k=2)
+    assert obj3._padded_k == 8
+    expected5 = torch.tensor([[8., 8., 8., 9., 8., ninf, ninf, ninf, ninf],
+                              [2., ninf, 2., 2., ninf, ninf, ninf, ninf,
+                               ninf]])
+    assert torch.all(retval5 == expected5).item()
+    y = torch.tensor([[8, 8, 8, 9, 8, 8, 1, 1, 1.0],
+                      [2, 1, 2, 2, 3, 1, 1, 1, 1]])
+    retval6 = obj3(y, p=0.9, k=2)
+    expected6 = torch.tensor([[8., 8., 8., 9., 8., 8., ninf, ninf, ninf],
+                              [2., ninf, 2., 2., 3., ninf, ninf, ninf, ninf]])
+    assert torch.all(retval6 == expected6).item()
+    assert obj3._padded_k == 8
