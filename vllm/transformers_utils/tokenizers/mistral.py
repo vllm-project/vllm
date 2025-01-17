@@ -261,7 +261,6 @@ class MistralTokenizer:
         max_length: Optional[int] = None,
     ) -> List[int]:
         # Mistral Tokenizers should not add special tokens
-        assert isinstance(prompt, str), f"Invalid prompt: {prompt}"
         input_ids = self.encode(prompt)
 
         if truncation:
