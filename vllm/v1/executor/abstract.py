@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
-from typing import Tuple, Type
+from typing import Type
 
 from vllm.config import VllmConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 
 
@@ -31,11 +32,15 @@ class Executor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def initialize(self, num_gpu_blocks: int) -> None:
+    def initialize(self, kv_cache_config: KVCacheConfig) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_available_memory(self) -> int:  # in bytes
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_kv_cache_spec(self) -> KVCacheSpec:
         raise NotImplementedError
 
     @abstractmethod
