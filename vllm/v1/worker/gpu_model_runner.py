@@ -7,6 +7,8 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
@@ -16,13 +18,16 @@ from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, bind_kv_cache, cdiv,
-                        is_pin_memory_available)
+                        LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
+from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -88,8 +93,12 @@ class GPUModelRunner:
         self.mm_input_mapper_profiling = MMInputMapperClient(self.model_config)
         self.mm_input_mapper_profiling.use_cache = False
 
-        self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  # noqa: E501
-        self.encoder_cache_size = self.scheduler_config.encoder_cache_size
+        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
+            model_config=model_config,
+            scheduler_config=scheduler_config,
+        )
+        self.max_num_encoder_input_tokens = encoder_compute_budget
+        self.encoder_cache_size = encoder_cache_size
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
@@ -746,44 +755,30 @@ class GPUModelRunner:
         ]
 
         # Profile with multimodal encoder & encoder cache.
-        if self.is_multimodal_model:
-
-            # Create dummy batch of multimodal inputs.
-            dummy_request_data = self.input_registry.dummy_data_for_profiling(
-                model_config=self.model_config,
-                seq_len=self.max_num_tokens,
-                mm_registry=self.mm_registry,
-            )
-            dummy_mm_data = dummy_request_data.multi_modal_data
+        # TODO: handle encoder-decoder models once we support them.
+        if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
+                and self.encoder_cache_size > 0):
 
             # NOTE: Currently model is profiled with a single non-text
             # modality with the max possible input tokens even when
             # it supports multiple.
-            max_tokens_by_modality_dict = self.mm_registry.get_max_tokens_per_item_by_modality(  # noqa: E501
+            max_tokens_by_modality_dict = MULTIMODAL_REGISTRY.get_max_tokens_per_item_by_nonzero_modality(  # noqa: E501
                 self.model_config)
-
             dummy_data_modality, max_tokens_per_mm_item = max(
                 max_tokens_by_modality_dict.items(), key=lambda item: item[1])
 
             # Check how many items of this modality can be supported by
-            # the encoder cache budget.
-            encoder_cache_budget = min(self.max_num_encoder_input_tokens,
-                                       self.encoder_cache_size)
-            max_num_mm_items_encoder_budget = encoder_cache_budget // \
-                max_tokens_per_mm_item
+            # the encoder budget.
+            encoder_budget = min(self.max_num_encoder_input_tokens,
+                                 self.encoder_cache_size)
 
-            # TODO: Allow users to set encoder_cache_budget in case this
-            # happens.
-            assert max_num_mm_items_encoder_budget > 0, (
-                f"Encoder cache budget={encoder_cache_budget} is too small to "
-                f"support the maximum possible size of multimodal embeddings"
-                f"={max_tokens_per_mm_item}.")
+            max_num_mm_items_encoder_budget = cdiv(encoder_budget,
+                                                   max_tokens_per_mm_item)
 
             # Check how many items of this modality can be supported by
             # the decoder budget.
-            max_mm_items_per_req = max(
-                self.mm_registry.get_mm_limits_per_prompt(
-                    self.model_config).values())
+            max_mm_items_per_req = self.mm_registry.get_mm_limits_per_prompt(
+                self.model_config)[dummy_data_modality]
 
             # NOTE: We do not consider max_num_batched_tokens on purpose
             # because the multimodal embeddings can be generated in advance
@@ -793,6 +788,19 @@ class GPUModelRunner:
 
             max_num_mm_items = min(max_num_mm_items_encoder_budget,
                                    max_num_mm_items_decoder_budget)
+
+            logger.info(
+                "Encoder cache will be initialized with a budget of %s tokens,"
+                " and profiled with %s %s items of the maximum feature size.",
+                encoder_budget, max_num_mm_items, dummy_data_modality)
+
+            # Create dummy batch of multimodal inputs.
+            dummy_request_data = self.input_registry.dummy_data_for_profiling(
+                model_config=self.model_config,
+                seq_len=self.max_num_tokens,
+                mm_registry=self.mm_registry,
+            )
+            dummy_mm_data = dummy_request_data.multi_modal_data
 
             # Dummy data definition in V0 may contain multiple multimodal items
             # (e.g, multiple images) for a single request, therefore here we
@@ -877,15 +885,71 @@ class GPUModelRunner:
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 
-    def initialize_kv_cache(self, num_blocks: int) -> None:
-        assert len(self.kv_caches) == 0
-        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size)
-        for _ in range(self.num_attn_layers):
-            self.kv_caches.append(
-                torch.zeros(kv_cache_shape,
-                            dtype=self.kv_cache_dtype,
-                            device=self.device))
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Initialize KV cache based on `kv_cache_config`.
+        Args:
+            kv_cache_config: Configuration for the KV cache, including the KV 
+            cache size of each layer
+        """
+        if len(kv_cache_config.groups) > 1:
+            raise NotImplementedError(
+                "Hybrid models with more than one KV cache type are not "
+                "supported yet.")
+
+        kv_caches: Dict[str, torch.Tensor] = {}
+
+        for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
+            tensor_config = kv_cache_config.tensors[layer_name]
+            assert tensor_config.size % layer_spec.page_size_bytes == 0
+            num_blocks = tensor_config.size // layer_spec.page_size_bytes
+            if isinstance(layer_spec, FullAttentionSpec):
+                kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+                    num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
+                    layer_spec.head_size)
+                dtype = layer_spec.dtype
+                kv_caches[layer_name] = torch.zeros(kv_cache_shape,
+                                                    dtype=dtype,
+                                                    device=self.device)
+            else:
+                raise NotImplementedError
+
         bind_kv_cache(
+            kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
-            [self.kv_caches])
+            self.kv_caches)
+
+    def get_kv_cache_spec(self) -> KVCacheSpec:
+        """
+        Generates the KVCacheSpec by parsing the kv cache format from each 
+        Attention module in the static forward context.
+        Returns:
+            KVCacheSpec: A dictionary mapping layer names to their KV cache 
+            format. Layers that do not need KV cache are not included.
+        """
+
+        forward_ctx = self.vllm_config.compilation_config.static_forward_context
+        block_size = self.vllm_config.cache_config.block_size
+        kv_cache_spec: KVCacheSpec = {}
+        for layer_name, attn_module in forward_ctx.items():
+            # TODO: Support other attention modules, e.g., sliding window,
+            # cross-attention, MLA.
+            assert isinstance(attn_module, Attention)
+            if attn_module.attn_type == AttentionType.DECODER:
+                kv_cache_spec[layer_name] = FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=attn_module.num_kv_heads,
+                    head_size=attn_module.head_size,
+                    dtype=attn_module.dtype,
+                )
+            elif attn_module.attn_type in (AttentionType.ENCODER,
+                                           AttentionType.ENCODER_ONLY):
+                # encoder-only attention does not need KV cache.
+                continue
+            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
+                raise NotImplementedError
+            else:
+                raise ValueError(
+                    f"Unknown attention type: {attn_module.attn_type}")
+
+        return kv_cache_spec
