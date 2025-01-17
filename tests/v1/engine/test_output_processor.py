@@ -1,7 +1,7 @@
+import math
 from typing import Dict, List, Optional
 
 import pytest
-import math
 
 from tests.v1.engine.utils import (STOP_STRINGS,
                                    DummyOutputProcessorTestVectors,
@@ -105,8 +105,6 @@ def _validate_logprobs(
         cumulative_logprob = gen_cumulative_logprob[req_id]
         prompt_token_ids = dtv.prompt_tokens[req_idx]
         ref_logprobs = dtv.generation_logprobs[req_idx]
-        ref_prompt_logprobs = dtv.prompt_logprobs[req_idx]
-
         if num_sample_logprobs:
             # Validate sample logprobs
             assert logprobs is not None, (f"Request {req_id} requires sample"
@@ -127,6 +125,11 @@ def _validate_logprobs(
             for idx, (sampled_token,
                       pos_logprob_dict) in enumerate(zip(new_tokens,
                                                          logprobs)):
+                # Break out the reference log probability value &
+                # logprob token id tensors associated with this
+                # position in the completion. B
+                (ref_pos_logprob_vals,
+                 ref_pos_logprob_toks) = ref_logprobs[idx]
                 # For each position in the completion sequence,
                 # ensure the actual sampled token is among the
                 # logprobs
@@ -143,8 +146,71 @@ def _validate_logprobs(
                              f" {num_lp_toks} logprobs found at"
                              f" position {idx}. Logprobs dict:"
                              f" {pos_logprob_dict}")
-                ref_cumulative_logprob += pos_logprob_dict[
-                    sampled_token].logprob
+                # Validate that the logprob processor yields
+                # the correct log probabilities and rankings
+                rank_dict: Dict[int, float] = {}
+                last_match_rank = -1
+                last_match_tok_id = -1
+                smp_lp_rank = pos_logprob_dict[sampled_token].rank
+                for jdx in range(1, len(ref_pos_logprob_toks)):
+                    # Iterate over the (logprob val,logprob tok id)
+                    # pairs expected by the test fixture at this
+                    # position in the completion.
+                    ref_lp_val = float(ref_pos_logprob_vals[jdx])
+                    ref_tok_id = int(ref_pos_logprob_toks[jdx])
+                    if ref_tok_id in pos_logprob_dict:
+                        # Detect when one of the expected pairs
+                        # actually appears
+                        lp = pos_logprob_dict[ref_tok_id]
+                        lp_val = lp.logprob
+                        # Validate log probability
+                        assert math.isclose(lp_val, ref_lp_val), (
+                            f"Token id {ref_tok_id} appears in logprobs dict"
+                            f" at position {idx} in completion with log"
+                            f" probability {lp_val} but {ref_lp_val} was"
+                            f" expected. Logprob: {lp}")
+                        # Validate proper rank order
+                        lp_rank = lp.rank
+                        if last_match_rank == -1:
+                            # Validate that first rank is 1
+                            if lp_rank != 1:
+                                # Rank not being 1 must be explained
+                                # by sampled token being injected into
+                                # the logprobs at position 1
+                                assert lp_rank == 2 and smp_lp_rank == 1
+                        else:
+                            # Validate rank order
+                            assert lp_rank > last_match_rank, (
+                                f"At position {idx}, token {ref_tok_id}"
+                                f" (log prob={lp_val}) has rank {lp_rank}"
+                                " which should be greater than the rank"
+                                f" {last_match_rank} of token"
+                                f" {last_match_tok_id} (log prob="
+                                f"{rank_dict[lp_rank]}), but it isn't.")
+                            # Validate consecutive rankings
+                            if lp_rank - last_match_rank > 1:
+                                # Non-consecutive rankings must be explained
+                                # by the sampled token being injected into the
+                                # logprobs
+                                assert (smp_lp_rank - last_match_rank == 1
+                                        and lp_rank - smp_lp_rank
+                                        == 1), ("Sample logprobs rankings are"
+                                                " non-consecutive.")
+                        last_match_rank = lp_rank
+                        last_match_tok_id = ref_tok_id
+                        rank_dict[lp_rank] = lp_val
+                # Validate
+                assert last_match_rank >= num_lp_toks - 1
+                if last_match_rank == num_lp_toks - 1:
+                    assert smp_lp_rank == num_lp_toks
+                    last_match_rank = num_lp_toks
+                # Validate that the sample logprobs expected by the test
+                # fixture account for all of the sample logprobs
+                assert last_match_rank == num_lp_toks, (
+                    f"Only {last_match_rank} of the sample logprobs"
+                    f" at position {idx} match the sample"
+                    f" logprobs returned by the mock engine core;"
+                    f" expected {num_lp_toks} matches.")
                 for lp_tok in pos_logprob_dict:
                     # Confirm that sample logprob decoded token matches
                     # the logprob token id at this sequence position
@@ -156,6 +222,8 @@ def _validate_logprobs(
                         f" token is {decoded_token} instead"
                         f" (at position {idx})")
 
+                ref_cumulative_logprob += pos_logprob_dict[
+                    sampled_token].logprob
             # Assert that cumulative logprobs are correct
             assert math.isclose(cumulative_logprob, ref_cumulative_logprob)
         else:
