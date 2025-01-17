@@ -35,6 +35,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+
 from .interfaces import SupportsLoRA
 from .utils import maybe_prefix
 
@@ -162,7 +163,7 @@ class TransformersModel(nn.Module, SupportsLoRA):
             for i in range(config.num_hidden_layers)
         ]
         self.config._attn_implementation_internal = "vllm"
-            
+
         # Model modifications
         self.replace_vocab_embed_class(self.model)
         self.replace_rms_norm_class(self.model)
@@ -205,8 +206,8 @@ class TransformersModel(nn.Module, SupportsLoRA):
 
     def replace_vocab_embed_class(self, module: nn.Module):
         # Sorted by most frequently use (most frequent first)
-        vocab_embed_names = (
-            "embed_tokens", "word_embeddings", "wte", "embed_in")
+        vocab_embed_names = ("embed_tokens", "word_embeddings", "wte",
+                             "embed_in")
         for vocab_embed_name in vocab_embed_names:
             if hasattr(module, vocab_embed_name):
                 old_module = getattr(module, vocab_embed_name)
@@ -224,12 +225,11 @@ class TransformersModel(nn.Module, SupportsLoRA):
         for child_name, child_module in module.named_children():
             qual_name = prefix + child_name
             if "RMSNorm" in child_module.__class__.__name__:
-                rms_norm = RMSNorm(
-                    self.config.hidden_size, eps=self.config.rms_norm_eps)
+                rms_norm = RMSNorm(self.config.hidden_size,
+                                   eps=self.config.rms_norm_eps)
                 setattr(module, child_name, rms_norm)
                 self.log_replacement(qual_name, child_module, rms_norm)
             self.replace_rms_norm_class(child_module, prefix=f"{qual_name}.")
-
 
     def _autoset_attn_implementation(
         self,
