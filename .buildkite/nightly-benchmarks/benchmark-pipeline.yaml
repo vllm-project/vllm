@@ -33,7 +33,7 @@ steps:
               mountPath: /dev/shm
             env:
             - name: VLLM_USE_V1
-              value: 1
+              value: "1"
             - name: VLLM_USAGE_SOURCE
               value: ci-test
             - name: HF_TOKEN
