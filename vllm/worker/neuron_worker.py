@@ -8,6 +8,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.neuron_model_runner import NeuronModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
@@ -25,6 +26,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        is_driver_worker: bool = True,
     ) -> None:
         WorkerBase.__init__(self, vllm_config=vllm_config)
         self.local_rank = local_rank
@@ -37,7 +39,22 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         self.model_runner: NeuronModelRunner = NeuronModelRunner(
             vllm_config=vllm_config)
-        self.is_driver_worker = True
+        self.is_driver_worker = is_driver_worker
+
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None,
+    ) -> Optional[List[SamplerOutput]]:
+        assert execute_model_req is not None
+        assert (not execute_model_req.blocks_to_swap_in
+                and not execute_model_req.blocks_to_swap_out
+                and not execute_model_req.blocks_to_copy), (
+                    "Cache operations are not supported for Neuron backend.")
+        assert execute_model_req.num_lookahead_slots == 0, (
+            "lookahead not supported for Neuron backend.")
+        output = LocalOrDistributedWorkerBase.execute_model(
+            self, execute_model_req)
+        return output
 
     def init_device(self) -> None:
         self.init_distributed_environment()
@@ -103,13 +120,14 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def init_distributed_environment(self):
         """Neuron uses transformers-neuronx for tensor parallelism.
-
-        vLLM still needs the environment inited when TP/PP > 1
+        It has only one process to control multiple devices.
+        vLLM still needs the environment initialized when TP/PP > 1,
+        so we initialize a distributed environment with one process.
         """
         init_distributed_environment(
             world_size=1,
-            rank=self.rank,
-            local_rank=self.local_rank,
+            rank=0,
+            local_rank=0,
             distributed_init_method=self.distributed_init_method,
             backend="gloo",
         )
