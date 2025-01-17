@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class Encoding:
-    input_ids: List[int]
+    input_ids: Union[List[int], List[List[int]]]
 
 
 def maybe_serialize_tool_calls(request: ChatCompletionRequest):
@@ -223,12 +223,32 @@ class MistralTokenizer:
 
     def __call__(
         self,
-        prompt: str,
+        prompt: Union[str, List[str], List[int]],
         add_special_tokens: bool = False,
         truncation: bool = False,
         max_length: Optional[int] = None,
     ):
+        # For List[str], original prompt text
+        if isinstance(prompt, list) and len(prompt) > 0 and isinstance(
+                prompt[0], str):
+            all_input_ids = []
+            for p in prompt:
+                assert isinstance(p, str), f"Invalid prompt: {p}"
+                input_ids = self.encode(p)
+                if truncation:
+                    input_ids = input_ids[:max_length]
+                all_input_ids.append(input_ids)
+            return Encoding(input_ids=all_input_ids)
+
+        # For List[int], apply chat template output
+        if isinstance(prompt, list) and len(prompt) > 0 and isinstance(
+                prompt[0], int):
+            assert all(isinstance(p, int)
+                       for p in prompt), (f"Invalid prompt: {prompt}")
+            return Encoding(input_ids=prompt)  # type: ignore[arg-type]
+
         # Mistral Tokenizers should not add special tokens
+        assert isinstance(prompt, str), f"Invalid prompt: {prompt}"
         input_ids = self.encode(prompt)
 
         if truncation:
