@@ -377,7 +377,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool silu_activation,"
       "int pad_slot_id) -> ()");
   ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
-#endif
+
+  ops.def("cublas_gemm_rs() -> Tensor");
+  ops.impl("cublas_gemm_rs", torch::kCUDA, &cublas_gemm_rs);
+  ops.def("cublas_ag_gemm() -> Tensor");
+  ops.impl("cublas_ag_gemm", torch::kCUDA, &cublas_ag_gemm);
+#endif  // !USE_ROCM
 
   // Quantized GEMM for GPTQ.
   // Note: even though the C++ inferred schema is correct for this op, it seems

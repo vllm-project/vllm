@@ -26,8 +26,125 @@ from .dump_graph import dump_graph
 logger = init_logger(__name__)
 
 
-def pprint(x):
-    pass
+class InductorHashCache:
+    """
+    Disk format: a Python list of tuples, each tuple is
+    (runtime_shape, graph_index, hash_str)
+    We use list of tuple for readability.
+
+    In-memory format: a defaultdict of dict, where the key is
+    runtime_shape, and the value is a dict of graph_index to hash_str.
+
+    The data is essentially `Dict[Optional[int], Dict[int, str]]`,
+    we don't use json here because json doesn't support int as key.
+
+    TODO: better off-the-shelf solution to serialize the data?
+    """
+
+    def __init__(self, cache_dir: str, disabled: bool = False):
+        self.cache: defaultdict = defaultdict(dict)
+        self.disabled = disabled
+        self.cache_dir = cache_dir
+        self.cache_file_path = os.path.join(cache_dir,
+                                            "inductor_hash_cache.py")
+        if disabled:
+            return
+        # set flags so that Inductor and Triton store their cache
+        # in the cache_dir, then users only need to copy the cache_dir
+        # to another machine to reuse the cache.
+        inductor_cache = os.path.join(cache_dir, "inductor_cache")
+        os.makedirs(inductor_cache, exist_ok=True)
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
+        triton_cache = os.path.join(cache_dir, "triton_cache")
+        os.makedirs(triton_cache, exist_ok=True)
+        os.environ["TRITON_CACHE_DIR"] = triton_cache
+        if os.path.exists(self.cache_file_path):
+            with open(self.cache_file_path) as f:
+                self.deserialize(f.read())
+
+    def deserialize(self, data: str):
+        # we use ast.literal_eval to parse the data
+        # because it is a safe way to parse Python literals.
+        # do not use eval(), it is unsafe.
+        try:
+            list_data = ast.literal_eval(data)
+            for runtime_shape, graph_index, hash_str in list_data:
+                self.cache[runtime_shape][graph_index] = hash_str
+        except Exception as ex:
+            logger.warning("Unable to read cache: %s, error: %s", self.cache_file_path, ex)
+            self.cache.clear()
+            self.disabled = True
+
+    def serialize(self) -> str:
+        data = []
+        for runtime_shape, graph_index_to_hash_str in self.cache.items():
+            for graph_index, hash_str in graph_index_to_hash_str.items():
+                data.append((runtime_shape, graph_index, hash_str))
+        printer = pprint.PrettyPrinter(indent=4)
+        return printer.pformat(data)
+
+    def save_to_file(self):
+        if self.disabled:
+            return
+        with open(self.cache_file_path, "w") as f:
+            f.write(self.serialize())
+
+    def __contains__(self, key: Tuple[Optional[int], int]) -> bool:
+        if self.disabled:
+            return False
+        runtime_shape, graph_index = key
+        return runtime_shape in self.cache and graph_index in self.cache[
+            runtime_shape]
+
+    def __getitem__(self, key: Tuple[Optional[int], int]) -> str:
+        if self.disabled:
+            raise KeyError("cannot read from disabled cache")
+        runtime_shape, graph_index = key
+        return self.cache[runtime_shape][graph_index]
+
+    def __setitem__(self, key: Tuple[Optional[int], int], value: str):
+        # setitem for disabled cache is fine, because we
+        # don't actually write to the disk
+        runtime_shape, graph_index = key
+        self.cache[runtime_shape][graph_index] = value
+
+
+class AlwaysHitShapeEnv:
+    """
+    Why do we need this class:
+
+    For normal `torch.compile` usage, every compilation will have
+    one Dynamo bytecode compilation and one Inductor compilation.
+    The Inductor compilation happens under the context of the
+    Dynamo bytecode compilation, and that context is used to
+    determine the dynamic shape information, etc.
+
+    For our use case, we only run Dynamo bytecode compilation once,
+    and run Inductor compilation multiple times with different shapes
+    plus a general shape. The compilation for specific shapes happens
+    outside of the context of the Dynamo bytecode compilation. At that
+    time, we don't have shape environment to provide to Inductor, and
+    it will fail the Inductor code cache lookup.
+
+    By providing a dummy shape environment that always hits, we can
+    make the Inductor code cache lookup always hit, and we can
+    compile the graph for different shapes as needed.
+
+    The following dummy methods are obtained by trial-and-error
+    until it works.
+    """
+
+    def __init__(self) -> None:
+        self.guards: List[Any] = []
+
+    def evaluate_guards_expression(self, *args, **kwargs):
+        return True
+
+    def get_pruned_guards(self, *args, **kwargs):
+        return []
+
+    def produce_guards_expression(self, *args, **kwargs):
+        return ""
 
 
 def wrap_inductor(graph: fx.GraphModule,
@@ -369,6 +486,7 @@ class VllmBackend:
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
+
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done
         compilation_counter.num_graphs_seen += 1
@@ -385,16 +503,16 @@ class VllmBackend:
         self.configure_post_pass()
 
         if ("before_split_graph"
-                in self.compilation_configs.pass_config.dump_graph_stages):
-            dump_graph(self.compilation_configs.pass_config, graph.graph,
+                in self.compilation_config.pass_config.dump_graph_stages):
+            dump_graph(self.compilation_config.pass_config, graph.graph,
                        "before_split_graph")
 
         self.split_gm, self.piecewise_graphs = split_graph(
             graph, self.compilation_config.splitting_ops)
 
         if ("after_split_graph"
-                in self.compilation_configs.pass_config.dump_graph_stages):
-            dump_graph(self.compilation_configs.pass_config,
+                in self.compilation_config.pass_config.dump_graph_stages):
+            dump_graph(self.compilation_config.pass_config,
                        self.split_gm.graph, "after_split_graph")
 
         compilation_counter.num_piecewise_graphs_seen += len(
@@ -541,13 +659,11 @@ class PiecewiseBackend:
         if not self.first_run_finished:
             self.first_run_finished = True
             self.check_for_ending_compilation()
-            pprint(f"RUN GENERAL 1")
             return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
         if runtime_shape not in self.concrete_size_entries:
             # we don't need to do anything for this shape
-            pprint(f"RUN GENERAL 2 - {runtime_shape}")
             return self.compiled_graph_for_general_shape(*args)
 
         entry = self.concrete_size_entries[runtime_shape]
@@ -574,7 +690,6 @@ class PiecewiseBackend:
                 self.check_for_ending_compilation()
 
         if not entry.use_cudagraph:
-            pprint(f"RUN STATIC {runtime_shape}")
             return entry.runnable(*args)
 
         if entry.cudagraph is None:
@@ -586,7 +701,6 @@ class PiecewiseBackend:
                         entry.num_finished_warmup,
                         self.compilation_config.cudagraph_num_of_warmups,
                         runtime_shape)
-                pprint(f"RUN STATIC CUDAGRAPH WARMUP 1 {runtime_shape}")
                 return entry.runnable(*args)
 
             if self.is_first_graph:
@@ -617,7 +731,6 @@ class PiecewiseBackend:
                 # mind-exploding: carefully manage the reference and memory.
                 with torch.cuda.graph(cudagraph, pool=self.graph_pool):
                     # `output` is managed by pytorch's cudagraph pool
-                    pprint(f"RUN STATIC CUDAGRAPH WARMUP 2 {runtime_shape}")
                     output = entry.runnable(*args)
                     if self.is_last_graph:
                         # by converting it to weak ref,
@@ -649,6 +762,5 @@ class PiecewiseBackend:
                 f" Expected {entry.input_addresses}, got {new_input_addresses}"
             )
 
-        pprint(f"RUN STATIC CUDAGRAPH REPLAY {runtime_shape}")
         entry.cudagraph.replay()
         return entry.output

@@ -4,10 +4,25 @@ from typing import Iterable, Optional
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._ops import OpOverload
+from torch._inductor.pattern_matcher import Match
 
 
 def is_func(node: fx.Node, target) -> bool:
     return node.op == "call_function" and node.target == target
+
+
+def find_fn(nodes: Iterable[fx.Node], op) -> Optional[fx.Node]:
+    for node in nodes:
+        if node.op == "call_function" and node.target == op:
+            return node
+    return None
+
+
+def find_op(nodes: Iterable[fx.Node], op: str) -> Optional[fx.Node]:
+    for node in nodes:
+        if node.op == op:
+            return node
+    return None
 
 
 # Returns the first auto_functionalized node with the given op (if it exists)
@@ -40,3 +55,13 @@ def find_getitem(node: fx.Node, idx: int) -> fx.Node:
     ret = find_getitem_maybe(node, idx)
     assert ret is not None, f"Could not find getitem {idx} in node {node}"
     return ret
+
+
+def last_node_in_match(match: Match) -> fx.Node:
+    if len(match.nodes) > 0:
+        graph = match.nodes[0].graph
+        for n in reversed(graph.nodes):
+            if n in reversed(match.nodes):
+                return n
+    raise ValueError("No nodes in graph")
+

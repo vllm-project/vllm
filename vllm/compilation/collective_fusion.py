@@ -7,8 +7,8 @@ from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
                                              fwd_only, register_replacement)
 
 import vllm.envs as envs
-from vllm.compilation.utils import (find_auto_fn, find_fn, find_getitem,
-                                    find_op, last_node_in_match)
+from vllm.compilation.fx_utils import (find_auto_fn, find_fn, find_getitem,
+                                       find_op, last_node_in_match)
 from vllm.config import CompilationConfig
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
@@ -19,6 +19,8 @@ from vllm.utils import direct_register_custom_op
 
 from .inductor_pass import get_pass_context
 from .vllm_inductor_pass import VllmInductorPass
+from .utils import use_cc_kernels
+
 
 logger = init_logger(__name__)
 
@@ -32,19 +34,9 @@ if envs.VLLM_USE_FLUX:
         logger.info("Attempting to use flux but flux not installed.")
         use_flux = False
 
-# Depends on arch, see auto_tile_shape in include/flux/gemm_hparams.h
-# Can be 256 on sm80.
-FLUX_TILE_SIZE: int = 128
-
 
 def get_world_name() -> str:
     return torch.distributed.group.WORLD.group_name
-
-
-def use_cc_kernels(m_shape: int) -> bool:
-    n_slices = get_tensor_model_parallel_world_size()
-    return (m_shape % (FLUX_TILE_SIZE * n_slices) == 0
-            and m_shape >= FLUX_TILE_SIZE * n_slices)
 
 
 def residual_slice_shape(residual: torch.Tensor, rank: int) -> int:
@@ -79,7 +71,7 @@ def match_gemm_rs_ag_gemm(
     return mm_2, new_residual
 
 
-def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
+def get_gemm_rs_ag_gemm(max_m: int, gemm_1_type: torch.dtype,
                         gemm_1_weights: torch.Size, gemm_2_type: torch.dtype,
                         gemm_2_weights: torch.Size,
                         tp_group_name: str,
@@ -213,7 +205,6 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
             rms_norm_weights: torch.Tensor, gemm_2_weights: torch.Tensor,
             first_layer: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        print(f"START STATIC FLUX {residual.shape} {first_layer}")
         if first_layer:
             slice_shape = residual_slice_shape(residual, rank)
             residual_chunk = torch.ops.aten.split.Tensor(residual, slice_shape)
@@ -236,8 +227,6 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
         new_residual = split_2[0]
 
         mm_2 = ag_gemm(output, gemm_2_weights)
-
-        print(f"END STATIC FLUX {residual.shape} {first_layer}")
 
         return mm_2, new_residual, slice_scatter
 
@@ -304,14 +293,12 @@ def match_final(
 def gemm_ag_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
                   gemm_1_activations: torch.Tensor,
                   rms_norm_weights: torch.Tensor) -> torch.Tensor:
-    # TODO: use ag gemm here?
     mm_1 = torch.ops.aten.mm.default(gemm_1_activations,
                                      gemm_1_weights.transpose(1, 0))
 
     reduced = tensor_model_parallel_all_reduce(mm_1)
 
     if use_cc_kernels(reduced.size(0)):
-        print(f"ALL GATHER {my_residual.size()}, {reduced.size()}")
         wait_tensor = tensor_model_parallel_all_gather(my_residual)
     else:
         assert reduced.size() == my_residual.size()
@@ -322,15 +309,12 @@ def gemm_ag_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
                                             weight=rms_norm_weights,
                                             epsilon=1e-05)
 
-    print(f"DONE FINAL {my_residual.size()}, {reduced.size()}")
-
     return reduced
 
 
 def gemm_ag_final_static(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
                          gemm_1_activations: torch.Tensor,
                          rms_norm_weights: torch.Tensor) -> torch.Tensor:
-    # TODO: use ag gemm here?
     mm_1 = torch.ops.aten.mm.default(gemm_1_activations,
                                      gemm_1_weights.transpose(1, 0))
 
@@ -507,7 +491,7 @@ class CollectiveFusionPass(VllmInductorPass):
                 tp_group_name = ar_node.args[1]
 
                 fused_gemm_func, fused_gemm_fake_func = get_gemm_rs_ag_gemm(
-                    use_flux, max_m, gemm_1.dtype, gemm_1.shape, gemm_2.dtype,
+                    max_m, gemm_1.dtype, gemm_1.shape, gemm_2.dtype,
                     gemm_2.shape, tp_group_name, self.is_static_shape())
 
                 fused_node = graph.call_function(fused_gemm_func,

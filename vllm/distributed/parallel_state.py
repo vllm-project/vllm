@@ -41,13 +41,16 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import direct_register_custom_op, supports_custom_op
 
+logger = init_logger(__name__)
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 has_flux = False
 if envs.VLLM_USE_FLUX:
     try:
-        import flux
+        logger.warning("Flux kernels requested but Can't import flux.")
+        from flux import init_flux_shm
         has_flux = True
     except ImportError:
         has_flux = False
@@ -220,7 +223,7 @@ class GroupCoordinator:
 
         if has_flux and torch.distributed.get_world_size(
                 self.device_group) > 1:
-            flux.init_flux_shm(self.device_group)
+            init_flux_shm(self.device_group)
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -949,8 +952,6 @@ def graph_capture(device: torch.device):
         yield context
 
 
-logger = init_logger(__name__)
-
 _ENABLE_CUSTOM_ALL_REDUCE = True
 
 
@@ -998,8 +999,9 @@ def init_distributed_environment(
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
 
-    group_name = torch.distributed.group.WORLD.group_name
-    _symmetric_memory.enable_symm_mem_for_group(group_name)
+    if not has_flux:
+        group_name = torch.distributed.group.WORLD.group_name
+        _symmetric_memory.enable_symm_mem_for_group(group_name)
 
 
 def initialize_model_parallel(

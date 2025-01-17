@@ -1,3 +1,4 @@
+import os
 import dataclasses
 import gc
 import inspect
@@ -66,7 +67,7 @@ logger = init_logger(__name__)
 
 LORA_WARMUP_RANK = 8
 
-_NUM_WARMUP_ITERS = 2
+_NUM_WARMUP_ITERS = 11
 
 TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 
@@ -1456,13 +1457,19 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         for doing_warmup in [True, False]:
             with self.attn_state.graph_capture(max_batch_size):
-                with graph_capture() if not doing_warmup else nullcontext() as graph_capture_context:
+                with graph_capture(self.device) if not doing_warmup else nullcontext() as graph_capture_context:
                     # NOTE: Capturing the largest batch size first may help reduce the
                     # memory usage of CUDA graph.
                     for virtual_engine in range(
                             self.parallel_config.pipeline_parallel_size):
-                        for batch_size in \
-                            self.vllm_config.compilation_config.capture_sizes:
+                        # Only rank 0 should print progress bar during capture
+                        capture_sizes = (
+                            tqdm(
+                                self.vllm_config.compilation_config.capture_sizes,
+                                desc="Capturing CUDA graph shapes",
+                            ) if get_tensor_model_parallel_rank() == 0 else
+                            self.vllm_config.compilation_config.capture_sizes)
+                        for batch_size in capture_sizes:
                             attn_metadata = (
                                 self.attn_state.graph_capture_get_metadata_for_batch(
                                     batch_size,
@@ -1569,6 +1576,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
 
+COUNT: int = 0
 
 class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     """
@@ -1660,17 +1668,20 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # TODO(andoorve): We can remove this once all
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
+        global COUNT
+        rank = get_tensor_model_parallel_rank()
         if prefill_meta is None and decode_meta.use_cuda_graph:
-            print(f"START DECODE {model_input.input_tokens.shape}")
+            print(f"START DECODE {model_input.input_tokens.shape} {COUNT} {os.getpid()}")
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][
                 graph_batch_size]
-            print(f"END DECODE {model_input.input_tokens.shape}")
+            print(f"END DECODE {model_input.input_tokens.shape} {COUNT} {os.getpid()}")
         else:
-            print(f"START PREFILL {model_input.input_tokens.shape}")
+            print(f"START PREFILL {model_input.input_tokens.shape} {COUNT} {os.getpid()}")
             model_executable = self.model
-            print(f"END PREFILL {model_input.input_tokens.shape}")
+            print(f"END PREFILL {model_input.input_tokens.shape} {COUNT} {os.getpid()}")
+        COUNT = COUNT + 1
 
         # Receive KV cache in distributed KV cache transfer setting
         # In disagg prefill setting, it will also recv hidden states and bypass
@@ -1914,6 +1925,7 @@ class CUDAGraphRunner(nn.Module):
         # Graph Capture.
         torch.cuda.synchronize()
         # Capture the graph.
+        print(f"capturing graph for {input_ids.shape}")
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
             output_hidden_or_intermediate_states = self.model(
@@ -1942,6 +1954,9 @@ class CUDAGraphRunner(nn.Module):
             # in the graph's memory pool
             gc.collect()
         torch.cuda.synchronize()
+        self._graph.enable_debug_mode()
+        print(f"dumping graph for {input_ids.shape}")
+        self._graph.debug_dump(f"cudagraph{get_tensor_model_parallel_rank()}-{input_ids.shape[0]}.txt")
 
         # Save the input and output buffers.
         self.input_buffers = {
@@ -2006,8 +2021,16 @@ class CUDAGraphRunner(nn.Module):
             self.input_buffers["encoder_positions"].copy_(
                 kwargs['encoder_positions'], non_blocking=True)
 
+        rank = get_tensor_model_parallel_rank()
+        global COUNT
+        print(f"START CUDAGRAPH {input_ids.shape} {COUNT} {os.getpid()}")
+
         # Run the graph.
         self.graph.replay()
+
+        print(f"END CUDAGRAPH {input_ids.shape} {COUNT} {os.getpid()}")
+        COUNT = COUNT + 1
+
         # Return the output tensor.
         if get_pp_group().is_last_rank:
             return self.output_buffers["hidden_states"]
