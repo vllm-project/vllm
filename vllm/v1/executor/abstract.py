@@ -2,9 +2,9 @@ from typing import Type
 
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
-from vllm.executor.ray_distributed_executor import RayDistributedExecutor
-from vllm.executor.uniproc_executor import (ExecutorWithExternalLauncher,
-                                            UniProcExecutor)
+from vllm.executor.ray_distributed_executor import RayDistributedExecutor as RayDistributedExecutorV0 # noqa
+from vllm.executor.uniproc_executor import ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0 # noqa
+from vllm.executor.uniproc_executor import UniProcExecutor as UniProcExecutorV0 # noqa
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -15,19 +15,31 @@ class Executor(ExecutorBase):
     @staticmethod
     def get_class(vllm_config: VllmConfig) -> Type["Executor"]:
         executor_class: Type[Executor]
+        parallel_config = vllm_config.parallel_config
         distributed_executor_backend = (
-            vllm_config.parallel_config.distributed_executor_backend)
+            parallel_config.distributed_executor_backend)
+        if distributed_executor_backend is None:
+            # If the user does not specify the distributed executor backend,
+            # we will choose the backend based on the world size.
+            if parallel_config.world_size > 1:
+                distributed_executor_backend = "mp"
+            else:
+                distributed_executor_backend = "uni"
+
         if distributed_executor_backend == "ray":
-            executor_class = RayDistributedExecutorV1
+            executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
             executor_class = MultiprocExecutor
         elif distributed_executor_backend == "uni":
-            executor_class = UniprocExecutorV1
+            executor_class = UniProcExecutor
         elif distributed_executor_backend == "external_launcher":
             # TODO: make v1 scheduling deterministic
             # to support external launcher
-            executor_class = ExecutorWithExternalLauncherV1
+            executor_class = ExecutorWithExternalLauncher
+        else:
+            raise ValueError("Unknown distributed executor backend: "
+                             f"{distributed_executor_backend}")
         return executor_class
 
     def initialize(self, kv_cache_config: KVCacheConfig) -> None:
@@ -63,13 +75,13 @@ class Executor(ExecutorBase):
         self.collective_rpc("profile", args=(is_start, ))
 
 
-class UniprocExecutorV1(UniProcExecutor, Executor):
+class UniProcExecutor(UniProcExecutorV0, Executor):
     pass
 
 
-class ExecutorWithExternalLauncherV1(ExecutorWithExternalLauncher, Executor):
+class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
     pass
 
 
-class RayDistributedExecutorV1(RayDistributedExecutor, Executor):
+class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
     pass
