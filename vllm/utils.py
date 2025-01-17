@@ -2183,5 +2183,5 @@ def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
     elif isinstance(method, str):
         func = getattr(obj, method)
     else:
-        func = method # type: ignore
+        func = method  # type: ignore
     return func(*args, **kwargs)
