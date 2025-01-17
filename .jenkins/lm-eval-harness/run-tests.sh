@@ -42,6 +42,7 @@ do
     export LM_EVAL_TP_SIZE=$TP_SIZE
     export PT_HPU_ENABLE_LAZY_COLLECTIVES=true
     export VLLM_SKIP_WARMUP=true
+    export TQDM_BAR_FORMAT="{desc}: {percentage:3.0f}% {bar:10} | {n_fmt}/{total_fmt} [{elapsed}<{remaining}]" 
     RANDOM_SUFFIX=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 4; echo)
     JUNIT_FAMILY=""
     JUNIT_XML=""

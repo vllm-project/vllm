@@ -24,6 +24,9 @@ TEST_DATA_FILE = os.environ.get(
     "LM_EVAL_TEST_DATA_FILE",
     ".jenkins/lm-eval-harness/configs/Meta-Llama-3-8B-Instruct.yaml")
 
+REPORT_PERFORMANCE = os.environ.get("LM_EVAL_REPORT_PERFORMANCE",
+                                    "false") in ['1', 'true']
+
 TP_SIZE = os.environ.get("LM_EVAL_TP_SIZE", 1)
 
 
@@ -170,9 +173,10 @@ def test_lm_eval_correctness(record_xml_attribute, record_property):
                                 x['resps'])))['input_ids'])) for x in samples
             ]
             tokenized_outputs_lens = [len(x) for x in tokenized_outputs]
-            report_performance(task['name'], tokenized_inputs_lens,
-                               tokenized_outputs_lens, total_time,
-                               record_property)
+            if REPORT_PERFORMANCE:
+                report_performance(task['name'], tokenized_inputs_lens,
+                                   tokenized_outputs_lens, total_time,
+                                   record_property)
 
             for metric in task["metrics"]:
                 ground_truth = metric["value"]
