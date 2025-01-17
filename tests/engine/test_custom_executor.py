@@ -9,11 +9,17 @@ from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
 from vllm.executor.uniproc_executor import UniProcExecutor
+from vllm.worker.worker import Worker
 from vllm.sampling_params import SamplingParams
 
 
 class Mock:
     ...
+
+
+class CustomWorker(Worker):
+    def check_model_cls(self):
+        return isinstance(self.model_runner.model, nn.Module)
 
 
 class CustomUniExecutor(UniProcExecutor):
@@ -52,7 +58,10 @@ def test_custom_executor(model, tmp_path):
         assert not os.path.exists(".marker")
 
         engine_args = EngineArgs(
-            model=model, distributed_executor_backend=CustomUniExecutor)
+            model=model,
+            distributed_executor_backend=CustomUniExecutor,
+            worker_cls=CustomWorker,
+        )
         engine = LLMEngine.from_engine_args(engine_args)
         sampling_params = SamplingParams(max_tokens=1)
 
@@ -61,7 +70,7 @@ def test_custom_executor(model, tmp_path):
 
         assert os.path.exists(".marker")
 
-        assert isinstance(engine.get_model(), nn.Module)
+        assert all(engine.collective_rpc("check_model_cls"))
     finally:
         os.chdir(cwd)
 
@@ -87,6 +96,6 @@ def test_custom_executor_async(model, tmp_path):
 
         assert os.path.exists(".marker")
 
-        assert isinstance(engine.get_model(), nn.Module)
+        assert all(engine.collective_rpc("check_model_cls"))
     finally:
         os.chdir(cwd)

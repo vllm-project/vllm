@@ -5,8 +5,8 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
-from typing import (TYPE_CHECKING, Callable, ClassVar, Deque, Dict, Iterable,
-                    List, Mapping, NamedTuple, Optional)
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
+                    Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
@@ -875,6 +875,14 @@ class LLMEngine:
         """
         for scheduler in self.scheduler:
             scheduler.abort_seq_group(request_id)
+
+    def collective_rpc(self,
+                       method: str,
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[Any]:
+        return self.model_executor.collective_rpc(
+            method, timeout, args, kwargs)
 
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
