@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import shutil
 from contextlib import suppress
 
@@ -168,18 +167,18 @@ async def test_dynamic_lora_invalid_files(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("test_name,config_change,expected_error",
                          BADREQUEST_CASES)
-async def test_dynamic_lora_badrequests(client: openai.AsyncOpenAI,
-                                        tmp_path: str, zephyr_lora_files: str,
-                                        test_name: str, config_change: dict,
+async def test_dynamic_lora_badrequests(client: openai.AsyncOpenAI, tmp_path,
+                                        zephyr_lora_files, test_name: str,
+                                        config_change: dict,
                                         expected_error: str):
     # Create test directory
-    test_dir = os.path.join(tmp_path, test_name)
+    test_dir = tmp_path / test_name
 
     # Copy adapter files
     shutil.copytree(zephyr_lora_files, test_dir)
 
     # Load and modify configuration
-    config_path = os.path.join(test_dir, "adapter_config.json")
+    config_path = test_dir / "adapter_config.json"
     with open(config_path) as f:
         adapter_config = json.load(f)
     # Apply configuration changes

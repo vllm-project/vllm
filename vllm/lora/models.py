@@ -195,9 +195,7 @@ class LoRAModel(AdapterModel):
             lora_dir: The local path that has lora data.
             expected_lora_modules: Name of modules that are expected to be
                 replaced by lora.
-            max_position_embeddings: Max position embedding length. Used to
-                scaling the largest context length. If None, the lora model's
-                context length is not scaled.
+            peft_helper: Loaded lora configuration information.
             lora_model_id: Lora model id. If not given, automatically set by
                 a global counter.
             device: Device where the lora model is loaded.
@@ -206,7 +204,6 @@ class LoRAModel(AdapterModel):
         Returns:
             Loaded LoRA Model.
         """
-        # lora_config_path = os.path.join(lora_dir, "adapter_config.json")
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
         new_embeddings_tensor_path = os.path.join(
