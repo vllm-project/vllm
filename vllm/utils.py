@@ -2187,5 +2187,5 @@ def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
             raise NotImplementedError(f"Method {method!r} is not"
                                       " implemented.") from None
     else:
-        func = method  # type: ignore
+        func = partial(method, obj)  # type: ignore
     return func(*args, **kwargs)
