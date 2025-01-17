@@ -321,3 +321,50 @@ void cutlass_grouped_mm_sm90(c10::List<at::Tensor> const& out_tensors,
   cutlass_group_gemm_caller<Cutlass3xGemmDefault>(
       out_tensors, a_tensors, b_tensors, a_scales, b_scales);
 }
+
+__global__ void get_a_expert_offsets(cutlass::float_e4m3_t** trg_a_ptrs,
+                                     cutlass::float_e4m3_t* base_a_ptr,
+                                     const int* __restrict__ topk_ids,
+                                     int64_t* expert_offsets,
+                                     int topk_length) {
+  int expert_id = threadIdx.x;
+  int num_experts = blockDim.x;
+
+  int occurrences = 0;
+  for (int i = 0; i < topk_length; ++i) {
+    occurrences += (topk_ids[i] == expert_id);
+  }
+  expert_offsets[expert_id + 1] = occurrences;
+  __syncthreads();
+
+  if (threadIdx.x == 0) {
+    int64_t tot_offset = 0;
+    expert_offsets[0] = 0;
+    for (int i = 0; i < num_experts; ++i) {
+      trg_a_ptrs[i] = base_a_ptr + tot_offset;
+      tot_offset += expert_offsets[i + 1];
+      expert_offsets[i + 1] = tot_offset;
+    }
+  }
+}
+
+// For a given "a" of size [M,K] performs a permutation of the M rows based
+// on the given "perm" indices.
+__global__ void permute_rows_kernel(cutlass::float_e4m3_t const* __restrict__ a_ptr,
+                                    int const* __restrict__ perm_int_ptr,
+                                    cutlass::float_e4m3_t* __restrict__ out_ptr,
+                                    int size_m, int size_k, int block_rows) {
+  // TODO
+}
+
+void compute_expert_offsets_caller(torch::Tensor& trg_a_ptrs,
+                                   torch::Tensor& a,
+                                   const torch::Tensor& topk_ids,
+                                   torch::Tensor& expert_offsets,
+                                   const int64_t num_experts) {
+    get_a_expert_offsets<<<1, num_experts>>>((float_e4m3_t**)trg_a_ptrs.data_ptr(),
+                                             (cutlass::float_e4m3_t*)a.data_ptr(),
+                                             (const int*)topk_ids.data_ptr(),
+                                             (int64_t*)expert_offsets.data_ptr(),
+                                             topk_ids.numel());
+}

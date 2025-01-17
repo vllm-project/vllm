@@ -36,6 +36,13 @@ void cutlass_grouped_mm_sm90(c10::List<at::Tensor> const& out_tensors,
                              c10::List<at::Tensor> const& a_scales,
                              c10::List<at::Tensor> const& b_scales);
 
+
+void compute_expert_offsets_caller(torch::Tensor& trg_a_ptrs,
+                                   torch::Tensor& a,
+                                   const torch::Tensor& topk_ids,
+                                   torch::Tensor& expert_offsets,
+                                   const int64_t num_experts);
+
 #endif
 
 void cutlass_scaled_mm_azp_sm75(torch::Tensor& c, torch::Tensor const& a,
@@ -157,6 +164,15 @@ void cutlass_grouped_mm(c10::List<at::Tensor> const& out_tensors,
                         c10::List<at::Tensor> const& b_scales) {
   cutlass_grouped_mm_sm90(out_tensors, a_tensors, b_tensors, a_scales,
                           b_scales);
+}
+
+void compute_expert_offsets(torch::Tensor& trg_a_ptrs,
+                                   torch::Tensor& a,
+                                   const torch::Tensor& topk_ids,
+                                   torch::Tensor& expert_offsets,
+                                   const int64_t num_experts) {
+  compute_expert_offsets_caller(trg_a_ptrs, a, topk_ids, expert_offsets,
+                                num_experts);
 }
 
 void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
