@@ -113,7 +113,6 @@ def wrap_base_vllm_parameter(param: Parameter, weight_loader: Callable,
     add_param_feature(param, vLLMParameterFeatures.Base)
 
 
-
 def wrap_column_vllm_parameter(param: Parameter, output_dim: int,
                                **kwargs) -> None:
     """
