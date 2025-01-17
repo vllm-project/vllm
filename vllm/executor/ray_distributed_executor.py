@@ -430,8 +430,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         if isinstance(method, str):
             sent_method = method
         else:
-            sent_method = cloudpickle.dumps(
-                method, protocol=cloudpickle.HIGHEST_PROTOCOL)
+            sent_method = cloudpickle.dumps(method)
         del method
         if self.use_ray_spmd_worker:
             assert not async_run_tensor_parallel_workers_only, (

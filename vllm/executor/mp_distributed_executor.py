@@ -126,8 +126,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         if isinstance(method, str):
             sent_method = method
         else:
-            sent_method = cloudpickle.dumps(
-                method, protocol=cloudpickle.HIGHEST_PROTOCOL)
+            sent_method = cloudpickle.dumps(method)
         del method
 
         if max_concurrent_workers:
