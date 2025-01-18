@@ -626,8 +626,6 @@ class ChatGLMModel(nn.Module):
 
 
 class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP):
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {}
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".word_embeddings": ""}, )
@@ -707,11 +705,6 @@ class ChatGLM(ChatGLMBaseModel):
 
 
 class ChatGLMV(ChatGLMBaseModel, SupportsMultiModal):
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        "gate_proj": ("merged_proj", 0),
-        "dense_h_to_4h": ("merged_proj", 1),
-    }
 
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
