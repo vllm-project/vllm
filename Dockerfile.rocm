@@ -71,7 +71,8 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm /vllm-workspace
 # install development dependencies (for testing)
 RUN cd /vllm-workspace \
     && rm -rf vllm \
-    && python3 -m pip install -e tests/vllm_test_utils
+    && python3 -m pip install -e tests/vllm_test_utils \
+    && python3 -m pip install lm-eval[api]==0.4.4
 
 # -----------------------
 # Final vLLM image
