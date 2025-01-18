@@ -1810,46 +1810,37 @@ class LLMEngine:
     def list_prompt_adapters(self) -> List[int]:
         return self.model_executor.list_prompt_adapters()
 
-    def check_health(self) -> None:
-        if self.tokenizer:
-            self.tokenizer.check_health()
-        self.model_executor.check_health()
-
     def start_profile(self) -> None:
-        # using type instead of isinstance to check to avoid capturing
-        # inherited classes (MultiprocessingGPUExecutor)
-        if type(self.model_executor) == GPUExecutor:  # noqa: E721
-            self.model_executor.start_profile()
-        else:
-            self.model_executor._run_workers("start_profile")
+        self.model_executor.start_profile()
 
     def stop_profile(self) -> None:
-        # using type instead of isinstance to check to avoid capturing
-        # inherited classes (MultiprocessingGPUExecutor)
-        if type(self.model_executor) == GPUExecutor:  # noqa: E721
-            self.model_executor.stop_profile()
-        else:
-            self.model_executor._run_workers("stop_profile")
+        self.model_executor.stop_profile()
+
+    def collective_rpc(self,
+                       method: Union[str, Callable],
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> List[Any]:
+        """
+        See LLM.collective_rpc for more details.
+        """
+        return self.model_executor.collective_rpc(method, timeout, args,
+                                                  kwargs)
 
     def sleep(self) -> None:
         assert self.vllm_config.model_config.enable_sleeping_mode, (
             "Sleeping mode is not enabled in the model config")
-        # using type instead of isinstance to check to avoid capturing
-        # inherited classes (MultiprocessingGPUExecutor)
-        if type(self.model_executor) == GPUExecutor:  # noqa: E721
-            self.model_executor.sleep()
-        else:
-            self.model_executor._run_workers("sleep")
+        self.model_executor.sleep()
 
     def wake_up(self) -> None:
         assert self.vllm_config.model_config.enable_sleeping_mode, (
             "Sleeping mode is not enabled in the model config")
-        # using type instead of isinstance to check to avoid capturing
-        # inherited classes (MultiprocessingGPUExecutor)
-        if type(self.model_executor) == GPUExecutor:  # noqa: E721
-            self.model_executor.wake_up()
-        else:
-            self.model_executor._run_workers("wake_up")
+        self.model_executor.wake_up()
+
+    def check_health(self) -> None:
+        if self.tokenizer:
+            self.tokenizer.check_health()
+        self.model_executor.check_health()
 
     def is_tracing_enabled(self) -> bool:
         return self.tracer is not None
