@@ -26,7 +26,8 @@ QUANTIZATION_METHODS: List[str] = [
     "experts_int8",
     "neuron_quant",
     "ipex",
-    "quark"
+    "quark",
+    "moe_quant_int"
 ]
 
 
@@ -58,6 +59,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .neuron_quant import NeuronQuantConfig
     from .qqq import QQQConfig
     from .tpu_int8 import Int8TpuConfig
+    from .moe_quant_int import MoeQuantIntConfig
 
     method_to_config: Dict[str, Type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,
@@ -82,7 +84,8 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "experts_int8": ExpertsInt8Config,
         "neuron_quant": NeuronQuantConfig,
         "ipex": IPEXConfig,
-        "quark": QuarkConfig
+        "quark": QuarkConfig,
+        "moe_quant_int": MoeQuantIntConfig,
     }
 
     return method_to_config[quantization]
