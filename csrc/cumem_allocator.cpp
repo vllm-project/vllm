@@ -1,6 +1,8 @@
 // A CUDAPluggableAllocator based on cumem* APIs.
 // Important: allocation size, CUdeviceptr and CUmemGenericAllocationHandle* need to be unsigned long long
 
+extern "C" {
+
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
@@ -24,8 +26,6 @@
 // This brings the limitation that the allocator needs to be singleton.
 static PyObject* g_python_malloc_callback = nullptr;
 static PyObject* g_python_free_callback   = nullptr;
-
-extern "C" {
 
 // ---------------------------------------------------------------------------
 // Helper functions:
@@ -191,8 +191,6 @@ void my_free(void* ptr, ssize_t size, int device, cudaStream_t stream)
     free(p_memHandle);
 }
 
-} // extern "C"
-
 // ---------------------------------------------------------------------------
 // Python extension boilerplate:
 
@@ -304,3 +302,4 @@ PyInit_cumem_allocator(void)
     }
     return module;
 }
+} // extern "C"
