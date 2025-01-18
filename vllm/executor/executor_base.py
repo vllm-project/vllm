@@ -161,6 +161,12 @@ class ExecutorBase(ABC):
     def stop_profile(self) -> None:
         self.collective_rpc("stop_profile")
 
+    def sleep(self):
+        self.collective_rpc("sleep")
+
+    def wake_up(self):
+        self.collective_rpc("wake_up")
+
     def save_sharded_state(
         self,
         path: str,
