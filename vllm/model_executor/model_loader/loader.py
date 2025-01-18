@@ -1105,15 +1105,22 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     weight_name,
                     index,
             ) in self.modules_mapping.inverse_packed_mapping.items():
-                shard_pos = quant_param_name.find(shard_name)
                 # Some models, such as MiniCPM V2.5/2.6, contain both
                 # module names 'kv_proj' and 'qkv_proj'. To prevent 'kv_proj'
                 # from being incorrectly identified as being present in
                 # 'vpm.encoder.layers.0.self_attn.qkv_proj.weight
-                if shard_pos > 0 and quant_param_name[shard_pos - 1] == ".":
+                shard_pos = quant_param_name.find(shard_name)
+                can_correct_rename = (shard_pos > 0) and (
+                    quant_param_name[shard_pos - 1] == ".")
+                # If the quant_param_name is packed, it won't occur in the
+                # param_dict before renaming.
+                new_quant_param_name = quant_param_name.replace(
+                    shard_name, weight_name)
+                need_rename = (quant_param_name not in param_dict) \
+                              and (new_quant_param_name in param_dict)
+                if can_correct_rename and need_rename:
                     shard_index = index
-                    quant_param_name = quant_param_name.replace(
-                        shard_name, weight_name)
+                    quant_param_name = new_quant_param_name
                     break
 
             # Models like Clip/Siglip may skip some layers in initialization,
