@@ -103,6 +103,7 @@ PyObject* create_tuple_from_c_integers(unsigned long long a,
 // ---------------------------------------------------------------------------
 // Our exported C functions that call Python:
 
+// use CUstream instead of cudaStream_t, to avoid including cuda_runtime_api.h
 void* my_malloc(ssize_t size, int device, CUstream stream) {
   ensure_context(device);
 
@@ -162,6 +163,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   return (void*)d_mem;
 }
 
+// use CUstream instead of cudaStream_t, to avoid including cuda_runtime_api.h
 void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   // get memory handle from the pointer
   if (!g_python_free_callback) {
