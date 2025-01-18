@@ -6,9 +6,11 @@ import time
 import weakref
 from dataclasses import dataclass
 from enum import Enum, auto
+from functools import partial
 from multiprocessing.process import BaseProcess
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+import cloudpickle
 import psutil
 import zmq
 
@@ -23,8 +25,6 @@ from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_mp_context,
                         get_open_port, get_open_zmq_ipc_path, zmq_socket_ctx)
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -35,7 +35,7 @@ POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
 
 class MultiprocExecutor(Executor):
 
-    def __init__(self, vllm_config: VllmConfig) -> None:
+    def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
@@ -52,9 +52,6 @@ class MultiprocExecutor(Executor):
             self.shutdown()
 
         signal.signal(signal.SIGUSR1, sigusr1_handler)
-
-        self.vllm_config = vllm_config
-        self.parallel_config = vllm_config.parallel_config
 
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -80,7 +77,8 @@ class MultiprocExecutor(Executor):
         # Create workers
         self.workers: List[WorkerProcHandle] = []
         for rank in range(self.world_size):
-            worker = WorkerProc.make_worker_process(vllm_config, rank, rank,
+            worker = WorkerProc.make_worker_process(self.vllm_config, rank,
+                                                    rank,
                                                     distributed_init_method,
                                                     scheduler_output_handle)
             self.workers.append(worker)
@@ -91,36 +89,8 @@ class MultiprocExecutor(Executor):
         for w in self.workers:
             w.worker_response_mq.wait_until_ready()
 
-    def initialize(self, kv_cache_config: KVCacheConfig) -> None:
-        """
-        Initialize the KV caches and begin the model execution loop of the
-        underlying workers.
-        """
-        self.collective_rpc("initialize_cache", args=(kv_cache_config, ))
-        self.collective_rpc("compile_or_warm_up_model")
-
-    def determine_available_memory(self) -> int:
-        """
-        Determine the available memory (in bytes) for KV cache by invoking the
-        underlying worker.
-        """
-        memory_sizes = self.collective_rpc("determine_available_memory")
-
-        # Since we use a shared centralized controller, we take the minimum
-        # memory size across all workers to make sure all the memory
-        # operators can be applied to all workers.
-        return min(memory_sizes)
-
-    def get_kv_cache_spec(self) -> KVCacheSpec:
-        """
-        Get all kv cache needed by the model by invoking the underlying worker.
-        """
-        kv_cache_specs = self.collective_rpc("get_kv_cache_spec")
-        assert all(s == kv_cache_specs[0] for s in kv_cache_specs)
-        return kv_cache_specs[0]
-
     def collective_rpc(self,
-                       method: str,
+                       method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
@@ -141,7 +111,12 @@ class MultiprocExecutor(Executor):
         kwargs = kwargs or {}
 
         try:
-            self.rpc_broadcast_mq.enqueue((method, args, kwargs))
+            if isinstance(method, str):
+                send_method = method
+            else:
+                send_method = cloudpickle.dumps(
+                    method, protocol=pickle.HIGHEST_PROTOCOL)
+            self.rpc_broadcast_mq.enqueue((send_method, args, kwargs))
 
             responses = [None] * self.world_size
             for w in self.workers:
@@ -164,18 +139,6 @@ class MultiprocExecutor(Executor):
         except Exception as e:
             # Re-raise any other exceptions
             raise e
-
-    def execute_model(
-        self,
-        scheduler_output,
-    ) -> ModelRunnerOutput:
-        model_output = self.collective_rpc("execute_model",
-                                           args=(scheduler_output, ))[0]
-        return model_output
-
-    def profile(self, is_start: bool = True):
-        self.collective_rpc("profile", args=(is_start, ))
-        return
 
     def _ensure_worker_termination(self):
         """Ensure that all worker processes are terminated. Assumes workers have
@@ -408,7 +371,11 @@ class WorkerProc:
             method, args, kwargs = self.rpc_broadcast_mq.dequeue()
 
             try:
-                output = getattr(self.worker, method)(*args, **kwargs)
+                if isinstance(method, str):
+                    func = getattr(self.worker, method)
+                elif isinstance(method, bytes):
+                    func = partial(cloudpickle.loads(method), self.worker)
+                output = func(*args, **kwargs)
             except Exception as e:
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.FAILURE, e))

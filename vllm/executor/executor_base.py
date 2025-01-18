@@ -1,6 +1,7 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Awaitable, Dict, List, Optional, Set, Tuple, Union
+from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
+                    Union)
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -47,7 +48,7 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def collective_rpc(self,
-                       method: str,
+                       method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
@@ -77,16 +78,6 @@ class ExecutorBase(ABC):
         a = min([r[0] for r in results])
         b = min([r[1] for r in results])
         return a, b
-
-    def initialize(self, num_gpu_blocks: int) -> None:
-        """
-        Initialize the KV caches and begin the model execution loop of the
-        underlying workers.
-        For V1 compatibility.
-        """
-        logger.info("# GPU blocks: %d", num_gpu_blocks)
-        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, ))
-        self.collective_rpc("compile_or_warm_up_model")
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
         """Initialize the KV cache by invoking the underlying worker.
@@ -260,7 +251,7 @@ class DistributedExecutorBase(ExecutorBase):
         raise NotImplementedError
 
     def collective_rpc(self,
-                       method: str,
+                       method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
@@ -269,7 +260,7 @@ class DistributedExecutorBase(ExecutorBase):
     @abstractmethod
     def _run_workers(
         self,
-        method: str,
+        method: Union[str, Callable],
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,

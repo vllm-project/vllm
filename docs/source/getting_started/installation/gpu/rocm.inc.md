@@ -70,7 +70,7 @@ Currently, there are no pre-built ROCm wheels.
 
     # Install PyTorch
     $ pip uninstall torch -y
-    $ pip install --no-cache-dir --pre torch==2.6.0.dev20241024 --index-url https://download.pytorch.org/whl/nightly/rocm6.2
+    $ pip install --no-cache-dir --pre torch --index-url https://download.pytorch.org/whl/rocm6.2
 
     # Build & install AMD SMI
     $ pip install /opt/rocm/share/amd_smi
