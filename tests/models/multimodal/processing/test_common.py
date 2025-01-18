@@ -22,6 +22,8 @@ def _test_processing_correctness(
 ):
     if model_id == "TIGER-Lab/Mantis-8B-siglip-llama3":
         hf_overrides = {"architectures": ["MantisForConditionalGeneration"]}
+    elif model_id == "deepseek-ai/deepseek-vl2-tiny":
+        hf_overrides = {"architectures": ["DeepseekVLV2ForCausalLM"]}
     else:
         hf_overrides = {}
 
@@ -139,6 +141,7 @@ def _test_processing_correctness(
     ("rhymes-ai/Aria", {"image": True}),
     ("Salesforce/blip2-opt-2.7b", {"image": False}),
     ("facebook/chameleon-7b", {"image": False}),
+    ("deepseek-ai/deepseek-vl2-tiny", {"image": True}),
     ("adept/fuyu-8b", {"image": False}),
     ("llava-hf/llava-1.5-7b-hf", {"image": True}),
     ("llava-hf/llava-v1.6-mistral-7b-hf", {"image": True}),
