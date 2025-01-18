@@ -5,11 +5,11 @@
 # both of them failed because of cuda context mismatch.
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
+import gc
 from contextlib import contextmanager
 from enum import Enum
 from typing import Dict, Optional
 
-import gc
 import torch
 from vllm_allocator_adaptor import (HandleType, create_and_map,
                                     unmap_and_release,

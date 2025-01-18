@@ -7,8 +7,8 @@ import torch
 import torch.distributed
 
 import vllm.envs as envs
-from vllm.device_allocator.cumem import CuMemAllocator, CuMemMode
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.device_allocator.cumem import CuMemAllocator, CuMemMode
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
