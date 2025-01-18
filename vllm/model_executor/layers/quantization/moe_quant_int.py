@@ -29,6 +29,7 @@ class MoeQuantIntConfig(QuantizationConfig):
         self.bit8_pack_factor = 8 // self.weight_bits
         self.lm_head_quantized = lm_head_quantized
         self.linear_quant_method = linear_quant_method
+        self.full_config = full_config
 
         if modules_to_not_convert is None:
             self.modules_to_not_convert = []
@@ -97,14 +98,14 @@ class MoeQuantIntConfig(QuantizationConfig):
         num_bits = quant_config.get("bits")
         desc_act = quant_config.get("desc_act")
 
-        if quant_method == "gptq" and not desc_act and num_bits in [4, 8] and \
-                GPTQMarlinConfig.is_gptq_marlin_compatible(quant_config):
-            return True
-        elif quant_method == "awq" and num_bits == 4 and \
-                AWQMarlinConfig.is_awq_marlin_compatible(quant_config):
-            return True
-        else:
-            return False
+        gptq_compatible = quant_method == "gptq" and \
+                not desc_act and num_bits in [4, 8] and \
+                GPTQMarlinConfig.is_gptq_marlin_compatible(quant_config)
+        awq_compatible = quant_method == "awq" and \
+                num_bits == 4 and \
+                AWQMarlinConfig.is_awq_marlin_compatible(quant_config)
+
+        return gptq_compatible or awq_compatible
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
@@ -112,9 +113,11 @@ class MoeQuantIntConfig(QuantizationConfig):
             return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
             if self.linear_quant_method == "gptq":
-                return GPTQMarlinLinearMethod(self.linear_quant_config)
+                config = GPTQMarlinConfig.from_config(self.full_config)
+                return GPTQMarlinLinearMethod(config)
             elif self.linear_quant_method == "awq":
-                return AWQMarlinLinearMethod(self.linear_quant_config)
+                config = AWQMarlinConfig.from_config(self.full_config)
+                return AWQMarlinLinearMethod(config)
             else:
                 raise ValueError("moe_quant_int only support gptq and awq.")
         elif isinstance(layer, FusedMoE):
