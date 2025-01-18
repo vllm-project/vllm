@@ -150,6 +150,11 @@ class GPUModelRunner:
             # - stride: (1, 3)
             # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1921022256
 
+            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
+            # the modality of inputs. For text-only inputs, each dimension has
+            # identical position IDs, making M-RoPE functionally equivalent to
+            # 1D-RoPE.
+            # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros((self.max_num_tokens, 3),
                                                dtype=torch.int64,
                                                device=self.device)
