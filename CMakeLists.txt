@@ -197,10 +197,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   define_gpu_extension_target(
     cumem_allocator
     DESTINATION vllm
-    LANGUAGE ${VLLM_GPU_LANG}
+    LANGUAGE CXX
     SOURCES ${VLLM_CUMEM_EXT_SRC}
-    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-    ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
 endif()
