@@ -6,9 +6,11 @@ import time
 import weakref
 from dataclasses import dataclass
 from enum import Enum, auto
+from functools import partial
 from multiprocessing.process import BaseProcess
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+import cloudpickle
 import psutil
 import zmq
 
@@ -23,6 +25,7 @@ from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_mp_context,
                         get_open_port, get_open_zmq_ipc_path, zmq_socket_ctx)
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
 
@@ -90,32 +93,36 @@ class MultiprocExecutor(Executor):
         for w in self.workers:
             w.worker_response_mq.wait_until_ready()
 
-    def initialize(self, num_gpu_blocks: int) -> None:
+    def initialize(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        logger.info("# GPU blocks: %d", num_gpu_blocks)
-        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, ))
+        self.collective_rpc("initialize_cache", args=(kv_cache_config, ))
         self.collective_rpc("compile_or_warm_up_model")
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_available_memory(self) -> int:
         """
-        Determine the number of available KV blocks by invoking the
+        Determine the available memory (in bytes) for KV cache by invoking the
         underlying worker.
         """
-        num_blocks = self.collective_rpc("determine_num_available_blocks")
+        memory_sizes = self.collective_rpc("determine_available_memory")
 
         # Since we use a shared centralized controller, we take the minimum
-        # number of blocks across all workers to make sure all the memory
+        # memory size across all workers to make sure all the memory
         # operators can be applied to all workers.
-        num_gpu_blocks = min(b[0] for b in num_blocks)
-        num_cpu_blocks = min(b[1] for b in num_blocks)
+        return min(memory_sizes)
 
-        return num_gpu_blocks, num_cpu_blocks
+    def get_kv_cache_spec(self) -> KVCacheSpec:
+        """
+        Get all kv cache needed by the model by invoking the underlying worker.
+        """
+        kv_cache_specs = self.collective_rpc("get_kv_cache_spec")
+        assert all(s == kv_cache_specs[0] for s in kv_cache_specs)
+        return kv_cache_specs[0]
 
     def collective_rpc(self,
-                       method: str,
+                       method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
@@ -136,7 +143,12 @@ class MultiprocExecutor(Executor):
         kwargs = kwargs or {}
 
         try:
-            self.rpc_broadcast_mq.enqueue((method, args, kwargs))
+            if isinstance(method, str):
+                send_method = method
+            else:
+                send_method = cloudpickle.dumps(
+                    method, protocol=pickle.HIGHEST_PROTOCOL)
+            self.rpc_broadcast_mq.enqueue((send_method, args, kwargs))
 
             responses = [None] * self.world_size
             for w in self.workers:
@@ -246,7 +258,7 @@ class WorkerProc:
         ready_path: str,
     ):
         self.rank = rank
-        wrapper = WorkerWrapperBase(vllm_config=vllm_config, rank=rank)
+        wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: List[Dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)
@@ -403,7 +415,11 @@ class WorkerProc:
             method, args, kwargs = self.rpc_broadcast_mq.dequeue()
 
             try:
-                output = getattr(self.worker, method)(*args, **kwargs)
+                if isinstance(method, str):
+                    func = getattr(self.worker, method)
+                elif isinstance(method, bytes):
+                    func = partial(cloudpickle.loads(method), self.worker)
+                output = func(*args, **kwargs)
             except Exception as e:
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.FAILURE, e))
