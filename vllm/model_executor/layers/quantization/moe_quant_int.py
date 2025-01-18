@@ -5,8 +5,8 @@ import torch
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.linear import (
-    LinearBase, UnquantizedLinearMethod)
+from vllm.model_executor.layers.linear import (LinearBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.awq_marlin import (
     AWQMarlinConfig, AWQMarlinLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
