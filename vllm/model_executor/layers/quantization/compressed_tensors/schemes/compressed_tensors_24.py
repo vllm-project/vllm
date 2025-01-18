@@ -119,21 +119,12 @@ class CompressedTensors24(CompressedTensorsScheme):
         :param layer: The layer with the weights to be processed
         
         """
-        # torch.compile workaround
-        if hasattr(layer, "input_scale"):
-            layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
-                                                   requires_grad=False)
-
-        if self.weight_quant:
-            if self.weight_quant.strategy == QuantizationStrategy.TENSOR.value:
-                layer.weight_scale = torch.nn.Parameter(convert_to_channelwise(
-                    weight_scale=layer.weight_scale,
-                    logical_widths=layer.logical_widths),
-                                                        requires_grad=False)
-            else:
-                # torch.compile workaround
-                layer.weight_scale = torch.nn.Parameter(
-                    layer.weight_scale.data, requires_grad=False)
+        if (self.weight_quant and self.weight_quant.strategy
+                == QuantizationStrategy.TENSOR.value):
+            layer.weight_scale = torch.nn.Parameter(convert_to_channelwise(
+                weight_scale=layer.weight_scale,
+                logical_widths=layer.logical_widths),
+                                                    requires_grad=False)
 
         w_compressed, meta = ops.cutlass_sparse_compress(layer.weight.data)
         layer.weight = torch.nn.Parameter(w_compressed, requires_grad=False)

@@ -237,11 +237,7 @@ class QQQLinearMethod(LinearMethodBase):
         layer.register_parameter("workspace", workspace)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # required by torch.compile
-        layer.B = Parameter(layer.B.data, requires_grad=False)
-        layer.s_channel = Parameter(layer.s_channel.data, requires_grad=False)
-        layer.s_group = Parameter(layer.s_group.data, requires_grad=False)
-        layer.workspace = Parameter(layer.workspace.data, requires_grad=False)
+        pass
 
     def apply(
         self,

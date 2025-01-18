@@ -91,7 +91,6 @@ class TPUInt8LinearMethod(LinearMethodBase):
         return qweight, qscale
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        layer.weight = Parameter(layer.weight.data, requires_grad=False)
         device = layer.weight.device
         qweight, qscale = self._quantize_weight(layer.weight)
         qweight = qweight.to(device)

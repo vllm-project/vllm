@@ -119,10 +119,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         layer.input_scale_ub = input_scale_ub
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        # required by torch.compile
-        layer.weight_scale = Parameter(layer.weight_scale.data,
-                                       requires_grad=False)
-        layer.weight = Parameter(layer.weight.data, requires_grad=False)
+        pass
 
         weight = layer.weight
 

@@ -225,10 +225,7 @@ class MarlinLinearMethod(LinearMethodBase):
         layer.register_parameter("workspace", workspace)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # required by torch.compile
-        layer.B = Parameter(layer.B.data, requires_grad=False)
-        layer.s = Parameter(layer.s.data, requires_grad=False)
-        layer.workspace = Parameter(layer.workspace.data, requires_grad=False)
+        pass
 
     def apply(
         self,

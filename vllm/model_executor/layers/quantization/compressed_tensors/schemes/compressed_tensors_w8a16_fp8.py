@@ -50,10 +50,6 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         layer.weight = torch.nn.Parameter(layer.weight.t(),
                                           requires_grad=False)
 
-        if self.is_static_input_scheme:
-            # required by torch.compile to be torch.nn.Parameter
-            layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
-                                                   requires_grad=False)
         prepare_fp8_layer_for_marlin(layer, strategy="channel")
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,

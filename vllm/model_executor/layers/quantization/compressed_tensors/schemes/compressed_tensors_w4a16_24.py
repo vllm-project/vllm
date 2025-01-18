@@ -48,12 +48,7 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         return 80
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # required by torch.compile to be torch.nn.Parameter
-        layer.weight_packed = Parameter(layer.weight_packed.data,
-                                        requires_grad=False)
-        layer.scale_packed = Parameter(layer.scale_packed.data,
-                                       requires_grad=False)
-        layer.meta = Parameter(layer.meta.data, requires_grad=False)
+        pass
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
