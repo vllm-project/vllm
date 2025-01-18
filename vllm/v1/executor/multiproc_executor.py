@@ -19,7 +19,6 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
-from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.multiproc_worker_utils import (
     _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
@@ -34,7 +33,7 @@ POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
 
 
-class MultiprocExecutor(ExecutorBase, Executor):
+class MultiprocExecutor(Executor):
 
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
