@@ -580,11 +580,16 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             B.stride(1),
             C.stride(1),
             C.stride(2),
-            A_scale.stride(0) if ndim(A_scale) == 2 else 0,
-            A_scale.stride(1) if ndim(A_scale) == 2 else 0,
-            B_scale.stride(0) if ndim(B_scale) >= 2 else 0,
-            B_scale.stride(2) if ndim(B_scale) == 3 else 0,
-            B_scale.stride(1) if ndim(B_scale) >= 2 else 0,
+            A_scale.stride(0)
+            if A_scale is not None and A_scale.ndim == 2 else 0,
+            A_scale.stride(1)
+            if A_scale is not None and A_scale.ndim == 2 else 0,
+            B_scale.stride(0)
+            if B_scale is not None and B_scale.ndim >= 2 else 0,
+            B_scale.stride(2)
+            if B_scale is not None and B_scale.ndim == 3 else 0,
+            B_scale.stride(1)
+            if B_scale is not None and B_scale.ndim >= 2 else 0,
             0 if block_shape is None else block_shape[0],
             0 if block_shape is None else block_shape[1],
             MUL_ROUTED_WEIGHT=mul_routed_weight,

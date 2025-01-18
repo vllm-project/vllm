@@ -5,8 +5,8 @@ import torch
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.linear import (LinearBase,
-                                               UnquantizedLinearMethod)
+from vllm.model_executor.layers.linear import (
+    LinearBase, UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.gptq_marlin import (
@@ -35,15 +35,6 @@ class MoeQuantIntConfig(QuantizationConfig):
             self.modules_to_not_convert = []
         else:
             self.modules_to_not_convert = modules_to_not_convert
-
-        self.linear_quant_config: GPTQMarlinConfig | AWQMarlinConfig
-        if self.linear_quant_method == "gptq":
-            self.linear_quant_config = GPTQMarlinConfig.from_config(
-                full_config)
-        elif self.linear_quant_method == "awq":
-            self.linear_quant_config = AWQMarlinConfig.from_config(full_config)
-        else:
-            raise ValueError("MoeQuantInt only support gptq now.")
 
     @classmethod
     def get_name(cls) -> str:
