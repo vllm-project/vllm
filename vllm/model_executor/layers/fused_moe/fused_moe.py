@@ -174,16 +174,18 @@ def fused_moe_kernel_gptq_awq(
         b_scale = b_scale.to(tl.float32)
 
         if has_zp and use_int4_w8a16:
+            offs_k_true = (offs_k[:, None] + BLOCK_SIZE_K * k) // group_size
             b_zp_ptrs = b_zp_ptr + off_experts * stride_bze + \
                 (offs_bn[None, :] // 2) * stride_bzn + \
-                ((offs_k[:, None] + BLOCK_SIZE_K * k) // group_size) * stride_bzk
+                offs_k_true * stride_bzk
             b_zp = tl.load(b_zp_ptrs, mask=k_mask, other=k_other)
             b_zp = ((b_zp >> b_zp_shifter) & 0xF)
             b_zp = b_zp.to(tl.float32)
         elif has_zp and use_int8_w8a16:
+            offs_k_true = (offs_k[:, None] + BLOCK_SIZE_K * k) // group_size
             b_zp_ptrs = b_zp_ptr + off_experts * stride_bze + \
                 offs_bn[None, :] * stride_bzn + \
-                ((offs_k[:, None] + BLOCK_SIZE_K * k) // group_size) * stride_bzk
+                offs_k_true * stride_bzk
             b_zp = tl.load(b_zp_ptrs, mask=k_mask, other=k_other)
             b_zp = b_zp.to(tl.float32)
 

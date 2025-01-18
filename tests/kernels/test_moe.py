@@ -14,6 +14,8 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, moe_align_block_size)
+from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
+    fused_moe as iterative_moe)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -75,16 +77,10 @@ def test_fused_moe_quant_int(m: int, n: int, k: int, e: int, topk: int,
 
     if weight_bits == 4:
         pack_factor = 2
-        if has_zp:
-            quant_type = scalar_types.uint4
-        else:
-            quant_type = scalar_types.uint4b8
+        quant_type = scalar_types.uint4 if has_zp else scalar_types.uint4b8
     elif weight_bits == 8:
         pack_factor = 1
-        if has_zp:
-            quant_type = scalar_types.uint8
-        else:
-            quant_type = scalar_types.uint8b128
+        quant_type = scalar_types.uint8 if has_zp else scalar_types.uint8b128
 
     w1_ref = w1.clone()
     w2_ref = w2.clone()

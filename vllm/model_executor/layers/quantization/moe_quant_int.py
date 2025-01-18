@@ -2,11 +2,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 import torch
 
-from vllm.distributed import get_tp_group
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import (LinearBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.gptq_marlin import (
@@ -90,16 +90,16 @@ class MoeQuantIntConfig(QuantizationConfig):
         # Extract data from quant config.
         quant_method = quant_config.get("quant_method", "").lower()
         num_bits = quant_config.get("bits")
-        sym = quant_config.get("sym")
         desc_act = quant_config.get("desc_act")
 
         if quant_method == "gptq" and not desc_act and num_bits in [4, 8] and \
                 GPTQMarlinConfig.is_gptq_marlin_compatible(quant_config):
             return True
-        if quant_method == "awq" and num_bits == 4 and \
+        elif quant_method == "awq" and num_bits == 4 and \
                 AWQMarlinConfig.is_awq_marlin_compatible(quant_config):
             return True
-        return False
+        else:
+            return False
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
@@ -341,7 +341,8 @@ class MoeQuantIntMethod(FusedMoEMethodBase):
                     loaded_weight = loaded_weight.T
 
             # repeat the qzeros/scales to fit new group size
-            if layer.group_size_div_factor > 1 and "qzeros" in weight_name or "scales" in weight_name:
+            if layer.group_size_div_factor > 1 and \
+                    "qzeros" in weight_name or "scales" in weight_name:
                 loaded_weight = loaded_weight.repeat_interleave(
                     layer.group_size_div_factor, 1)
 
