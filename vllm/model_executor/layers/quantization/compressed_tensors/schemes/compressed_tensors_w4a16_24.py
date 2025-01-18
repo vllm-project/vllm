@@ -68,55 +68,56 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         pack_factor = 32 // self.quant_type.size_bits
         output_size_per_partition = sum(output_partition_sizes)
 
-        qweight = PackedvLLMParameter(data=torch.empty(
+        qweight = Parameter(data=torch.empty(
             input_size_per_partition // self.tile_size // 2,
             output_size_per_partition * self.tile_size // pack_factor,
             dtype=torch.int32,
         ),
-                                      input_dim=0,
-                                      output_dim=1,
-                                      packed_dim=1,
-                                      packed_factor=pack_factor,
-                                      marlin_tile_size=self.tile_size,
-                                      weight_loader=weight_loader)
+                            requires_grad=False)
+        qweight.vllm_parameter = PackedvLLMParameter(
+            data=qweight,
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=pack_factor,
+            marlin_tile_size=self.tile_size,
+            weight_loader=weight_loader)
 
         input_groups = (1 if self.group_size is None else
                         input_size_per_partition // self.group_size)
 
-        weight_scale_args = {
-            "data":
-            torch.empty(
-                input_groups,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
-            "weight_loader":
-            weight_loader
-        }
+        scales = Parameter(torch.empty(
+            input_groups,
+            output_size_per_partition,
+            dtype=params_dtype,
+        ),
+                           requires_grad=False)
+        weight_scale_args = {"data": scales, "weight_loader": weight_loader}
 
         if self.group_size is not None:
-            scales = GroupQuantScaleParameter(output_dim=1,
-                                              input_dim=0,
-                                              **weight_scale_args)
+            scales.vllm_parameter = GroupQuantScaleParameter(
+                output_dim=1, input_dim=0, **weight_scale_args)
         else:
-            scales = ChannelQuantScaleParameter(output_dim=1,
-                                                **weight_scale_args)
+            scales.vllm_parameter = ChannelQuantScaleParameter(
+                output_dim=1, **weight_scale_args)
+        weight_shape = Parameter(data=torch.empty(2, dtype=torch.int64),
+                                 requires_grad=False)
+        weight_shape.vllm_parameter = BasevLLMParameter(
+            data=weight_shape, weight_loader=weight_loader)
 
-        weight_shape = BasevLLMParameter(data=torch.empty(2,
-                                                          dtype=torch.int64),
-                                         weight_loader=weight_loader)
-
-        meta = PackedvLLMParameter(data=torch.empty(
+        meta = Parameter(data=torch.empty(
             input_size_per_partition // 8 // 2 // 2,
             output_size_per_partition * 2,
             dtype=torch.int16,
         ),
-                                   input_dim=0,
-                                   output_dim=1,
-                                   packed_dim=1,
-                                   packed_factor=1,
-                                   marlin_tile_size=2,
-                                   weight_loader=weight_loader)
+                         requires_grad=False)
+        meta.vllm_parameter = PackedvLLMParameter(data=meta,
+                                                  input_dim=0,
+                                                  output_dim=1,
+                                                  packed_dim=1,
+                                                  packed_factor=1,
+                                                  marlin_tile_size=2,
+                                                  weight_loader=weight_loader)
 
         layer.register_parameter("weight_packed", qweight)
         layer.register_parameter("weight_shape", weight_shape)

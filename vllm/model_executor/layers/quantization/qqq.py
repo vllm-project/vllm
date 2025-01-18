@@ -209,24 +209,27 @@ class QQQLinearMethod(LinearMethodBase):
                 dtype=torch.half,
             )
 
-        s_group_attr = {"data": s_group_data, "weight_loader": weight_loader}
+        s_group = Parameter(s_group_data, requires_grad=False)
+        s_group_attr = {"data": s_group, "weight_loader": weight_loader}
 
         if self.quant_config.group_size == -1:
-            s_group = BasevLLMParameter(**s_group_attr)
+            s_group.vllm_parameter = BasevLLMParameter(**s_group_attr)
         else:
-            s_group = GroupQuantScaleParameter(output_dim=1,
-                                               input_dim=0,
-                                               **s_group_attr)
+            s_group.vllm_parameter = GroupQuantScaleParameter(output_dim=1,
+                                                              input_dim=0,
+                                                              **s_group_attr)
 
         # Allocate workspace (Used for internal locking mechanism)
         max_workspace_size = (
             output_size_per_partition //
             self.quant_config.min_n_threads) * self.quant_config.max_parallel
 
-        workspace = BasevLLMParameter(data=torch.zeros(max_workspace_size,
-                                                       device="cuda",
-                                                       dtype=torch.int),
-                                      weight_loader=weight_loader)
+        workspace = Parameter(data=torch.zeros(max_workspace_size,
+                                               device="cuda",
+                                               dtype=torch.int),
+                              requires_grad=False)
+        workspace.vllm_parameter = BasevLLMParameter(
+            data=workspace, weight_loader=weight_loader)
 
         layer.register_parameter("B", qweight)
         layer.register_parameter("s_channel", s_channel)

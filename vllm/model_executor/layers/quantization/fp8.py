@@ -196,13 +196,15 @@ class Fp8LinearMethod(LinearMethodBase):
                         if self.quant_config.is_checkpoint_fp8_serialized else
                         params_dtype)
 
-        weight = ModelWeightParameter(data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition,
-            dtype=weight_dtype),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
+        weight = Parameter(data=torch.empty(output_size_per_partition,
+                                            input_size_per_partition,
+                                            dtype=weight_dtype),
+                           requires_grad=False)
+        weight.vllm_parameter = ModelWeightParameter(
+            data=weight,
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
 
         # If checkpoint is serialized fp8, load them.
@@ -210,21 +212,27 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.quant_config.is_checkpoint_fp8_serialized:
             # WEIGHT SCALE
             if not self.block_quant:
-                scale = PerTensorScaleParameter(
-                    data=torch.empty(len(output_partition_sizes),
-                                     dtype=torch.float32),
+                scale = Parameter(data=torch.empty(len(output_partition_sizes),
+                                                   dtype=torch.float32),
+                                  requires_grad=False)
+                scale.vllm_parameter = PerTensorScaleParameter(
+                    data=scale,
                     weight_loader=weight_loader,
                 )
                 scale[:] = torch.finfo(torch.float32).min
                 layer.register_parameter("weight_scale", scale)
             else:
                 assert self.quant_config.activation_scheme == "dynamic"
-                scale = BlockQuantScaleParameter(
+                scale = Parameter(
                     data=torch.empty(
                         (output_size_per_partition + block_n - 1) // block_n,
                         (input_size_per_partition + block_k - 1) // block_k,
                         dtype=torch.float32,
                     ),
+                    requires_grad=False,
+                )
+                scale.vllm_parameter = BlockQuantScaleParameter(
+                    data=scale,
                     input_dim=1,
                     output_dim=0,
                     weight_loader=weight_loader,
@@ -235,10 +243,11 @@ class Fp8LinearMethod(LinearMethodBase):
 
             # INPUT ACTIVATION SCALE
             if self.quant_config.activation_scheme == "static":
-                scale = PerTensorScaleParameter(data=torch.empty(
-                    len(output_partition_sizes), dtype=torch.float32),
-                                                weight_loader=weight_loader)
-
+                scale = Parameter(data=torch.empty(len(output_partition_sizes),
+                                                   dtype=torch.float32),
+                                  requires_grad=False)
+                scale.vllm_parameter = PerTensorScaleParameter(
+                    data=scale, weight_loader=weight_loader)
                 scale[:] = torch.finfo(torch.float32).min
                 layer.register_parameter("input_scale", scale)
             else:

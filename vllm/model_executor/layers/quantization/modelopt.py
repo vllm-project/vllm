@@ -113,26 +113,32 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         weight_dtype = (torch.float8_e4m3fn
                         if self.quant_config.is_checkpoint_fp8_serialized else
                         params_dtype)
-        weight = ModelWeightParameter(data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition,
-            dtype=weight_dtype),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
+        weight = Parameter(data=torch.empty(output_size_per_partition,
+                                            input_size_per_partition,
+                                            dtype=weight_dtype),
+                           requires_grad=False)
+        weight.vllm_parameter = ModelWeightParameter(
+            data=weight,
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
 
         if self.quant_config.is_checkpoint_fp8_serialized:
             # WEIGHT SCALE
-            weight_scale = PerTensorScaleParameter(data=torch.empty(
+            weight_scale = Parameter(data=torch.empty(
                 len(output_partition_sizes), dtype=torch.float32),
-                                                   weight_loader=weight_loader)
+                                     requires_grad=False)
+            weight_scale.vllm_parameter = PerTensorScaleParameter(
+                data=weight_scale, weight_loader=weight_loader)
             weight_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("weight_scale", weight_scale)
             # INPUT SCALE
-            scale = PerTensorScaleParameter(data=torch.empty(
-                len(output_partition_sizes), dtype=torch.float32),
-                                            weight_loader=weight_loader)
+            scale = Parameter(data=torch.empty(len(output_partition_sizes),
+                                               dtype=torch.float32),
+                              requires_grad=False)
+            scale.vllm_parameter = PerTensorScaleParameter(
+                data=scale, weight_loader=weight_loader)
 
             scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", scale)

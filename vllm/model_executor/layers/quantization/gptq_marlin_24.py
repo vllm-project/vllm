@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
 
 import torch
+from torch.nn import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -186,14 +187,16 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
                 "Each permutation group must reside on the same gpu")
 
         # Quantized 4Bit weights packed into Int32.
-        qweight = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition // self.quant_config.tile_size // 2,
-                output_size_per_partition * self.quant_config.tile_size //
-                self.quant_config.pack_factor,
-                device="cuda",
-                dtype=torch.int32,
-            ),
+        qweight = Parameter(data=torch.empty(
+            input_size_per_partition // self.quant_config.tile_size // 2,
+            output_size_per_partition * self.quant_config.tile_size //
+            self.quant_config.pack_factor,
+            device="cuda",
+            dtype=torch.int32,
+        ),
+                            requires_grad=False)
+        qweight.vllm_parameter = PackedvLLMParameter(
+            data=qweight,
             input_dim=0,
             output_dim=1,
             packed_dim=1,
@@ -202,52 +205,52 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
             weight_loader=weight_loader)
 
         # Meta
-        meta = PackedvLLMParameter(data=torch.empty(
+        meta = Parameter(data=torch.empty(
             input_size_per_partition // 8 // 2 // 2,
             output_size_per_partition * 2,
             device="cuda",
             dtype=torch.int16,
         ),
-                                   input_dim=0,
-                                   output_dim=1,
-                                   packed_dim=1,
-                                   packed_factor=1,
-                                   marlin_tile_size=2,
-                                   weight_loader=weight_loader)
+                         requires_grad=False)
+        meta.vllm_parameter = PackedvLLMParameter(data=meta,
+                                                  input_dim=0,
+                                                  output_dim=1,
+                                                  packed_dim=1,
+                                                  packed_factor=1,
+                                                  marlin_tile_size=2,
+                                                  weight_loader=weight_loader)
 
         # Determine if channelwise or not
         input_groups = (1 if self.quant_config.group_size == -1 else
                         input_size_per_partition //
                         self.quant_config.group_size)
 
-        weight_scale_args = {
-            "data":
-            torch.empty(
-                input_groups,
-                output_size_per_partition,
-                device="cuda",
-                dtype=params_dtype,
-            ),
-            "weight_loader":
-            weight_loader
-        }
+        scales = Parameter(torch.empty(
+            input_groups,
+            output_size_per_partition,
+            device="cuda",
+            dtype=params_dtype,
+        ),
+                           requires_grad=False)
+        weight_scale_args = {"data": scales, "weight_loader": weight_loader}
         if input_groups == 1:
-            scales = ChannelQuantScaleParameter(output_dim=1,
-                                                **weight_scale_args)
+            scales.vllm_parameter = ChannelQuantScaleParameter(
+                output_dim=1, **weight_scale_args)
         else:
-            scales = GroupQuantScaleParameter(output_dim=1,
-                                              input_dim=0,
-                                              **weight_scale_args)
+            scales.vllm_parameter = GroupQuantScaleParameter(
+                output_dim=1, input_dim=0, **weight_scale_args)
 
         # Allocate workspace (Used for internal locking mechanism)
         max_workspace_size = (
             output_size_per_partition //
             self.quant_config.min_n_threads) * self.quant_config.max_parallel
 
-        workspace = BasevLLMParameter(data=torch.zeros(max_workspace_size,
-                                                       device="cuda",
-                                                       dtype=torch.int),
-                                      weight_loader=weight_loader)
+        workspace = Parameter(data=torch.zeros(max_workspace_size,
+                                               device="cuda",
+                                               dtype=torch.int),
+                              requires_grad=False)
+        workspace.vllm_parameter = BasevLLMParameter(
+            data=workspace, weight_loader=weight_loader)
 
         layer.register_parameter("B_24", qweight)
         layer.register_parameter("B_meta", meta)

@@ -15,7 +15,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     MarlinWorkspace)
 from vllm.model_executor.layers.quantization.utils.quant_utils import gptq_pack
-from vllm.model_executor.parameter import *
+from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           GroupQuantScaleParameter,
+                                           PackedvLLMParameter)
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -86,39 +88,31 @@ class HQQMarlinConfig(QuantizationConfig):
         return None
 
 
+# Empty HQQ parameter, will be ignored during loading
+class HQQEmptyParameter(BasevLLMParameter):
+
+    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        pass
+
+    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+        pass
+
+    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        pass
+
+
 def error_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     raise ValueError("No loader provided for HQQ parameter!")
 
 
-# Empty HQQ parameter, will be ignored during loading
-def HQQEmptyParameter(data: torch.Tensor, **kwargs) -> Parameter:
-    param = Parameter(data, requires_grad=False)
-    wrap_base_vllm_parameter(param, **kwargs)
-    wrap_column_vllm_parameter(param, **kwargs)
-    wrap_row_vllm_parameter(param, **kwargs)
-    add_param_feature(param, vLLMParameterFeatures.HQQEmpty)
-    return param
-
-
 # HQQ packing creates issues with sharding - therefore, prior to loading, we
 # repack to GPTQ. We also reshape the weights to their proper GPTQ shape.
-def HQQweightParameter(data: torch.Tensor, **kwargs) -> Parameter:
-    param = Parameter(data, requires_grad=False)
-    wrap_base_vllm_parameter(param, **kwargs)
-    wrap_column_vllm_parameter(param, **kwargs)
-    wrap_row_vllm_parameter(param, **kwargs)
-    wrap_packed_vllm_parameter(param, **kwargs)
-    wrap_hqq_weight_parameter(param, **kwargs)
-    add_param_feature(param, vLLMParameterFeatures.HQQWeight)
-    return param
+class HQQweightParameter(PackedvLLMParameter):
 
-
-def wrap_hqq_weight_parameter(param: Parameter, packed_factor: int,
-                              packed_dim: int, weight_bits: int,
-                              **kwargs) -> None:
-
-    def unpack_4bit_u8(param: Parameter, W_q: torch.Tensor) -> torch.Tensor:
-        assert param.weight_bits == 4, "Unsupported quant bitsize (must be 4)"
+    # unpack function from https://github.com/mobiusml/hqq
+    def unpack_4bit_u8(self,
+                       W_q: torch.Tensor) -> torch.Tensor:  # uint8/2 > uint8
+        assert self.weight_bits == 4, "Unsupported quant bitsize (must be 4)"
 
         dtype = torch.uint8
         step = W_q.shape[0]
@@ -129,105 +123,56 @@ def wrap_hqq_weight_parameter(param: Parameter, packed_factor: int,
         tmp[step:] = W_q & 0b00001111
         return tmp
 
-    def load_merged_column_weight(param: Parameter,
-                                  loaded_weight: torch.Tensor,
-                                  **kwargs) -> None:
-        loaded_weight = param.unpack_4bit_u8(loaded_weight)
-        loaded_weight = loaded_weight.reshape(-1, param.input_shape).transpose(
+    def __init__(self, packed_factor: int, packed_dim: int, weight_bits: int,
+                 **kwargs):
+        super().__init__(packed_factor, packed_dim, None, **kwargs)
+        self.weight_bits = weight_bits
+        self.input_shape = self.data.shape[self.input_dim] * self.packed_factor
+        self.output_shape = self.data.shape[self.output_dim]
+
+    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        loaded_weight = self.unpack_4bit_u8(loaded_weight)
+        loaded_weight = loaded_weight.reshape(-1, self.input_shape).transpose(
             1, 0)
-        loaded_weight = gptq_pack(loaded_weight, param.weight_bits,
+        loaded_weight = gptq_pack(loaded_weight, self.weight_bits,
                                   loaded_weight.shape[0],
                                   loaded_weight.shape[1])
-        # load_merged_column_weight from wrap_column_vllm_parameter
-        param.load_merged_column_weight_(loaded_weight, **kwargs)
+        super().load_merged_column_weight(loaded_weight, **kwargs)
 
-    def load_row_parallel_weight(param: Parameter,
-                                 loaded_weight: torch.Tensor) -> None:
-        loaded_weight = param.unpack_4bit_u8(loaded_weight)
-        loaded_weight = loaded_weight.reshape(param.output_shape,
+    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+        loaded_weight = self.unpack_4bit_u8(loaded_weight)
+        loaded_weight = loaded_weight.reshape(self.output_shape,
                                               -1).transpose(1, 0)
-        loaded_weight = gptq_pack(loaded_weight, param.weight_bits,
+        loaded_weight = gptq_pack(loaded_weight, self.weight_bits,
                                   loaded_weight.shape[0],
                                   loaded_weight.shape[1])
-        # load_row_parallel_weight from wrap_row_vllm_parameter
-        param.load_row_parallel_weight_(loaded_weight)
+        super().load_row_parallel_weight(loaded_weight)
 
-    def load_qkv_weight(param: Parameter, loaded_weight: torch.Tensor,
-                        **kwargs) -> None:
-        loaded_weight = param.unpack_4bit_u8(loaded_weight)
-        loaded_weight = (loaded_weight.reshape(-1,
-                                               param.input_shape).transpose(
-                                                   1, 0))
-        loaded_weight = gptq_pack(loaded_weight, param.weight_bits,
+    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        loaded_weight = self.unpack_4bit_u8(loaded_weight)
+        loaded_weight = loaded_weight.reshape(-1, self.input_shape).transpose(
+            1, 0)
+        loaded_weight = gptq_pack(loaded_weight, self.weight_bits,
                                   loaded_weight.shape[0],
                                   loaded_weight.shape[1])
-        # load_qkv_weight from wrap_column_vllm_parameter
-        param.load_qkv_weight_(loaded_weight, **kwargs)
-
-    param.weight_bits = weight_bits
-    param.input_shape = param.shape[param.input_dim] * packed_factor
-    param.output_shape = param.shape[param.output_dim]
-    param.unpack_4bit_u8 = lambda W_q: unpack_4bit_u8(param, W_q)
-    # save the original method
-    param.load_merged_column_weight_ = param.load_merged_column_weight
-    param.load_merged_column_weight = \
-        lambda loaded_weight, **kwargs: \
-            load_merged_column_weight(param, loaded_weight, **kwargs)
-    # save the original method
-    param.load_row_parallel_weight_ = param.load_row_parallel_weight
-    param.load_row_parallel_weight = \
-        lambda loaded_weight: \
-            load_row_parallel_weight(param, loaded_weight)
-    param.load_qkv_weight_ = param.load_qkv_weight  # save the original method
-    param.load_qkv_weight = \
-        lambda loaded_weight, **kwargs: \
-            load_qkv_weight(param, loaded_weight, **kwargs)
+        super().load_qkv_weight(loaded_weight, **kwargs)
 
 
 # Zero points and scales in HQQ must also be reshaped to correspond to W_q's
 # GPTQ shape (transposed - we transpose them too when processing weights).
-def HQQZeroScaleParameter(data: torch.Tensor, **kwargs) -> Parameter:
-    param = Parameter(data, requires_grad=False)
-    wrap_base_vllm_parameter(param, **kwargs)
-    wrap_column_vllm_parameter(param, **kwargs)
-    wrap_row_vllm_parameter(param, **kwargs)
-    wrap_group_quant_scale_parameter(param, **kwargs)
-    wrap_hqq_zero_scale_parameter(param, **kwargs)
-    return param
+class HQQZeroScaleParameter(GroupQuantScaleParameter):
 
+    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        loaded_weight = loaded_weight.reshape(-1, self.data.shape[1])
+        super().load_merged_column_weight(loaded_weight, **kwargs)
 
-def wrap_hqq_zero_scale_parameter(param: Parameter, **kwargs) -> None:
+    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+        loaded_weight = loaded_weight.reshape(self.data.shape[0], -1)
+        super().load_row_parallel_weight(loaded_weight)
 
-    def load_merged_column_weight(param: Parameter,
-                                  loaded_weight: torch.Tensor,
-                                  **kwargs) -> None:
-        loaded_weight = loaded_weight.reshape(-1, param.shape[1])
-        param.load_merged_column_weight_(loaded_weight, **kwargs)
-
-    def load_row_parallel_weight(param: Parameter,
-                                 loaded_weight: torch.Tensor) -> None:
-        loaded_weight = loaded_weight.reshape(param.shape[0], -1)
-        param.load_row_parallel_weight_(loaded_weight)
-
-    def load_qkv_weight(param: Parameter, loaded_weight: torch.Tensor,
-                        **kwargs) -> None:
-        loaded_weight = loaded_weight.reshape(-1, param.shape[1])
-        param.load_qkv_weight_(loaded_weight, **kwargs)
-
-    # save the original method
-    param.load_merged_column_weight_ = param.load_merged_column_weight
-    param.load_merged_column_weight = \
-        lambda loaded_weight, **kwargs: \
-            (load_merged_column_weight(param, loaded_weight, **kwargs))
-    # save the original method
-    param.load_row_parallel_weight_ = param.load_row_parallel_weight
-    param.load_row_parallel_weight = \
-        lambda loaded_weight: load_row_parallel_weight(param, loaded_weight)
-    # save the original method
-    param.load_qkv_weight_ = param.load_qkv_weight
-    param.load_qkv_weight = \
-        lambda loaded_weight, **kwargs: \
-            (load_qkv_weight(param, loaded_weight, **kwargs))
+    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        loaded_weight = loaded_weight.reshape(-1, self.data.shape[1])
+        super().load_qkv_weight(loaded_weight, **kwargs)
 
 
 class HQQMarlinMethod(LinearMethodBase):
@@ -258,12 +203,14 @@ class HQQMarlinMethod(LinearMethodBase):
         self.scales_and_zp_size = (input_size_per_partition //
                                    self.quant_config.group_size)
 
-        qweight = HQQweightParameter(
-            data=torch.empty(
-                self.input_size_per_partition // self.quant_config.pack_factor,
-                self.output_size_per_partition,
-                dtype=torch.int32,
-            ),
+        qweight = Parameter(data=torch.empty(
+            self.input_size_per_partition // self.quant_config.pack_factor,
+            self.output_size_per_partition,
+            dtype=torch.int32,
+        ),
+                            requires_grad=False)
+        qweight.vllm_parameter = HQQweightParameter(
+            data=qweight,
             input_dim=0,
             output_dim=1,
             packed_dim=0,
@@ -271,23 +218,26 @@ class HQQMarlinMethod(LinearMethodBase):
             weight_bits=self.quant_config.weight_bits,
             weight_loader=weight_loader)
 
-        zeros = HQQZeroScaleParameter(data=torch.empty(
+        zeros = Parameter(data=torch.empty(
             self.output_size_per_partition,
             self.scales_and_zp_size,
             dtype=params_dtype,
         ),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
+                          requires_grad=False)
+        zeros.vllm_parameter = HQQZeroScaleParameter(
+            data=zeros, input_dim=1, output_dim=0, weight_loader=weight_loader)
 
-        scales = HQQZeroScaleParameter(data=torch.empty(
+        scales = Parameter(data=torch.empty(
             self.output_size_per_partition,
             self.scales_and_zp_size,
             dtype=params_dtype,
         ),
-                                       input_dim=1,
-                                       output_dim=0,
-                                       weight_loader=weight_loader)
+                           requires_grad=False)
+        scales.vllm_parameter = HQQZeroScaleParameter(
+            data=scales,
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader)
 
         layer.register_parameter("W_q", qweight)
         layer.register_parameter("zero", zeros)
@@ -302,10 +252,10 @@ class HQQMarlinMethod(LinearMethodBase):
                              "shape", "stores_quant_config",
                              "unpack_view_dtype", "view_as_float")
         for name in ignore_parameters:
-            layer.register_parameter(
-                name,
-                HQQEmptyParameter(data=torch.empty(0),
-                                  weight_loader=weight_loader))
+            empty = Parameter(torch.empty(0), requires_grad=False)
+            empty.vllm_parameter = HQQEmptyParameter(
+                data=empty, weight_loader=weight_loader)
+            layer.register_parameter(name, empty)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         dev = layer.W_q.device

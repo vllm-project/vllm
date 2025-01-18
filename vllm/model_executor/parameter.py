@@ -1,6 +1,5 @@
-from enum import Enum
 from fractions import Fraction
-from typing import Callable, List, Optional, Union
+from typing import Callable, Optional, Union
 
 import torch
 from torch.nn import Parameter
@@ -10,407 +9,357 @@ from vllm.logger import init_logger
 from vllm.model_executor.utils import _make_synced_weight_loader
 
 __all__ = [
-    "vLLMParameterFeatures", "add_param_feature", "has_any_param_feature",
-    "BasevLLMParameter", "wrap_base_vllm_parameter",
-    "wrap_column_vllm_parameter", "RowvLLMParameter",
-    "wrap_row_vllm_parameter", "ModelWeightParameter",
-    "wrap_model_weight_parameter", "GroupQuantScaleParameter",
-    "wrap_group_quant_scale_parameter", "ChannelQuantScaleParameter",
-    "PerTensorScaleParameter", "wrap_per_tensor_scale_parameter",
-    "PackedColumnParameter", "wrap_packed_column_parameter",
-    "PackedvLLMParameter", "wrap_packed_vllm_parameter",
-    "BlockQuantScaleParameter", "permute_param_layout_"
+    "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
+    "ModelWeightParameter", "ChannelQuantScaleParameter",
+    "GroupQuantScaleParameter", "PackedColumnParameter", "RowvLLMParameter"
 ]
 
 logger = init_logger(__name__)
 
 
-class vLLMParameterFeatures(Enum):
+class BasevLLMParameter:
     """
-    Enum for the different features that a vLLM parameter
-    can have. This is used to track what functionality a
-    parameter has and to add functionality to the parameter
-    based on the features it has.
-    """
-    Base = 0
-    ModelWeight = 1
-    PerTensorScale = 2
-    ChannelQuantScale = 3
-    GroupQuantScale = 4
-    PackedColumn = 5
-    Packed = 6
-    Row = 7
-    Column = 8
-    BlockQuantScale = 9
-    HQQEmpty = 10
-    HQQWeight = 11
-    HQQZeroScale = 12
-
-
-def add_param_feature(param: Parameter, feature: vLLMParameterFeatures):
-    """
-    Add a feature to a parameter.
-    """
-    if not hasattr(param, 'param_features'):
-        param.param_features = []
-    param.param_features.append(feature)
-
-
-def has_any_param_feature(param: Parameter,
-                          feature_list: List[vLLMParameterFeatures]):
-    """
-    Check if a parameter paramect has any of the specified features.
-    """
-    if not hasattr(param, 'param_features'):
-        return False
-    assert isinstance(feature_list, list)
-    for feature in feature_list:
-        assert isinstance(feature, vLLMParameterFeatures),\
-            f"feature_list must contain only vLLMParameterFeatures, "\
-            f"got {type(feature)} instead"
-        if feature in param.param_features:
-            return True
-    return False
-
-
-def BasevLLMParameter(data: torch.Tensor, **kwargs) -> Parameter:
-    param = Parameter(data, requires_grad=False)
-    wrap_base_vllm_parameter(param, **kwargs)
-    return param
-
-
-def wrap_base_vllm_parameter(param: Parameter, weight_loader: Callable,
-                             **kwargs):
-    """
-    Base parameter for vLLM linear layers. Adds basic functionality
+    Base parameter for vLLM linear layers. Extends the torch.nn.parameter
     by taking in a linear weight loader. Will copy the loaded weight
     into the parameter when the provided weight loader is called.
     """
 
-    def _is_1d_and_scalar(param: Parameter, loaded_weight: torch.Tensor):
-        cond1 = param.data.ndim == 1 and param.data.numel() == 1
+    # def __new__(cls, data: torch.Tensor, **kwargs):
+
+    #     return super().__new__(cls, data=data, requires_grad=False)
+
+    def __init__(self, data: Parameter, weight_loader: Callable, **kwargs):
+        """
+        Initialize the BasevLLMParameter
+
+        :param data: torch tensor with the parameter data
+        :param weight_loader: weight loader callable
+
+        :returns: a torch.nn.parameter
+        """
+
+        # During weight loading, we often do something like:
+        # narrowed_tensor = param.data.narrow(0, offset, len)
+        # narrowed_tensor.copy_(real_weight)
+        # expecting narrowed_tensor and param.data to share the same storage.
+        # However, on TPUs, narrowed_tensor will lazily propagate to the base
+        # tensor, which is param.data, leading to the redundant memory usage.
+        # This sometimes causes OOM errors during model loading. To avoid this,
+        # we sync the param tensor after its weight loader is called.
+        from vllm.platforms import current_platform
+        if current_platform.is_tpu():
+            weight_loader = _make_synced_weight_loader(weight_loader)
+
+        self._weight_loader = weight_loader
+        self.data = data
+        self.data.weight_loader = self.weight_loader
+
+    @property
+    def weight_loader(self):
+        return self._weight_loader
+
+    def _is_1d_and_scalar(self, loaded_weight: torch.Tensor):
+        cond1 = self.data.ndim == 1 and self.data.numel() == 1
         cond2 = loaded_weight.ndim == 0 and loaded_weight.numel() == 1
         return (cond1 and cond2)
 
-    def _assert_and_load(param: Parameter, loaded_weight: torch.Tensor):
-        assert (param.data.shape == loaded_weight.shape
-                or _is_1d_and_scalar(param, loaded_weight))
-        param.data.copy_(loaded_weight)
+    def _assert_and_load(self, loaded_weight: torch.Tensor):
+        assert (self.data.shape == loaded_weight.shape
+                or self._is_1d_and_scalar(loaded_weight))
+        self.data.copy_(loaded_weight)
 
-    from vllm.platforms import current_platform
-    if current_platform.is_tpu():
-        weight_loader = _make_synced_weight_loader(weight_loader)
-    param.weight_loader = weight_loader
-    param.load_column_parallel_weight = lambda loaded_weight: _assert_and_load(
-        param, loaded_weight)
-    param.load_row_parallel_weight = lambda loaded_weight: _assert_and_load(
-        param, loaded_weight)
-    param.load_merged_column_weight = \
-        lambda loaded_weight, **kwargs: _assert_and_load(
-        param, loaded_weight)
-    param.load_qkv_weight = lambda loaded_weight, **kwargs: _assert_and_load(
-        param, loaded_weight)
-    add_param_feature(param, vLLMParameterFeatures.Base)
+    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
+        self._assert_and_load(loaded_weight)
+
+    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+        self._assert_and_load(loaded_weight)
+
+    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        self._assert_and_load(loaded_weight)
+
+    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        self._assert_and_load(loaded_weight)
 
 
-def wrap_column_vllm_parameter(param: Parameter, output_dim: int,
-                               **kwargs) -> None:
+class _ColumnvLLMParameter(BasevLLMParameter):
     """
-    Add functionality to the parameter for loading weights into
-    linear layers with column parallelism. This includes QKV and MLP
-    layers which are not already fused on disk. Requires an output
-    dimension to be defined. Called within the weight loader of each
-    of the column parallel linear layers.
+    Private class defining weight loading functionality 
+    (load_merged_column_weight, load_qkv_weight)
+    for parameters being loaded into linear layers with column
+    parallelism. This includes QKV and MLP layers which are
+    not already fused on disk. Requires an output dimension 
+    to be defined. Called within the weight loader of
+    each of the column parallel linear layers.
     """
 
-    def load_column_parallel_weight(param: Parameter,
-                                    loaded_weight: torch.Tensor):
+    def __init__(self, output_dim: int, **kwargs):
+        self._output_dim = output_dim
+        super().__init__(**kwargs)
+
+    @property
+    def output_dim(self):
+        return self._output_dim
+
+    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
-        shard_size = param.data.shape[param.output_dim]
-        loaded_weight = loaded_weight.narrow(param.output_dim,
+        shard_size = self.data.shape[self.output_dim]
+        loaded_weight = loaded_weight.narrow(self.output_dim,
                                              tp_rank * shard_size, shard_size)
-        assert param.data.shape == loaded_weight.shape
-        param.data.copy_(loaded_weight)
+        assert self.data.shape == loaded_weight.shape
+        self.data.copy_(loaded_weight)
 
-    def load_merged_column_weight(param: Parameter,
-                                  loaded_weight: torch.Tensor, **kwargs):
+    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
+
         shard_offset = kwargs.get("shard_offset")
         shard_size = kwargs.get("shard_size")
-        if (has_any_param_feature(
-                param,
-            [vLLMParameterFeatures.PackedColumn, vLLMParameterFeatures.Packed])
-                and param.output_dim == param.packed_dim):
-            shard_size, shard_offset = param.adjust_shard_indexes_for_packing(
+        if isinstance(
+                self,
+            (PackedColumnParameter,
+             PackedvLLMParameter)) and self.packed_dim == self.output_dim:
+            shard_size, shard_offset = self.adjust_shard_indexes_for_packing(
                 shard_offset=shard_offset, shard_size=shard_size)
 
-        param_data = param.data
+        param_data = self.data
 
         tp_rank = get_tensor_model_parallel_rank()
-        param_data = param_data.narrow(param.output_dim, shard_offset,
+        param_data = param_data.narrow(self.output_dim, shard_offset,
                                        shard_size)
-        loaded_weight = loaded_weight.narrow(param.output_dim,
+        loaded_weight = loaded_weight.narrow(self.output_dim,
                                              tp_rank * shard_size, shard_size)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-    def load_qkv_weight(param: Parameter, loaded_weight: torch.Tensor,
-                        **kwargs):
+    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+
         shard_offset = kwargs.get("shard_offset")
         shard_size = kwargs.get("shard_size")
         shard_id = kwargs.get("shard_id")
         num_heads = kwargs.get("num_heads")
 
-        if (has_any_param_feature(
-                param,
-            [vLLMParameterFeatures.PackedColumn, vLLMParameterFeatures.Packed])
-                and output_dim == param.packed_dim):
-            shard_size, shard_offset = param.adjust_shard_indexes_for_packing(
+        if isinstance(
+                self,
+            (PackedColumnParameter,
+             PackedvLLMParameter)) and self.output_dim == self.packed_dim:
+            shard_size, shard_offset = self.adjust_shard_indexes_for_packing(
                 shard_offset=shard_offset, shard_size=shard_size)
 
-        param_data = param.data
+        param_data = self.data
         tp_rank = get_tensor_model_parallel_rank()
         shard_id = tp_rank if shard_id == "q" else tp_rank // num_heads
-        param_data = param_data.narrow(param.output_dim, shard_offset,
+        param_data = param_data.narrow(self.output_dim, shard_offset,
                                        shard_size)
-        loaded_weight = loaded_weight.narrow(param.output_dim,
+        loaded_weight = loaded_weight.narrow(self.output_dim,
                                              shard_id * shard_size, shard_size)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-    param.output_dim = output_dim
-    param.load_column_parallel_weight = lambda loaded_weight: (
-        load_column_parallel_weight(param, loaded_weight))
-    param.load_merged_column_weight = lambda loaded_weight, **kwargs: (
-        load_merged_column_weight(param, loaded_weight, **kwargs))
-    param.load_qkv_weight = lambda loaded_weight, **kwargs: (load_qkv_weight(
-        param, loaded_weight, **kwargs))
-    add_param_feature(param, vLLMParameterFeatures.Column)
 
-
-def RowvLLMParameter(data: torch.Tensor, **kwargs) -> Parameter:
-    param = Parameter(data, requires_grad=False)
-    wrap_base_vllm_parameter(param, **kwargs)
-    wrap_row_vllm_parameter(param, **kwargs)
-    return param
-
-
-def wrap_row_vllm_parameter(param: Parameter, input_dim: int,
-                            **kwargs) -> None:
+class RowvLLMParameter(BasevLLMParameter):
     """
-    Add functionality to the parameter for loading weights into
-    linear layers with row parallelism. This includes layers
-    which are fused on disk. Requires an input dimension to be
-    defined. Called within the weight loader of each of the
-    row parallel linear layers.
+    Parameter class defining weight_loading functionality
+    (load_row_parallel_weight) for parameters being loaded
+    into linear layers with row parallel functionality.
+    Requires an input_dim to be defined.
     """
 
-    def load_row_parallel_weight(param: Parameter,
-                                 loaded_weight: torch.Tensor):
+    def __init__(self, input_dim: int, **kwargs):
+        self._input_dim = input_dim
+        super().__init__(**kwargs)
+
+    @property
+    def input_dim(self):
+        return self._input_dim
+
+    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
-        shard_size = param.data.shape[input_dim]
-        loaded_weight = loaded_weight.narrow(input_dim, tp_rank * shard_size,
-                                             shard_size)
-        assert param.data.shape == loaded_weight.shape
-        param.data.copy_(loaded_weight)
+        shard_size = self.data.shape[self.input_dim]
+        loaded_weight = loaded_weight.narrow(self.input_dim,
+                                             tp_rank * shard_size, shard_size)
 
-    param.input_dim = input_dim
-    param.load_row_parallel_weight = lambda loaded_weight: (
-        load_row_parallel_weight(param, loaded_weight))
-    add_param_feature(param, vLLMParameterFeatures.Row)
+        if len(loaded_weight.shape) == 0:
+            loaded_weight = loaded_weight.reshape(1)
 
-
-def ModelWeightParameter(data: torch.Tensor, **kwargs) -> Parameter:
-    param = Parameter(data, requires_grad=False)
-    wrap_base_vllm_parameter(param, **kwargs)
-    wrap_column_vllm_parameter(param, **kwargs)
-    wrap_row_vllm_parameter(param, **kwargs)
-    wrap_model_weight_parameter(param, **kwargs)
-    return param
+        assert self.data.shape == loaded_weight.shape
+        self.data.copy_(loaded_weight)
 
 
-def wrap_model_weight_parameter(param: Parameter, **kwargs) -> None:
-    add_param_feature(param, vLLMParameterFeatures.ModelWeight)
-
-
-def GroupQuantScaleParameter(data: torch.Tensor, **kwargs) -> Parameter:
-    param = Parameter(data, requires_grad=False)
-    wrap_base_vllm_parameter(param, **kwargs)
-    wrap_column_vllm_parameter(param, **kwargs)
-    wrap_row_vllm_parameter(param, **kwargs)
-    wrap_group_quant_scale_parameter(param, **kwargs)
-    add_param_feature(param, vLLMParameterFeatures.GroupQuantScale)
-    return param
-
-
-def wrap_group_quant_scale_parameter(param: Parameter, **kwargs) -> None:
-    add_param_feature(param, vLLMParameterFeatures.GroupQuantScale)
-
-
-def ChannelQuantScaleParameter(data: torch.Tensor, **kwargs) -> Parameter:
-    param = Parameter(data, requires_grad=False)
-    wrap_base_vllm_parameter(param, **kwargs)
-    wrap_column_vllm_parameter(param, **kwargs)
-    # wrap_channel_quant_scale_parameter(param, **kwargs)
-    add_param_feature(param, vLLMParameterFeatures.ChannelQuantScale)
-    return param
-
-
-def PerTensorScaleParameter(data: torch.Tensor, **kwargs) -> Parameter:
-    param = Parameter(data, requires_grad=False)
-    wrap_base_vllm_parameter(param, **kwargs)
-    wrap_per_tensor_scale_parameter(param, **kwargs)
-    return param
-
-
-def wrap_per_tensor_scale_parameter(param: Parameter, **kwargs) -> None:
+class ModelWeightParameter(_ColumnvLLMParameter, RowvLLMParameter):
     """
-    Add functionality for scales where the number of scales is
+    Parameter class for linear layer weights. Uses both column and
+    row parallelism.
+    """
+    pass
+
+
+class GroupQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
+    """
+    Parameter class for weight scales loaded for weights with
+    grouped quantization. Uses both column and row parallelism.
+    """
+    pass
+
+
+class ChannelQuantScaleParameter(_ColumnvLLMParameter):
+    """
+    Parameter class for weight scales loaded for weights with
+    channel-wise quantization. Equivalent to _ColumnvLLMParameter.
+    """
+    pass
+
+
+class PerTensorScaleParameter(BasevLLMParameter):
+    """
+    Parameter class for scales where the number of scales is
     equivalent to the number of logical matrices in fused linear
     layers (e.g. for QKV, there are 3 scales loaded from disk).
     This is relevant to weights with per-tensor quantization.
     Adds functionality to map the scalers to a shard during
-    weight loading.
+    weight loading. 
 
-    Note: additional parameter manipulation may be handled
-    for each quantization config specifically, within
-    process_weights_after_loading
+    Note: additional parameter manipulation may be handled 
+    for each quantization config specifically, within 
+    process_weights_after_loading 
     """
 
-    def shard_id_as_int(shard_id: Union[str, int]) -> int:
+    def __init__(self, **kwargs):
+        self.qkv_idxs = {"q": 0, "k": 1, "v": 2}
+        super().__init__(**kwargs)
+
+    def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
         if isinstance(shard_id, int):
             return shard_id
 
         # if not int, assume shard_id for qkv
         # map to int and return
         assert isinstance(shard_id, str)
-        assert shard_id in param.qkv_idxs
-        return param.qkv_idxs[shard_id]
+        assert shard_id in self.qkv_idxs
+        return self.qkv_idxs[shard_id]
 
-    def load_into_shard_id(param: Parameter, loaded_weight: torch.Tensor,
-                           shard_id: int, **kwargs):
-        param_data = param.data
-        shard_id = param.shard_id_as_int(shard_id)
+    # For row parallel layers, no sharding needed
+    # load weight into parameter as is
+    def load_row_parallel_weight(self, *args, **kwargs):
+        super().load_row_parallel_weight(*args, **kwargs)
+
+    def load_merged_column_weight(self, *args, **kwargs):
+        self._load_into_shard_id(*args, **kwargs)
+
+    def load_qkv_weight(self, *args, **kwargs):
+        self._load_into_shard_id(*args, **kwargs)
+
+    def load_column_parallel_weight(self, *args, **kwargs):
+        super().load_row_parallel_weight(*args, **kwargs)
+
+    def _load_into_shard_id(self, loaded_weight: torch.Tensor,
+                            shard_id: Union[str, int], **kwargs):
+        """
+        Slice the parameter data based on the shard id for 
+        loading.
+        """
+
+        param_data = self.data
+        shard_id = self._shard_id_as_int(shard_id)
+
         # AutoFP8 scales do not have a shape
         # compressed-tensors scales do have a shape
         if len(loaded_weight.shape) != 0:
             assert loaded_weight.shape[0] == 1
             loaded_weight = loaded_weight[0]
+
         param_data = param_data[shard_id]
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-    def load_row_parallel_weight(param: Parameter,
-                                 loaded_weight: torch.Tensor):
-        assert param.data.shape == loaded_weight.shape
-        param.data.copy_(loaded_weight)
 
-    def load_merged_column_weight(param: Parameter, **kwargs):
-        param.load_into_shard_id(param, **kwargs)
-
-    def load_qkv_weight(param: Parameter, **kwargs):
-        param.load_into_shard_id(param, **kwargs)
-
-    def load_column_parallel_weight(param: Parameter,
-                                    loaded_weight: torch.Tensor):
-        assert param.data.shape == loaded_weight.shape
-        param.data.copy_(loaded_weight)
-
-    param.qkv_idxs = {"q": 0, "k": 1, "v": 2}
-    param.shard_id_as_int = shard_id_as_int
-    param.load_into_shard_id = load_into_shard_id
-    param.load_row_parallel_weight = lambda loaded_weight: (
-        load_row_parallel_weight(param, loaded_weight))
-    param.load_merged_column_weight = lambda **kwargs: (
-        load_merged_column_weight(param, **kwargs))
-    param.load_qkv_weight = lambda **kwargs: (load_qkv_weight(param, **kwargs))
-    param.load_column_parallel_weight = lambda loaded_weight: (
-        load_column_parallel_weight(param, loaded_weight))
-    add_param_feature(param, vLLMParameterFeatures.PerTensorScale)
-
-
-def PackedColumnParameter(data: torch.Tensor, **kwargs) -> Parameter:
-    param = Parameter(data, requires_grad=False)
-    wrap_base_vllm_parameter(param, **kwargs)
-    wrap_column_vllm_parameter(param, **kwargs)
-    wrap_packed_column_parameter(param, **kwargs)
-    return param
-
-
-def wrap_packed_column_parameter(param: Parameter,
-                                 packed_factor: Union[int, Fraction],
-                                 packed_dim: int,
-                                 marlin_tile_size: Optional[int] = None,
-                                 **kwargs) -> None:
+class PackedColumnParameter(_ColumnvLLMParameter):
     """
-    Add properties and methods for parameters which are packed on disk
+    Parameter for model parameters which are packed on disk
     and support column parallelism only. See PackedvLLMParameter
     for more details on the packed properties.
     """
 
-    def adjust_shard_indexes_for_packing(shard_size, shard_offset):
+    def __init__(self,
+                 packed_factor: Union[int, Fraction],
+                 packed_dim: int,
+                 marlin_tile_size: Optional[int] = None,
+                 **kwargs):
+        self._packed_factor = packed_factor
+        self._packed_dim = packed_dim
+        self._marlin_tile_size = marlin_tile_size
+        super().__init__(**kwargs)
+
+    @property
+    def packed_dim(self):
+        return self._packed_dim
+
+    @property
+    def packed_factor(self):
+        return self._packed_factor
+
+    @property
+    def marlin_tile_size(self):
+        return self._marlin_tile_size
+
+    def adjust_shard_indexes_for_packing(self, shard_size, shard_offset):
         return _adjust_shard_indexes_for_packing(
             shard_size=shard_size,
             shard_offset=shard_offset,
-            packed_factor=packed_factor,
-            marlin_tile_size=marlin_tile_size)
-
-    param.packed_factor = packed_factor
-    param.packed_dim = packed_dim
-    param.marlin_tile_size = marlin_tile_size
-    param.adjust_shard_indexes_for_packing = adjust_shard_indexes_for_packing
-    add_param_feature(param, vLLMParameterFeatures.PackedColumn)
+            packed_factor=self.packed_factor,
+            marlin_tile_size=self.marlin_tile_size)
 
 
-def PackedvLLMParameter(data: torch.Tensor, **kwargs) -> Parameter:
-    param = Parameter(data, requires_grad=False)
-    wrap_base_vllm_parameter(param, **kwargs)
-    wrap_column_vllm_parameter(param, **kwargs)
-    wrap_row_vllm_parameter(param, **kwargs)
-    wrap_packed_vllm_parameter(param, **kwargs)
-    return param
-
-
-def wrap_packed_vllm_parameter(param: Parameter,
-                               packed_factor: Union[int, Fraction],
-                               packed_dim: int,
-                               marlin_tile_size: Optional[int] = None,
-                               **kwargs) -> None:
+class PackedvLLMParameter(ModelWeightParameter):
     """
-    Add properties and methods for parameters which are packed on disk.
+    Parameter for model weights which are packed on disk.
     Example: GPTQ Marlin weights are int4 or int8, packed into int32.
     Extends the ModelWeightParameter to take in the
     packed factor, the packed dimension, and optionally, marlin
-    tile size for marlin kernels. Adjusts the shard_size and
+    tile size for marlin kernels. Adjusts the shard_size and 
     shard_offset for fused linear layers model weight loading
     by accounting for packing and optionally, marlin tile size.
     """
 
-    def adjust_shard_indexes_for_packing(shard_size, shard_offset):
+    def __init__(self,
+                 packed_factor: Union[int, Fraction],
+                 packed_dim: int,
+                 marlin_tile_size: Optional[int] = None,
+                 **kwargs):
+        self._packed_factor = packed_factor
+        self._packed_dim = packed_dim
+        self._marlin_tile_size = marlin_tile_size
+        super().__init__(**kwargs)
+
+    @property
+    def packed_dim(self):
+        return self._packed_dim
+
+    @property
+    def packed_factor(self):
+        return self._packed_factor
+
+    @property
+    def marlin_tile_size(self):
+        return self._marlin_tile_size
+
+    def adjust_shard_indexes_for_packing(self, shard_size, shard_offset):
         return _adjust_shard_indexes_for_packing(
             shard_size=shard_size,
             shard_offset=shard_offset,
-            packed_factor=packed_factor,
-            marlin_tile_size=marlin_tile_size)
-
-    param.packed_factor = packed_factor
-    param.packed_dim = packed_dim
-    param.marlin_tile_size = marlin_tile_size
-    param.adjust_shard_indexes_for_packing = adjust_shard_indexes_for_packing
-    add_param_feature(param, vLLMParameterFeatures.Packed)
+            packed_factor=self.packed_factor,
+            marlin_tile_size=self.marlin_tile_size)
 
 
-def BlockQuantScaleParameter(data: torch.Tensor, **kwargs) -> Parameter:
-    param = Parameter(data, requires_grad=False)
-    wrap_base_vllm_parameter(param, **kwargs)
-    wrap_column_vllm_parameter(param, **kwargs)
-    wrap_row_vllm_parameter(param, **kwargs)
-    add_param_feature(param, vLLMParameterFeatures.BlockQuantScale)
-    return param
+class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
+    """
+    Parameter class for weight scales loaded for weights with
+    block-wise quantization. Uses both column and row parallelism.
+    """
+
+    pass
 
 
 def permute_param_layout_(param: Parameter, input_dim: int, output_dim: int,
-                          **kwargs) -> Parameter:
+                          **kwargs) -> BasevLLMParameter:
     """
     Permute a parameter's layout to the specified input and output dimensions, 
     useful for forcing the parameter into a known layout, for example, if I need
@@ -422,8 +371,8 @@ def permute_param_layout_(param: Parameter, input_dim: int, output_dim: int,
     required, asserting if it cannot get it to the correct layout)
     """
 
-    curr_input_dim = getattr(param, "input_dim", None)
-    curr_output_dim = getattr(param, "output_dim", None)
+    curr_input_dim = getattr(param.vllm_parameter, "input_dim", None)
+    curr_output_dim = getattr(param.vllm_parameter, "output_dim", None)
 
     if curr_input_dim is None or curr_output_dim is None:
         assert param.data.dim() == 2,\
@@ -452,17 +401,17 @@ def permute_param_layout_(param: Parameter, input_dim: int, output_dim: int,
     perm.insert(output_dim, curr_output_dim)
 
     if "packed_dim" in kwargs:
-        assert hasattr(param, "packed_dim") and\
-            param.packed_dim == perm[kwargs["packed_dim"]],\
+        assert hasattr(param.vllm_parameter, "packed_dim") and\
+            param.vllm_parameter.packed_dim == perm[kwargs["packed_dim"]],\
             "permute_param_layout_ currently doesn't support repacking"
 
     param.data = param.data.permute(*perm)
-    if hasattr(param, "_input_dim"):
-        param._input_dim = input_dim
-    if hasattr(param, "_output_dim"):
-        param._output_dim = output_dim
-    if "packed_dim" in kwargs and hasattr(param, "_packed_dim"):
-        param._packed_dim = kwargs["packed_dim"]
+    if hasattr(param.vllm_parameter, "_input_dim"):
+        param.vllm_parameter._input_dim = input_dim
+    if hasattr(param.vllm_parameter, "_output_dim"):
+        param.vllm_parameter._output_dim = output_dim
+    if "packed_dim" in kwargs and hasattr(param.vllm_parameter, "_packed_dim"):
+        param.vllm_parameter._packed_dim = kwargs["packed_dim"]
 
     return param
 

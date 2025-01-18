@@ -63,13 +63,15 @@ class TPUInt8LinearMethod(LinearMethodBase):
                        **extra_weight_attrs):
 
         weight_loader = extra_weight_attrs.get("weight_loader")
-        weight = ModelWeightParameter(data=torch.empty(
-            sum(output_partition_sizes),
-            input_size_per_partition,
-            dtype=params_dtype),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
+        weight = Parameter(torch.empty(sum(output_partition_sizes),
+                                       input_size_per_partition,
+                                       dtype=params_dtype),
+                           requires_grad=False)
+        weight.vllm_parameter = ModelWeightParameter(
+            data=weight,
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
 
     def _quantize_weight(

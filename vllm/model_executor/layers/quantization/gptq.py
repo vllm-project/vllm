@@ -4,6 +4,7 @@ from fractions import Fraction
 from typing import Any, Dict, List, Optional
 
 import torch
+from torch.nn import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
@@ -139,61 +140,59 @@ class GPTQLinearMethod(LinearMethodBase):
                 scale_and_zero_size = input_size_per_partition // group_size
                 scale_and_zero_input_dim = 0
 
-        qweight = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition // self.quant_config.pack_factor,
-                output_size_per_partition,
-                dtype=torch.int32,
-            ),
+        qweight = Parameter(data=torch.empty(
+            input_size_per_partition // self.quant_config.pack_factor,
+            output_size_per_partition,
+            dtype=torch.int32,
+        ),
+                            requires_grad=False)
+        qweight.vllm_parameter = PackedvLLMParameter(
+            data=qweight,
             input_dim=0,
             output_dim=1,
             packed_dim=0,
             packed_factor=self.quant_config.pack_factor,
             weight_loader=weight_loader)
 
-        g_idx = RowvLLMParameter(data=torch.tensor(
+        g_idx = Parameter(data=torch.tensor(
             [
                 i // self.quant_config.group_size
                 for i in range(input_size_per_partition)
             ],
             dtype=torch.int32,
         ),
-                                 input_dim=0,
-                                 weight_loader=weight_loader)
-        qzeros_args = {
-            "data":
-            torch.empty(
-                scale_and_zero_size,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            "weight_loader":
-            weight_loader
-        }
-        weight_scale_args = {
-            "data":
-            torch.empty(
-                scale_and_zero_size,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
-            "weight_loader":
-            weight_loader
-        }
+                          requires_grad=False)
+        g_idx.vllm_parameter = RowvLLMParameter(data=g_idx,
+                                                input_dim=0,
+                                                weight_loader=weight_loader)
+        qzeros = Parameter(torch.empty(
+            scale_and_zero_size,
+            output_size_per_partition // self.quant_config.pack_factor,
+            dtype=torch.int32,
+        ),
+                           requires_grad=False)
+        qzeros_args = {"data": qzeros, "weight_loader": weight_loader}
+        scales = Parameter(torch.empty(
+            scale_and_zero_size,
+            output_size_per_partition,
+            dtype=params_dtype,
+        ),
+                           requires_grad=False)
+        weight_scale_args = {"data": scales, "weight_loader": weight_loader}
         if scale_and_zero_input_dim is None:
-            scales = ChannelQuantScaleParameter(output_dim=1,
-                                                **weight_scale_args)
-            qzeros = PackedColumnParameter(
+            scales.vllm_parameter = ChannelQuantScaleParameter(
+                output_dim=1, **weight_scale_args)
+            qzeros.vllm_parameter = PackedColumnParameter(
                 output_dim=1,
                 packed_dim=1,
                 packed_factor=self.quant_config.pack_factor,
                 **qzeros_args)
 
         else:
-            scales = GroupQuantScaleParameter(output_dim=1,
-                                              input_dim=0,
-                                              **weight_scale_args)
-            qzeros = PackedvLLMParameter(
+            scales.vllm_parameter = GroupQuantScaleParameter(
+                output_dim=1, input_dim=0, **weight_scale_args)
+
+            qzeros.vllm_parameter = PackedvLLMParameter(
                 input_dim=0,
                 output_dim=1,
                 packed_dim=1,

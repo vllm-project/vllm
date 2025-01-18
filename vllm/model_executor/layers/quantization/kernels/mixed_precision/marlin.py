@@ -8,9 +8,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supports_shape, marlin_is_k_full, marlin_make_empty_g_idx,
     marlin_make_workspace, marlin_permute_scales, marlin_sort_g_idx,
     query_marlin_supported_quant_types)
-from vllm.model_executor.parameter import (has_any_param_feature,
-                                           permute_param_layout_,
-                                           vLLMParameterFeatures)
+from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           permute_param_layout_)
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -89,7 +88,7 @@ class MarlinLinearKernel(MPLinearKernel):
             setattr(layer, self.w_zp_name, marlin_make_empty_g_idx(device))
 
         def transform_w_q(x):
-            assert has_any_param_feature(x, [vLLMParameterFeatures.Base])
+            assert isinstance(x.vllm_parameter, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
             x.data = ops.gptq_marlin_repack(x.data.contiguous(),
                                             perm=layer.g_idx_sort_indices,
@@ -99,7 +98,7 @@ class MarlinLinearKernel(MPLinearKernel):
             return x
 
         def transform_w_s(x):
-            assert has_any_param_feature(x, [vLLMParameterFeatures.Base])
+            assert isinstance(x.vllm_parameter, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1)
             x.data = marlin_permute_scales(x.data.contiguous(),
                                            size_k=c.partition_weight_shape[0],

@@ -2,6 +2,7 @@ from typing import Callable, List, Optional, Set
 
 import torch
 from compressed_tensors.quantization import ActivationOrdering
+from torch.nn import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -96,41 +97,40 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             assert input_size_per_partition % group_size == 0
             scales_and_zp_size = input_size_per_partition // group_size
 
-        weight = PackedvLLMParameter(input_dim=1,
-                                     output_dim=0,
-                                     weight_loader=weight_loader,
-                                     packed_factor=self.pack_factor,
-                                     packed_dim=1,
-                                     data=torch.empty(
-                                         output_size_per_partition,
-                                         input_size_per_partition //
-                                         self.pack_factor,
-                                         dtype=torch.int32,
-                                     ))
-
+        weight = Parameter(data=torch.empty(output_size_per_partition,
+                                            input_size_per_partition //
+                                            self.pack_factor,
+                                            dtype=torch.int32),
+                           requires_grad=False)
+        weight.vllm_parameter = PackedvLLMParameter(
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+            packed_factor=self.pack_factor,
+            packed_dim=1,
+            data=weight)
+        weight_scale = Parameter(torch.empty(
+            output_size_per_partition,
+            scales_and_zp_size,
+            dtype=params_dtype,
+        ),
+                                 requires_grad=False)
         weight_scale_args = {
-            "weight_loader":
-            weight_loader,
-            "data":
-            torch.empty(
-                output_size_per_partition,
-                scales_and_zp_size,
-                dtype=params_dtype,
-            )
+            "weight_loader": weight_loader,
+            "data": weight_scale,
         }
         if not partition_scales:
-            weight_scale = ChannelQuantScaleParameter(output_dim=0,
-                                                      **weight_scale_args)
+            weight_scale.vllm_parameter = ChannelQuantScaleParameter(
+                output_dim=0, **weight_scale_args)
         else:
-            weight_scale = GroupQuantScaleParameter(output_dim=0,
-                                                    input_dim=1,
-                                                    **weight_scale_args)
-
+            weight_scale.vllm_parameter = GroupQuantScaleParameter(
+                output_dim=0, input_dim=1, **weight_scale_args)
         # A 2D array defining the original shape of the weights
         # before packing
-        weight_shape = BasevLLMParameter(data=torch.empty(2,
-                                                          dtype=torch.int64),
-                                         weight_loader=weight_loader)
+        weight_shape = Parameter(torch.empty(2, dtype=torch.int64),
+                                 requires_grad=False)
+        weight_shape.vllm_parameter = BasevLLMParameter(
+            data=weight_shape, weight_loader=weight_loader)
 
         layer.register_parameter("weight_packed", weight)
         layer.register_parameter("weight_scale", weight_scale)
@@ -138,12 +138,13 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         # group index (for activation reordering)
         if self.has_g_idx:
-            weight_g_idx = RowvLLMParameter(data=torch.empty(
+            weight_g_idx = Parameter(data=torch.empty(
                 input_size_per_partition,
                 dtype=torch.int32,
             ),
-                                            input_dim=0,
-                                            weight_loader=weight_loader)
+                                     requires_grad=False)
+            weight_g_idx.vllm_parameter = RowvLLMParameter(
+                data=weight_g_idx, input_dim=0, weight_loader=weight_loader)
             layer.register_parameter("weight_g_idx", weight_g_idx)
 
         self.kernel = kernel_type(mp_linear_kernel_config,

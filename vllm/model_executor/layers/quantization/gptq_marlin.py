@@ -1,6 +1,7 @@
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import torch
+from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
@@ -222,12 +223,14 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             scales_and_zp_size = input_size_per_partition // group_size
 
         # Quantized weights
-        qweight = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition // self.quant_config.pack_factor,
-                output_size_per_partition,
-                dtype=torch.int32,
-            ),
+        qweight = Parameter(data=torch.empty(
+            input_size_per_partition // self.quant_config.pack_factor,
+            output_size_per_partition,
+            dtype=torch.int32,
+        ),
+                            requires_grad=False)
+        qweight.vllm_parameter = PackedvLLMParameter(
+            data=qweight,
             input_dim=0,
             output_dim=1,
             packed_dim=0,
@@ -235,48 +238,43 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             weight_loader=weight_loader)
 
         # Activation order
-        g_idx = RowvLLMParameter(data=torch.empty(
+        g_idx = Parameter(data=torch.empty(
             input_size_per_partition,
             dtype=torch.int32,
         ),
-                                 input_dim=0,
-                                 weight_loader=weight_loader)
+                          requires_grad=False)
+        g_idx.vllm_parameter = RowvLLMParameter(data=g_idx,
+                                                input_dim=0,
+                                                weight_loader=weight_loader)
 
-        qzeros_args = {
-            "data":
-            torch.empty(
-                scales_and_zp_size,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            "weight_loader":
-            weight_loader
-        }
-        weight_scale_args = {
-            "data":
-            torch.empty(
-                scales_and_zp_size,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
-            "weight_loader":
-            weight_loader
-        }
+        qzeros = Parameter(torch.empty(
+            scales_and_zp_size,
+            output_size_per_partition // self.quant_config.pack_factor,
+            dtype=torch.int32,
+        ),
+                           requires_grad=False)
+        qzeros_args = {"data": qzeros, "weight_loader": weight_loader}
+        scales = Parameter(torch.empty(
+            scales_and_zp_size,
+            output_size_per_partition,
+            dtype=params_dtype,
+        ),
+                           requires_grad=False)
+        weight_scale_args = {"data": scales, "weight_loader": weight_loader}
 
         if scales_and_zp_input_dim is None:
-            scales = ChannelQuantScaleParameter(output_dim=1,
-                                                **weight_scale_args)
-            qzeros = PackedColumnParameter(
+            scales.vllm_parameter = ChannelQuantScaleParameter(
+                output_dim=1, **weight_scale_args)
+            qzeros.vllm_parameter = PackedColumnParameter(
                 output_dim=1,
                 packed_dim=1,
                 packed_factor=self.quant_config.pack_factor,
                 **qzeros_args)
 
         else:
-            scales = GroupQuantScaleParameter(output_dim=1,
-                                              input_dim=0,
-                                              **weight_scale_args)
-            qzeros = PackedvLLMParameter(
+            scales.vllm_parameter = GroupQuantScaleParameter(
+                output_dim=1, input_dim=0, **weight_scale_args)
+            qzeros.vllm_parameter = PackedvLLMParameter(
                 input_dim=0,
                 output_dim=1,
                 packed_dim=1,

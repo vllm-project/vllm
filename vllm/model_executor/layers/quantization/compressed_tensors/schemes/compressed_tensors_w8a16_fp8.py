@@ -2,6 +2,7 @@ from typing import Callable, List, Optional
 
 import torch
 from compressed_tensors.quantization import QuantizationStrategy
+from torch.nn import Parameter
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
@@ -79,15 +80,17 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
         # WEIGHT SCALE
         if self.strategy == QuantizationStrategy.CHANNEL:
-            weight_scale = ChannelQuantScaleParameter(
-                data=torch.empty((sum(output_partition_sizes), 1),
-                                 dtype=torch.float32),
-                output_dim=0,
-                weight_loader=weight_loader)
+            weight_scale = Parameter(data=torch.empty(
+                (sum(output_partition_sizes), 1), dtype=torch.float32),
+                                     requires_grad=False)
+            weight_scale.vllm_parameter = ChannelQuantScaleParameter(
+                data=weight_scale, output_dim=0, weight_loader=weight_loader)
         elif self.strategy == QuantizationStrategy.TENSOR:
-            weight_scale = PerTensorScaleParameter(data=torch.empty(
+            weight_scale = Parameter(data=torch.empty(
                 len(output_partition_sizes), dtype=torch.float32),
-                                                   weight_loader=weight_loader)
+                                     requires_grad=False)
+            weight_scale.vllm_parameter = PerTensorScaleParameter(
+                data=weight_scale, weight_loader=weight_loader)
         else:
             raise ValueError(
                 f"Unsupported weight strategy={self.strategy}, "
@@ -98,9 +101,11 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
         # INPUT SCALE (to deal with converted checkpoints)
         if self.is_static_input_scheme:
-            input_scale = PerTensorScaleParameter(data=torch.empty(
+            input_scale = Parameter(data=torch.empty(
                 len(output_partition_sizes), dtype=torch.float32),
-                                                  weight_loader=weight_loader)
+                                    requires_grad=False)
+            input_scale.vllm_parameter = PerTensorScaleParameter(
+                data=input_scale, weight_loader=weight_loader)
             layer.register_parameter("input_scale", input_scale)
 
     def apply_weights(self,

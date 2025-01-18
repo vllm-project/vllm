@@ -1,6 +1,7 @@
 from typing import Callable, List, Optional, Set
 
 import torch
+from torch.nn import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
@@ -48,44 +49,51 @@ class QuarkW8A8Int8(QuarkScheme):
             self._kernel_backends_being_used.add(kernel_type.__name__)
 
         # WEIGHT
-        weight = ModelWeightParameter(data=torch.empty(
-            sum(output_partition_sizes),
-            input_size_per_partition,
-            dtype=torch.int8),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
+        weight = Parameter(data=torch.empty(sum(output_partition_sizes),
+                                            input_size_per_partition,
+                                            dtype=torch.int8),
+                           requires_grad=False)
+        weight.vllm_parameter = ModelWeightParameter(
+            data=weight,
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader)
 
         layer.register_parameter("weight", weight)
 
         # WEIGHT SCALE
         if self.qscheme == "per_channel":
-            weight_scale = ChannelQuantScaleParameter(
-                data=torch.empty((sum(output_partition_sizes), 1),
-                                 dtype=torch.float32),
-                output_dim=0,
-                weight_loader=weight_loader)
+            weight_scale = Parameter(data=torch.empty(
+                (sum(output_partition_sizes), 1), dtype=torch.float32),
+                                     requires_grad=False)
+            weight_scale.vllm_parameter = ChannelQuantScaleParameter(
+                data=weight_scale, output_dim=0, weight_loader=weight_loader)
         else:
             assert self.qscheme == "per_tensor"
-            weight_scale = PerTensorScaleParameter(data=torch.empty(
+            weight_scale = Parameter(data=torch.empty(
                 len(output_partition_sizes), dtype=torch.float32),
-                                                   weight_loader=weight_loader)
+                                     requires_grad=False)
+            weight_scale.vllm_parameter = PerTensorScaleParameter(
+                data=weight_scale, weight_loader=weight_loader)
         layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE
         if self.is_static_input_scheme:
-            input_scale = BasevLLMParameter(data=torch.empty(
-                1, dtype=torch.float32),
-                                            weight_loader=weight_loader)
+            input_scale = Parameter(data=torch.empty(1, dtype=torch.float32),
+                                    requires_grad=False)
+            input_scale.vllm_parameter = BasevLLMParameter(
+                data=input_scale, weight_loader=weight_loader)
             layer.register_parameter("input_scale", input_scale)
 
             if not self.input_symmetric:
                 # Note: quark stores the zp using the same dtype
                 # as the weights
                 # AZP loaded as int8 but used as int32
+                input_zero_point = Parameter(data=torch.empty(
+                    1, dtype=torch.int8),
+                                             requires_grad=False)
                 input_zero_point = BasevLLMParameter(
-                    data=torch.empty(1, dtype=torch.int8),
-                    weight_loader=weight_loader)
+                    data=input_zero_point, weight_loader=weight_loader)
                 layer.register_parameter("input_zero_point", input_zero_point)
 
         self.kernel = kernel_type(c=scaled_mm_linear_kernel_config,

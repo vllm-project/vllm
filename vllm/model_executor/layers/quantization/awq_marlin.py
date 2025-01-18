@@ -189,12 +189,14 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             input_size=input_size,
             group_size=group_size)
 
-        qweight = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
+        qweight = Parameter(data=torch.empty(
+            input_size_per_partition,
+            output_size_per_partition // self.quant_config.pack_factor,
+            dtype=torch.int32,
+        ),
+                            requires_grad=False)
+        qweight.vllm_parameter = PackedvLLMParameter(
+            data=qweight,
             input_dim=0,
             output_dim=1,
             packed_dim=1,
@@ -203,26 +205,31 @@ class AWQMarlinLinearMethod(LinearMethodBase):
 
         num_groups = input_size_per_partition // group_size
 
-        qzeros = PackedvLLMParameter(
-            data=torch.empty(
-                num_groups,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
+        qzeros = Parameter(data=torch.empty(
+            num_groups,
+            output_size_per_partition // self.quant_config.pack_factor,
+            dtype=torch.int32,
+        ),
+                           requires_grad=False)
+        qzeros.vllm_parameter = PackedvLLMParameter(
+            data=qzeros,
             input_dim=0,
             output_dim=1,
             packed_dim=1,
             packed_factor=self.quant_config.pack_factor,
             weight_loader=weight_loader)
 
-        scales = GroupQuantScaleParameter(data=torch.empty(
+        scales = Parameter(data=torch.empty(
             num_groups,
             output_size_per_partition,
             dtype=params_dtype,
         ),
-                                          input_dim=0,
-                                          output_dim=1,
-                                          weight_loader=weight_loader)
+                           requires_grad=False)
+        scales.vllm_parameter = GroupQuantScaleParameter(
+            data=scales,
+            input_dim=0,
+            output_dim=1,
+            weight_loader=weight_loader)
 
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("qzeros", qzeros)
