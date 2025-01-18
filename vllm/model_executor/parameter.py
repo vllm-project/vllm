@@ -32,7 +32,7 @@ class BasevLLMParameter:
         :param data: torch tensor with the parameter data
         :param weight_loader: weight loader callable
 
-        :returns: a torch.nn.parameter
+        :returns: None
         """
 
         # During weight loading, we often do something like:
@@ -50,6 +50,10 @@ class BasevLLMParameter:
         self._weight_loader = weight_loader
         self.data = data
         self.data.weight_loader = self.weight_loader
+        self.data.load_column_parallel_weight = self.load_column_parallel_weight
+        self.data.load_row_parallel_weight = self.load_row_parallel_weight
+        self.data.load_merged_column_weight = self.load_merged_column_weight
+        self.data.load_qkv_weight = self.load_qkv_weight
 
     @property
     def weight_loader(self):
@@ -92,6 +96,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
     def __init__(self, output_dim: int, **kwargs):
         self._output_dim = output_dim
         super().__init__(**kwargs)
+        self.data.output_dim = self.output_dim
 
     @property
     def output_dim(self):
@@ -163,6 +168,7 @@ class RowvLLMParameter(BasevLLMParameter):
     def __init__(self, input_dim: int, **kwargs):
         self._input_dim = input_dim
         super().__init__(**kwargs)
+        self.data.input_dim = self.input_dim
 
     @property
     def input_dim(self):
@@ -284,6 +290,9 @@ class PackedColumnParameter(_ColumnvLLMParameter):
         self._packed_dim = packed_dim
         self._marlin_tile_size = marlin_tile_size
         super().__init__(**kwargs)
+        self.data.packed_dim = self.packed_dim
+        self.data.packed_factor = self.packed_factor
+        self.data.marlin_tile_size = self.marlin_tile_size
 
     @property
     def packed_dim(self):
@@ -325,6 +334,9 @@ class PackedvLLMParameter(ModelWeightParameter):
         self._packed_dim = packed_dim
         self._marlin_tile_size = marlin_tile_size
         super().__init__(**kwargs)
+        self.data.output_dim = self.output_dim
+        self.data.packed_dim = self.packed_dim
+        self.data.packed_factor = self.packed_factor
 
     @property
     def packed_dim(self):
@@ -368,8 +380,8 @@ def permute_param_layout_(param: Parameter, input_dim: int, output_dim: int,
     required, asserting if it cannot get it to the correct layout)
     """
 
-    curr_input_dim = getattr(param.vllm_parameter, "input_dim", None)
-    curr_output_dim = getattr(param.vllm_parameter, "output_dim", None)
+    curr_input_dim = getattr(param, "input_dim", None)
+    curr_output_dim = getattr(param, "output_dim", None)
 
     if curr_input_dim is None or curr_output_dim is None:
         assert param.data.dim() == 2,\
@@ -398,8 +410,8 @@ def permute_param_layout_(param: Parameter, input_dim: int, output_dim: int,
     perm.insert(output_dim, curr_output_dim)
 
     if "packed_dim" in kwargs:
-        assert hasattr(param.vllm_parameter, "packed_dim") and\
-            param.vllm_parameter.packed_dim == perm[kwargs["packed_dim"]],\
+        assert hasattr(param, "packed_dim") and\
+            param.packed_dim == perm[kwargs["packed_dim"]],\
             "permute_param_layout_ currently doesn't support repacking"
 
     param.data = param.data.permute(*perm)

@@ -361,8 +361,7 @@ class ColumnParallelLinear(LinearBase):
         if len(loaded_weight.shape) == 0:
             assert loaded_weight.numel() == 1
             loaded_weight = loaded_weight.reshape(1)
-        param.vllm_parameter.load_column_parallel_weight(
-            loaded_weight=loaded_weight)
+        param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(self, input_):
         bias = self.bias if not self.skip_bias_add else None
@@ -647,11 +646,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
             shard_size = self.output_sizes[loaded_shard_id] // tp_size
 
-        param.vllm_parameter.load_merged_column_weight(
-            loaded_weight=loaded_weight,
-            shard_id=loaded_shard_id,
-            shard_offset=shard_offset,
-            shard_size=shard_size)
+        param.load_merged_column_weight(loaded_weight=loaded_weight,
+                                        shard_id=loaded_shard_id,
+                                        shard_offset=shard_offset,
+                                        shard_size=shard_size)
 
 
 class QKVParallelLinear(ColumnParallelLinear):
@@ -797,12 +795,11 @@ class QKVParallelLinear(ColumnParallelLinear):
         shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
         shard_size = self._get_shard_size_mapping(loaded_shard_id)
 
-        param.vllm_parameter.load_qkv_weight(
-            loaded_weight=loaded_weight,
-            num_heads=self.num_kv_head_replicas,
-            shard_id=loaded_shard_id,
-            shard_offset=shard_offset,
-            shard_size=shard_size)
+        param.load_qkv_weight(loaded_weight=loaded_weight,
+                              num_heads=self.num_kv_head_replicas,
+                              shard_id=loaded_shard_id,
+                              shard_offset=shard_offset,
+                              shard_size=shard_size)
 
     def weight_loader(self,
                       param: Parameter,
@@ -1104,8 +1101,7 @@ class RowParallelLinear(LinearBase):
             assert loaded_weight.numel() == 1
             loaded_weight = loaded_weight.reshape(1)
 
-        param.vllm_parameter.load_row_parallel_weight(
-            loaded_weight=loaded_weight)
+        param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(self, input_):
         if self.input_is_parallel:
