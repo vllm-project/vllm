@@ -490,6 +490,26 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
+set(VLLM_CUMEM_EXT_SRC
+  "csrc/cumem_allocator.cpp")
+
+set_gencode_flags_for_srcs(
+  SRCS "${VLLM_CUMEM_EXT_SRC}"
+  CUDA_ARCHS "${CUDA_ARCHS}")
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  message(STATUS "Enabling cumem allocator extension.")
+  define_gpu_extension_target(
+    cumem_allocator
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_CUMEM_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    USE_SABI 3
+    WITH_SOABI)
+endif()
+
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
