@@ -194,11 +194,13 @@ set_gencode_flags_for_srcs(
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   message(STATUS "Enabling cumem allocator extension.")
+  list(APPEND CUMEM_LIBS cuda)
   define_gpu_extension_target(
     cumem_allocator
     DESTINATION vllm
     LANGUAGE CXX
     SOURCES ${VLLM_CUMEM_EXT_SRC}
+    LIBRARIES ${CUMEM_LIBS}
     USE_SABI 3.8
     WITH_SOABI)
 endif()
