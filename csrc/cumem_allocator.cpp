@@ -103,7 +103,7 @@ PyObject* create_tuple_from_c_integers(unsigned long long a,
 // ---------------------------------------------------------------------------
 // Our exported C functions that call Python:
 
-void* my_malloc(ssize_t size, int device, cudaStream_t stream) {
+void* my_malloc(ssize_t size, int device, CUstream stream) {
   ensure_context(device);
 
   // first allocation, align the size, and reserve an address, and also allocate
@@ -162,7 +162,7 @@ void* my_malloc(ssize_t size, int device, cudaStream_t stream) {
   return (void*)d_mem;
 }
 
-void my_free(void* ptr, ssize_t size, int device, cudaStream_t stream) {
+void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   // get memory handle from the pointer
   if (!g_python_free_callback) {
     std::cerr << "ERROR: g_python_free_callback not set.\n";
