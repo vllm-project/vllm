@@ -776,7 +776,7 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
     ) -> None:
         config = vllm_config.model_config.hf_config
         # Initialize VL
-        if hasattr(config, "visual"):
+        if hasattr(config, "vision_config"):
             return ChatGLMV(vllm_config=vllm_config, prefix=prefix)
         # Initialize LLM
         else:
