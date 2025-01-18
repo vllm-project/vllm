@@ -598,8 +598,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # Special case for Quantization.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
-            # if isinstance(param, (PackedColumnParameter, PackedvLLMParameter
-            #                       )) and param.packed_dim == param.output_dim:
             if isinstance(param, (PackedColumnParameter, PackedvLLMParameter
                                   )) and param.packed_dim == param.output_dim:
                 shard_size, shard_offset = \

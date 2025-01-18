@@ -25,10 +25,6 @@ class BasevLLMParameter:
     into the parameter when the provided weight loader is called.
     """
 
-    # def __new__(cls, data: torch.Tensor, **kwargs):
-
-    #     return super().__new__(cls, data=data, requires_grad=False)
-
     def __init__(self, data: Parameter, weight_loader: Callable, **kwargs):
         """
         Initialize the BasevLLMParameter
