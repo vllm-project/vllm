@@ -35,13 +35,15 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
 
         cuda_device_count = cuda_device_count_stateless()
         # Use confusing message for more common TP-only case.
-        assert tensor_parallel_size <= cuda_device_count, (
-            f"please set tensor_parallel_size ({tensor_parallel_size}) "
-            f"to less than max local gpu count ({cuda_device_count})")
+        if tensor_parallel_size > cuda_device_count:
+            raise RuntimeError(
+                f"please set tensor_parallel_size ({tensor_parallel_size}) "
+                f"to less than max local gpu count ({cuda_device_count})")
 
-        assert world_size <= cuda_device_count, (
-            f"please ensure that world_size ({world_size}) "
-            f"is less than than max local gpu count ({cuda_device_count})")
+        if world_size > cuda_device_count:
+            raise RuntimeError(
+                f"please ensure that world_size ({world_size}) "
+                f"is less than than max local gpu count ({cuda_device_count})")
 
         # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
         if "CUDA_VISIBLE_DEVICES" not in os.environ:
