@@ -944,7 +944,6 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
 
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
                                  ):
-    _placeholder_map: Optional[dict[str, list[int]]] = None
 
     def _get_data_parser(self) -> MultiModalDataParser:
         return Qwen2MultiModalDataParser()
@@ -959,15 +958,12 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
         image_processor = self.info.get_image_processor(
             **hf_processor_mm_kwargs)
 
-        if not self._placeholder_map:
-            # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
-            # image_token and video_token registered
-            encode_fn = hf_processor.tokenizer.encode
-            self._placeholder_map = {
-                "image": encode_fn(hf_processor.image_token),
-                "video": encode_fn(hf_processor.video_token),
-            }
-        placeholder = self._placeholder_map
+        # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
+        # image_token and video_token registered
+        placeholder = {
+            "image": hf_processor.image_token,
+            "video": hf_processor.video_token,
+        }
 
         merge_length = image_processor.merge_size**2
 

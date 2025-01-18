@@ -141,6 +141,7 @@ class GPUModelRunner:
                                      dtype=torch.int64,
                                      device=self.device)
 
+        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.model_config.uses_mrope:
             # a permuted mrope_positions tensor satisfying the following
             #   properties to allow `torch.compile` work properly:
@@ -266,6 +267,7 @@ class GPUModelRunner:
                 output_token_ids=[],
             )
 
+            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.model_config.uses_mrope:
                 image_grid_thw = []
                 video_grid_thw = []
@@ -361,6 +363,7 @@ class GPUModelRunner:
                out=positions_np)
 
         # Calculate M-RoPE positions.
+        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.model_config.uses_mrope:
             self._calc_mrope_positions(scheduler_output)
 
@@ -411,10 +414,12 @@ class GPUModelRunner:
         self.input_ids[:total_num_scheduled_tokens].copy_(
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
         if self.model_config.uses_mrope:
+            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
                 self.mrope_positions_cpu[:, :total_num_scheduled_tokens],
                 non_blocking=True)
         else:
+            # Common case (1D positions)
             self.positions[:total_num_scheduled_tokens].copy_(
                 self.positions_cpu[:total_num_scheduled_tokens],
                 non_blocking=True)
