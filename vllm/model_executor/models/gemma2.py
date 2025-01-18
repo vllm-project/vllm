@@ -55,7 +55,6 @@ class Gemma2MLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        hidden_act: str,
         hidden_activation: str,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
@@ -68,7 +67,7 @@ class Gemma2MLP(nn.Module):
                                            hidden_size,
                                            bias=False,
                                            quant_config=quant_config)
-        if not (hidden_act == hidden_activation == "gelu_pytorch_tanh"):
+        if not (hidden_activation == "gelu_pytorch_tanh"):
             raise ValueError(
                 "Gemma2 uses `gelu_pytorch_tanh` as the hidden activation "
                 "function. Please set `hidden_act` and `hidden_activation` to "
@@ -201,7 +200,6 @@ class Gemma2DecoderLayer(nn.Module):
         self.mlp = Gemma2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
             hidden_activation=config.hidden_activation,
             quant_config=quant_config,
         )
@@ -257,6 +255,7 @@ class Gemma2Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,

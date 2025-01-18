@@ -1193,8 +1193,15 @@ class GGUFModelLoader(BaseModelLoader):
         See "Standardized tensor names" in
         https://github.com/ggerganov/ggml/blob/master/docs/gguf.md for details.
         """
-        config = model_config.hf_config
+        # NOTE: Make a copy of the config to avoid modifying the original,
+        # because we will need to revert sliding_window modifications to create
+        # dummy HF model.
+        config = copy.deepcopy(model_config.hf_config)
         model_type = config.model_type
+        # revert sliding_window modifications
+        if model_type == "gemma2" and hasattr(config,
+                                              "interleaved_sliding_window"):
+            config.sliding_window = config.interleaved_sliding_window
         # hack: ggufs have a different name than transformers
         if model_type == "cohere":
             model_type = "command-r"
