@@ -751,7 +751,6 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         image_token_id = hf_config.image_token_index
 
         # Assume that it doesn't depend on the image size
-        # check feature select strategy
         num_image_tokens = self.info.get_num_image_tokens(
             image_width=-1,
             image_height=-1,
