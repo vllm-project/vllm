@@ -11,7 +11,8 @@ from vllm.model_executor.utils import _make_synced_weight_loader
 __all__ = [
     "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
     "ModelWeightParameter", "ChannelQuantScaleParameter",
-    "GroupQuantScaleParameter", "PackedColumnParameter", "RowvLLMParameter"
+    "GroupQuantScaleParameter", "PackedColumnParameter", "RowvLLMParameter",
+    "BlockQuantScaleParameter"
 ]
 
 logger = init_logger(__name__)
