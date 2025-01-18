@@ -1,5 +1,6 @@
 // A CUDAPluggableAllocator based on cumem* APIs.
 // Important: allocation size, CUdeviceptr and CUmemGenericAllocationHandle* need to be unsigned long long
+#include <iostream>
 
 extern "C" {
 
@@ -8,7 +9,6 @@ extern "C" {
 
 #include <sys/types.h>
 #include <cuda_runtime_api.h>
-#include <iostream>
 #include <cuda.h>
 
 #define CUDA_CHECK(condition) \
