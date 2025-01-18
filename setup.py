@@ -301,6 +301,7 @@ class repackage_wheel(build_ext):
                 "vllm/vllm_flash_attn/vllm_flash_attn_c.abi3.so",
                 "vllm/vllm_flash_attn/flash_attn_interface.py",
                 "vllm/vllm_flash_attn/__init__.py",
+                "vllm/cumem_allocator.abi3.so",
                 # "vllm/_version.py", # not available in nightly wheels yet
             ]
             file_members = filter(lambda x: x.filename in files_to_copy,
