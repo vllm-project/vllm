@@ -76,24 +76,26 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.static_input_scales = not self.input_quant.dynamic
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                       hidden_size: int, intermediate_size: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
         params_dtype = torch.float8_e4m3fn
 
         # WEIGHTS
-        w13_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                    2 * intermediate_size,
-                                                    hidden_size,
-                                                    dtype=params_dtype),
+        w13_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_size,
+            dtype=params_dtype),
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
-        w2_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                   hidden_size,
-                                                   intermediate_size,
-                                                   dtype=params_dtype),
+        w2_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            dtype=params_dtype),
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
@@ -268,35 +270,37 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                              f"{WNA16_SUPPORTED_BITS}")
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                       hidden_size: int, intermediate_size: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
         assert params_dtype == torch.float16, (
             "float16 is required for MoE compressed models. Set dtype=torch.float16"  # noqa: E501
         )
 
+        intermediate_size_full = extra_weight_attrs.pop(
+            "intermediate_size_full")
+
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
-        intermediate_full = extra_weight_attrs.pop("intermediate_full")
         extra_weight_attrs.update({
             "is_transposed": True,
             "quant_method": self.strategy
         })
-        w13_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                    hidden_size //
-                                                    self.packed_factor,
-                                                    2 * intermediate_size,
-                                                    dtype=torch.int32),
+        w13_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            hidden_size // self.packed_factor,
+            2 * intermediate_size_per_partition,
+            dtype=torch.int32),
                                         requires_grad=False)
         layer.register_parameter("w13_weight_packed", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
-        w2_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                   intermediate_size //
-                                                   self.packed_factor,
-                                                   hidden_size,
-                                                   dtype=torch.int32),
+        w2_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            intermediate_size_per_partition // self.packed_factor,
+            hidden_size,
+            dtype=torch.int32),
                                        requires_grad=False)
         layer.register_parameter("w2_weight_packed", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
@@ -304,11 +308,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         # In the case where we have actorder/g_idx,
         # we do not partition the w2 scales
         load_full_w2 = self.actorder and self.group_size != -1
-        w2_scales_size = (intermediate_full
-                          if load_full_w2 else intermediate_size)
+        w2_scales_size = (intermediate_size_full
+                          if load_full_w2 else intermediate_size_per_partition)
 
-        self.is_k_full = (not self.actorder) or (intermediate_size
-                                                 == intermediate_full)
+        self.is_k_full = (not self.actorder) or (
+            intermediate_size_per_partition == intermediate_size_full)
 
         if self.strategy == "channel":
             num_groups_w2 = num_groups_w13 = 1
@@ -317,10 +321,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             num_groups_w2 = w2_scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 
-        w13_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                  num_groups_w13,
-                                                  2 * intermediate_size,
-                                                  dtype=params_dtype),
+        w13_scale = torch.nn.Parameter(torch.ones(
+            num_experts,
+            num_groups_w13,
+            2 * intermediate_size_per_partition,
+            dtype=params_dtype),
                                        requires_grad=False)
         layer.register_parameter("w13_weight_scale", w13_scale)
         set_weight_attrs(w13_scale, extra_weight_attrs)
@@ -358,7 +363,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         w2_g_idx = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                intermediate_size,
+                intermediate_size_per_partition,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -381,7 +386,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         w2_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                intermediate_size,
+                intermediate_size_per_partition,
                 dtype=torch.int32,
             ),
             requires_grad=False,
