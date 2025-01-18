@@ -5,7 +5,6 @@
 # both of them failed because of cuda context mismatch.
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
-import gc
 from contextlib import contextmanager
 from enum import Enum
 from typing import Callable, Dict, Optional, Tuple
@@ -180,8 +179,16 @@ class CuMemAllocator:
         with use_memory_pool_with_allocator(self.python_malloc_callback,
                                             self.python_free_callback):
             yield
-            gc.collect()
-            torch.cuda.empty_cache()
+            # PyTorch's bug, calling torch.cuda.empty_cache() will error
+            # when using pluggable allocator, see
+            # https://dev-discuss.pytorch.org/t/understanding-the-difference-between-the-caching-behavior-of-cuda-caching-allocator-and-pluggable-allocator/2746/5?u=youkaichao # noqa
+            # if we have some memory allocated and then freed,
+            # the memory will not be released.
+            # right now it is fine, because we only use this allocator
+            # during weight loading and kv cache creation, where we only
+            # allocate memory.
+            # TODO: we need to find a way to release the memory,
+            # i.e. calling torch.cuda.empty_cache()
             self.current_mode = old_mode
 
     def get_current_usage(self):
