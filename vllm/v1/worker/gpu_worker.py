@@ -7,6 +7,7 @@ import torch
 import torch.distributed
 
 import vllm.envs as envs
+from vllm.device_allocator.cumem import CuMemAllocator, CuMemMode
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
@@ -77,6 +78,14 @@ class Worker:
         else:
             self.profiler = None
 
+    def sleep(self) -> None:
+        allocator = CuMemAllocator.get_instance()
+        allocator.sleep()
+
+    def wake_up(self) -> None:
+        allocator = CuMemAllocator.get_instance()
+        allocator.wake_up()
+
     def init_device(self):
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
@@ -110,7 +119,17 @@ class Worker:
         self.model_runner = GPUModelRunner(self.vllm_config, self.device)
 
     def load_model(self) -> None:
-        self.model_runner.load_model()
+        if self.vllm_config.model_config.enable_sleeping_mode:
+            allocator = CuMemAllocator.get_instance()
+            assert allocator.get_current_usage() == 0, (
+                "Sleep mode can only be "
+                "used for one instance per process.")
+            context = allocator.use_memory_pool(CuMemMode.OFFLOAD)
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()
+        with context:
+            self.model_runner.load_model()
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -167,7 +186,14 @@ class Worker:
 
     def initialize_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-        self.model_runner.initialize_kv_cache(kv_cache_config)
+        if self.vllm_config.model_config.enable_sleeping_mode:
+            allocator = CuMemAllocator.get_instance()
+            context = allocator.use_memory_pool(CuMemMode.DISCARD)
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()
+        with context:
+            self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:

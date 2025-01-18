@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from enum import Enum
 from typing import Dict, Optional
 
+import gc
 import torch
 from vllm_allocator_adaptor import (HandleType, create_and_map,
                                     unmap_and_release,
@@ -115,6 +116,8 @@ class CuMemAllocator:
         with use_memory_pool_with_allocator(self.python_malloc_callback,
                                             self.python_free_callback):
             yield
+            gc.collect()
+            torch.cuda.empty_cache()
             self.current_mode = old_mode
 
     def get_current_usage(self):
