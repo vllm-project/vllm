@@ -5,10 +5,10 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
-from typing import (TYPE_CHECKING, Callable, ClassVar, Deque, Dict, Iterable,
-                    List, Mapping, NamedTuple, Optional)
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
+                    Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, Union, cast, overload
+from typing import Set, Tuple, Type, Union, cast, overload
 
 import torch
 from typing_extensions import TypeVar, deprecated
@@ -457,6 +457,11 @@ class LLMEngine:
                 # JAX-style, single-process, multi-device executor.
                 from vllm.executor.uniproc_executor import UniProcExecutor
                 executor_class = UniProcExecutor
+            elif distributed_executor_backend == "external_launcher":
+                # executor with external launcher
+                from vllm.executor.uniproc_executor import (  # noqa
+                    ExecutorWithExternalLauncher)
+                executor_class = ExecutorWithExternalLauncher
         else:
             from vllm.executor.uniproc_executor import UniProcExecutor
             executor_class = UniProcExecutor
@@ -1810,6 +1815,17 @@ class LLMEngine:
 
     def stop_profile(self) -> None:
         self.model_executor.stop_profile()
+
+    def collective_rpc(self,
+                       method: Union[str, Callable],
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> List[Any]:
+        """
+        See LLM.collective_rpc for more details.
+        """
+        return self.model_executor.collective_rpc(method, timeout, args,
+                                                  kwargs)
 
     def check_health(self) -> None:
         if self.tokenizer:

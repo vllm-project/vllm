@@ -607,10 +607,12 @@ class ModelConfig:
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
 
-        if (self.hf_config.model_type == 'deepseek_v3'
+        MODEL_NOT_SUPPORT_CUDA_GRAPH = ['deepseek_v3', 'mllama']
+        if (self.hf_config.model_type in MODEL_NOT_SUPPORT_CUDA_GRAPH
                 and not self.enforce_eager):
-            logger.warning("CUDA graph is not supported for Deepseek V3 yet, "
-                           "fallback to the eager mode.")
+            logger.warning(
+                "CUDA graph is not supported for %s yet, fallback to the eager "
+                "mode.", self.hf_config.model_type)
             self.enforce_eager = True
 
     def _verify_bnb_config(self) -> None:
@@ -733,9 +735,12 @@ class ModelConfig:
         if hasattr(self.hf_text_config,
                    "model_type") and (self.hf_text_config.model_type
                                       in ('deepseek_v2', 'deepseek_v3')):
-            # FlashAttention supports only head_size 32, 64, 128, 256,
-            # we need to pad head_size 192 to 256
-            return 256
+            qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim",
+                                       0)
+            qk_nope_head_dim = getattr(self.hf_text_config, "qk_nope_head_dim",
+                                       0)
+            if qk_rope_head_dim and qk_nope_head_dim:
+                return qk_rope_head_dim + qk_nope_head_dim
 
         if self.is_attention_free:
             return 0
@@ -1335,14 +1340,15 @@ class ParallelConfig:
         from vllm.executor.executor_base import ExecutorBase
         from vllm.platforms import current_platform
         if self.distributed_executor_backend not in (
-                "ray", "mp", "uni", None) and not (isinstance(
+                "ray", "mp", "uni",
+                "external_launcher", None) and not (isinstance(
                     self.distributed_executor_backend, type) and issubclass(
                         self.distributed_executor_backend, ExecutorBase)):
             raise ValueError(
                 "Unrecognized distributed executor backend "
                 f"{self.distributed_executor_backend}. Supported "
-                "values are 'ray', 'mp' 'uni', or custom ExecutorBase"
-                " subclass.")
+                "values are 'ray', 'mp' 'uni', 'external_launcher' or"
+                " custom ExecutorBase subclass.")
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
@@ -3168,7 +3174,8 @@ class VllmConfig:
 
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
-        if envs.VLLM_USE_V1 and not self.model_config.enforce_eager:
+        if envs.VLLM_USE_V1 and self.model_config is not None and \
+            not self.model_config.enforce_eager:
             # NOTE(woosuk): Currently, we use inductor because the piecewise
             # CUDA graphs do not work properly with the custom CUDA kernels.
             # FIXME(woosuk): Disable inductor to reduce the compilation time

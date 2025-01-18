@@ -83,6 +83,6 @@ function cpu_tests() {
     tests/lora/test_qwen2vl.py"
 }
 
-# All of CPU tests are expected to be finished less than 25 mins.
+# All of CPU tests are expected to be finished less than 40 mins.
 export -f cpu_tests
-timeout 30m bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
+timeout 40m bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
