@@ -171,25 +171,25 @@ def fused_moe_kernel_gptq_awq(
             offs_bn[None, :] * stride_bsn + \
             ((offs_k[:, None] + BLOCK_SIZE_K * k) // group_size) * stride_bsk
         b_scale = tl.load(b_scale_ptrs, mask=k_mask, other=k_other)
-        b_scale = b_scale.to(compute_type)
+        b_scale = b_scale.to(tl.float32)
 
         if has_zp and use_int4_w8a16:
             b_zp_ptrs = b_zp_ptr + off_experts * stride_bze + \
                 (offs_bn[None, :] // 2) * stride_bzn + \
                 ((offs_k[:, None] + BLOCK_SIZE_K * k) // group_size) * stride_bzk
             b_zp = tl.load(b_zp_ptrs, mask=k_mask, other=k_other)
-            b_zp = ((b_zp >> b_zp_shifter) & 0xF).to(compute_type)
-            b_zp = b_zp.to(compute_type)
+            b_zp = ((b_zp >> b_zp_shifter) & 0xF)
+            b_zp = b_zp.to(tl.float32)
         elif has_zp and use_int8_w8a16:
             b_zp_ptrs = b_zp_ptr + off_experts * stride_bze + \
                 offs_bn[None, :] * stride_bzn + \
                 ((offs_k[:, None] + BLOCK_SIZE_K * k) // group_size) * stride_bzk
             b_zp = tl.load(b_zp_ptrs, mask=k_mask, other=k_other)
-            b_zp = b_zp.to(compute_type)
+            b_zp = b_zp.to(tl.float32)
 
         # We accumulate along the K dimension.
-        accumulator = tl.dot(a, (b.to(compute_type) - b_zp) * b_scale,
-                             acc=accumulator)
+        b = ((b.to(tl.float32) - b_zp) * b_scale).to(compute_type)
+        accumulator = tl.dot(a, b, acc=accumulator)
 
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
