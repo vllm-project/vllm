@@ -143,10 +143,12 @@ class GPUModelRunner:
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.model_config.uses_mrope:
-            # a permuted mrope_positions tensor satisfying the following
-            #   properties to allow `torch.compile` work properly:
+            # NOTE: `mrope_positions` is implemented as a permuted tensor to
+            # satisfy the following properties to allow `torch.compile` to work
+            # properly:
             # - shape: (3, <variable>)
-            # - stride: (1, <variable>)
+            # - stride: (1, 3)
+            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1921022256
 
             self.mrope_positions = torch.zeros((self.max_num_tokens, 3),
                                                dtype=torch.int64,
