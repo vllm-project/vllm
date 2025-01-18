@@ -56,10 +56,10 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .ipex_quant import IPEXConfig
     from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config
+    from .moe_quant_int import MoeQuantIntConfig
     from .neuron_quant import NeuronQuantConfig
     from .qqq import QQQConfig
     from .tpu_int8 import Int8TpuConfig
-    from .moe_quant_int import MoeQuantIntConfig
 
     method_to_config: Dict[str, Type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,

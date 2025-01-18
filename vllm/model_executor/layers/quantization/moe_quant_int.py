@@ -7,12 +7,12 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (
     LinearBase, UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization.awq_marlin import (
+    AWQMarlinConfig, AWQMarlinLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig, GPTQMarlinLinearMethod)
-from vllm.model_executor.layers.quantization.awq_marlin import (
-    AWQMarlinConfig, AWQMarlinLinearMethod)
 from vllm.model_executor.utils import set_weight_attrs
 
 
