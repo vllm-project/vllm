@@ -104,11 +104,11 @@ class MoeQuantIntConfig(QuantizationConfig):
             return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
             if self.linear_quant_method == "gptq":
-                config = GPTQMarlinConfig.from_config(self.full_config)
-                return GPTQMarlinLinearMethod(config)
+                gptq_config = GPTQMarlinConfig.from_config(self.full_config)
+                return GPTQMarlinLinearMethod(gptq_config)
             elif self.linear_quant_method == "awq":
-                config = AWQMarlinConfig.from_config(self.full_config)
-                return AWQMarlinLinearMethod(config)
+                awq_config = AWQMarlinConfig.from_config(self.full_config)
+                return AWQMarlinLinearMethod(awq_config)
             else:
                 raise ValueError("moe_quant_int only support gptq and awq.")
         elif isinstance(layer, FusedMoE):

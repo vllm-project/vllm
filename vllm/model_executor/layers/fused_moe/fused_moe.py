@@ -557,8 +557,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         )
 
     else:
-        ndim = lambda x: 0 if x is None else x.ndim
-
         fused_moe_kernel[grid](
             A,
             B,
