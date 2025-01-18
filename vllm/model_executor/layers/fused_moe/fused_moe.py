@@ -136,9 +136,9 @@ def fused_moe_kernel_gptq_awq(
             offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn
 
     if not has_zp and use_int4_w8a16:
-        b_zp = 8
+        b_zp_num = 8
     if not has_zp and use_int8_w8a16:
-        b_zp = 128
+        b_zp_num = 128
     elif has_zp and use_int4_w8a16:
         b_zp_shifter = (offs_bn[None, :] % 2) * 4
 
@@ -190,7 +190,10 @@ def fused_moe_kernel_gptq_awq(
             b_zp = b_zp.to(tl.float32)
 
         # We accumulate along the K dimension.
-        b = ((b.to(tl.float32) - b_zp) * b_scale).to(compute_type)
+        if has_zp:
+            b = ((b.to(tl.float32) - b_zp) * b_scale).to(compute_type)
+        else:
+            b = ((b.to(tl.float32) - b_zp_num) * b_scale).to(compute_type)
         accumulator = tl.dot(a, b, acc=accumulator)
 
         # Advance the ptrs to the next K block.
@@ -579,9 +582,9 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             C.stride(2),
             A_scale.stride(0) if ndim(A_scale) == 2 else 0,
             A_scale.stride(1) if ndim(A_scale) == 2 else 0,
-            B_scale.stride(0) if ndim(A_scale) >= 2 else 0,
-            B_scale.stride(2) if ndim(A_scale) == 3 else 0,
-            B_scale.stride(1) if ndim(A_scale) >= 2 else 0,
+            B_scale.stride(0) if ndim(B_scale) >= 2 else 0,
+            B_scale.stride(2) if ndim(B_scale) == 3 else 0,
+            B_scale.stride(1) if ndim(B_scale) >= 2 else 0,
             0 if block_shape is None else block_shape[0],
             0 if block_shape is None else block_shape[1],
             MUL_ROUTED_WEIGHT=mul_routed_weight,

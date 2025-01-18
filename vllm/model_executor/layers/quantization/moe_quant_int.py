@@ -29,8 +29,13 @@ class MoeQuantIntConfig(QuantizationConfig):
         self.bit8_pack_factor = 8 // self.weight_bits
         self.lm_head_quantized = lm_head_quantized
         self.linear_quant_method = linear_quant_method
-        self.modules_to_not_convert = modules_to_not_convert
 
+        if modules_to_not_convert is None:
+            self.modules_to_not_convert = []
+        else:
+            self.modules_to_not_convert = modules_to_not_convert
+
+        self.linear_quant_config: GPTQMarlinConfig | AWQMarlinConfig
         if self.linear_quant_method == "gptq":
             self.linear_quant_config = GPTQMarlinConfig.from_config(
                 full_config)
