@@ -34,9 +34,14 @@ envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
-if not sys.platform.startswith("linux"):
+if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
     logger.warning(
-        "vLLM only supports Linux platform (including WSL). "
+        "VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
+    VLLM_TARGET_DEVICE = "cpu"
+elif not (sys.platform.startswith("linux")
+          or sys.platform.startswith("darwin")):
+    logger.warning(
+        "vLLM only supports Linux platform (including WSL) and MacOS."
         "Building on %s, "
         "so vLLM may not be able to run correctly", sys.platform)
     VLLM_TARGET_DEVICE = "empty"
@@ -252,7 +257,7 @@ class cmake_build_ext(build_ext):
 
 class repackage_wheel(build_ext):
     """Extracts libraries and other files from an existing wheel."""
-    default_wheel = "https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+    default_wheel = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
 
     def run(self) -> None:
         wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION",
@@ -319,21 +324,26 @@ class repackage_wheel(build_ext):
 
 
 def _is_hpu() -> bool:
-    is_hpu_available = True
+    # if VLLM_TARGET_DEVICE env var was set explicitly, skip HPU autodetection
+    if os.getenv("VLLM_TARGET_DEVICE", None) == VLLM_TARGET_DEVICE:
+        return VLLM_TARGET_DEVICE == "hpu"
+
+    # if VLLM_TARGET_DEVICE was not set explicitly, check if hl-smi succeeds,
+    # and if it doesn't, check if habanalabs driver is loaded
+    is_hpu_available = False
     try:
-        subprocess.run(["hl-smi"], capture_output=True, check=True)
+        out = subprocess.run(["hl-smi"], capture_output=True, check=True)
+        is_hpu_available = out.returncode == 0
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
-        if not os.path.exists('/dev/accel/accel0') and not os.path.exists(
-                '/dev/accel/accel_controlD0'):
-            # last resort...
+        if sys.platform.startswith("linux"):
             try:
                 output = subprocess.check_output(
                     'lsmod | grep habanalabs | wc -l', shell=True)
                 is_hpu_available = int(output) > 0
             except (ValueError, FileNotFoundError, PermissionError,
                     subprocess.CalledProcessError):
-                is_hpu_available = False
-    return is_hpu_available or VLLM_TARGET_DEVICE == "hpu"
+                pass
+    return is_hpu_available
 
 
 def _no_device() -> bool:
@@ -462,13 +472,9 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
-    # TODO: Revisit this temporary approach: https://github.com/vllm-project/vllm/issues/9182#issuecomment-2404860236
-    try:
-        version = get_version(
-            write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
-        )
-    except LookupError:
-        version = "0.0.0"
+    version = get_version(
+        write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
+    )
 
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 

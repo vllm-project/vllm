@@ -24,11 +24,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges,
-                                   repeat_and_pad_placeholder_tokens,
-                                   resolve_visual_encoder_outputs)
+                                   repeat_and_pad_placeholder_tokens)
 from vllm.sequence import SequenceData
 
-from .vision import VisionEncoderInfo
+from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
 
 def get_siglip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -171,14 +170,17 @@ class SiglipEncoderInfo(VisionEncoderInfo[SiglipVisionConfig]):
     def get_max_image_tokens(self) -> int:
         return get_max_siglip_image_tokens(self.vision_config)
 
-    def get_num_patches(self) -> int:
+    def get_image_size(self) -> int:
+        return self.vision_config.image_size
+
+    def get_patch_size(self) -> int:
+        return self.vision_config.patch_size
+
+    def get_patch_grid_length(self) -> int:
         return get_siglip_patch_grid_length(
             image_size=self.vision_config.image_size,
             patch_size=self.vision_config.patch_size,
         )
-
-    def get_image_size(self) -> int:
-        return self.vision_config.image_size
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.43.3/src/transformers/models/siglip/modeling_siglip.py#L249 # noqa

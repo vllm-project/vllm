@@ -1,3 +1,4 @@
+import contextlib
 import os
 import warnings
 from pathlib import Path
@@ -19,6 +20,19 @@ logger = init_logger(__name__)
 
 AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
                      MistralTokenizer]
+
+
+def decode_tokens(
+    tokenizer: AnyTokenizer,
+    token_ids: list[int],
+    *,
+    skip_special_tokens: bool = False,
+) -> str:
+    """
+    Backend-agnostic equivalent of HF's
+    :code:`tokenizer.decode(token_ids, skip_special_tokens=...)`.
+    """
+    return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
 
 
 def encode_tokens(
@@ -54,7 +68,15 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
         tokenizer.all_special_tokens_extended)
     tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
     tokenizer_len = len(tokenizer)
+
     max_token_id = max(tokenizer.get_vocab().values())
+    # Some tokenizers (e.g., QwenTokenizer) have special tokens that
+    # are added and included in the implementation of the vocab_size
+    # property, but not in get_vocab(); if there is an implementation
+    # of vocab size, we should take the greater value.
+    if hasattr(tokenizer, "vocab_size"):
+        with contextlib.suppress(NotImplementedError):
+            max_token_id = max(max_token_id, tokenizer.vocab_size)
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
 

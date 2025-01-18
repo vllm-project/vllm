@@ -305,15 +305,7 @@ class GroupCoordinator:
             stream.wait_stream(curr_stream)
 
         with torch.cuda.stream(stream), maybe_ca_context:
-            pynccl_comm = self.pynccl_comm
-            maybe_pynccl_context: Any
-            if not pynccl_comm:
-                maybe_pynccl_context = nullcontext()
-            else:
-                maybe_pynccl_context = pynccl_comm.change_state(
-                    stream=torch.cuda.current_stream())
-            with maybe_pynccl_context:
-                yield graph_capture_context
+            yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         """
@@ -365,10 +357,7 @@ class GroupCoordinator:
             return out
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
-        # TODO: pynccl should not use `stream=`
-        # it can just always use the current stream.
-        out = pynccl_comm.all_reduce(input_,
-                                     stream=torch.cuda.current_stream())
+        out = pynccl_comm.all_reduce(input_)
         if out is None:
             # fall back to the default all-reduce using PyTorch.
             # this usually happens during testing.
@@ -873,12 +862,14 @@ def init_model_parallel_group(
 ) -> GroupCoordinator:
     if use_custom_allreduce is None:
         use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
+    from vllm.platforms import current_platform
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
         torch_distributed_backend=backend,
-        use_pynccl=True,
-        use_custom_allreduce=use_custom_allreduce,
+        use_pynccl=current_platform.is_cuda_alike(),
+        use_custom_allreduce=current_platform.is_cuda_alike()
+        and use_custom_allreduce,
         use_tpu_communicator=True,
         use_hpu_communicator=True,
         use_xpu_communicator=True,
@@ -920,7 +911,7 @@ def get_kv_transfer_group() -> kv_transfer.KVTransferAgent:
 
 
 @contextmanager
-def graph_capture():
+def graph_capture(device: torch.device):
     """
     `graph_capture` is a context manager which should surround the code that
     is capturing the CUDA graph. Its main purpose is to ensure that the
@@ -934,8 +925,9 @@ def graph_capture():
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
     """
-    with get_tp_group().graph_capture() as context, get_pp_group(
-    ).graph_capture(context):
+    context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    with get_tp_group().graph_capture(context), get_pp_group().graph_capture(
+            context):
         yield context
 
 

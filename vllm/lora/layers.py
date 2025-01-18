@@ -51,6 +51,9 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
     # marlin
     elif hasattr(base_layer, "B"):
         return base_layer.B.device
+    # HQQ marlin
+    elif hasattr(base_layer, "W_q"):
+        return base_layer.W_q.device
     else:
         raise ValueError(f"Unsupported base layer: {base_layer}")
 
@@ -405,7 +408,9 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         self.output_size = self.base_layer.output_size
         self.n_slices = 1
 
-    def forward(self, input_):
+    def forward(
+        self, input_: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward of ReplicatedLinearWithLoRA
 
         Args:
@@ -496,7 +501,9 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         bias = bias[start_idx:end_idx]
         return bias
 
-    def forward(self, input_):
+    def forward(
+        self, input_: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward of ColumnParallelLinear
 
         Args:
@@ -833,7 +840,9 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         return bias
 
-    def forward(self, input_):
+    def forward(
+        self, input_: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward of RowParallelLinear
 
         Args:
@@ -931,8 +940,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         return self.base_layer.soft_cap
 
     @property
-    def use_gather(self):
-        return self.base_layer.use_gather
+    def use_all_gather(self):
+        return self.base_layer.use_all_gather
 
     @property
     def org_vocab_size(self):

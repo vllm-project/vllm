@@ -33,7 +33,7 @@ void paged_attention_v1(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
     torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
-    int64_t max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
+    int64_t max_seq_len, const std::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, double k_scale, double v_scale,
     const int64_t tp_rank, const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
@@ -44,7 +44,7 @@ void paged_attention_v2(
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
     torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
-    int64_t max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
+    int64_t max_seq_len, const std::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, double k_scale, double v_scale,
     const int64_t tp_rank, const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
@@ -85,6 +85,8 @@ void batched_rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                               torch::Tensor& cos_sin_cache_offsets);
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
+
+void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
@@ -153,15 +155,15 @@ bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
                        torch::Tensor const& b_scales,
-                       c10::optional<torch::Tensor> const& bias);
+                       std::optional<torch::Tensor> const& bias);
 
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,
                            torch::Tensor const& a_scales,
                            torch::Tensor const& b_scales,
                            torch::Tensor const& azp_adj,
-                           c10::optional<torch::Tensor> const& azp,
-                           c10::optional<torch::Tensor> const& bias);
+                           std::optional<torch::Tensor> const& azp,
+                           std::optional<torch::Tensor> const& bias);
 
 bool cutlass_sparse_scaled_mm_supported(int64_t cuda_device_capability);
 
@@ -169,7 +171,7 @@ void cutlass_scaled_sparse_mm(torch::Tensor& out, torch::Tensor const& a,
                               torch::Tensor const& b, torch::Tensor const& e,
                               torch::Tensor const& a_scales,
                               torch::Tensor const& b_scales,
-                              c10::optional<torch::Tensor> const& bias);
+                              std::optional<torch::Tensor> const& bias);
 
 bool cutlass_sparse_compress_entry(torch::Tensor& a_compressed,
                                    torch::Tensor& e, torch::Tensor const& a);
@@ -177,11 +179,11 @@ bool cutlass_sparse_compress_entry(torch::Tensor& a_compressed,
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor const& scale,
-                              c10::optional<torch::Tensor> const& azp);
+                              std::optional<torch::Tensor> const& azp);
 
 void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                                torch::Tensor& scales,
-                               c10::optional<torch::Tensor> const& azp);
+                               std::optional<torch::Tensor> const& azp);
 
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
@@ -198,34 +200,34 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
 
 void dynamic_per_token_scaled_fp8_quant(
     torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale,
-    c10::optional<torch::Tensor> const& scale_ub);
+    std::optional<torch::Tensor> const& scale_ub);
 
 void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const torch::Tensor& A, const torch::Tensor& B,
                         const torch::Tensor& C,
-                        const c10::optional<torch::Tensor>& D_,
-                        const c10::optional<torch::Tensor>& z_,
-                        const c10::optional<torch::Tensor>& delta_bias_,
+                        const std::optional<torch::Tensor>& D_,
+                        const std::optional<torch::Tensor>& z_,
+                        const std::optional<torch::Tensor>& delta_bias_,
                         bool delta_softplus,
-                        const c10::optional<torch::Tensor>& query_start_loc,
-                        const c10::optional<torch::Tensor>& cache_indices,
-                        const c10::optional<torch::Tensor>& has_initial_state,
+                        const std::optional<torch::Tensor>& query_start_loc,
+                        const std::optional<torch::Tensor>& cache_indices,
+                        const std::optional<torch::Tensor>& has_initial_state,
                         const torch::Tensor& ssm_states, int64_t pad_slot_id);
 
 void causal_conv1d_update(const at::Tensor& x, const at::Tensor& conv_state,
                           const at::Tensor& weight,
-                          const c10::optional<at::Tensor>& bias_,
+                          const std::optional<at::Tensor>& bias_,
                           bool silu_activation,
-                          const c10::optional<at::Tensor>& cache_seqlens_,
-                          const c10::optional<at::Tensor>& conv_state_indices_,
+                          const std::optional<at::Tensor>& cache_seqlens_,
+                          const std::optional<at::Tensor>& conv_state_indices_,
                           int64_t pad_slot_id);
 
 void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
-                       const c10::optional<at::Tensor>& bias_,
-                       const c10::optional<at::Tensor>& conv_states,
-                       const c10::optional<at::Tensor>& query_start_loc,
-                       const c10::optional<at::Tensor>& cache_indices,
-                       const c10::optional<at::Tensor>& has_initial_state,
+                       const std::optional<at::Tensor>& bias_,
+                       const std::optional<at::Tensor>& conv_states,
+                       const std::optional<at::Tensor>& query_start_loc,
+                       const std::optional<at::Tensor>& cache_indices,
+                       const std::optional<at::Tensor>& has_initial_state,
                        bool silu_activation, int64_t pad_slot_id);
 
 #ifndef USE_ROCM

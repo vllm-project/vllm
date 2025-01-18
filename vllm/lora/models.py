@@ -1,10 +1,9 @@
 import copy
-import json
 import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Type
+from typing import Any, Callable, Dict, List, Optional, Sequence, Type, Union
 
 import safetensors.torch
 import torch
@@ -180,8 +179,8 @@ class LoRAModel(AdapterModel):
         cls,
         lora_dir: str,
         expected_lora_modules: List[str],
+        peft_helper: PEFTHelper,
         *,
-        max_position_embeddings: Optional[int] = None,
         lora_model_id: Optional[int] = None,
         device: str = "cuda",
         dtype: Optional[torch.dtype] = None,
@@ -196,9 +195,7 @@ class LoRAModel(AdapterModel):
             lora_dir: The local path that has lora data.
             expected_lora_modules: Name of modules that are expected to be
                 replaced by lora.
-            max_position_embeddings: Max position embedding length. Used to
-                scaling the largest context length. If None, the lora model's
-                context length is not scaled.
+            peft_helper: Loaded lora configuration information.
             lora_model_id: Lora model id. If not given, automatically set by
                 a global counter.
             device: Device where the lora model is loaded.
@@ -207,18 +204,14 @@ class LoRAModel(AdapterModel):
         Returns:
             Loaded LoRA Model.
         """
-        lora_config_path = os.path.join(lora_dir, "adapter_config.json")
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
         new_embeddings_tensor_path = os.path.join(
             lora_dir, "new_embeddings.safetensors")
         new_embeddings_bin_file_path = os.path.join(lora_dir,
                                                     "new_embeddings.bin")
-        with open(lora_config_path) as f:
-            config = json.load(f)
 
-        config["vllm_max_position_embeddings"] = max_position_embeddings
-        peft_helper = PEFTHelper.from_dict(config)
+        unexpected_modules: List[Union[list[str], str]]
         if os.path.isfile(lora_tensor_path):
             tensors: Dict[str, torch.Tensor] = {}
             # Find unexpected modules.
