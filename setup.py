@@ -594,6 +594,7 @@ if _is_hip():
 if _is_cuda():
     ext_modules.append(
         CMakeExtension(name="vllm.vllm_flash_attn.vllm_flash_attn_c"))
+    ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
