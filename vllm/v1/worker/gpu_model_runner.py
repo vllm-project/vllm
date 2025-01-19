@@ -1,11 +1,10 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Tuple, cast
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
 
 import numpy as np
 import torch
 import torch.distributed
-import torch.nn as nn
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
@@ -823,10 +822,12 @@ class GPUModelRunner:
     @torch.inference_mode()
     def _dummy_run(
         self,
-        model: nn.Module,
         num_tokens: int,
-        kv_caches: List[torch.Tensor],
+        kv_caches: Optional[List[torch.Tensor]] = None,
     ) -> torch.Tensor:
+        model = self.model
+        if kv_caches is None:
+            kv_caches = self.kv_caches
         if self.is_multimodal_model:
             input_ids = None
             inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -952,8 +953,7 @@ class GPUModelRunner:
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.model, self.max_num_tokens,
-                                        dummy_kv_caches)
+        hidden_states = self._dummy_run(self.max_num_tokens, dummy_kv_caches)
         logits = self.model.compute_logits(hidden_states, None)
         logits = logits[:self.max_num_tokens]
         # TODO(woosuk): Consider the memory usage of the sampler.
@@ -979,8 +979,8 @@ class GPUModelRunner:
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(self.model, num_tokens, self.kv_caches)
-                self._dummy_run(self.model, num_tokens, self.kv_caches)
+                    self._dummy_run(num_tokens)
+                self._dummy_run(num_tokens)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
