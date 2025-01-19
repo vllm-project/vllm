@@ -137,7 +137,7 @@ class UltravoxMultiModalProcessor(
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
-        if not mm_data:
+        if not mm_data or not mm_data.get("audios", []):
             prompt_ids = self.info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
@@ -145,13 +145,6 @@ class UltravoxMultiModalProcessor(
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
         assert isinstance(audios, list)
-
-        if not audios:
-            return super()._call_hf_processor(
-                prompt=prompt,
-                mm_data=mm_data,
-                mm_kwargs=mm_kwargs,
-            )
 
         feature_extractor = self.info.get_feature_extractor()
         mm_kwargs = dict(
