@@ -1,9 +1,10 @@
 import asyncio
 from abc import ABC, abstractmethod
 from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
-                    TypeVar, Union)
+                    Union)
 
 import torch.nn as nn
+from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -17,7 +18,7 @@ from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
-_R = TypeVar("_R")
+_R = TypeVar("_R", default=Any)
 
 
 class ExecutorBase(ABC):

@@ -2,12 +2,12 @@ import itertools
 import warnings
 from contextlib import contextmanager
 from typing import (Any, Callable, ClassVar, Dict, List, Optional, Sequence,
-                    Tuple, Type, TypeVar, Union, cast, overload)
+                    Tuple, Type, Union, cast, overload)
 
 import cloudpickle
 import torch.nn as nn
 from tqdm import tqdm
-from typing_extensions import deprecated
+from typing_extensions import TypeVar, deprecated
 
 from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
@@ -43,7 +43,7 @@ from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
 
 logger = init_logger(__name__)
 
-_R = TypeVar("_R")
+_R = TypeVar("_R", default=Any)
 
 
 class LLM:
