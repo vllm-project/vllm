@@ -61,9 +61,13 @@ def test_models(
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
+
         # This test is for verifying whether the model's extra_repr
         # can be printed correctly.
-        vllm_model.apply_model(print)
+        def print_model(model):
+            print(model)
+
+        vllm_model.apply_model(print_model)
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,
