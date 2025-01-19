@@ -135,7 +135,10 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
             # In fairseq2, vocab size has to be divisible by tp_size
             # so we don't worry about padding
             if self.tp_size > 1 and loaded_weight.shape[
-                    dim] * self.tp_size == self.config.vocab_size:
+                    dim] < self.config.vocab_size:
+                assert loaded_weight.shape[
+                    dim] * self.tp_size == self.config.vocab_size, \
+                        "vocab_size should be divisible by tp_size."
                 repeats = [1] * len(loaded_weight.size())
                 repeats[dim] = self.tp_size
                 # repeat to match vocab size and to be easily 'narrow'able
