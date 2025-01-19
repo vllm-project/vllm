@@ -3,7 +3,8 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
                     Tuple, Union)
 
-from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
+from vllm.config import(CacheConfig, LoRAConfig, 
+                        SchedulerConfig, SpeculativeConfig)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.base import PlaceholderRange
@@ -28,10 +29,12 @@ class Scheduler:
         scheduler_config: SchedulerConfig,
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
+        speculative_config: Optional[SpeculativeConfig] = None,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
+        self.speculative_config = speculative_config
         # TODO: Support LoRA.
         assert lora_config is None, "V1 does not support LoRA yet."
 

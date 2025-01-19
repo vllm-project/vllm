@@ -320,12 +320,10 @@ class GPUModelRunner:
         for i, req_id in enumerate(self.input_batch.req_ids):
             if i == num_reqs:
                 break
-            if req_id not in scheduler_output.scheduled_spec_decode_tokens:
-                continue
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            req_num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_compute_tokens = self.input_batch.num_computed_tokens_cpu[i]
-            spec_query_end_loc += num_scheduled_tokens
-            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens[req_id]
+            spec_query_end_loc += req_num_scheduled_tokens
+            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
             for j, spec_token_id in enumerate(spec_token_ids):
                 # +1 here because the input for verification is [last_output_token_id] + spec_token_ids
                 self.input_batch.token_ids_cpu[i, num_compute_tokens + 1 + j] = spec_token_id
@@ -671,7 +669,7 @@ class GPUModelRunner:
             seq_len = req_state.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id]
             # assert seq_len <= req_state.num_tokens
             if seq_len >= req_state.num_tokens:
-                print("output_token_ids", sampled_token_ids[i], req_state.num_computed_tokens)
+                print(req_state.req_id, "output_token_ids", sampled_token_ids[i], req_state.num_computed_tokens)
                 # We don't rewind the generator state for requests now
                 # because spec decode only supports greedy decoding for now.
                 token_ids = sampled_token_ids[i]

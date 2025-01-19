@@ -60,7 +60,8 @@ class EngineCore:
         # Setup scheduler.
         self.scheduler = Scheduler(vllm_config.scheduler_config,
                                    vllm_config.cache_config,
-                                   vllm_config.lora_config)
+                                   vllm_config.lora_config,
+                                   vllm_config.speculative_config)
 
         self._last_logging_time = time.time()
 
@@ -120,14 +121,15 @@ class EngineCore:
         if not self.scheduler.has_unfinished_requests():
             return []
 
-        logger.info("Running EngineCore step.")
-        # Append tokens to requests directly
-        # to mimic ngram proposal. 
-        # Only change requests in the running queue.
-        # We don't do spec decode in the prefill phase for now.
-        # We don't handle prefill kv cache for now.
-        for req in self.scheduler.running:
-            req.append_spec_token_ids([1] * 5)
+
+        if self.scheduler.speculative_config and self.scheduler.speculative_config.num_speculative_tokens > 0:
+            # Append tokens to requests directly
+            # to mimic ngram proposal. 
+            # Only change requests in the running queue.
+            # We don't do spec decode in the prefill phase for now.
+            # We don't handle spec decode kv cache for now.
+            for req in self.scheduler.running:
+                req.append_spec_token_ids([1] * self.scheduler.speculative_config.num_speculative_tokens)
             
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
