@@ -7,7 +7,6 @@
 # the only successful approach is to call cuda driver API in C.
 import dataclasses
 from contextlib import contextmanager
-from enum import Enum
 from typing import Callable, Dict, Optional, Tuple, Union
 
 import torch
@@ -128,6 +127,7 @@ class CuMemAllocator:
 
     @staticmethod
     def get_instance() -> "CuMemAllocator":
+        assert cumem_available, "cumem allocator is not available"
         if CuMemAllocator.instance is None:
             CuMemAllocator.instance = CuMemAllocator()
         return CuMemAllocator.instance
@@ -151,6 +151,8 @@ class CuMemAllocator:
     def sleep(self,
               offload_tags: Optional[Union[Tuple[str], str]] = None) -> None:
         if offload_tags is None:
+            # by default, allocated tensors are offloaded
+            # when the allocator sleeps
             offload_tags = (CuMemAllocator.default_tag, )
         elif isinstance(offload_tags, str):
             offload_tags = (offload_tags, )
@@ -184,7 +186,11 @@ class CuMemAllocator:
                     data.cpu_backup_tensor = None
 
     @contextmanager
-    def use_memory_pool(self, tag: str = ""):
+    def use_memory_pool(self, tag: Optional[str] = None):
+        if tag is None:
+            tag = CuMemAllocator.default_tag
+        else:
+            assert isinstance(tag, str)
         old_tag = self.current_tag
         self.current_tag = tag
         with use_memory_pool_with_allocator(self.python_malloc_callback,

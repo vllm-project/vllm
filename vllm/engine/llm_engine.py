@@ -1827,10 +1827,10 @@ class LLMEngine:
         return self.model_executor.collective_rpc(method, timeout, args,
                                                   kwargs)
 
-    def sleep(self) -> None:
+    def sleep(self, level: int = 1) -> None:
         assert self.vllm_config.model_config.enable_sleeping_mode, (
             "Sleeping mode is not enabled in the model config")
-        self.model_executor.sleep()
+        self.model_executor.sleep(level=level)
 
     def wake_up(self) -> None:
         assert self.vllm_config.model_config.enable_sleeping_mode, (

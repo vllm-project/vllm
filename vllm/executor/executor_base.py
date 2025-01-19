@@ -161,8 +161,8 @@ class ExecutorBase(ABC):
     def stop_profile(self) -> None:
         self.collective_rpc("stop_profile")
 
-    def sleep(self):
-        self.collective_rpc("sleep")
+    def sleep(self, level: int = 1):
+        self.collective_rpc("sleep", kwargs=dict(level=level))
 
     def wake_up(self):
         self.collective_rpc("wake_up")

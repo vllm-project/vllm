@@ -8,7 +8,7 @@ import torch.distributed
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.device_allocator.cumem import CuMemAllocator, CuMemMode
+from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_kv_transfer_initialized,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
@@ -121,9 +121,9 @@ class Worker(LocalOrDistributedWorkerBase):
             raise RuntimeError("Profiler is not enabled.")
         self.profiler.stop()
 
-    def sleep(self) -> None:
+    def sleep(self, level: int = 1) -> None:
         allocator = CuMemAllocator.get_instance()
-        allocator.sleep()
+        allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
 
     def wake_up(self) -> None:
         allocator = CuMemAllocator.get_instance()
@@ -165,7 +165,7 @@ class Worker(LocalOrDistributedWorkerBase):
             assert allocator.get_current_usage() == 0, (
                 "Sleep mode can only be "
                 "used for one instance per process.")
-            context = allocator.use_memory_pool(CuMemMode.OFFLOAD)
+            context = allocator.use_memory_pool(tag="weights")
         else:
             from contextlib import nullcontext
             context = nullcontext()
@@ -291,7 +291,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
         if self.vllm_config.model_config.enable_sleeping_mode:
             allocator = CuMemAllocator.get_instance()
-            context = allocator.use_memory_pool(CuMemMode.DISCARD)
+            context = allocator.use_memory_pool(tag="kv_cache")
         else:
             from contextlib import nullcontext
             context = nullcontext()

@@ -1112,8 +1112,20 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def sleep(self):
-        self.llm_engine.sleep()
+    def sleep(self, level: int = 1):
+        """
+        Put the engine to sleep. The engine will not process any requests.
+        Level 1 sleep will offload the model weights, and discard the kv cache.
+            The content of kv cache is forgotten. Level 1 sleep is good for
+            sleep and wake up the engine and run the same model again. The model
+            weights are backed up in CPU memory.
+        Level 2 sleep will discard both the model weights and the kv cache.
+            The content of both the model weights and kv cache is forgotten.
+            Level 2 sleep is good for sleep and wake up the engine and run
+            a different model or update the model, where previous model weights
+            are not needed. It reduces CPU memory pressure.
+        """
+        self.llm_engine.sleep(level=level)
 
     def wake_up(self):
         self.llm_engine.wake_up()
