@@ -58,11 +58,23 @@ class ExecutorBase(ABC):
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
         """
-        The main interface of the executor to run a method on all workers.
+        Execute an RPC call on all workers.
 
-        If the args are heterogeneous, then we can pack them into a list,
-        and unpack them in the method of every worker, because every worker
-        knows their own rank.
+        Args:
+            method: Name of the worker method to execute, or a callable that
+                is serialized and sent to all workers to execute.
+
+                If the method is a callable, it should accept an additional
+                `self` argument, in addition to the arguments passed in `args`
+                and `kwargs`. The `self` argument will be the worker object.
+            timeout: Maximum time in seconds to wait for execution. Raises a
+                :exc:`TimeoutError` on timeout. `None` means wait indefinitely.
+            args: Positional arguments to pass to the worker method.
+            kwargs: Keyword arguments to pass to the worker method.
+        
+        Note:
+            It is recommended to use this API to only pass control messages,
+            and set up data-plane communication to pass data.
         """
         raise NotImplementedError
 

@@ -469,7 +469,7 @@ class LLM:
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
         """
-        Execute an RPC call on workers.
+        Execute an RPC call on all workers.
 
         Args:
             method: Name of the worker method to execute, or a callable that

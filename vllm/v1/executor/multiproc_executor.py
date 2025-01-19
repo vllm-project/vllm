@@ -97,6 +97,9 @@ class MultiprocExecutor(Executor):
         start_time = time.monotonic()
         kwargs = kwargs or {}
 
+        # NOTE: If the args are heterogeneous, then we pack them into a list,
+        # and unpack them in the method of every worker, because every worker
+        # knows their own rank.
         try:
             if isinstance(method, str):
                 send_method = method
