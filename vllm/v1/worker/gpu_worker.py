@@ -8,7 +8,7 @@ import torch.distributed
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
-from vllm.device_allocator.cumem import CuMemAllocator, CuMemMode
+from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -188,7 +188,7 @@ class Worker:
         """Allocate GPU KV cache with the specified kv_cache_config."""
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
-            context = allocator.use_memory_pool(CuMemMode.DISCARD)
+            context = allocator.use_memory_pool(tag="kv_cache")
         else:
             from contextlib import nullcontext
             context = nullcontext()
