@@ -490,7 +490,8 @@ class LLM:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
         """
-        return self.llm_engine.collective_rpc(method, timeout, args, kwargs)
+        executor = self.llm_engine.model_executor
+        return executor.collective_rpc(method, timeout, args, kwargs)
 
     def beam_search(
         self,

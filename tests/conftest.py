@@ -931,7 +931,14 @@ class VllmRunner:
         return [req_output.outputs.score for req_output in req_outputs]
 
     def get_torch_model(self) -> nn.Module:
-        return self.model.llm_engine.get_torch_model()
+        """
+        Get the PyTorch model that is being run inside vLLM.
+
+        Note:
+            This is not compatible with tensor and pipeline parallelism.
+        """
+        executor = self.model.llm_engine.model_executor
+        return executor.get_torch_model()
 
     def __enter__(self):
         return self

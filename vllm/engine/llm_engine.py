@@ -5,13 +5,12 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
-                    Iterable, List, Mapping, NamedTuple, Optional)
+from typing import (TYPE_CHECKING, Callable, ClassVar, Deque, Dict, Iterable,
+                    List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple, Type, Union, cast, overload
+from typing import Set, Type, Union, cast, overload
 
 import torch
-import torch.nn as nn
 from typing_extensions import TypeVar, deprecated
 
 import vllm.envs as envs
@@ -1816,32 +1815,6 @@ class LLMEngine:
 
     def stop_profile(self) -> None:
         self.model_executor.stop_profile()
-
-    def collective_rpc(self,
-                       method: Union[str, Callable],
-                       timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
-        """See :meth:`vllm.executor.ExecutorBase.collective_rpc`."""
-        return self.model_executor.collective_rpc(method, timeout, args,
-                                                  kwargs)
-
-    def get_torch_model(self) -> nn.Module:
-        """
-        Get the PyTorch model that is being run inside vLLM.
-
-        Note:
-            This is only valid when the model is loaded on a single worker.
-            If multiple workers are being created (e.g. when you are using
-            tensor or pipeline parallelism), please use :meth:`apply_to_model`
-            instead.
-        """
-        models = self.model_executor.apply_to_model(lambda x: x)
-        if len(models) > 1:
-            raise RuntimeError("`get_torch_model()` is only valid when a "
-                               "single worker is used.")
-
-        return models[0]
 
     def check_health(self) -> None:
         if self.tokenizer:
