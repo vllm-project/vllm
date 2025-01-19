@@ -8,7 +8,7 @@
 #include "../cuda_compat.h"
 #include "../dispatch_utils.h"
 
-#define CEILDIV(x, y) (((x) + (y) - 1) / (y))
+#define CEILDIV(x, y) (((x) + (y)-1) / (y))
 
 namespace vllm {
 namespace moe {
@@ -237,8 +237,9 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
           // tensors
           const int32_t num_thread = max((int32_t)num_experts, WARP_SIZE);
 
-          auto options_int =
-              torch::TensorOptions().dtype(torch::kInt).device(topk_ids.device());
+          auto options_int = torch::TensorOptions()
+                                 .dtype(torch::kInt)
+                                 .device(topk_ids.device());
           torch::Tensor token_cnts_buffer =
               torch::empty({(num_experts + 1) * num_experts}, options_int);
           torch::Tensor cumsum_buffer =
