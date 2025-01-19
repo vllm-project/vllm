@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Tuple, cast
+from typing import TYPE_CHECKING, Dict, List, Tuple, cast, Optional
 
 import numpy as np
 import torch
@@ -264,7 +264,8 @@ class GPUModelRunner:
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-    def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
+    def _prepare_inputs(self, scheduler_output: "SchedulerOutput") \
+                        -> Tuple[FlashAttentionMetadata, torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -278,7 +279,9 @@ class GPUModelRunner:
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens = []
         max_num_scheduled_tokens = 0
-        for req_id in self.input_batch.req_ids[:num_reqs]:
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            if i == num_reqs:
+                break
             assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_scheduled_tokens.append(num_tokens)
@@ -309,6 +312,24 @@ class GPUModelRunner:
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
+        
+        # Add spec decode tokens to input_batch.token_ids_cpu.
+        # Get spec decode logits indices.
+        spec_query_end_loc = 0
+        spec_decode_logits_indices = []
+        for i, req_id in enumerate(self.input_batch.req_id):
+            if i == num_reqs:
+                break
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_compute_tokens = self.input_batch.num_computed_tokens_cpu[i]
+            spec_query_end_loc += num_scheduled_tokens
+            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens[req_id]
+            for j, spec_token_id in enumerate(spec_token_ids):
+                # +1 here because the input for verification is [last_output_token_id] + spec_token_ids
+                self.input_batch.token_ids_cpu[i, num_compute_tokens + 1 + j] = spec_token_id
+            # -1 here because the input for verification is [last_output_token_id] + spec_token_ids
+            spec_decode_logits_indices.extend(range(spec_query_end_loc - len(spec_token_ids) - 1, spec_query_end_loc))
+                
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
@@ -454,12 +475,16 @@ class GPUModelRunner:
             cu_prefix_kv_lens=cu_prefix_kv_lens,
             cu_suffix_kv_lens=cu_suffix_kv_lens,
         )
-        # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
-        # request in the batch. While we should not sample any token from this
-        # partial request, we do so for simplicity. We will ignore the sampled
-        # token from the partial request.
-        # TODO: Support prompt logprobs.
-        logits_indices = query_start_loc[1:] - 1
+        
+        if scheduler_output.use_spec_decode:
+            logits_indices = torch.tensor(spec_decode_logits_indices, device=self.device)
+        else:
+            # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
+            # request in the batch. While we should not sample any token from this
+            # partial request, we do so for simplicity. We will ignore the sampled
+            # token from the partial request.
+            # TODO: Support prompt logprobs.
+            logits_indices = query_start_loc[1:] - 1    
         return attn_metadata, logits_indices
 
     def _prepare_sampling(
@@ -479,7 +504,10 @@ class GPUModelRunner:
                 for req_id, req in self.requests.items()}
 
         sampling_metadata = self.input_batch.make_sampling_metadata(
-            req_id_output_token_ids, skip_copy)
+            req_id_output_token_ids, 
+            skip_copy,
+            scheduler_output.use_spec_decode,
+            scheduler_output.scheduled_spec_decode_tokens)
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
@@ -618,6 +646,7 @@ class GPUModelRunner:
         hidden_states = hidden_states[:num_scheduled_tokens]
         hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(hidden_states, None)
+        logger.info("logits: %s", str(logits.shape))
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self._prepare_sampling(scheduler_output)
@@ -630,18 +659,21 @@ class GPUModelRunner:
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
-        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            if i == num_reqs:
+                break
             assert req_id is not None
             req_state = self.requests[req_id]
-            seq_len = (req_state.num_computed_tokens +
-                       scheduler_output.num_scheduled_tokens[req_id])
-            assert seq_len <= req_state.num_tokens
-            if seq_len == req_state.num_tokens:
-                # Append the sampled token to the output token ids.
-                token_id = sampled_token_ids[i]
-                self.input_batch.token_ids_cpu[i, seq_len] = token_id
-                self.input_batch.num_tokens[i] += 1
-                req_state.output_token_ids.append(token_id)
+            seq_len = req_state.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id]
+            # assert seq_len <= req_state.num_tokens
+            if seq_len >= req_state.num_tokens:
+                # We don't rewind the generator state for requests now
+                # because spec decode only supports greedy decoding for now.
+                token_ids = sampled_token_ids[i]
+                for j, token_id in enumerate(token_ids):
+                    self.input_batch.token_ids_cpu[i, req_state.num_computed_tokens + j] = token_id
+                self.input_batch.num_tokens[i] += len(token_ids)
+                req_state.output_token_ids.extend(token_ids)
             else:
                 # Ignore the sampled token from the partial request.
                 # Rewind the generator state as if the token was not sampled.

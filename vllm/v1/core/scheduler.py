@@ -84,8 +84,8 @@ class Scheduler:
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
-        # Each request just has the num_computed_tokens and num_tokens,
-        # which is equal to len(prompt_token_ids) + len(output_token_ids).
+        # Each request just has the num_computed_tokens and num_tokens.
+        # num_tokens  = len(prompt_token_ids) + len(output_token_ids) + len(spec_token_ids)
         # At each step, the scheduler tries to assign tokens to the requests
         # so that each request's num_computed_tokens can catch up its
         # num_tokens. This is general enough to cover chunked prefills,
@@ -101,6 +101,9 @@ class Scheduler:
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
         scheduled_encoder_inputs: Dict[str, List[int]] = {}
+        # Spec Decode-related.
+        spec_decode = False
+        scheduled_spec_decode_tokens: Dict[str, List[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
 
         # First, schedule the RUNNING requests.
@@ -116,7 +119,7 @@ class Scheduler:
             assert not has_partial_request
             assert token_budget > 0
             request = self.running[req_index]
-            num_new_tokens = request.num_tokens - request.num_computed_tokens
+            num_new_tokens = request.num_tokens_with_spec - request.num_computed_tokens
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
@@ -172,6 +175,10 @@ class Scheduler:
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
+            
+            if request.spec_token_ids:
+                spec_decode = True
+            scheduled_spec_decode_tokens[request.request_id] = request.spec_token_ids
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
@@ -295,6 +302,8 @@ class Scheduler:
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
+            use_spec_decode=spec_decode,
+            scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids=preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
@@ -399,12 +408,16 @@ class Scheduler:
     ) -> List[EngineCoreOutput]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
-        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        # num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        
         new_running: List[Request] = []
         engine_core_outputs: List[EngineCoreOutput] = []
         for request in self.running:
             req_id = request.request_id
-            request.num_computed_tokens += num_scheduled_tokens[req_id]
+            req_index = model_runner_output.req_id_to_index[req_id]
+            token_ids = sampled_token_ids[req_index]
+            request.num_computed_tokens += len(token_ids)
+            
             # When the request's num_computed_tokens catches up its num_tokens,
             # the request generates output tokens. Otherwise, we ignore the
             # sampler output for the request.
@@ -420,13 +433,10 @@ class Scheduler:
                     # in the decoder's KV cache.
                     self.encoder_cache_manager.free(request, input_id)
 
-            if request.num_computed_tokens == request.num_tokens:
-                req_index = model_runner_output.req_id_to_index[req_id]
-                # NOTE(woosuk): Currently, we assume that each request
-                # generates at most one token at each step.
-                token_id = sampled_token_ids[req_index]
-                request.append_output_token_ids(token_id)
-                num_new_tokens = 1
+            if request.num_computed_tokens >= request.num_tokens:
+                request.clear_spec_tokens()
+                request.append_output_token_ids(token_ids)
+                num_new_tokens = len(token_ids)
                 # TODO: Update the KV cache manager for prefix caching.
 
                 # Check for stop and update request state.
@@ -450,6 +460,9 @@ class Scheduler:
         self.running = new_running
         return engine_core_outputs
 
+    # TODO: the following logic does not consider
+    # when multiple tokens are generated in a 
+    # single forward pass
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len
                 or request.num_output_tokens >= request.max_tokens):
@@ -603,6 +616,8 @@ class SchedulerOutput:
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int
     scheduled_encoder_inputs: Dict[str, List[int]]
+    use_spec_decode: bool
+    scheduled_spec_decode_tokens: Dict[str, List[int]]
     num_common_prefix_blocks: int
 
     preempted_req_ids: Set[str]

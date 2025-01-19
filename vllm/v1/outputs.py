@@ -7,8 +7,9 @@ import torch
 @dataclass
 class SamplerOutput:
 
-    # [num_reqs]
-    sampled_token_ids: List[int]
+    # num_reqs x [num_generated_tokens]
+    # num_generated_tokens might be different for each request.
+    sampled_token_ids: List[List[int]]
 
     # [num_reqs, max_num_logprobs + 1]
     logprob_token_ids: Optional[torch.Tensor]
@@ -30,8 +31,9 @@ class ModelRunnerOutput:
     # req_id -> index
     req_id_to_index: Dict[str, int]
 
-    # [num_reqs]
-    sampled_token_ids: List[int]
+    # num_reqs x [num_generated_tokens]
+    # num_generated_tokens might be different for each request.
+    sampled_token_ids: List[List[int]]
 
     # [num_reqs, max_num_logprobs + 1]
     logprob_token_ids_cpu: Optional[torch.Tensor]

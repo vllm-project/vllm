@@ -320,6 +320,8 @@ class InputBatch:
         self,
         req_id_output_token_ids: Dict[str, List[int]],
         skip_copy: bool = False,
+        rejection_sampling: bool = False,
+        req_id_to_spec_token_ids: Optional[Dict[str, List[int]]] = None,
     ) -> SamplingMetadata:
         if not skip_copy:
             self.temperature[:self.num_reqs].copy_(
@@ -347,7 +349,7 @@ class InputBatch:
                 self.prompt_token_ids = self._make_prompt_token_ids_tensor()
 
         output_token_ids: List[List[int]] = []
-
+        spec_token_ids: List[List[int]] = []
         for req_id in self.req_ids[:self.num_reqs]:
             assert req_id is not None
             # Currently we create a tensor for output_token_ids from scratch
@@ -358,11 +360,14 @@ class InputBatch:
             # TODO - Replace this with incremental update to output token
             # statistics.
             output_token_ids.append(req_id_output_token_ids[req_id])
+            if req_id_to_spec_token_ids is not None:
+                spec_token_ids.append(req_id_to_spec_token_ids[req_id])
 
         return SamplingMetadata(
             temperature=self.temperature[:self.num_reqs],
             all_greedy=self.all_greedy,
             all_random=self.all_random,
+            rejection_sampling=rejection_sampling,
             top_p=self.top_p[:self.num_reqs],
             top_k=self.top_k[:self.num_reqs],
             no_top_p=self.no_top_p,
@@ -374,6 +379,7 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:self.num_reqs],
             repetition_penalties=self.repetition_penalties[:self.num_reqs],
             output_token_ids=output_token_ids,
+            spec_token_ids=spec_token_ids,
             min_tokens=self.min_tokens[:self.num_reqs],
             stop_token_ids=self.stop_token_ids[:self.num_reqs],
             no_penalties=self.no_penalties,
