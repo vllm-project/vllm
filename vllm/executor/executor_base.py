@@ -189,31 +189,16 @@ class ExecutorBase(ABC):
                                         pattern=pattern,
                                         max_size=max_size))
 
-    def get_torch_model(self) -> nn.Module:
+    def apply_to_models(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """
-        Get the PyTorch model that is being run inside the worker.
-
-        Note:
-            This is only valid when the model is loaded on a single worker.
-            If there are multiple workers, use :meth:`apply_to_model` instead.
-        """
-        models = self.apply_to_model(lambda x: x)
-        if len(models) > 1:
-            raise RuntimeError("`get_torch_model()` is only valid when a "
-                               "single worker is used.")
-
-        return models[0]
-
-    def apply_to_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
-        """
-        Run a function on the model inside each worker, and return
-        the result for each worker.
+        Run a function on the model inside each worker,
+        returning the result for each of them.
         """
 
-        def apply_func(worker: WorkerBase) -> _R:
+        def rpc_func(worker: WorkerBase) -> _R:
             return func(worker.get_model())
 
-        return self.collective_rpc(apply_func)
+        return self.collective_rpc(rpc_func)
 
     @abstractmethod
     def check_health(self) -> None:

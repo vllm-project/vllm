@@ -26,7 +26,7 @@ def test_classification_models(
         vllm_outputs = vllm_model.classify(example_prompts)
         # This test is for verifying whether the model's extra_repr
         # can be printed correctly.
-        print(vllm_model.get_torch_model())
+        vllm_model.apply_to_models(print)
 
     with hf_runner(model,
                    dtype=dtype,

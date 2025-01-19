@@ -244,6 +244,7 @@ def video_assets() -> _VideoAssets:
 
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
+_R = TypeVar("_R")
 
 
 class HfRunner:
@@ -930,15 +931,9 @@ class VllmRunner:
         req_outputs = self.model.score(text_1, text_2)
         return [req_output.outputs.score for req_output in req_outputs]
 
-    def get_torch_model(self) -> nn.Module:
-        """
-        Get the PyTorch model that is being run inside vLLM.
-
-        Note:
-            This is not compatible with tensor and pipeline parallelism.
-        """
+    def apply_to_models(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         executor = self.model.llm_engine.model_executor
-        return executor.get_torch_model()
+        return executor.apply_to_models(func)
 
     def __enter__(self):
         return self

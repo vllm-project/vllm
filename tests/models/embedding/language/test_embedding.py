@@ -63,7 +63,7 @@ def test_models(
         vllm_outputs = vllm_model.encode(example_prompts)
         # This test is for verifying whether the model's extra_repr
         # can be printed correctly.
-        print(vllm_model.get_torch_model())
+        vllm_model.apply_to_models(print)
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,
