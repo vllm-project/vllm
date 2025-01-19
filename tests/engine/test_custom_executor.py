@@ -9,8 +9,8 @@ from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
 from vllm.executor.uniproc_executor import UniProcExecutor
-from vllm.worker.worker import Worker
 from vllm.sampling_params import SamplingParams
+from vllm.worker.worker import Worker
 
 
 class Mock:
@@ -18,6 +18,7 @@ class Mock:
 
 
 class CustomWorker(Worker):
+
     def check_model_cls(self):
         return isinstance(self.model_runner.model, nn.Module)
 

@@ -876,14 +876,6 @@ class LLMEngine:
         for scheduler in self.scheduler:
             scheduler.abort_seq_group(request_id)
 
-    def collective_rpc(self,
-                       method: str,
-                       timeout: Optional[float] = None,
-                       args: tuple = (),
-                       kwargs: Optional[dict[str, Any]] = None) -> list[Any]:
-        return self.model_executor.collective_rpc(
-            method, timeout, args, kwargs)
-
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
         return self.model_config
