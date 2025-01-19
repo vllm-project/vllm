@@ -167,6 +167,8 @@ class CuMemAllocator:
                     dtype=torch.uint8,
                     device='cpu',
                     pin_memory=is_pin_memory_available())
+                import psutil
+                print(psutil.virtual_memory().used)
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor

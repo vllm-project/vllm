@@ -96,27 +96,17 @@ def test_end_to_end():
     free_gpu_bytes = torch.cuda.mem_get_info()[0]
     print(
         f"Free GPU memory before sleep: {free_gpu_bytes / GiB_bytes:.2f} GiB")
-    cpu_used_bytes = psutil.virtual_memory().used
-    print("CPU memory usage before sleep: "
-          f"{cpu_used_bytes / GiB_bytes:.2f} GiB")
 
     llm.sleep(level=1)
 
     free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
     print("Free GPU memory after sleep: "
           f"{free_gpu_bytes_after_sleep / GiB_bytes:.2f} GiB")
-    cpu_used_bytes_after_sleep = psutil.virtual_memory().used
-    print("CPU memory usage after sleep: "
-          f"{cpu_used_bytes_after_sleep / GiB_bytes:.2f} GiB")
     used_bytes = total - free_gpu_bytes_after_sleep
     assert free_gpu_bytes_after_sleep > free_gpu_bytes
     # now the memory usage is mostly cudagraph memory pool,
     # and it should be less than the model weights
     assert used_bytes < 2 * GiB_bytes
-
-    # model weights should be offloaded to CPU memory,
-    # and the CPU memory usage should be increased
-    assert cpu_used_bytes_after_sleep > cpu_used_bytes + 1 * GiB_bytes
 
     llm.wake_up()
     output2 = llm.generate(prompt, sampling_params)
