@@ -10,40 +10,15 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (ErrorResponse, ScoreRequest,
                                               ScoreResponse, ScoreResponseData,
                                               UsageInfo)
-from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
-from vllm.outputs import PoolingRequestOutput
+from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
-from vllm.utils import make_async, merge_async_iterators, random_uuid
+from vllm.utils import make_async, merge_async_iterators
 
 logger = init_logger(__name__)
-
-
-def request_output_to_score_response(
-        final_res_batch: List[PoolingRequestOutput], request_id: str,
-        created_time: int, model_name: str) -> ScoreResponse:
-    data: List[ScoreResponseData] = []
-    score = None
-    num_prompt_tokens = 0
-    for idx, final_res in enumerate(final_res_batch):
-        if final_res is not None:
-            score = final_res.outputs.embedding
-            score_data = ScoreResponseData(index=idx, score=score)
-            data.append(score_data)
-
-    usage = UsageInfo(
-        prompt_tokens=num_prompt_tokens,
-        total_tokens=num_prompt_tokens,
-    )
-
-    return ScoreResponse(
-        id=request_id,
-        created=created_time,
-        model=model_name,
-        data=data,
-        usage=usage,
-    )
 
 
 def make_pairs(text_1: Union[List[str], str], text_2: Union[List[str],
@@ -76,15 +51,13 @@ class OpenAIServingScores(OpenAIServing):
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
-        base_model_paths: List[BaseModelPath],
+        models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
-                         base_model_paths=base_model_paths,
-                         lora_modules=None,
-                         prompt_adapters=None,
+                         models=models,
                          request_logger=request_logger)
 
     async def create_score(
@@ -102,8 +75,8 @@ class OpenAIServingScores(OpenAIServing):
             return error_check_ret
 
         model_name = request.model
-        request_id = f"score-{random_uuid()}"
-        created_time = int(time.monotonic())
+        request_id = f"score-{self._base_request_id(raw_request)}"
+        created_time = int(time.time())
         truncate_prompt_tokens = request.truncate_prompt_tokens
 
         request_prompts = []
@@ -119,7 +92,7 @@ class OpenAIServingScores(OpenAIServing):
 
             if prompt_adapter_request is not None:
                 raise NotImplementedError("Prompt adapter is not supported "
-                                          "for embedding models")
+                                          "for scoring models")
 
             if isinstance(tokenizer, MistralTokenizer):
                 raise ValueError(
@@ -128,34 +101,44 @@ class OpenAIServingScores(OpenAIServing):
             if not self.model_config.is_cross_encoder:
                 raise ValueError("Model is not cross encoder.")
 
+            if truncate_prompt_tokens is not None and \
+                truncate_prompt_tokens > self.max_model_len:
+                raise ValueError(
+                    f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
+                    f"is greater than max_model_len ({self.max_model_len})."
+                    f" Please, select a smaller truncation size.")
+
+            input_pairs = make_pairs(request.text_1, request.text_2)
+            for q, t in input_pairs:
+                request_prompt = f"{q}{tokenizer.sep_token}{t}"
+
+                tokenization_kwargs: Dict[str, Any] = {}
+                if truncate_prompt_tokens is not None:
+                    tokenization_kwargs["truncation"] = True
+                    tokenization_kwargs["max_length"] = truncate_prompt_tokens
+
+                tokenize_async = make_async(tokenizer.__call__,
+                                            executor=self._tokenizer_executor)
+                prompt_inputs = await tokenize_async(text=q,
+                                                     text_pair=t,
+                                                     **tokenization_kwargs)
+
+                input_ids = prompt_inputs["input_ids"]
+                text_token_prompt = \
+                    self._validate_input(request, input_ids, request_prompt)
+                engine_prompt = TokensPrompt(
+                    prompt_token_ids=text_token_prompt["prompt_token_ids"],
+                    token_type_ids=prompt_inputs.get("token_type_ids"))
+
+                request_prompts.append(request_prompt)
+                engine_prompts.append(engine_prompt)
+
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
-
-        input_pairs = make_pairs(request.text_1, request.text_2)
-
-        for q, t in input_pairs:
-            request_prompt = f"{q}{tokenizer.sep_token}{t}"
-
-            tokenization_kwargs: Dict[str, Any] = {}
-            if truncate_prompt_tokens is not None:
-                tokenization_kwargs["truncation"] = True
-                tokenization_kwargs["max_length"] = truncate_prompt_tokens
-
-            tokenize_async = make_async(tokenizer.__call__,
-                                        executor=self._tokenizer_executor)
-            prompt_inputs = await tokenize_async(text=q,
-                                                 text_pair=t,
-                                                 **tokenization_kwargs)
-            engine_prompt = TokensPrompt(
-                prompt_token_ids=prompt_inputs["input_ids"],
-                token_type_ids=prompt_inputs.get("token_type_ids"))
-
-            request_prompts.append(request_prompt)
-            engine_prompts.append(engine_prompt)
 
         try:
             pooling_params = request.to_pooling_params()
@@ -186,10 +169,7 @@ class OpenAIServingScores(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        result_generator = merge_async_iterators(
-            *generators,
-            is_cancelled=raw_request.is_disconnected if raw_request else None,
-        )
+        result_generator = merge_async_iterators(*generators)
 
         num_prompts = len(engine_prompts)
 
@@ -206,8 +186,12 @@ class OpenAIServingScores(OpenAIServing):
             final_res_batch_checked = cast(List[PoolingRequestOutput],
                                            final_res_batch)
 
-            response = request_output_to_score_response(
-                final_res_batch_checked, request_id, created_time, model_name)
+            response = self.request_output_to_score_response(
+                final_res_batch_checked,
+                request_id,
+                created_time,
+                model_name,
+            )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
@@ -215,3 +199,38 @@ class OpenAIServingScores(OpenAIServing):
             return self.create_error_response(str(e))
 
         return response
+
+    def request_output_to_score_response(
+        self,
+        final_res_batch: List[PoolingRequestOutput],
+        request_id: str,
+        created_time: int,
+        model_name: str,
+    ) -> ScoreResponse:
+        items: List[ScoreResponseData] = []
+        num_prompt_tokens = 0
+
+        for idx, final_res in enumerate(final_res_batch):
+            classify_res = ScoringRequestOutput.from_base(final_res)
+
+            item = ScoreResponseData(
+                index=idx,
+                score=classify_res.outputs.score,
+            )
+            prompt_token_ids = final_res.prompt_token_ids
+
+            items.append(item)
+            num_prompt_tokens += len(prompt_token_ids)
+
+        usage = UsageInfo(
+            prompt_tokens=num_prompt_tokens,
+            total_tokens=num_prompt_tokens,
+        )
+
+        return ScoreResponse(
+            id=request_id,
+            created=created_time,
+            model=model_name,
+            data=items,
+            usage=usage,
+        )

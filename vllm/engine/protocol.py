@@ -209,7 +209,7 @@ class EngineClient(ABC):
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        """Generate outputs for a request from an embedding model."""
+        """Generate outputs for a request from a pooling model."""
         ...
 
     @abstractmethod
@@ -269,4 +269,9 @@ class EngineClient(ABC):
     @abstractmethod
     async def stop_profile(self) -> None:
         """Start profiling the engine"""
+        ...
+
+    @abstractmethod
+    async def add_lora(self, lora_request: LoRARequest) -> None:
+        """Load a new LoRA adapter into the engine for future requests."""
         ...

@@ -5,8 +5,9 @@ from typing import Callable, Iterable, List, Optional, Tuple, Union
 
 import torch
 
-from vllm.multimodal.utils import (rescale_image_size, rescale_video_size,
-                                   resize_video, sample_frames_from_video)
+from vllm.multimodal.image import rescale_image_size
+from vllm.multimodal.video import (rescale_video_size, resize_video,
+                                   sample_frames_from_video)
 
 from .....conftest import _ImageAssets, _VideoAssets
 from .types import (SINGLE_IMAGE_BASE_PROMPTS, TEST_IMG_PLACEHOLDER,

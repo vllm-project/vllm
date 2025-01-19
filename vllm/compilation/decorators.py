@@ -1,8 +1,10 @@
 import inspect
 from typing import Callable, Dict, List, Optional, TypeVar, Union, overload
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
+from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
@@ -74,8 +76,8 @@ def support_torch_compile(
     During runtime, when we actually mark dimensions of tensors,
      it depends on the value of arguments:
 
-    - if it is a single integer, the corresponding dimension of the argument
-        will be marked as dynamic.
+    - if it is a single integer (can be negative), the corresponding dimension 
+        of the argument will be marked as dynamic.
     - if it is `None`, ignored.
     - if it is `IntermediateTensors`, all the tensors in the intermediate
         tensors will be marked as dynamic.
@@ -145,6 +147,7 @@ def _support_torch_compile(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
+        self.vllm_config = vllm_config
         # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
         self.do_not_compile = \
@@ -156,9 +159,6 @@ def _support_torch_compile(
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
             self, compilation_level=vllm_config.compilation_config.level)
-
-        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE:
-            start_monitoring_torch_compile(vllm_config.compilation_config)
 
     cls.__init__ = __init__
 
@@ -177,15 +177,27 @@ def _support_torch_compile(
             for k, dims in dynamic_arg_dims.items():
                 arg = bound_args.arguments.get(k)
                 if arg is not None:
+                    dims = [dims] if isinstance(dims, int) else dims
                     if isinstance(arg, torch.Tensor):
+                        # In case dims is specified with negative indexing
+                        dims = [
+                            arg.ndim + dim if dim < 0 else dim for dim in dims
+                        ]
                         torch._dynamo.mark_dynamic(arg, dims)
                     elif isinstance(arg, IntermediateTensors):
                         for tensor in arg.tensors.values():
+                            # In case dims is specified with negative indexing
+                            dims = [
+                                tensor.ndim + dim if dim < 0 else dim
+                                for dim in dims
+                            ]
                             torch._dynamo.mark_dynamic(tensor, dims)
                     else:
                         raise ValueError(
                             "Unsupported dynamic dimensions"
                             f" {dims} for argument {k} with type {type(arg)}.")
+            # here, it is the starting point of the `torch.compile` process
+            start_monitoring_torch_compile(self.vllm_config)
 
         # if we don't use custom dispatcher, we can directly call the
         # compiled function and let torch.compile handle the dispatching,
@@ -196,7 +208,31 @@ def _support_torch_compile(
             # we need to control all the compilation of the model.
             torch._dynamo.eval_frame.remove_from_cache(
                 self.original_code_object)
-            return self.compiled_callable(*args, **kwargs)
+
+            # collect all relevant files traced by Dynamo,
+            # so that the compilation cache can trigger re-compilation
+            # properly when any of these files change.
+
+            # 1. the file containing the top-level forward function
+            self.vllm_config.compilation_config.traced_files.add(
+                self.original_code_object.co_filename)
+
+            # 2. every time Dynamo sees a function call, it will inline
+            # the function by calling InliningInstructionTranslator.inline_call
+            # we hijack this function to know all the functions called
+            # during Dynamo tracing, and their corresponding files
+            inline_call = InliningInstructionTranslator.inline_call
+
+            def patched_inline_call(parent, func, args, kwargs):
+                code = func.get_code()
+                self.vllm_config.compilation_config.traced_files.add(
+                    code.co_filename)
+                return inline_call(parent, func, args, kwargs)
+
+            with patch.object(InliningInstructionTranslator, 'inline_call',
+                              patched_inline_call):
+                output = self.compiled_callable(*args, **kwargs)
+            return output
 
         # usually, capturing the model once is enough, and then we can
         # dispatch to the compiled code directly, without going through

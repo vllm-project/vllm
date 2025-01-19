@@ -47,7 +47,7 @@ def _run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
     with vllm_runner(model,
-                     task="embedding",
+                     task="embed",
                      dtype=dtype,
                      max_model_len=4096,
                      enforce_eager=True) as vllm_model:
@@ -86,7 +86,7 @@ def _run_test(
     )
 
 
-@pytest.mark.skipif(transformers.__version__.startswith("4.46"),
+@pytest.mark.skipif(transformers.__version__ >= "4.46",
                     reason="Model broken with changes in transformers 4.46")
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
