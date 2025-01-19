@@ -69,6 +69,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "DeepseekV3ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3",  # noqa: E501
                                          trust_remote_code=True),
     "ExaoneForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct"),  # noqa: E501
+    "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),  # noqa: E501
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-2b"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
