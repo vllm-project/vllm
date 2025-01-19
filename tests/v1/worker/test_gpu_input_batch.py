@@ -85,6 +85,7 @@ def _construct_expected_sampling_metadata(
         temperature=torch.tensor(temperature, dtype=torch.float, device=device),
         all_greedy=False,
         all_random=True,
+        rejection_sampling=False,
         top_p=torch.tensor(top_p, dtype=torch.float, device=device),
         top_k=torch.tensor(top_k, dtype=torch.int, device=device),
         no_top_p=all(x == 1.0 for x in top_p),
@@ -107,6 +108,7 @@ def _construct_expected_sampling_metadata(
             repetition_penalties, dtype=torch.float,
             device=device),
         output_token_ids=output_token_ids,
+        spec_token_ids=[],
         min_tokens=min_tokens,
         stop_token_ids=stop_token_ids,
         no_penalties=(all(x ==0 for x in presence_penalties) and \

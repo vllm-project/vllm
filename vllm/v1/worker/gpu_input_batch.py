@@ -360,7 +360,7 @@ class InputBatch:
             # TODO - Replace this with incremental update to output token
             # statistics.
             output_token_ids.append(req_id_output_token_ids[req_id])
-            if req_id_to_spec_token_ids is not None:
+            if rejection_sampling:
                 spec_token_ids.append(req_id_to_spec_token_ids[req_id])
 
         return SamplingMetadata(

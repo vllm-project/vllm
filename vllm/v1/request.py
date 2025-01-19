@@ -111,6 +111,10 @@ class Request:
         
     def clear_spec_tokens(self) -> None:
         self._spec_token_ids = []
+        
+    @property
+    def spec_token_ids(self) -> ConstantList[int]:
+        return ConstantList(self._spec_token_ids)
 
     @property
     def num_tokens(self) -> int:

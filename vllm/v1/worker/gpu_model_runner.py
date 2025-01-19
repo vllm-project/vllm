@@ -317,9 +317,11 @@ class GPUModelRunner:
         # Get spec decode logits indices.
         spec_query_end_loc = 0
         spec_decode_logits_indices = []
-        for i, req_id in enumerate(self.input_batch.req_id):
+        for i, req_id in enumerate(self.input_batch.req_ids):
             if i == num_reqs:
                 break
+            if req_id not in scheduler_output.scheduled_spec_decode_tokens:
+                continue
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_compute_tokens = self.input_batch.num_computed_tokens_cpu[i]
             spec_query_end_loc += num_scheduled_tokens
@@ -370,6 +372,7 @@ class GPUModelRunner:
         # Copy the tensors to the GPU.
         self.input_ids[:total_num_scheduled_tokens].copy_(
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        print("input_ids", self.input_ids[:total_num_scheduled_tokens])
         self.positions[:total_num_scheduled_tokens].copy_(
             self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
         query_start_loc = self.query_start_loc_cpu[:num_reqs + 1].to(

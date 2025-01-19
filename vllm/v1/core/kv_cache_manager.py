@@ -162,8 +162,12 @@ class KVCacheManager:
         # TODO(rickyx): When supporting speculative decoding, we will need to
         # differentiate between them so that we can know how many blocks are
         # full after appending the actual tokens.
-        num_full_blocks_after_append = (request.num_computed_tokens +
-                                        num_tokens) // self.block_size
+        
+        # Does not include speculative tokens.
+        # FIXME: The logic is not correct because
+        #         we never count speculative tokens that are accepted.
+        num_cached_tokens = request.num_computed_tokens + num_tokens - len(request.spec_token_ids)
+        num_full_blocks_after_append = num_cached_tokens // self.block_size
         assert num_full_blocks_after_append <= len(req_blocks)
 
         new_full_blocks = req_blocks[

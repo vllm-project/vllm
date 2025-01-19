@@ -1,7 +1,10 @@
 import torch
+import torch.nn as nn
 from vllm.v1.outputs import SamplerOutput
+from vllm.logger import init_logger
 from vllm.v1.sample.metadata import SamplingMetadata
 
+logger = init_logger(__name__)
 class RejectionSampler(nn.Module):
     def sample(self, 
                logits: torch.Tensor,
@@ -30,6 +33,8 @@ class RejectionSampler(nn.Module):
             output_tokens = output_tokens[:i]   
             sampled_token_ids.append(output_tokens)
             output_token_start_idx += num_spec_tokens + 1
+            print("Proposed token ids", spec_tokens._x)
+            print("Output token ids", output_tokens)
         assert output_token_start_idx == len(output_token_ids_cpu)
         
         return SamplerOutput(sampled_token_ids=sampled_token_ids,
