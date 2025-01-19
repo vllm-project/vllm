@@ -124,7 +124,7 @@ class Worker:
             assert allocator.get_current_usage() == 0, (
                 "Sleep mode can only be "
                 "used for one instance per process.")
-            context = allocator.use_memory_pool(CuMemMode.OFFLOAD)
+            context = allocator.use_memory_pool(tag="weights")
         else:
             from contextlib import nullcontext
             context = nullcontext()
