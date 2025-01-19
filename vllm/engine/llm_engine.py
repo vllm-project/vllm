@@ -8,7 +8,7 @@ from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, Union, cast, overload
+from typing import Set, Tuple, Type, Union, cast, overload
 
 import torch
 import torch.nn as nn
@@ -1827,6 +1827,17 @@ class LLMEngine:
 
     def stop_profile(self) -> None:
         self.model_executor.stop_profile()
+
+    def collective_rpc(self,
+                       method: Union[str, Callable],
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> List[Any]:
+        """
+        See LLM.collective_rpc for more details.
+        """
+        return self.model_executor.collective_rpc(method, timeout, args,
+                                                  kwargs)
 
     def check_health(self) -> None:
         if self.tokenizer:

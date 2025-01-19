@@ -1,6 +1,6 @@
 import asyncio
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import pytest
 import torch.nn as nn
@@ -25,7 +25,7 @@ class CustomWorker(Worker):
 class CustomUniExecutor(UniProcExecutor):
 
     def collective_rpc(self,
-                       method: str,
+                       method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:

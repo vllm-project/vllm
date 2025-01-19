@@ -1,5 +1,8 @@
 import asyncio
-from typing import Any, List, Optional
+import os
+from typing import Any, Callable, List, Optional, Union
+
+import cloudpickle
 
 from vllm.executor.executor_base import DistributedExecutorBase
 from vllm.executor.multiproc_worker_utils import (
@@ -8,8 +11,9 @@ from vllm.executor.multiproc_worker_utils import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
-                        get_ip, get_open_port, make_async)
+from vllm.utils import (_run_task_with_lock, cuda_device_count_stateless,
+                        get_distributed_init_method, get_ip, get_open_port,
+                        make_async, run_method, update_environment_variables)
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -20,7 +24,39 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
 
     uses_ray: bool = False
 
+    def _check_cuda(self) -> None:
+        """Check that the number of GPUs is sufficient for the parallel
+        configuration. Separate from _init_executor to reduce the number of
+        indented blocks.
+        """
+        parallel_config = self.parallel_config
+        world_size = parallel_config.world_size
+        tensor_parallel_size = parallel_config.tensor_parallel_size
+
+        cuda_device_count = cuda_device_count_stateless()
+        # Use confusing message for more common TP-only case.
+        if tensor_parallel_size > cuda_device_count:
+            raise RuntimeError(
+                f"please set tensor_parallel_size ({tensor_parallel_size}) "
+                f"to less than max local gpu count ({cuda_device_count})")
+
+        if world_size > cuda_device_count:
+            raise RuntimeError(
+                f"please ensure that world_size ({world_size}) "
+                f"is less than than max local gpu count ({cuda_device_count})")
+
+        # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
+        if "CUDA_VISIBLE_DEVICES" not in os.environ:
+            update_environment_variables({
+                "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
+            })
+
     def _init_executor(self) -> None:
+
+        from vllm.platforms import current_platform
+        if current_platform.is_cuda_alike():
+            self._check_cuda()
+
         # Create the parallel GPU workers.
         world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -107,7 +143,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
 
     def _run_workers(
         self,
-        method: str,
+        method: Union[str, Callable],
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,
@@ -121,6 +157,11 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
                 It will also be run asynchronously and return a list of futures
                 rather than blocking on the results.
         """
+        if isinstance(method, str):
+            sent_method = method
+        else:
+            sent_method = cloudpickle.dumps(method)
+        del method
 
         if max_concurrent_workers:
             raise NotImplementedError(
@@ -129,18 +170,18 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         if async_run_tensor_parallel_workers_only:
             # Run only non-driver workers and just return futures.
             return [
-                worker.execute_method(method, *args, **kwargs)
+                worker.execute_method(sent_method, *args, **kwargs)
                 for worker in self.non_driver_workers
             ]
 
         # Start all remote workers first.
         worker_outputs = [
-            worker.execute_method(method, *args, **kwargs)
+            worker.execute_method(sent_method, *args, **kwargs)
             for worker in self.workers
         ]
 
-        driver_worker_method = getattr(self.driver_worker, method)
-        driver_worker_output = driver_worker_method(*args, **kwargs)
+        driver_worker_output = run_method(self.driver_worker, sent_method,
+                                          args, kwargs)
 
         # Get the results of the workers.
         return [driver_worker_output

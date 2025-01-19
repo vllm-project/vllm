@@ -301,6 +301,104 @@ run_serving_tests() {
   kill_gpu_processes
 }
 
+run_genai_perf_tests() {
+  # run genai-perf tests 
+
+  # $1: a json file specifying genai-perf test cases
+  local genai_perf_test_file
+  genai_perf_test_file=$1
+
+  # Iterate over genai-perf tests
+  jq -c '.[]' "$genai_perf_test_file" | while read -r params; do
+    # get the test name, and append the GPU type back to it.
+    test_name=$(echo "$params" | jq -r '.test_name')    
+    
+    # if TEST_SELECTOR is set, only run the test cases that match the selector
+    if [[ -n "$TEST_SELECTOR" ]] && [[ ! "$test_name" =~ $TEST_SELECTOR ]]; then
+      echo "Skip test case $test_name."
+      continue
+    fi
+    
+    # prepend the current serving engine to the test name
+    test_name=${CURRENT_LLM_SERVING_ENGINE}_${test_name}
+
+    # get common parameters
+    common_params=$(echo "$params" | jq -r '.common_parameters')
+    model=$(echo "$common_params" | jq -r '.model')
+    tp=$(echo "$common_params" | jq -r '.tp')
+    dataset_name=$(echo "$common_params" | jq -r '.dataset_name')
+    dataset_path=$(echo "$common_params" | jq -r '.dataset_path')
+    port=$(echo "$common_params" | jq -r '.port')
+    num_prompts=$(echo "$common_params" | jq -r '.num_prompts')
+    reuse_server=$(echo "$common_params" | jq -r '.reuse_server')
+
+    # get client and server arguments
+    server_params=$(echo "$params" | jq -r ".${CURRENT_LLM_SERVING_ENGINE}_server_parameters")
+    qps_list=$(echo "$params" | jq -r '.qps_list')
+    qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
+    echo "Running over qps list $qps_list"
+
+    # check if there is enough GPU to run the test
+    if [[ $gpu_count -lt $tp ]]; then
+      echo "Required num-shard $tp but only $gpu_count GPU found. Skip testcase $test_name."
+      continue
+    fi
+
+    if [[ $reuse_server == "true" ]]; then
+      echo "Reuse previous server for test case $test_name"
+    else
+      kill_gpu_processes
+      bash "$VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/scripts/launch-server.sh" \
+        "$server_params" "$common_params"
+    fi
+
+    if wait_for_server; then
+      echo ""
+      echo "$CURRENT_LLM_SERVING_ENGINE server is up and running."
+    else
+      echo ""
+      echo "$CURRENT_LLM_SERVING_ENGINE failed to start within the timeout period."
+      break
+    fi
+
+    # iterate over different QPS
+    for qps in $qps_list; do
+      # remove the surrounding single quote from qps
+      if [[ "$qps" == *"inf"* ]]; then
+        echo "qps was $qps"
+        qps=$num_prompts
+        echo "now qps is $qps"
+      fi
+    
+      new_test_name=$test_name"_qps_"$qps
+      backend=$CURRENT_LLM_SERVING_ENGINE
+      
+      if [[ "$backend" == *"vllm"* ]]; then
+        backend="vllm"
+      fi
+      #TODO: add output dir.
+      client_command="genai-perf profile \
+        -m $model \
+        --service-kind openai \
+        --backend vllm \
+        --endpoint-type chat \
+        --streaming \
+        --url localhost:$port \
+        --request-rate $qps \
+        --num-prompts $num_prompts \
+      "
+
+    echo "Client command: $client_command"
+
+    eval "$client_command"
+
+    #TODO: process/record outputs
+    done
+  done
+
+  kill_gpu_processes
+
+}
 
 prepare_dataset() {
 
@@ -328,12 +426,17 @@ main() {
 
   pip install -U transformers
 
+  pip install -r requirements-dev.txt
+  which genai-perf
+
   # check storage
   df -h
 
   ensure_installed wget
   ensure_installed curl
   ensure_installed jq
+  # genai-perf dependency
+  ensure_installed libb64-0d
 
   prepare_dataset
 
@@ -344,6 +447,10 @@ main() {
 
   # run the test
   run_serving_tests "$BENCHMARK_ROOT/tests/nightly-tests.json"
+
+  # run genai-perf tests
+  run_genai_perf_tests "$BENCHMARK_ROOT/tests/genai-perf-tests.json"
+  mv artifacts/ $RESULTS_FOLDER/
 
   # upload benchmark results to buildkite
   python3 -m pip install tabulate pandas
