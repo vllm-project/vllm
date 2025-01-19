@@ -1,4 +1,3 @@
-import psutil
 import torch
 
 from vllm import LLM, SamplingParams
@@ -93,22 +92,15 @@ def test_end_to_end():
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
 
-    free_gpu_bytes = torch.cuda.mem_get_info()[0]
-    print(
-        f"Free GPU memory before sleep: {free_gpu_bytes / GiB_bytes:.2f} GiB")
-
     # the benefit of `llm.sleep(level=2)` is mainly CPU memory usage,
     # which is difficult to measure in the test. therefore, we only
     # test sleep level 1 here.
     llm.sleep(level=1)
 
     free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
-    print("Free GPU memory after sleep: "
-          f"{free_gpu_bytes_after_sleep / GiB_bytes:.2f} GiB")
     used_bytes = total - free_gpu_bytes_after_sleep
-    assert free_gpu_bytes_after_sleep > free_gpu_bytes
     # now the memory usage is mostly cudagraph memory pool,
-    # and it should be less than the model weights
+    # and it should be less than the model weights (1B model, 2GiB weights)
     assert used_bytes < 2 * GiB_bytes
 
     llm.wake_up()

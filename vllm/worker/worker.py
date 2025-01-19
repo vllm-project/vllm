@@ -122,8 +122,17 @@ class Worker(LocalOrDistributedWorkerBase):
         self.profiler.stop()
 
     def sleep(self, level: int = 1) -> None:
+        free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
         allocator = CuMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
+        free_bytes_after_sleep, total = torch.cuda.mem_get_info()
+        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+        used_bytes = total - free_bytes_after_sleep
+        assert freed_bytes >= 0, "Memory usage increased after sleeping."
+        logger.info(
+            "Sleep mode freed %.2f GiB memory, "
+            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
+            used_bytes / GiB_bytes)
 
     def wake_up(self) -> None:
         allocator = CuMemAllocator.get_instance()
