@@ -262,7 +262,14 @@ class MQLLMEngineClient(EngineClient):
         """Setup the client before it starts sending server requests."""
 
         # Start output_loop
-        self.output_loop = asyncio.create_task(self.run_output_handler_loop())
+        if self.output_loop is None:
+            # only generate once to avoid multiple concurrent output_loops
+            # this will lead to race conditions and wrong orders of tokens
+            # returned by the engine
+            # setup will be called multiple times during the startup of
+            # the engine
+            self.output_loop = asyncio.create_task(
+                self.run_output_handler_loop())
 
         with self.get_data_socket() as socket:
             # Wait until server is ready.
@@ -271,8 +278,9 @@ class MQLLMEngineClient(EngineClient):
             self.tracing_flag = response.tracing_enabled
 
             # Start health_loop.
-            self.health_loop = asyncio.create_task(
-                self.run_heartbeat_loop(timeout=VLLM_RPC_TIMEOUT))
+            if self.health_loop is None:
+                self.health_loop = asyncio.create_task(
+                    self.run_heartbeat_loop(timeout=VLLM_RPC_TIMEOUT))
 
     def close(self):
         """Destroy the ZeroMQ Context."""
