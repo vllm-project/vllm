@@ -931,21 +931,7 @@ class VllmRunner:
         return [req_output.outputs.score for req_output in req_outputs]
 
     def get_torch_model(self) -> nn.Module:
-        """
-        Get the PyTorch model that is being run inside vLLM.
-
-        Note:
-            This is only valid when the model is loaded on a single worker.
-            If multiple workers are being created (e.g. when you are using
-            tensor or pipeline parallelism), please use :meth:`apply_to_model`
-            instead.
-        """
-        models = self.model.llm_engine.model_executor.apply_to_model(identity)
-        if len(models) > 1:
-            raise RuntimeError("`get_torch_model()` is only valid when a "
-                               "single worker is used.")
-
-        return models[0]
+        return self.model.llm_engine.get_torch_model()
 
     def __enter__(self):
         return self
