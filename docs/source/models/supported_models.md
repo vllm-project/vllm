@@ -754,7 +754,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `Qwen/QVQ-72B-Preview`, `Qwen/Qwen2-VL-7B-Instruct`, `Qwen/Qwen2-VL-72B-Instruct`, etc.
   - ✅︎
   - ✅︎
-  -
+  - ✅︎
 * - `UltravoxModel`
   - Ultravox
   - T + A<sup>E+</sup>

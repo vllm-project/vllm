@@ -105,7 +105,7 @@ def batch_make_image_embeddings(
     pixel_values = preprocess_result["pixel_values"]
     image_grid_thw = preprocess_result["image_grid_thw"]
 
-    # pixel values to embeddinds & grid_thws
+    # pixel values to embeddings & grid_thws
     with torch.no_grad():
         visual = llm.llm_engine.model_executor.driver_worker. \
             model_runner.model.visual
@@ -124,11 +124,10 @@ def batch_make_image_embeddings(
     for image_batch in image_batches_:
         cur_batch_image_count = len(image_batch)
         merge_size = image_processor.merge_size
-        cur_batch_embed_len = sum([
-            grid_thw.prod() // merge_size // merge_size
+        cur_batch_embed_len = sum(
+            grid_thw.prod(-1) // merge_size // merge_size
             for grid_thw in image_grid_thw[image_counter:image_counter +
-                                           cur_batch_image_count]
-        ])
+                                           cur_batch_image_count])
 
         result.append({
             "image_embeds":
@@ -187,7 +186,7 @@ def batch_make_video_embeddings(
     pixel_values = preprocess_result["pixel_values_videos"]
     video_grid_thw = preprocess_result["video_grid_thw"]
 
-    # pixel values to embeddinds & grid_thws
+    # pixel values to embeddings & grid_thws
     with torch.no_grad():
         visual = llm.llm_engine.model_executor.driver_worker.\
             model_runner.model.visual
@@ -206,11 +205,10 @@ def batch_make_video_embeddings(
     for video_batch in video_batches_:
         cur_batch_video_count = len(video_batch)
         merge_size = image_processor.merge_size
-        cur_batch_embed_len = sum([
-            grid_thw.prod() // merge_size // merge_size
+        cur_batch_embed_len = sum(
+            grid_thw.prod(-1) // merge_size // merge_size
             for grid_thw in video_grid_thw[video_counter:video_counter +
-                                           cur_batch_video_count]
-        ])
+                                           cur_batch_video_count])
 
         result.append({
             "video_embeds":

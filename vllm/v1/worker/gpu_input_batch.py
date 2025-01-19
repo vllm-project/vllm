@@ -30,6 +30,9 @@ class CachedRequestState:
     num_computed_tokens: int
     output_token_ids: List[int]
 
+    mrope_positions: Optional[torch.Tensor] = None
+    mrope_position_delta: Optional[int] = None
+
     @property
     def num_tokens(self) -> int:
         return len(self.prompt_token_ids) + len(self.output_token_ids)
