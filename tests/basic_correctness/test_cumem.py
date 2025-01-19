@@ -97,6 +97,9 @@ def test_end_to_end():
     print(
         f"Free GPU memory before sleep: {free_gpu_bytes / GiB_bytes:.2f} GiB")
 
+    # the benefit of `llm.sleep(level=2)` is mainly CPU memory usage,
+    # which is difficult to measure in the test. therefore, we only
+    # test sleep level 1 here.
     llm.sleep(level=1)
 
     free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
@@ -113,22 +116,3 @@ def test_end_to_end():
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
-
-
-@fork_new_process_for_each_test
-def test_deep_sleep():
-    llm = LLM("meta-llama/Llama-3.2-1B", enable_sleep_mode=True)
-
-    cpu_used_bytes = psutil.virtual_memory().used
-    print("CPU memory usage before sleep: "
-          f"{cpu_used_bytes / GiB_bytes:.2f} GiB")
-
-    # both model weights and kv cache are discarded
-    llm.sleep(level=2)
-
-    cpu_used_bytes_after_sleep = psutil.virtual_memory().used
-    print("CPU memory usage after sleep: "
-          f"{cpu_used_bytes_after_sleep / GiB_bytes:.2f} GiB")
-
-    # the CPU memory usage should be similar to the memory usage before sleep
-    assert abs(cpu_used_bytes_after_sleep - cpu_used_bytes) < 0.5 * GiB_bytes
