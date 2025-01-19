@@ -138,8 +138,8 @@ class Qwen2VLVideoEmbeddingInputs(TypedDict):
     """Supported types:
     - List[`torch.Tensor`]: A list of tensors holding all videos' features.
         Each tensor holds an video's features.
-    - `torch.Tensor`: A tensor holding all images' features
-        (concatenation of all images' feature tensors).
+    - `torch.Tensor`: A tensor holding all videos' features
+        (concatenation of all videos' feature tensors).
     
     Tensor shape: `(num_image_features, hidden_size)`
     - `num_image_features` varies based on 
