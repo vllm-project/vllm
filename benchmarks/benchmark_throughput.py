@@ -3,6 +3,7 @@
 import argparse
 import dataclasses
 import json
+import pickle
 import random
 import time
 from functools import cache
@@ -25,6 +26,9 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
+
+SAMPLING_TEMPERATURE = 0.0
+SAMPLING_TOP_P = 1.0
 
 
 @dataclasses.dataclass
@@ -166,6 +170,7 @@ def run_vllm(
     requests: List[SampleRequest],
     n: int,
     engine_args: EngineArgs,
+    do_profile: bool,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
@@ -180,8 +185,8 @@ def run_vllm(
         sampling_params.append(
             SamplingParams(
                 n=n,
-                temperature=1.0,
-                top_p=1.0,
+                temperature=SAMPLING_TEMPERATURE,
+                top_p=SAMPLING_TOP_P,
                 ignore_eos=True,
                 max_tokens=request.expected_output_len,
             ))
@@ -191,13 +196,23 @@ def run_vllm(
 
     use_beam_search = False
 
+    outputs = None
     if not use_beam_search:
         start = time.perf_counter()
-        llm.generate(prompts,
-                     sampling_params,
-                     lora_request=lora_requests,
-                     use_tqdm=True)
+        if do_profile:
+            llm.start_profile()
+        outputs = llm.generate(prompts,
+                               sampling_params,
+                               lora_request=lora_requests,
+                               use_tqdm=True)
         end = time.perf_counter()
+
+        if do_profile:
+            llm.stop_profile()
+            # it takes a while to generate the profile !!
+            print("Called llm.stop_profile() ... Sleeping for 100s on client "
+                  "side for profile trace dump to finish !!")
+            time.sleep(100)
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
         prompts = [request.prompt for request in requests]
@@ -214,7 +229,7 @@ def run_vllm(
                 ignore_eos=True,
             ))
         end = time.perf_counter()
-    return end - start
+    return end - start, outputs
 
 
 async def run_vllm_async(
@@ -222,6 +237,7 @@ async def run_vllm_async(
     n: int,
     engine_args: AsyncEngineArgs,
     disable_frontend_multiprocessing: bool = False,
+    do_profile: bool = False,
 ) -> float:
     from vllm import SamplingParams
 
@@ -239,14 +255,16 @@ async def run_vllm_async(
             sampling_params.append(
                 SamplingParams(
                     n=n,
-                    temperature=1.0,
-                    top_p=1.0,
+                    temperature=SAMPLING_TEMPERATURE,
+                    top_p=SAMPLING_TOP_P,
                     ignore_eos=True,
                     max_tokens=request.expected_output_len,
                 ))
             lora_requests.append(request.lora_request)
 
         generators = []
+        if do_profile:
+            await llm.start_profile()
         start = time.perf_counter()
         for i, (prompt, sp,
                 lr) in enumerate(zip(prompts, sampling_params, lora_requests)):
@@ -256,10 +274,25 @@ async def run_vllm_async(
                                      request_id=f"test{i}")
             generators.append(generator)
         all_gens = merge_async_iterators(*generators)
+        outputs_dict = {}
         async for i, res in all_gens:
-            pass
+            outputs_dict[i] = res
+
         end = time.perf_counter()
-        return end - start
+        elapsed = end - start
+
+        if do_profile:
+            await llm.stop_profile()
+            print("Called llm.stop_profile() ... Sleeping for 100s on client"
+                  "side for profile trace dump to finish !!")
+            time.sleep(100)
+
+        num_prompts = len(prompts)
+        outputs = []
+        for i in range(num_prompts):
+            outputs.append(outputs_dict[i])
+
+        return elapsed, outputs
 
 
 def run_hf(
@@ -392,16 +425,25 @@ def main(args: argparse.Namespace):
                          for request in requests)
     if args.backend == "vllm":
         if args.async_engine:
-            elapsed_time = uvloop.run(
+            elapsed_time, outputs = uvloop.run(
                 run_vllm_async(
                     requests,
                     args.n,
                     AsyncEngineArgs.from_cli_args(args),
                     args.disable_frontend_multiprocessing,
+                    do_profile=args.profile,
                 ))
         else:
-            elapsed_time = run_vllm(requests, args.n,
-                                    EngineArgs.from_cli_args(args))
+            elapsed_time, outputs = run_vllm(requests,
+                                             args.n,
+                                             EngineArgs.from_cli_args(args),
+                                             do_profile=args.profile)
+
+        if args.pickle_outputs:
+            print("Pickling request outputs : ")
+            with open("outputs.pkl", "wb+") as f:
+                pickle.dump(outputs, f)
+
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -490,6 +532,16 @@ if __name__ == "__main__":
         default=None,
         help="Path to the lora adapters to use. This can be an absolute path, "
         "a relative path, or a Hugging Face model identifier.")
+
+    parser.add_argument("--profile",
+                        action='store_true',
+                        default=False,
+                        help="Profile the entire run")
+
+    parser.add_argument("--pickle-outputs",
+                        action="store_true",
+                        default=False,
+                        help="Pickle outputs got from benchmark")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()

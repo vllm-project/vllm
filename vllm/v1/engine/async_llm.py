@@ -375,4 +375,4 @@ class AsyncLLM(EngineClient):
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
-        raise NotImplementedError("LoRA not yet supported in V1")
+        await self.engine_core.add_lora_async(lora_request)

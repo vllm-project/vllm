@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
 """
 Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
@@ -14,20 +13,23 @@ import triton.language as tl
 
 from vllm.utils import direct_register_custom_op
 
-from .utils import _get_lora_a_ptr
+from .utils import _get_lora_a_ptr, get_v1_op_configs
 from .kernel_utils import do_shrink_kernel
 
 
+
 @triton.jit
-def _sgmv_shrink_kernel(
+def _v1_shrink_kernel(
         input_ptr,
         lora_ptr,  #1-3
         out_ptr,
+        M,
         N,
         K,
-        b_seq_start_loc,
-        seq_lens,
-        lora_indices,
+        token_indices_sorted_by_lora_ids,
+        num_tokens_per_lora,
+        lora_token_start_loc,
+        lora_ids,
         scaling,
         input_d0_stride,
         input_d1_stride,  # 1
@@ -48,39 +50,51 @@ def _sgmv_shrink_kernel(
     The GEMM of Multi-LoRA can be considered as GroupGEMM. Additionally,
     introducing SPLIT-K can improve performance
     """
-    pid = tl.program_id(axis=0)
-    pid_mix = tl.program_id(axis=1)
-    cur_batch = tl.program_id(axis=2)
+
+
+    pid_lmn = tl.program_id(axis=0)
+    pid_sk_slice = tl.program_id(axis=1)
+
     cta_n_num = tl.cdiv(N, BLOCK_N)
-    pid_m = pid // cta_n_num
-    pid_n = pid % cta_n_num
+    cta_m_num = tl.cdiv(M, BLOCK_M)
+    lora_idx = pid_lmn // (cta_m_num * cta_n_num)
+    pid_n = (pid_lmn // cta_m_num) % cta_n_num
+    pid_m = pid_lmn % cta_m_num
+
+    lora_id = tl.load(lora_ids + lora_idx)
+    if lora_id == -1:
+        # early exit for the no-lora case.
+        return
+
     if SLICE_NUM == 1:
         slice_id: tl.constexpr = 0
-        pid_sk = tl.program_id(axis=1)
+        pid_sk = pid_sk_slice 
     else:
-        pid_mix = tl.program_id(axis=1)
-        slice_id = pid_mix // SPLIT_K
-        pid_sk = pid_mix % SPLIT_K
+        slice_id = pid_sk_slice // SPLIT_K
+        pid_sk = pid_sk_slice % SPLIT_K
 
-    M_LEN = tl.load(seq_lens + cur_batch)
-    if pid_m * BLOCK_M >= M_LEN:
+
+    # lora m indices offsets
+    lora_m_indices_start = tl.load(lora_token_start_loc + lora_idx)
+    lora_m_size = tl.load(num_tokens_per_lora + lora_idx)
+
+    cta_m_offset = pid_m * BLOCK_M
+    if cta_m_offset >= lora_m_size:
+        # early exit CTA
         return
-    lora_index = tl.load(lora_indices + cur_batch)
-    if lora_index == -1:
-        return
 
-    M_OFFSET = tl.load(b_seq_start_loc + cur_batch)
+    CTA_M_LEN = min(BLOCK_M, lora_m_size - cta_m_offset)
+    offset_m = tl.arange(0, BLOCK_M) % CTA_M_LEN 
 
-    CTA_M_LEN = min(BLOCK_M, M_LEN - (pid_m * BLOCK_M))
-    CTA_M_OFFSET = M_OFFSET + (pid_m * BLOCK_M)
-    offset_m = tl.arange(0, BLOCK_M)
-    ram = CTA_M_OFFSET + tl.max_contiguous(tl.multiple_of(offset_m % CTA_M_LEN, BLOCK_M), BLOCK_M)
+    cta_lora_seq_indices = (token_indices_sorted_by_lora_ids +
+                            lora_m_indices_start + cta_m_offset)
+    ram = tl.load(cta_lora_seq_indices + offset_m)
 
     do_shrink_kernel(pid_m,
                      pid_n,
                      pid_sk,
                      slice_id,
-                     lora_index,
+                     lora_id,
                      input_ptr,
                      lora_ptr,
                      out_ptr,
@@ -107,17 +121,17 @@ def _sgmv_shrink_kernel(
                      SPLIT_K,
                      SLICE_NUM)
 
+
 @torch.inference_mode()
-def _sgmv_shrink(
+def _v1_shrink(
     inputs: torch.Tensor,
     lora_a_weights: List[torch.Tensor],
     output_tensor: torch.Tensor,
-    b_seq_start_loc: torch.Tensor,
-    seq_len_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    batches: int,
-    max_seq_length: int,
-    token_nums: int,
+    token_lora_mapping: torch.Tensor,
+    token_indices_sorted_by_lora_ids: torch.Tensor,  # inputs.size(0)
+    num_tokens_per_lora: torch.Tensor,  # max-loras
+    lora_token_start_loc: torch.Tensor,  # max-loras
+    lora_ids: torch.Tensor,  # max-loras
     scaling: float,
 ) -> None:
     """
@@ -146,35 +160,46 @@ def _sgmv_shrink(
     for weight in lora_a_weights:
         assert weight.dtype in [torch.float16, torch.bfloat16]
 
-    assert inputs.size(0) == token_nums
     assert inputs.size(1) == lora_a_weights[0].size(-1)
-    assert b_seq_start_loc.size(0) == batches
-    assert lora_indices_tensor.size(0) == batches
     assert inputs.is_contiguous()
     assert output_tensor.is_contiguous()
     (lora_ptr_tensor, lora_strides_d0, lora_strides_d1,
-     lora_strides_d2) = _get_lora_a_ptr(lora_a_weights, b_seq_start_loc.device)
+     lora_strides_d2) = _get_lora_a_ptr(lora_a_weights, inputs.device)
     # TODO tuning this config
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size,N=rank
-    BLOCK_M = 32
-    BLOCK_N = 16
-    BLOCK_K = 32
-    SPLIT_K = 8
+    M = inputs.size(0)
+    NUM_SLICES = len(lora_a_weights)
+
+    kernel_config = get_v1_op_configs("shrink",
+                                        batch = M, 
+                                        hidden_size = K,
+                                        rank = N,
+                                        num_slices = NUM_SLICES)
+    BLOCK_M = kernel_config['block_m']
+    BLOCK_N = kernel_config['block_n']
+    BLOCK_K = kernel_config['block_k']
+    SPLIT_K = kernel_config['split_k']
+
     EVEN_K = K % (BLOCK_K * SPLIT_K) == 0
+    MAX_LORAS = lora_ids.size(0)
     grid = (
-        triton.cdiv(max_seq_length, BLOCK_M) * triton.cdiv(N, BLOCK_N),
+        MAX_LORAS * triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         SPLIT_K * len(lora_a_weights),
-        batches,
     )
-    _sgmv_shrink_kernel[grid](
+
+    _v1_shrink_kernel[grid](
         inputs,
         lora_ptr_tensor,
         output_tensor,
+        M,
         N,
         K,
-        b_seq_start_loc,
-        seq_len_tensor,
-        lora_indices_tensor,
+        # New additions 
+        token_indices_sorted_by_lora_ids,
+        num_tokens_per_lora,
+        lora_token_start_loc,
+        lora_ids,
+        # ----
         scaling,
         inputs.stride(0),
         inputs.stride(1),
@@ -189,21 +214,25 @@ def _sgmv_shrink(
         BLOCK_K,
         EVEN_K,
         SPLIT_K,
-        len(lora_a_weights),
+        NUM_SLICES,
+        num_warps = kernel_config['num_warps'],
+        num_ctas = kernel_config['num_ctas'],
+        num_stages = kernel_config['num_stages'],
+        maxnreg = kernel_config['max_nreg'],
     )
+
     return
 
 
-def sgmv_shrink_fake(
+def _v1_shrink_fake(
     inputs: torch.Tensor,
     lora_a_weights: List[torch.Tensor],
     output_tensor: torch.Tensor,
-    b_seq_start_loc: torch.Tensor,
-    seq_len_tensor: torch.Tensor,
-    lora_indices_tensor: torch.Tensor,
-    batches: int,
-    max_seq_length: int,
-    token_nums: int,
+    token_lora_mapping: torch.Tensor,
+    token_indices_sorted_by_lora_ids: torch.Tensor,  # inputs.size(0)
+    num_tokens_per_lora: torch.Tensor,  # max-loras
+    lora_token_start_loc: torch.Tensor,  # max-loras
+    lora_ids: torch.Tensor,  # max-loras
     scaling: float,
 ) -> None:
     return
@@ -211,12 +240,12 @@ def sgmv_shrink_fake(
 
 try:
     direct_register_custom_op(
-        op_name="sgmv_shrink",
-        op_func=_sgmv_shrink,
+        op_name="v1_shrink",
+        op_func=_v1_shrink,
         mutates_args=["output_tensor"],
-        fake_impl=sgmv_shrink_fake,
+        fake_impl=_v1_shrink_fake,
     )
-    sgmv_shrink = torch.ops.vllm.sgmv_shrink
+    v1_shrink = torch.ops.vllm.v1_shrink
 
 except AttributeError:
-    sgmv_shrink = _sgmv_shrink
+    v1_shrink = _v1_shrink

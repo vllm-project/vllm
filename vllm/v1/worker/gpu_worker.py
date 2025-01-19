@@ -15,6 +15,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.utils import GiB_bytes
@@ -247,6 +248,9 @@ class Worker:
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
+
+    def add_lora(self, lora_request: LoRARequest) -> None:
+        self.model_runner.add_lora(lora_request)
 
 
 def init_worker_distributed_environment(

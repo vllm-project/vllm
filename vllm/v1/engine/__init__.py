@@ -72,6 +72,9 @@ class EngineCoreProfile:
 class EngineCoreResetPrefixCache:
     pass
 
+@dataclass
+class EngineCoreAddLora:
+    lora_request: "LoRARequest"
 
 class EngineCoreRequestType(enum.Enum):
     """
@@ -82,7 +85,9 @@ class EngineCoreRequestType(enum.Enum):
     ABORT = b'\x01'
     PROFILE = b'\x02'
     RESET_PREFIX_CACHE = b'\x03'
+    ADD_LORA = b'\x04'
 
 
 EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile,
-                               EngineCoreResetPrefixCache, List[str]]
+                               EngineCoreResetPrefixCache, EngineCoreAddLora,
+                               List[str]]

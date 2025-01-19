@@ -2204,7 +2204,7 @@ def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
             func = getattr(obj, method)
         except AttributeError:
             raise NotImplementedError(f"Method {method!r} is not"
-                                      " implemented.") from None
+                                      f" implemented in object {obj}") from None
     else:
         func = partial(method, obj)  # type: ignore
     return func(*args, **kwargs)

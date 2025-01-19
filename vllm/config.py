@@ -2114,6 +2114,13 @@ class LoRAConfig:
         # no factors to consider.
         # LoRA is not compatible with `torch.compile` .
         factors: List[Any] = []
+        factors.append(self.max_lora_rank)
+        factors.append(self.max_loras)
+        factors.append(self.fully_sharded_loras)
+        factors.append(self.lora_dtype)
+        factors.append(self.lora_extra_vocab_size)
+        factors.append(self.long_lora_scaling_factors)
+        factors.append(self.bias_enabled)
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -3263,11 +3270,11 @@ class VllmConfig:
                 " Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        if self.lora_config is not None and self.compilation_config.level !=\
-             CompilationLevel.NO_COMPILATION:
-            logger.warning("LoRA is not supported with `torch.compile` yet. "
-                           "Disabling `torch.compile`.")
-            self.compilation_config.level = CompilationLevel.NO_COMPILATION
+        #if self.lora_config is not None and self.compilation_config.level !=\
+        #     CompilationLevel.NO_COMPILATION:
+        #    logger.warning("LoRA is not supported with `torch.compile` yet. "
+        #                   "Disabling `torch.compile`.")
+        #    self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         current_platform.check_and_update_config(self)
 

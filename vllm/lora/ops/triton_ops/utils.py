@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import functools
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
+from pathlib import Path
+import json
+import vllm.envs as envs
+import os
 
 import torch
 
@@ -11,6 +15,78 @@ def _get_op_configs(op_type: str, batch: int, hidden_size: int):
     # TODO: add optimal configurations
     return None
 
+@functools.lru_cache(maxsize=100)
+def load_v1_op_config(op_type: str, add_inputs: Optional[bool]) -> Optional[Dict]:
+    gpu_name = torch.cuda.get_device_name()
+    gpu_name = gpu_name.replace(' ', '_')
+    gpu_name = gpu_name.replace('-', '_')
+
+    config_fname = None
+    if op_type == "shrink":
+        config_fname = f"{gpu_name}_{op_type.upper()}.json"
+    else:
+        config_fname = f"{gpu_name}_{op_type.upper()}_{str(add_inputs).upper()}.json"
+
+    config_path = Path(f'{os.path.dirname(os.path.realpath(__file__))}/configs/{config_fname}')
+    if not config_path.exists():
+        return None
+
+    # load json
+    config_data = None 
+    with open(str(config_path), "r") as f:
+        config_data = json.load(f)
+    return config_data
+
+
+@functools.lru_cache(maxsize=100)
+def get_v1_op_configs(op_type: str, batch: int, hidden_size: int,
+                       rank: int, num_slices: int, add_inputs: Optional[bool] = None) -> dict[str, int]:
+
+    assert op_type in ["shrink", "expand"]
+
+    # default config
+    default = {}
+    if op_type == "shrink":
+        default = {
+            'block_m' : 32,
+            'block_n' : 16,
+            'block_k' : 256 if batch < 128 else 32,
+            'split_k' : 64 if batch < 128 else 8,
+            'num_warps' : 4,
+            'num_ctas' : 1,
+            'num_stages' : 2,
+            'max_nreg' : None
+        }
+    else:
+        default = {
+            'block_m' : 64,
+            'block_n' : 128,
+            'block_k' : 16,
+            'num_warps' : 4,
+            'num_ctas' : 1,
+            'num_stages' : 2,
+            'max_nreg' : None
+        }
+    m = batch
+
+    k, n = (hidden_size, rank) if op_type == "shrink" else (rank, hidden_size) 
+
+    config_data = load_v1_op_config(op_type, add_inputs)
+    if not config_data:
+        return default
+
+    # config is structured as config_data[num_slices][m][k][n] = {} 
+    # slice by num_slices
+    config_data = config_data[str(num_slices)]
+    # slice by m
+    config_data = config_data.get(str(m)) or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - m))]
+    # slice by k
+    config_data = config_data.get(str(k)) or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - k))]
+    # slice by n
+    config_data = config_data.get(str(n)) or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - n))]
+
+    assert config_data is not None
+    return config_data
 
 def _check_divisibility(hidden_size: int):
     # The bgmv_expand kernel requires that the hidden_size be divisible by
@@ -36,7 +112,10 @@ def _get_default_config(op_type: str, batch: int, hidden_size: int):
 
 
 def get_lora_op_configs(op_type: str, batch: int,
-                        hidden_size: int) -> Dict[str, int]:
+                        hidden_size: int,
+                        rank: Optional[int] = None,
+                        num_slices: Optional[int] = None,
+                        add_inputs: Optional[bool] = None) -> Dict[str, int]:
     """Inspired by `fused_moe_kernel`
     The return value will be a dictionary mapping an irregular grid of batch 
     sizes and hidden_size to configurations of the bgmv-related kernel. 

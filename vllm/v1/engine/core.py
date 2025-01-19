@@ -15,14 +15,16 @@ from msgspec import msgpack
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
-from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
-                            EngineCoreRequest, EngineCoreRequestType,
-                            EngineCoreRequestUnion, EngineCoreResetPrefixCache)
+from vllm.v1.engine import (EngineCoreAddLora, EngineCoreOutputs,
+                            EngineCoreProfile, EngineCoreRequest,
+                            EngineCoreRequestType, EngineCoreRequestUnion,
+                            EngineCoreResetPrefixCache)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
@@ -140,6 +142,9 @@ class EngineCore:
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 
+    def add_lora(self, request: LoRARequest):
+        self.model_executor.add_lora(request)
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
@@ -254,6 +259,8 @@ class EngineCoreProc(EngineCore):
             self.model_executor.profile(request.is_start)
         elif isinstance(request, EngineCoreResetPrefixCache):
             self.reset_prefix_cache()
+        elif isinstance(request, EngineCoreAddLora):
+            self.model_executor.add_lora(request.lora_request)
         else:
             # TODO: make an EngineCoreAbort wrapper
             assert isinstance(request, list)
@@ -265,6 +272,7 @@ class EngineCoreProc(EngineCore):
         # Msgpack serialization decoding.
         decoder_add_req = PickleEncoder()
         decoder_abort_req = PickleEncoder()
+        decoder_add_lora_req = PickleEncoder()
 
         with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
             while True:
@@ -282,6 +290,8 @@ class EngineCoreProc(EngineCore):
                         EngineCoreRequestType.PROFILE.value,
                         EngineCoreRequestType.RESET_PREFIX_CACHE.value):
                     request = pickle.loads(request_data)
+                elif request_type == EngineCoreRequestType.ADD_LORA.value:
+                    request = decoder_add_lora_req.decode(request_data)
                 else:
                     raise ValueError(f"Unknown RequestType: {request_type}")
 
