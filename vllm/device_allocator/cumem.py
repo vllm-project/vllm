@@ -5,9 +5,10 @@
 # both of them failed because of cuda context mismatch.
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
+import dataclasses
 from contextlib import contextmanager
 from enum import Enum
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple, Union
 
 import torch
 
@@ -62,6 +63,13 @@ except Exception:
 HandleType = Tuple[int, int, int, int]
 
 
+@dataclasses.dataclass
+class AllocationData:
+    handle: HandleType
+    tag: str
+    cpu_backup_tensor: Optional[torch.Tensor] = None
+
+
 def create_and_map(allocation_handle: HandleType) -> None:
     python_create_and_map(*allocation_handle)
 
@@ -91,26 +99,21 @@ def use_memory_pool_with_allocator(
         yield mem_pool
 
 
-# an enum of two modes: offload and discard
-# offload: move the data from GPU to CPU when sleeping
-# discard: discard the data when sleeping
-# the default mode is offload
-
-
-class CuMemMode(Enum):
-    OFFLOAD = 1
-    DISCARD = 2
-
-
 class CuMemAllocator:
     """
     A singleton class that manages a memory pool for CUDA tensors.
     The memory in this pool can be offloaded or discarded when the
     allocator sleeps.
 
-    Inside the `use_memory_pool(mode)` context, all tensors created will
-    be allocated in the memory pool, and has the same mode as the
-    mode passed to the context.
+    Inside the `use_memory_pool(tag)` context, all tensors created will
+    be allocated in the memory pool, and has the same tag as the
+    tag passed to the context.
+
+    When we call `sleep`, all tensors with the specified tag will be
+    offloaded to CPU memory, and the rest of the tensors will be discarded.
+    When we call `wake_up`, all tensors that are previously offloaded
+    will be loaded back to GPU memory, and the rest of the tensors will
+    have empty memory.
 
     Why it needs to be a singleton?
     When allocated tensors are garbage collected, PyTorch will call
@@ -121,6 +124,7 @@ class CuMemAllocator:
     not work as expected.
     """
     instance: "CuMemAllocator" = None
+    default_tag: str = "default"
 
     @staticmethod
     def get_instance() -> "CuMemAllocator":
@@ -129,29 +133,32 @@ class CuMemAllocator:
         return CuMemAllocator.instance
 
     def __init__(self):
-        self.pointer_to_handle: Dict[int, HandleType] = {}
-        self.pointer_to_cpu_backup_tensor: Dict[int,
-                                                Optional[torch.Tensor]] = {}
-        self.pointer_to_mode: Dict[int, CuMemMode] = {}
-        self.current_mode = CuMemMode.OFFLOAD
+        self.pointer_to_data: Dict[int, AllocationData] = {}
+        self.current_tag: str = CuMemAllocator.default_tag
 
     def python_malloc_callback(self, allocation_handle: HandleType) -> None:
         py_d_mem = allocation_handle[2]
-        self.pointer_to_handle[py_d_mem] = allocation_handle
-        self.pointer_to_cpu_backup_tensor[py_d_mem] = None
-        self.pointer_to_mode[py_d_mem] = self.current_mode
+        self.pointer_to_data[py_d_mem] = AllocationData(
+            allocation_handle, self.current_tag)
         return
 
     def python_free_callback(self, ptr: int) -> HandleType:
-        cpu_backup_tensor = self.pointer_to_cpu_backup_tensor.pop(ptr)
-        if cpu_backup_tensor is not None:
-            del cpu_backup_tensor
-        return self.pointer_to_handle.pop(ptr)
+        data = self.pointer_to_data.pop(ptr)
+        if data.cpu_backup_tensor is not None:
+            data.cpu_backup_tensor = None
+        return data.handle
 
-    def sleep(self):
-        for ptr, mode in self.pointer_to_mode.items():
-            handle = self.pointer_to_handle[ptr]
-            if mode == CuMemMode.OFFLOAD:
+    def sleep(self,
+              offload_tags: Optional[Union[Tuple[str], str]] = None) -> None:
+        if offload_tags is None:
+            offload_tags = (CuMemAllocator.default_tag, )
+        elif isinstance(offload_tags, str):
+            offload_tags = (offload_tags, )
+        else:
+            assert isinstance(offload_tags, tuple)
+        for ptr, data in self.pointer_to_data.items():
+            handle = data.handle
+            if data.tag in offload_tags:
                 size_in_bytes = handle[1]
                 cpu_backup_tensor = torch.empty(
                     size_in_bytes,
@@ -160,30 +167,26 @@ class CuMemAllocator:
                     pin_memory=is_pin_memory_available())
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
-                self.pointer_to_cpu_backup_tensor[ptr] = cpu_backup_tensor
+                data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
 
     def wake_up(self):
-        for ptr, mode in self.pointer_to_mode.items():
-            handle = self.pointer_to_handle[ptr]
+        for ptr, data in self.pointer_to_data.items():
+            handle = data.handle
             create_and_map(handle)
-            if mode == CuMemMode.OFFLOAD:
-                cpu_backup_tensor = self.pointer_to_cpu_backup_tensor.pop(ptr)
+            if data.cpu_backup_tensor is not None:
+                cpu_backup_tensor = data.cpu_backup_tensor
                 if cpu_backup_tensor is not None:
                     size_in_bytes = cpu_backup_tensor.numel(
                     ) * cpu_backup_tensor.element_size()
                     cpu_ptr = cpu_backup_tensor.data_ptr()
                     libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-
-        self.pointer_to_cpu_backup_tensor = {
-            ptr: None
-            for ptr in self.pointer_to_cpu_backup_tensor
-        }
+                    data.cpu_backup_tensor = None
 
     @contextmanager
-    def use_memory_pool(self, mode: CuMemMode = CuMemMode.OFFLOAD):
-        old_mode = self.current_mode
-        self.current_mode = mode
+    def use_memory_pool(self, tag: str = ""):
+        old_tag = self.current_tag
+        self.current_tag = tag
         with use_memory_pool_with_allocator(self.python_malloc_callback,
                                             self.python_free_callback):
             yield
@@ -197,10 +200,11 @@ class CuMemAllocator:
             # allocate memory.
             # TODO: we need to find a way to release the memory,
             # i.e. calling torch.cuda.empty_cache()
-            self.current_mode = old_mode
+            self.current_tag = old_tag
 
     def get_current_usage(self):
         sum_bytes = 0
-        for ptr, handle in self.pointer_to_handle.items():
+        for ptr, data in self.pointer_to_data.items():
+            handle = data.handle
             sum_bytes += handle[1]
         return sum_bytes
