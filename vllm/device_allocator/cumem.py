@@ -1,4 +1,4 @@
-# cumem-based pytorch pluggable allocator
+# cumem-based pytorch pluggable allocator to implement sleep mode.
 # other approaches tried but failed:
 # - cuda-python package binding
 # - custom libcuda driver ctypes wrapper

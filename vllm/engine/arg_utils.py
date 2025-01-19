@@ -956,10 +956,10 @@ class EngineArgs:
             "loaded from model. If set to a folder path, the generation config "
             "will be loaded from the specified folder path.")
 
-        parser.add_argument("--enable-sleeping-mode",
+        parser.add_argument("--enable-sleep-mode",
                             action="store_true",
                             default=False,
-                            help="Enable sleeping mode for the engine. ")
+                            help="Enable sleep mode for the engine. ")
 
         return parser
 
