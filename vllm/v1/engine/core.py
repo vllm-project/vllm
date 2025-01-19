@@ -121,13 +121,13 @@ class EngineCore:
             return []
 
         logger.info("Running EngineCore step.")
-        # Append tokens to requests directly
-        # to mimic ngram proposal. 
-        # Only change requests in the running queue.
-        # We don't do spec decode in the prefill phase for now.
-        # We don't handle prefill kv cache for now.
-        for req in self.scheduler.running:
-            req.append_spec_token_ids([1] * 5)
+        # # Append tokens to requests directly
+        # # to mimic ngram proposal. 
+        # # Only change requests in the running queue.
+        # # We don't do spec decode in the prefill phase for now.
+        # # We don't handle prefill kv cache for now.
+        # for req in self.scheduler.running:
+        #     req.append_spec_token_ids([1] * 5)
             
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)

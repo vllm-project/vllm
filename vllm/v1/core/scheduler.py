@@ -408,7 +408,7 @@ class Scheduler:
     ) -> List[EngineCoreOutput]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
-        # num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         
         new_running: List[Request] = []
         engine_core_outputs: List[EngineCoreOutput] = []
@@ -416,7 +416,8 @@ class Scheduler:
             req_id = request.request_id
             req_index = model_runner_output.req_id_to_index[req_id]
             token_ids = sampled_token_ids[req_index]
-            request.num_computed_tokens += len(token_ids)
+            # FIXME: have a cleaner way to handle this
+            request.num_computed_tokens += num_scheduled_tokens[req_id] - (len(request.spec_token_ids) + 1 - len(token_ids))
             
             # When the request's num_computed_tokens catches up its num_tokens,
             # the request generates output tokens. Otherwise, we ignore the
