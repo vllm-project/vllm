@@ -1828,12 +1828,12 @@ class LLMEngine:
                                                   kwargs)
 
     def sleep(self, level: int = 1) -> None:
-        assert self.vllm_config.model_config.enable_sleeping_mode, (
+        assert self.vllm_config.model_config.enable_sleep_mode, (
             "Sleeping mode is not enabled in the model config")
         self.model_executor.sleep(level=level)
 
     def wake_up(self) -> None:
-        assert self.vllm_config.model_config.enable_sleeping_mode, (
+        assert self.vllm_config.model_config.enable_sleep_mode, (
             "Sleeping mode is not enabled in the model config")
         self.model_executor.wake_up()
 

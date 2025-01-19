@@ -119,7 +119,7 @@ class Worker:
         self.model_runner = GPUModelRunner(self.vllm_config, self.device)
 
     def load_model(self) -> None:
-        if self.vllm_config.model_config.enable_sleeping_mode:
+        if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, (
                 "Sleep mode can only be "
@@ -186,7 +186,7 @@ class Worker:
 
     def initialize_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-        if self.vllm_config.model_config.enable_sleeping_mode:
+        if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
             context = allocator.use_memory_pool(CuMemMode.DISCARD)
         else:

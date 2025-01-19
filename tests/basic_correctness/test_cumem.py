@@ -88,7 +88,7 @@ def test_cumem_with_cudagraph():
 
 @fork_new_process_for_each_test
 def test_end_to_end():
-    llm = LLM("meta-llama/Llama-3.2-1B", enable_sleeping_mode=True)
+    llm = LLM("meta-llama/Llama-3.2-1B", enable_sleep_mode=True)
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
@@ -127,7 +127,7 @@ def test_end_to_end():
 
 @fork_new_process_for_each_test
 def test_deep_sleep():
-    llm = LLM("meta-llama/Llama-3.2-1B", enable_sleeping_mode=True)
+    llm = LLM("meta-llama/Llama-3.2-1B", enable_sleep_mode=True)
 
     cpu_used_bytes = psutil.virtual_memory().used
     print("CPU memory usage before sleep: "

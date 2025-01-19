@@ -197,7 +197,7 @@ class EngineArgs:
     kv_transfer_config: Optional[KVTransferConfig] = None
 
     generation_config: Optional[str] = None
-    enable_sleeping_mode: bool = False
+    enable_sleep_mode: bool = False
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -1006,7 +1006,7 @@ class EngineArgs:
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,
-            enable_sleeping_mode=self.enable_sleeping_mode,
+            enable_sleep_mode=self.enable_sleep_mode,
         )
 
     def create_load_config(self) -> LoadConfig:

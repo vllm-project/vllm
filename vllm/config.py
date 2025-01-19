@@ -230,7 +230,7 @@ class ModelConfig:
         override_pooler_config: Optional["PoolerConfig"] = None,
         logits_processor_pattern: Optional[str] = None,
         generation_config: Optional[str] = None,
-        enable_sleeping_mode: bool = False,
+        enable_sleep_mode: bool = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -280,11 +280,11 @@ class ModelConfig:
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
-        self.enable_sleeping_mode = enable_sleeping_mode
+        self.enable_sleep_mode = enable_sleep_mode
 
         from vllm.platforms import current_platform
 
-        if self.enable_sleeping_mode:
+        if self.enable_sleep_mode:
             assert current_platform.is_cuda(), (
                 "Sleeping mode is only supported on CUDA devices.")
 
