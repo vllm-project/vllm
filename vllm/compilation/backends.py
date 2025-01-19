@@ -624,9 +624,12 @@ class VllmBackend:
         ]
 
         # index of tensors that have symbolic shapes (batch size)
+        # for weights and static buffers, they will have concrete shapes,
+        # and therefore x.numel() will be an integer.
         self.sym_tensor_indices = [
             i for i, x in enumerate(fake_args)
             if isinstance(x, torch._subclasses.fake_tensor.FakeTensor)
+            and not isinstance(x.numel(), int)
         ]
 
         # compiler managed cudagraph input buffers
