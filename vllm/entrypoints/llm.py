@@ -2,9 +2,10 @@ import itertools
 import warnings
 from contextlib import contextmanager
 from typing import (Any, Callable, ClassVar, Dict, List, Optional, Sequence,
-                    Tuple, Type, Union, cast, overload)
+                    Tuple, Type, TypeVar, Union, cast, overload)
 
 import cloudpickle
+import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import deprecated
 
@@ -41,6 +42,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
 
 logger = init_logger(__name__)
+
+_R = TypeVar("_R")
 
 
 class LLM:
@@ -464,10 +467,10 @@ class LLM:
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def collective_rpc(self,
-                       method: Union[str, Callable],
+                       method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       kwargs: Optional[Dict[str, Any]] = None) -> List[_R]:
         """
         Execute an RPC call on all workers.
 
@@ -492,6 +495,14 @@ class LLM:
         """
         executor = self.llm_engine.model_executor
         return executor.collective_rpc(method, timeout, args, kwargs)
+
+    def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
+        """
+        Run a function directly on the model inside each worker,
+        returning the result for each of them.
+        """
+        executor = self.llm_engine.model_executor
+        return executor.apply_model(func)
 
     def beam_search(
         self,

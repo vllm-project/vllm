@@ -53,10 +53,10 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def collective_rpc(self,
-                       method: Union[str, Callable],
+                       method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       kwargs: Optional[Dict[str, Any]] = None) -> List[_R]:
         """
         Execute an RPC call on all workers.
 
