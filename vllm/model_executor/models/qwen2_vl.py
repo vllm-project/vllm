@@ -98,6 +98,8 @@ class Qwen2VLImageEmbeddingInputs(TypedDict):
     """Supported types:
     - List[`torch.Tensor`]: A list of tensors holding all images' features.
         Each tensor holds an image's features.
+    - `torch.Tensor`: A tensor holding all images' features
+        (concatenation of all images' feature tensors).
     
     Tensor shape: `(num_image_features, hidden_size)`
     - `num_image_features` varies based on
@@ -136,6 +138,8 @@ class Qwen2VLVideoEmbeddingInputs(TypedDict):
     """Supported types:
     - List[`torch.Tensor`]: A list of tensors holding all videos' features.
         Each tensor holds an video's features.
+    - `torch.Tensor`: A tensor holding all images' features
+        (concatenation of all images' feature tensors).
     
     Tensor shape: `(num_image_features, hidden_size)`
     - `num_image_features` varies based on 
@@ -1175,26 +1179,27 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _process_image_input(
             self, image_input: Qwen2VLImageInputs) -> tuple[torch.Tensor, ...]:
 
-        if image_input["type"] == "image_embeds":
-            return tuple(image_input["image_embeds"].type(self.visual.dtype))
-
         grid_thw = image_input["image_grid_thw"]
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod() // merge_size // merge_size
-        pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+        if image_input["type"] == "image_embeds":
+            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
+            return image_embeds.split(sizes.tolist())
 
+        pixel_values = image_input["pixel_values"].type(self.visual.dtype)
         image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
         return image_embeds.split(sizes.tolist())
 
     def _process_video_input(
             self, video_input: Qwen2VLVideoInputs) -> tuple[torch.Tensor, ...]:
-        if video_input["type"] == "video_embeds":
-            return tuple(video_input["video_embeds"].type(self.visual.dtype))
-
         grid_thw = video_input["video_grid_thw"]
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod() // merge_size // merge_size
+        if video_input["type"] == "video_embeds":
+            video_embeds = video_input["video_embeds"].type(self.visual.dtype)
+            return video_embeds.split(sizes.tolist())
+
         pixel_values_videos = video_input["pixel_values_videos"].type(
             self.visual.dtype)
         video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
