@@ -33,7 +33,6 @@ from .utils import (is_pp_missing_parameter,
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
-
 class Mamba2DecoderLayer(nn.Module):
 
     def __init__(self,
@@ -226,8 +225,11 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
             else:
                 self.max_batch_size = vllm_config.pad_for_cudagraph(
                     self.scheduler_config.max_num_seqs)
+        elif self.scheduler_config is not None:
+            # For eager just take the scheduler_config if avail
+            self.max_batch_size = self.scheduler_config.max_num_seqs
         else:
-            self.max_batch_size = 256
+            self.max_batch_size = 8192 + 2
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.backbone.get_input_embeddings(input_ids)
@@ -247,15 +249,7 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
                 self.lm_head.weight.dtype, num_mamba_layers,
                 self.max_batch_size, *self._get_mamba_cache_shape())
 
-        (
-            mamba_cache_tensors,
-            state_indices_tensor,
-        ) = self.mamba_cache.current_run_tensors(input_ids, attn_metadata,
-                                                 **kwargs)
-
-        mamba_cache_params = MambaCacheParams(mamba_cache_tensors[0],
-                                              mamba_cache_tensors[1],
-                                              state_indices_tensor)
+        mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
         hidden_states = self.backbone(input_ids, positions, attn_metadata,
                                       mamba_cache_params, intermediate_tensors,
@@ -290,7 +284,7 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         conv_dim = (intermediate_size + 2 * n_groups * self.config.state_size)
         conv_state_shape = (
             divide(conv_dim, world_size),
-            self.config.state_size - 1,
+            self.config.conv_kernel - 1,
         )
 
         # These are not TP-ed as they depend on A, dt_bias, D
