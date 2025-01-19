@@ -457,8 +457,7 @@ def moe_align_block_size(
                                       dtype=torch.int32,
                                       device=topk_ids.device)
     ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
-                             expert_ids, num_tokens_post_pad,
-                             num_experts >= 256)
+                             expert_ids, num_tokens_post_pad)
     return sorted_ids, expert_ids, num_tokens_post_pad
 
 
