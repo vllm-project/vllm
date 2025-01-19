@@ -27,6 +27,17 @@ _USAGE_STATS_SERVER = envs.VLLM_USAGE_STATS_SERVER
 
 _GLOBAL_RUNTIME_DATA: Dict[str, Union[str, int, bool]] = {}
 
+_USAGE_ENV_VARS_TO_COLLECT = [
+    "VLLM_USE_MODELSCOPE",
+    "VLLM_USE_TRITON_FLASH_ATTN",
+    "VLLM_ATTENTION_BACKEND",
+    "VLLM_USE_FLASHINFER_SAMPLER",
+    "VLLM_PP_LAYER_PARTITION",
+    "VLLM_USE_TRITON_AWQ",
+    "VLLM_USE_V1",
+    "VLLM_ENABLE_V1_MULTIPROCESSING",
+]
+
 
 def set_runtime_usage_data(key: str, value: Union[str, int, bool]) -> None:
     """Set global usage data that will be sent with every usage heartbeat."""
@@ -122,6 +133,7 @@ class UsageMessage:
         self.gpu_count: Optional[int] = None
         self.gpu_type: Optional[str] = None
         self.gpu_memory_per_device: Optional[int] = None
+        self.env_var_json: Optional[str] = None
 
         # vLLM Information
         self.model_architecture: Optional[str] = None
@@ -175,6 +187,12 @@ class UsageMessage:
         self.context = usage_context.value
         self.vllm_version = VLLM_VERSION
         self.model_architecture = model_architecture
+
+        # Environment variables
+        self.env_var_json = json.dumps({
+            env_var: getattr(envs, env_var)
+            for env_var in _USAGE_ENV_VARS_TO_COLLECT
+        })
 
         # Metadata
         self.log_time = _get_current_timestamp_ns()
