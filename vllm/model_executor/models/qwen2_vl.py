@@ -1180,8 +1180,10 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             self, image_input: Qwen2VLImageInputs) -> tuple[torch.Tensor, ...]:
 
         grid_thw = image_input["image_grid_thw"]
+        assert grid_thw.ndim == 2
         merge_size = self.visual.spatial_merge_size
-        sizes = grid_thw.prod() // merge_size // merge_size
+        sizes = grid_thw.prod(-1) // merge_size // merge_size
+
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
             return image_embeds.split(sizes.tolist())
@@ -1193,9 +1195,12 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _process_video_input(
             self, video_input: Qwen2VLVideoInputs) -> tuple[torch.Tensor, ...]:
+
         grid_thw = video_input["video_grid_thw"]
+        assert grid_thw.ndim == 2
         merge_size = self.visual.spatial_merge_size
-        sizes = grid_thw.prod() // merge_size // merge_size
+        sizes = grid_thw.prod(-1) // merge_size // merge_size
+
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
             return video_embeds.split(sizes.tolist())
