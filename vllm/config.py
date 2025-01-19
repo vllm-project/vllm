@@ -286,7 +286,7 @@ class ModelConfig:
 
         if self.enable_sleep_mode:
             assert current_platform.is_cuda(), (
-                "Sleeping mode is only supported on CUDA devices.")
+                "Sleep mode is only supported on CUDA devices.")
 
         hf_config = get_config(self.model, trust_remote_code, revision,
                                code_revision, config_format)
