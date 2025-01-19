@@ -181,7 +181,7 @@ class CuMemAllocator:
             yield
             # PyTorch's bug, calling torch.cuda.empty_cache() will error
             # when using pluggable allocator, see
-            # https://dev-discuss.pytorch.org/t/understanding-the-difference-between-the-caching-behavior-of-cuda-caching-allocator-and-pluggable-allocator/2746/5?u=youkaichao # noqa
+            # https://github.com/pytorch/pytorch/issues/145168 .
             # if we have some memory allocated and then freed,
             # the memory will not be released.
             # right now it is fine, because we only use this allocator
