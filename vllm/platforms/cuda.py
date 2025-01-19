@@ -124,7 +124,8 @@ class CudaPlatformBase(Platform):
                         "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
                 if envs.VLLM_USE_V1:
-                    raise NotImplementedError
+                    pass
+                    # raise NotImplementedError
                 else:
                     parallel_config.worker_cls = \
                         "vllm.spec_decode.spec_decode_worker.create_spec_worker"
