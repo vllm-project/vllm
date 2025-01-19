@@ -12,8 +12,7 @@ from ...utils import check_outputs_equal
 
 MODELS = [
     "state-spaces/mamba-130m-hf", "tiiuae/falcon-mamba-tiny-dev",
-    "mistralai/Mamba-Codestral-7B-v0.1",
-    "/home/tms/mamba2-130m-hf",
+    "mistralai/Mamba-Codestral-7B-v0.1"
 ]
 
 
@@ -125,7 +124,7 @@ def test_chunked_prefill_with_parallel_sampling(vllm_runner, example_prompts,
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
+@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 8])
 def test_chunked_prefill(vllm_runner, example_prompts, model: str, dtype: str,
                          max_tokens: int,
                          chunked_prefill_token_size: int) -> None:
