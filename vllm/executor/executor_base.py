@@ -1,7 +1,7 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set,
-                    TypeVar, Tuple, Union)
+from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
+                    TypeVar, Union)
 
 import torch.nn as nn
 
@@ -176,23 +176,6 @@ class ExecutorBase(ABC):
                             kwargs=dict(path=path,
                                         pattern=pattern,
                                         max_size=max_size))
-
-    def get_model(self) -> nn.Module:
-        """
-        Get the model that is being run inside vLLM.
-
-        Note:
-            This is only valid when the model is loaded on a single worker.
-            If multiple workers are being created (e.g. when you are using
-            tensor or pipeline parallelism), please use :meth:`apply_to_model`
-            instead.
-        """
-        models = self.collective_rpc("get_model")
-        if len(models) > 1:
-            raise RuntimeError("`get_model()` is only valid when the model is "
-                               "loaded on a single worker.")
-
-        return models[0]
 
     def apply_to_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """

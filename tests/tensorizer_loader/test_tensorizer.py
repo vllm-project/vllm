@@ -24,7 +24,6 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
 # yapf: enable
 from vllm.utils import PlaceholderModule, import_from_path
 
-from ..conftest import VllmRunner
 from ..utils import VLLM_PATH, RemoteOpenAIServer
 from .conftest import retry_until_skip
 
@@ -56,10 +55,6 @@ def is_curl_installed():
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
-
-
-def get_torch_model(vllm_runner: VllmRunner):
-    return vllm_runner.model.llm_engine.get_model()
 
 
 def write_keyfile(keyfile_path: str):
@@ -115,7 +110,7 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
 
         config_for_serializing = TensorizerConfig(tensorizer_uri=model_path,
                                                   encryption_keyfile=key_path)
-        serialize_vllm_model(get_torch_model(vllm_model),
+        serialize_vllm_model(vllm_model.get_torch_model(),
                              config_for_serializing)
 
     config_for_deserializing = TensorizerConfig(tensorizer_uri=model_path,
@@ -169,7 +164,7 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
     with vllm_runner(model_ref, ) as vllm_model:
         model_path = tmp_path / (model_ref + ".tensors")
 
-        serialize_vllm_model(get_torch_model(vllm_model),
+        serialize_vllm_model(vllm_model.get_torch_model(),
                              TensorizerConfig(tensorizer_uri=model_path))
 
     with vllm_runner(
@@ -209,7 +204,7 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
     with vllm_runner(model_ref, ) as vllm_model:
         model_path = tmp_path / (model_ref + ".tensors")
 
-        serialize_vllm_model(get_torch_model(vllm_model),
+        serialize_vllm_model(vllm_model.get_torch_model(),
                              TensorizerConfig(tensorizer_uri=model_path))
 
         model_loader_extra_config = {
@@ -331,7 +326,7 @@ def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
 
     with vllm_runner(model_ref) as vllm_model:
         outputs = vllm_model.generate(prompts, sampling_params)
-        serialize_vllm_model(get_torch_model(vllm_model), config)
+        serialize_vllm_model(vllm_model.get_torch_model(), config)
 
         assert is_vllm_tensorized(config)
 

@@ -5,7 +5,6 @@ import pytest
 import torch
 from PIL import Image
 
-from vllm.entrypoints.llm import LLM
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import rescale_video_size, sample_frames_from_video
 
@@ -69,7 +68,7 @@ class Qwen2VLPromptVideoEmbeddingInput(TypedDict):
 
 def batch_make_image_embeddings(
         image_batches: List[Union[Image.Image, List[Image.Image]]], processor,
-        llm: LLM) -> List[Qwen2VLPromptImageEmbeddingInput]:
+        llm: VllmRunner) -> List[Qwen2VLPromptImageEmbeddingInput]:
     """batched image embeddings for Qwen2-VL
 
     This will infer all images' embeddings in a single batch, 
@@ -107,7 +106,7 @@ def batch_make_image_embeddings(
 
     # pixel values to embeddinds & grid_thws
     with torch.no_grad():
-        visual = llm.llm_engine.get_model().visual
+        visual = llm.get_torch_model().visual
 
         pixel_values_on_device = pixel_values.to(visual.device,
                                                  dtype=visual.dtype)
@@ -150,7 +149,7 @@ def batch_make_image_embeddings(
 
 def batch_make_video_embeddings(
         video_batches: PromptVideoInput, processor,
-        llm: LLM) -> List[Qwen2VLPromptVideoEmbeddingInput]:
+        llm: VllmRunner) -> List[Qwen2VLPromptVideoEmbeddingInput]:
     """batched video embeddings for Qwen2-VL
 
     A NDArray represents a single video's all frames.
@@ -188,7 +187,7 @@ def batch_make_video_embeddings(
 
     # pixel values to embeddinds & grid_thws
     with torch.no_grad():
-        visual = llm.llm_engine.get_model().visual
+        visual = llm.get_torch_model().visual
 
         pixel_values_on_device = pixel_values.to(visual.device,
                                                  dtype=visual.dtype)
@@ -278,9 +277,9 @@ def run_embedding_input_test(
                 max_tokens,
                 num_logprobs=num_logprobs,
                 images=batch_make_image_embeddings(
-                    images, processor, vllm_model.model) if images else None,
+                    images, processor, vllm_model) if images else None,
                 videos=batch_make_video_embeddings(
-                    videos, processor, vllm_model.model) if videos else None)
+                    videos, processor, vllm_model) if videos else None)
             for prompts, images, videos in inputs
         ]
 
