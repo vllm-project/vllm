@@ -153,6 +153,9 @@ class DelegateWorkerBase(WorkerBase):
                          num_cpu_blocks: int) -> None:
         self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
+    def get_model(self) -> nn.Module:
+        return self.worker.get_model()
+
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
