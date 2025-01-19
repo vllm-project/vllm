@@ -487,7 +487,7 @@ class LLM:
             kwargs: Keyword arguments to pass to the worker method.
 
         Returns:
-            List of results from each worker.
+            A list containing the results from each worker.
         
         Note:
             It is recommended to use this API to only pass control messages,
