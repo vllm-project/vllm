@@ -1,7 +1,7 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
-                    Union)
+from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set,
+                    TypeVar, Tuple, Union)
 
 import torch.nn as nn
 
@@ -13,8 +13,11 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import make_async
+from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
+
+_R = TypeVar("_R")
 
 
 class ExecutorBase(ABC):
@@ -190,7 +193,32 @@ class ExecutorBase(ABC):
                                         max_size=max_size))
 
     def get_model(self) -> nn.Module:
-        return self.collective_rpc("get_model")[0]
+        """
+        Get the model that is being run inside vLLM.
+
+        Note:
+            This is only valid when the model is loaded on a single worker.
+            If multiple workers are being created (e.g. when you are using
+            tensor or pipeline parallelism), please use :meth:`apply_to_model`
+            instead.
+        """
+        models = self.collective_rpc("get_model")
+        if len(models) > 1:
+            raise RuntimeError("`get_model()` is only valid when the model is "
+                               "loaded on a single worker.")
+
+        return models[0]
+
+    def apply_to_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
+        """
+        Run a function on the model inside each worker, and return
+        the result for each worker.
+        """
+
+        def apply_func(worker: WorkerBase) -> _R:
+            return func(worker.get_model())
+
+        return self.collective_rpc(apply_func)
 
     @abstractmethod
     def check_health(self) -> None:

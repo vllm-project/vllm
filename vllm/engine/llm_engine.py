@@ -11,7 +11,6 @@ from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Type, Union, cast, overload
 
 import torch
-import torch.nn as nn
 from typing_extensions import TypeVar, deprecated
 
 import vllm.envs as envs
@@ -1810,9 +1809,6 @@ class LLMEngine:
 
     def list_prompt_adapters(self) -> List[int]:
         return self.model_executor.list_prompt_adapters()
-
-    def get_model(self) -> nn.Module:
-        return self.model_executor.get_model()
 
     def start_profile(self) -> None:
         self.model_executor.start_profile()
