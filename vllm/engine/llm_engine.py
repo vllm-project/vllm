@@ -1825,9 +1825,7 @@ class LLMEngine:
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
-        """
-        See LLM.collective_rpc for more details.
-        """
+        """See :meth:`vllm.executor.ExecutorBase.collective_rpc`."""
         return self.model_executor.collective_rpc(method, timeout, args,
                                                   kwargs)
 

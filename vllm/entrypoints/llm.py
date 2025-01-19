@@ -468,20 +468,7 @@ class LLM:
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
-        """
-        Run a method on all workers, with homogeneous arguments.
-        The main extension point for the LLM entrypoint.
-        Users can provide custom worker class through `worker_cls`
-        argument, and implement new methods in the worker class.
-        Then, users can call the new methods through this API.
-        It is recommended to use this API to only pass control messages,
-        and set up data-plane communication to pass data.
-        The method can also be a callable, which will be serialized
-        and sent to all workers to execute.
-        If the method is a callable, it should accept an additional
-        `self` argument, in addition to the arguments passed in `args`
-        and `kwargs`. The `self` argument will be the worker object.
-        """
+        """See :meth:`vllm.executor.ExecutorBase.collective_rpc`."""
         return self.llm_engine.collective_rpc(method, timeout, args, kwargs)
 
     def beam_search(

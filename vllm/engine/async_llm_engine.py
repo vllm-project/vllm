@@ -1178,6 +1178,7 @@ class AsyncLLMEngine(EngineClient):
         self.engine.remove_logger(logger_name=logger_name)
 
     def get_model(self) -> nn.Module:
+        """See :meth:`vllm.executor.ExecutorBase.collective_rpc`."""
         return self.engine.get_model()
 
     async def start_profile(self) -> None:
