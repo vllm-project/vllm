@@ -11,21 +11,7 @@ from typing import Callable, Dict, Optional, Tuple
 
 import torch
 
-from vllm.cumem_allocator import (init_module, python_create_and_map,
-                                  python_unmap_and_release)
-from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.utils import is_pin_memory_available
-
-# py_device, py_alignedSize, py_d_mem, py_p_memHandle
-HandleType = Tuple[int, int, int, int]
-
-
-def create_and_map(allocation_handle: HandleType) -> None:
-    python_create_and_map(*allocation_handle)
-
-
-def unmap_and_release(allocation_handle: HandleType) -> None:
-    python_unmap_and_release(*allocation_handle)
 
 
 def find_loaded_library(lib_name) -> Optional[str]:
@@ -54,6 +40,36 @@ def find_loaded_library(lib_name) -> Optional[str]:
     return path
 
 
+cumem_available = False
+try:
+    from vllm.cumem_allocator import (init_module, python_create_and_map,
+                                      python_unmap_and_release)
+    from vllm.distributed.device_communicators.cuda_wrapper import (
+        CudaRTLibrary)
+    lib_name = find_loaded_library("cumem_allocator")
+    libcudart = CudaRTLibrary()
+    cumem_available = True
+except Exception:
+    # rocm platform does not support cumem allocator
+    init_module = None
+    python_create_and_map = None
+    python_unmap_and_release = None
+    CudaRTLibrary = None
+    lib_name = None
+    libcudart = None
+
+# py_device, py_alignedSize, py_d_mem, py_p_memHandle
+HandleType = Tuple[int, int, int, int]
+
+
+def create_and_map(allocation_handle: HandleType) -> None:
+    python_create_and_map(*allocation_handle)
+
+
+def unmap_and_release(allocation_handle: HandleType) -> None:
+    python_unmap_and_release(*allocation_handle)
+
+
 def get_pluggable_allocator(
     python_malloc_fn: Callable[[int],
                                int], python_free_func: Callable[[int, int],
@@ -74,14 +90,6 @@ def use_memory_pool_with_allocator(
     with torch.cuda.memory.use_mem_pool(mem_pool):
         yield mem_pool
 
-
-lib_name = find_loaded_library("cumem_allocator")
-
-if lib_name is None:
-    raise RuntimeError(
-        "cumem_allocator library not found in the process memory map")
-
-libcudart = CudaRTLibrary()
 
 # an enum of two modes: offload and discard
 # offload: move the data from GPU to CPU when sleeping
