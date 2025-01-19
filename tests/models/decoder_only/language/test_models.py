@@ -75,7 +75,7 @@ def test_models(
             example_prompts, max_tokens, num_logprobs)
         # This test is for verifying whether the model's extra_repr
         # can be printed correctly.
-        vllm_model.apply_to_models(print)
+        vllm_model.apply_model(print)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,

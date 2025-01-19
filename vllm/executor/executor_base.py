@@ -114,6 +114,17 @@ class ExecutorBase(ABC):
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
 
+    def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
+        """
+        Run a function directly on the model inside each worker,
+        returning the result for each of them.
+        """
+
+        def rpc_func(worker: WorkerBase) -> _R:
+            return func(worker.get_model())
+
+        return self.collective_rpc(rpc_func)
+
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
     ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
@@ -188,17 +199,6 @@ class ExecutorBase(ABC):
                             kwargs=dict(path=path,
                                         pattern=pattern,
                                         max_size=max_size))
-
-    def apply_to_models(self, func: Callable[[nn.Module], _R]) -> list[_R]:
-        """
-        Run a function on the model inside each worker,
-        returning the result for each of them.
-        """
-
-        def rpc_func(worker: WorkerBase) -> _R:
-            return func(worker.get_model())
-
-        return self.collective_rpc(rpc_func)
 
     @abstractmethod
     def check_health(self) -> None:

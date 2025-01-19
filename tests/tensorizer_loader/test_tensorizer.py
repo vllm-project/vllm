@@ -112,7 +112,7 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
         config_for_serializing = TensorizerConfig(tensorizer_uri=model_path,
                                                   encryption_keyfile=key_path)
 
-        vllm_model.apply_to_models(
+        vllm_model.apply_model(
             partial(serialize_vllm_model,
                     tensorizer_config=config_for_serializing))
 
@@ -167,7 +167,7 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
     with vllm_runner(model_ref, ) as vllm_model:
         model_path = tmp_path / (model_ref + ".tensors")
 
-        vllm_model.apply_to_models(
+        vllm_model.apply_model(
             partial(
                 serialize_vllm_model,
                 tensorizer_config=TensorizerConfig(tensorizer_uri=model_path)))
@@ -209,7 +209,7 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
     with vllm_runner(model_ref, ) as vllm_model:
         model_path = tmp_path / (model_ref + ".tensors")
 
-        vllm_model.apply_to_models(
+        vllm_model.apply_model(
             partial(
                 serialize_vllm_model,
                 tensorizer_config=TensorizerConfig(tensorizer_uri=model_path)))
@@ -334,7 +334,7 @@ def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
     with vllm_runner(model_ref) as vllm_model:
         outputs = vllm_model.generate(prompts, sampling_params)
 
-        vllm_model.apply_to_models(
+        vllm_model.apply_model(
             partial(serialize_vllm_model, tensorizer_config=config))
 
         assert is_vllm_tensorized(config)

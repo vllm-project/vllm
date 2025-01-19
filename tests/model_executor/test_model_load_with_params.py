@@ -50,7 +50,7 @@ def test_model_loading_with_params(vllm_runner):
             assert model._pooler.pooling_type == PoolingType.CLS
             assert model._pooler.normalize
 
-        vllm_model.apply_to_models(check_model)
+        vllm_model.apply_model(check_model)
 
         # assert output
         assert output
@@ -89,7 +89,7 @@ def test_roberta_model_loading_with_params(vllm_runner):
             assert model._pooler.pooling_type == PoolingType.MEAN
             assert model._pooler.normalize
 
-        vllm_model.apply_to_models(check_model)
+        vllm_model.apply_model(check_model)
 
         # assert output
         assert output
@@ -116,6 +116,6 @@ def test_facebook_roberta_model_loading_with_params(vllm_runner):
             assert not hasattr(model, "lm_head")
             assert isinstance(model._pooler, CLSPool)
 
-        vllm_model.apply_to_models(check_model)
+        vllm_model.apply_model(check_model)
 
         assert output

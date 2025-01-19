@@ -78,7 +78,7 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
             assert qkv_proj.weight_scale.dtype is torch.float32
             assert qkv_proj.input_scale.dtype is torch.float32
 
-        llm.apply_to_models(check_model)
+        llm.apply_model(check_model)
 
         output = llm.generate_greedy(["Hello my name is"], max_tokens=20)
         assert output
@@ -147,7 +147,7 @@ def test_compressed_tensors_w8a8_dynamic_per_token(vllm_runner, model_args):
             assert qkv_proj.scheme.strategy == strategy
             assert qkv_proj.weight.dtype is torch.int8
 
-        llm.apply_to_models(check_model)
+        llm.apply_model(check_model)
 
         output = llm.generate_greedy(["Hello my name is"], max_tokens=20)
         assert output
@@ -178,7 +178,7 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
             assert qkv_proj.weight_scale.dtype is torch.float16
             assert qkv_proj.scheme.pack_factor == pack_factor
 
-        llm.apply_to_models(check_model)
+        llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
@@ -198,7 +198,7 @@ def test_compressed_tensors_w4a16_marlin24(vllm_runner):
             assert isinstance(qkv_proj.scheme, CompressedTensorsW4A16Sparse24)
             assert qkv_proj.weight_packed.dtype is torch.int32
 
-        llm.apply_to_models(check_model)
+        llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
@@ -227,7 +227,7 @@ def test_compressed_tensors_fp8(vllm_runner):
                 assert qkv_proj.weight_scale.dtype is torch.float32
                 assert len(qkv_proj.weight_scale.shape) == 0
 
-        llm.apply_to_models(check_model)
+        llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
@@ -278,7 +278,7 @@ def test_compressed_tensors_2of4_quant_fp8(vllm_runner, args_2of4):
             assert qkv_proj.scheme.weights_dtype == torch.float8_e4m3fn
             _test_2of4_quant_models(qkv_proj, weight_strategy, input_strategy)
 
-        llm.apply_to_models(check_model)
+        llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         print(output)
@@ -306,7 +306,7 @@ def test_compressed_tensors_2of4_quant_int8(vllm_runner, args_2of4):
             assert qkv_proj.scheme.weights_dtype == torch.int8
             _test_2of4_quant_models(qkv_proj, weight_strategy, input_strategy)
 
-        llm.apply_to_models(check_model)
+        llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         print(output)
@@ -338,7 +338,7 @@ def test_compressed_tensors_2of4_sparse(vllm_runner, args_2of4):
             assert sparsity_map.get("Linear").format == "dense"
             assert sparsity_map.get("Linear").sparsity_structure == "2:4"
 
-        llm.apply_to_models(check_model)
+        llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         print(output)

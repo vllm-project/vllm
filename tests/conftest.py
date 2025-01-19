@@ -931,9 +931,9 @@ class VllmRunner:
         req_outputs = self.model.score(text_1, text_2)
         return [req_output.outputs.score for req_output in req_outputs]
 
-    def apply_to_models(self, func: Callable[[nn.Module], _R]) -> list[_R]:
+    def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         executor = self.model.llm_engine.model_executor
-        return executor.apply_to_models(func)
+        return executor.apply_model(func)
 
     def __enter__(self):
         return self

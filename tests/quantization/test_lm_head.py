@@ -43,7 +43,7 @@ def test_lm_head(
                 assert isinstance(lm_head_layer.linear_method,
                                   UnquantizedEmbeddingMethod)
 
-        vllm_model.apply_to_models(check_model)
+        vllm_model.apply_model(check_model)
 
         print(
             vllm_model.generate_greedy(prompts=["Hello my name is"],

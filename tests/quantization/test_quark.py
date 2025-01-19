@@ -27,7 +27,7 @@ def test_quark_fp8(vllm_runner):
                 #assert qkv_proj.weight.dtype is torch.float8_e4m3fnuz
                 assert len(qkv_proj.weight_scale.shape) == 0
 
-        llm.apply_to_models(check_model)
+        llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output

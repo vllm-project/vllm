@@ -59,7 +59,7 @@ def test_kv_cache_model_load_and_run(vllm_runner, model_id: str):
             assert 0.0 < attn._k_scale < 1.0
             assert 0.0 < attn._v_scale < 1.0
 
-        llm.apply_to_models(check_model)
+        llm.apply_model(check_model)
 
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
@@ -98,7 +98,7 @@ def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
                 # for weight-only quantization using Marlin kernels
                 assert fc1.weight.dtype == torch.int32
 
-        llm.apply_to_models(check_model)
+        llm.apply_model(check_model)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
