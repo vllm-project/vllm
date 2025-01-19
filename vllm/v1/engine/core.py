@@ -130,9 +130,6 @@ class EngineCore:
             scheduler_output, output)
         return engine_core_outputs
 
-    def get_model(self) -> nn.Module:
-        return self.model_executor.get_model()
-
     def shutdown(self):
         self.model_executor.shutdown()
 
