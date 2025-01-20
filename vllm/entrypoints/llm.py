@@ -1187,10 +1187,19 @@ class LLM:
             raise ValueError("The lengths of prompts and lora_request "
                              "must be the same.")
 
-        for sp in params if isinstance(params, list) else (params, ):
+        server_max_tokens = self.llm_engine.model_config.get_diff_sampling_param().get(
+            "max_tokens", 0
+        )
+        for sp in params if isinstance(params, list) else (params,):
             if isinstance(sp, SamplingParams):
                 self._add_guided_params(sp, guided_options)
 
+                # Limit generated tokens
+                sp.max_tokens = (
+                    min(sp.max_tokens, server_max_tokens)
+                    if server_max_tokens
+                    else sp.max_tokens
+                )
                 # We only care about the final output
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
 
