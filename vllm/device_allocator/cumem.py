@@ -127,6 +127,11 @@ class CuMemAllocator:
 
     @staticmethod
     def get_instance() -> "CuMemAllocator":
+        """
+        CuMemAllocator is a singleton class.
+        We cannot call the constructor directly.
+        Call this method to get the instance.
+        """
         assert cumem_available, "cumem allocator is not available"
         if CuMemAllocator.instance is None:
             CuMemAllocator.instance = CuMemAllocator()
@@ -137,12 +142,18 @@ class CuMemAllocator:
         self.current_tag: str = CuMemAllocator.default_tag
 
     def python_malloc_callback(self, allocation_handle: HandleType) -> None:
+        """
+        Internal method to store the allocation data
+        when memory is allocated in the memory pool."""
         py_d_mem = allocation_handle[2]
         self.pointer_to_data[py_d_mem] = AllocationData(
             allocation_handle, self.current_tag)
         return
 
     def python_free_callback(self, ptr: int) -> HandleType:
+        """
+        Internal method to look up the allocation data
+        when memory is freed in the memory pool."""
         data = self.pointer_to_data.pop(ptr)
         if data.cpu_backup_tensor is not None:
             data.cpu_backup_tensor = None
@@ -150,6 +161,10 @@ class CuMemAllocator:
 
     def sleep(self,
               offload_tags: Optional[Union[Tuple[str], str]] = None) -> None:
+        """
+        Put the allocator in sleep mode.
+        All data in the memory allocation with the specified tag will be 
+        offloaded to CPU memory, and others will be discarded."""
         if offload_tags is None:
             # by default, allocated tensors are offloaded
             # when the allocator sleeps
@@ -173,6 +188,10 @@ class CuMemAllocator:
             unmap_and_release(handle)
 
     def wake_up(self):
+        """
+        Wake up the allocator from sleep mode.
+        All data that is previously offloaded will be loaded back to GPU 
+        memory, and the rest of the data will have empty memory."""
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle
             create_and_map(handle)
@@ -187,6 +206,10 @@ class CuMemAllocator:
 
     @contextmanager
     def use_memory_pool(self, tag: Optional[str] = None):
+        """
+        A context manager to use the memory pool.
+        All memory allocation created inside the context will be allocated 
+        in the memory pool, and has the specified tag."""
         if tag is None:
             tag = CuMemAllocator.default_tag
         else:
