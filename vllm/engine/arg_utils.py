@@ -959,7 +959,8 @@ class EngineArgs:
         parser.add_argument("--enable-sleep-mode",
                             action="store_true",
                             default=False,
-                            help="Enable sleep mode for the engine. ")
+                            help="Enable sleep mode for the engine. "
+                            "(only cuda platform is supported)")
 
         return parser
 
