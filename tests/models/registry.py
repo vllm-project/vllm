@@ -1,5 +1,9 @@
 from dataclasses import dataclass, field
-from typing import AbstractSet, Mapping, Optional
+from typing import AbstractSet, Literal, Mapping, Optional
+
+import pytest
+from packaging.version import Version
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,47 @@ class _HfExamplesInfo:
 
     trust_remote_code: bool = False
     """The ``trust_remote_code`` level required to load the model."""
+
+    def check_transformers_version(
+        self,
+        *,
+        on_fail: Literal["error", "skip"],
+    ) -> None:
+        """
+        If the installed transformers version does not meet the requirements,
+        perform the given action.
+        """
+        if self.min_transformers_version is None:
+            return
+
+        current_version = TRANSFORMERS_VERSION
+        required_version = self.min_transformers_version
+        if Version(current_version) < Version(required_version):
+            msg = (
+                f"You have `transformers=={current_version}` installed, but "
+                f"`transformers>={required_version}` is required to run this "
+                "model")
+
+            if on_fail == "error":
+                raise RuntimeError(msg)
+            else:
+                pytest.skip(msg)
+
+    def check_available_online(
+        self,
+        *,
+        on_fail: Literal["error", "skip"],
+    ) -> None:
+        """
+        If the model is not available online, perform the given action.
+        """
+        if not self.is_available_online:
+            msg = "Model is not available online"
+
+            if on_fail == "error":
+                raise RuntimeError(msg)
+            else:
+                pytest.skip(msg)
 
 
 # yapf: disable
