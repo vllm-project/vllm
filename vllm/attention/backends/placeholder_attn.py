@@ -77,7 +77,6 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
     # seq_lens stored as a tensor.
     seq_lens_tensor: Optional[torch.Tensor]
 
-
     # Maximum sequence length among prefill batch. 0 if there are decoding
     # requests only.
     max_prefill_seq_len: int

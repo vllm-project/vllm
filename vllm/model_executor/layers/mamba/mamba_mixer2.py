@@ -391,6 +391,9 @@ class MambaMixer2(CustomOp):
                 cache_indices=mamba_cache_params.state_indices_tensor,
                 query_start_loc=attn_metadata.query_start_loc).transpose(
                     0, 1)[:seq_len]
+
+            # TODO: Why is this needed?
+            hidden_states_B_C = hidden_states_B_C.contiguous()
         else:
             hidden_states_B_C = causal_conv1d_update(
                 hidden_states_B_C,
@@ -463,7 +466,7 @@ class MambaMixer2(CustomOp):
                 -1, self.num_heads // self.tp_size, self.head_dim)
 
             # - the hidden is reshaped into number of current batches
-            # - in this case there is no more prefil, so the batches gen
+            # - in this case there is no more prefill, so the batches gen
             #   1 token at a time
             # - thus hidden will be (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected

@@ -230,7 +230,7 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
             # For eager just take the scheduler_config if avail
             self.max_batch_size = self.scheduler_config.max_num_seqs
         else:
-            self.max_batch_size = 8192 + 2
+            self.max_batch_size = 128 + 2
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.backbone.get_input_embeddings(input_ids)

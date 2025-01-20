@@ -3,6 +3,7 @@
 Run `pytest tests/models/test_mamba.py`.
 """
 import pytest
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from vllm.engine.arg_utils import EngineArgs
@@ -11,9 +12,9 @@ from vllm.sampling_params import SamplingParams
 from ...utils import check_outputs_equal
 
 MODELS = [
-    "state-spaces/mamba-130m-hf", "tiiuae/falcon-mamba-tiny-dev",
+    "state-spaces/mamba-130m-hf",
+    "tiiuae/falcon-mamba-tiny-dev",
     "mistralai/Mamba-Codestral-7B-v0.1",
-    "/home/tms/mamba2-130m-hf",
 ]
 
 
@@ -24,6 +25,10 @@ def generate_greedy(model_name, example_prompts, max_tokens):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name)
 
+    # Set the device (GPU if available, else CPU)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
     # Generate texts from the prompts
     outputs = []
     for prompt in example_prompts:
@@ -32,7 +37,9 @@ def generate_greedy(model_name, example_prompts, max_tokens):
         input_ids = inputs["input_ids"].to(model.device)
 
         # Generate text using the model's generate method directly
-        generated_ids = model.generate(input_ids, max_new_tokens=max_tokens)
+        generated_ids = model.generate(input_ids,
+                                       max_new_tokens=max_tokens,
+                                       do_sample=False)
         generated_text = tokenizer.decode(generated_ids[0],
                                           skip_special_tokens=True)
 
@@ -53,7 +60,8 @@ def test_models(
 ) -> None:
     hf_outputs = generate_greedy(model, example_prompts, max_tokens)
 
-    with vllm_runner(model, dtype=dtype, enforce_eager=True) as vllm_model:
+    # Set max_num_seqs to keep Codestral from going OOM at fp32
+    with vllm_runner(model, dtype=dtype, max_num_seqs=16) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         # This test is for verifying whether the model's extra_repr
         # can be printed correctly.
@@ -81,7 +89,7 @@ def test_batching(
 ) -> None:
     # To pass the small model tests, we need full precision.
     for_loop_outputs = []
-    with vllm_runner(model, dtype=dtype) as vllm_model:
+    with vllm_runner(model, dtype=dtype, max_num_seqs=16) as vllm_model:
         for prompt in example_prompts:
             for_loop_outputs.append(
                 vllm_model.generate_greedy([prompt], max_tokens)[0])
@@ -125,7 +133,7 @@ def test_chunked_prefill_with_parallel_sampling(vllm_runner, example_prompts,
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 8])
+@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
 def test_chunked_prefill(vllm_runner, example_prompts, model: str, dtype: str,
                          max_tokens: int,
                          chunked_prefill_token_size: int) -> None:
@@ -165,7 +173,7 @@ def test_parallel_sampling(
     max_tokens: int,
 ) -> None:
 
-    with vllm_runner(model, dtype=dtype) as vllm_model:
+    with vllm_runner(model, dtype=dtype, max_num_seqs=16) as vllm_model:
         for_loop_outputs = []
         for _ in range(10):
             for_loop_outputs.append(
@@ -232,7 +240,7 @@ def test_models_preemption_recompute(
     # Tests that outputs are identical with and w/o preemtions (recompute)
     assert dtype == "float"
 
-    with vllm_runner(model, dtype=dtype) as vllm_model:
+    with vllm_runner(model, dtype=dtype, max_num_seqs=16) as vllm_model:
         vllm_model.model.llm_engine.scheduler[
             0].ENABLE_ARTIFICIAL_PREEMPT = True
         preempt_vllm_outputs = vllm_model.generate_greedy(
@@ -283,7 +291,7 @@ def test_state_cleanup(
     # This test is for verifying that the Mamba state is cleaned up between
     # steps, If its not cleaned, an error would be expected.
     try:
-        with vllm_runner(model, dtype=dtype) as vllm_model:
+        with vllm_runner(model, dtype=dtype, max_num_seqs=16) as vllm_model:
             for _ in range(10):
                 vllm_model.generate_greedy([example_prompts[0]] * 100, 1)
     except ValueError:
