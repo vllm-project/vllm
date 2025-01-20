@@ -26,11 +26,8 @@ def run_aria(question: str, modality: str):
 
     # NOTE: Need L40 (or equivalent) to avoid OOM
     llm = LLM(model=model_name,
-              tokenizer_mode="slow",
-              dtype="bfloat16",
               max_model_len=4096,
               max_num_seqs=2,
-              trust_remote_code=True,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
 
     prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>\n{question}"

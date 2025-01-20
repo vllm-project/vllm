@@ -11,6 +11,7 @@ from vllm.multimodal.processing import ProcessingCache
 from vllm.multimodal.utils import cached_get_tokenizer
 
 from ....multimodal.utils import random_audio, random_image, random_video
+from ...registry import HF_EXAMPLE_MODELS
 
 
 def _test_processing_correctness(
@@ -20,12 +21,9 @@ def _test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
-    if model_id == "TIGER-Lab/Mantis-8B-siglip-llama3":
-        hf_overrides = {"architectures": ["MantisForConditionalGeneration"]}
-    elif model_id == "deepseek-ai/deepseek-vl2-tiny":
-        hf_overrides = {"architectures": ["DeepseekVLV2ForCausalLM"]}
-    else:
-        hf_overrides = {}
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
 
     limit_mm_per_prompt = {
         modality: 3 if supports_multi else 1
@@ -41,7 +39,7 @@ def _test_processing_correctness(
         seed=0,
         dtype="float16",
         revision=None,
-        hf_overrides=hf_overrides,
+        hf_overrides=model_info.hf_overrides,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
 
