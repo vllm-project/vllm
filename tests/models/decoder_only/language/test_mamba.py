@@ -12,7 +12,8 @@ from ...utils import check_outputs_equal
 
 MODELS = [
     "state-spaces/mamba-130m-hf", "tiiuae/falcon-mamba-tiny-dev",
-    "mistralai/Mamba-Codestral-7B-v0.1"
+    "mistralai/Mamba-Codestral-7B-v0.1",
+    "/home/tms/mamba2-130m-hf",
 ]
 
 
