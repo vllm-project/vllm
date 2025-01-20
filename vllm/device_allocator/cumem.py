@@ -159,8 +159,10 @@ class CuMemAllocator:
             data.cpu_backup_tensor = None
         return data.handle
 
-    def sleep(self,
-              offload_tags: Optional[Union[Tuple[str], str]] = None) -> None:
+    def sleep(
+            self,
+            offload_tags: Optional[Union[Tuple[str, ...],
+                                         str]] = None) -> None:
         """
         Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be 
