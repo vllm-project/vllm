@@ -38,6 +38,8 @@ The first vLLM meetup in 2025 is happening on January 22nd, Wednesday, with Goog
 ## About
 vLLM is a fast and easy-to-use library for LLM inference and serving.
 
+Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evloved into a community-driven project with contributions from both academia and industry.
+
 vLLM is fast with:
 
 - State-of-the-art serving throughput
@@ -72,16 +74,16 @@ Find the full list of supported models [here](https://docs.vllm.ai/en/latest/mod
 
 ## Getting Started
 
-Install vLLM with `pip` or [from source](https://vllm.readthedocs.io/en/latest/getting_started/installation.html#build-from-source):
+Install vLLM with `pip` or [from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source):
 
 ```bash
 pip install vllm
 ```
 
-Visit our [documentation](https://vllm.readthedocs.io/en/latest/) to learn more.
-- [Installation](https://vllm.readthedocs.io/en/latest/getting_started/installation.html)
-- [Quickstart](https://vllm.readthedocs.io/en/latest/getting_started/quickstart.html)
-- [List of Supported Models](https://vllm.readthedocs.io/en/latest/models/supported_models.html)
+Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
+- [Installation](https://docs.vllm.ai/en/latest/getting_started/installation/index.html)
+- [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
+- [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
 
 ## Contributing
 

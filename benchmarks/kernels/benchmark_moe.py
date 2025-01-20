@@ -152,9 +152,6 @@ def get_rocm_tuning_space(use_fp16):
         block_k_range.remove(16)  # BLOCK_K=16 not supported for fp8
     num_warps_range = [1, 2, 4, 8]
     group_m_range = [1, 4, 8, 16, 32]
-    # For now we see better perf with num_stages=0 for all gemm configs we care
-    # But keep this explicit so that we do not forget we may need to set it to
-    # other values in the future
     num_stage_range = [2]
     waves_per_eu_range = [0]
     matrix_instr_nonkdim_range = [16, 32] if use_fp16 else []
@@ -208,19 +205,21 @@ def get_configs_compute_bound(use_fp16) -> List[Dict[str, int]]:
     return configs
 
 
-def prune_search_space(num_tokens, shard_intermediate_size, hidden_size,
-                       search_space, is_fp16):
+def prune_rocm_search_space(num_tokens, shard_intermediate_size, hidden_size,
+                            search_space, is_fp16):
     N1, K1 = shard_intermediate_size, hidden_size
     N2, K2 = hidden_size, shard_intermediate_size // 2
-    pruned_space_1 = prune_configs(num_tokens * 2, N1, K1, search_space,
-                                   is_fp16)
-    pruned_space_2 = prune_configs(num_tokens * 2, N2, K2, search_space,
-                                   is_fp16)
+    pruned_space_1 = prune_rocm_configs(num_tokens * 2, N1, K1, search_space,
+                                        is_fp16)
+    pruned_space_2 = prune_rocm_configs(num_tokens * 2, N2, K2, search_space,
+                                        is_fp16)
     search_space = merge_unique_dicts(pruned_space_1, pruned_space_2)
     return search_space
 
 
-def prune_configs(M, N, K, configs, is_fp16=True):
+# The following code is inspired by ROCm/Triton GEMM tuning script:
+# https://github.com/ROCm/triton/blob/triton-mlir/scripts/amd/gemm/tune_gemm.py#L89
+def prune_rocm_configs(M, N, K, configs, is_fp16=True):
     pruned_configs = []
     elemBytes_a = 2 if is_fp16 else 1
     elemBytes_b = 2 if is_fp16 else 1
@@ -319,8 +318,9 @@ class BenchmarkWorker:
         torch.set_default_device("cuda")
         current_platform.seed_everything(seed)
         self.seed = seed
-        # get the device id to allocate the tensors and kernels explicitly
-        # on the respective GPU ID
+        # Get the device ID to allocate tensors and kernels
+        # on the respective GPU. This is required for Ray to work
+        # correctly with multi-GPU tuning on the ROCm platform.
         self.device_id = int(ray.get_gpu_ids()[0])
 
     def benchmark(
@@ -371,10 +371,10 @@ class BenchmarkWorker:
         best_time = float("inf")
         if current_platform.is_rocm():
             is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16)
-            search_space = prune_search_space(num_tokens,
-                                              shard_intermediate_size,
-                                              hidden_size, search_space,
-                                              is_fp16)
+            search_space = prune_rocm_search_space(num_tokens,
+                                                   shard_intermediate_size,
+                                                   hidden_size, search_space,
+                                                   is_fp16)
 
         with torch.cuda.device(self.device_id):
             for config in tqdm(search_space):

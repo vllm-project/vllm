@@ -8,6 +8,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionType)
@@ -28,6 +29,8 @@ from vllm.vllm_flash_attn import (flash_attn_varlen_func,
 
 
 class FlashAttentionBackend(AttentionBackend):
+
+    accept_output_buffer: bool = True
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
@@ -635,15 +638,12 @@ class FlashAttentionImpl(AttentionImpl):
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
-        q_scale: Optional[torch.Tensor] = None,
-        prob_scale: Optional[torch.Tensor] = None,
         fp8_out_scale: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -661,7 +661,7 @@ class FlashAttentionImpl(AttentionImpl):
         NOTE: It in-place updates the output tensor.
         """
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
-        assert k_scale == 1.0 and v_scale == 1.0, (
+        assert layer._k_scale == 1.0 and layer._v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
 
         assert output is not None, "Output tensor must be provided."
@@ -713,8 +713,8 @@ class FlashAttentionImpl(AttentionImpl):
                     kv_cache[1],
                     updated_slot_mapping.flatten(),  # type: ignore[union-attr]
                     kv_cache_dtype,
-                    k_scale,
-                    v_scale,
+                    layer._k_scale,
+                    layer._v_scale,
                 )
 
         (num_prefill_query_tokens, num_prefill_kv_tokens,

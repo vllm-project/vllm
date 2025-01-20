@@ -107,7 +107,9 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
+        self.sliding_window = sliding_window
         self.backend = backend_name_to_enum(attn_backend.get_name())
+        self.dtype = dtype
 
         # For cuda and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
@@ -116,11 +118,7 @@ class Attention(nn.Module):
         self.use_direct_call = not current_platform.is_cuda(
         ) and not current_platform.is_cpu()
 
-        # For some attention backends, we allocate an output tensor before
-        # calling the custom op. When piecewise cudagraph is enabled, this
-        # makes sure the output tensor is allocated inside the cudagraph.
-        self.use_output = self.backend == _Backend.FLASH_ATTN or \
-            self.backend == _Backend.FLASH_ATTN_VLLM_V1
+        self.use_output = attn_backend.accept_output_buffer
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -144,12 +142,12 @@ class Attention(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        _kv_cache: torch.Tensor,
-        _attn_metadata: AttentionMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         fp8_out_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales and \
-            _attn_metadata.enable_kv_scales_calculation:
+            attn_metadata.enable_kv_scales_calculation:
             self.calc_kv_scales(query, key, value)
         if self.use_output:
             output = torch.empty_like(query)
@@ -216,11 +214,11 @@ class MultiHeadAttention(nn.Module):
                                         kv_cache_dtype=None,
                                         block_size=16,
                                         is_attention_free=False)
-        attn_backend = backend_name_to_enum(attn_backend.get_name())
-        if attn_backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
-            attn_backend = _Backend.XFORMERS
+        backend = backend_name_to_enum(attn_backend.get_name())
+        if backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
+            backend = _Backend.XFORMERS
 
-        self.attn_backend = attn_backend if attn_backend in {
+        self.attn_backend = backend if backend in {
             _Backend.TORCH_SDPA, _Backend.XFORMERS
         } else _Backend.TORCH_SDPA
 
@@ -268,9 +266,8 @@ def unified_attention(
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                             self._k_scale, self._v_scale, self._q_scale,
-                             self._prob_scale, fp8_out_scale)
+    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata,
+                             fp8_out_scale)
 
 
 def unified_attention_fake(
@@ -304,15 +301,12 @@ def unified_attention_with_output(
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    self.impl.forward(query,
+    self.impl.forward(self,
+                      query,
                       key,
                       value,
                       kv_cache,
                       attn_metadata,
-                      self._k_scale,
-                      self._v_scale,
-                      self._q_scale,
-                      self._prob_scale,
                       fp8_out_scale,
                       output=output)
 

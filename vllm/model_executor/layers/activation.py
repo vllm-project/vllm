@@ -30,8 +30,10 @@ class FatreluAndMul(CustomOp):
     def __init__(self, threshold: float = 0.):
         super().__init__()
         self.threshold = threshold
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if current_platform.is_cuda_alike():
             self.op = torch.ops._C.fatrelu_and_mul
+        elif current_platform.is_cpu():
+            self._forward_method = self.forward_native
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
@@ -95,6 +97,43 @@ class SiluAndMul(CustomOp):
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         self.op(out, x)
         return out
+
+
+@CustomOp.register("mul_and_silu")
+class MulAndSilu(CustomOp):
+    """An activation function for SwiGLU.
+
+    The function computes x -> x[:d] * silu(x[d:]) where d = x.shape[-1] // 2.
+
+    Shapes:
+        x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
+        return: (num_tokens, d) or (batch_size, seq_len, d)
+    """
+
+    def __init__(self):
+        super().__init__()
+        if current_platform.is_cuda_alike():
+            self.op = torch.ops._C.mul_and_silu
+        elif current_platform.is_xpu():
+            from vllm._ipex_ops import ipex_ops
+            self.op = ipex_ops.silu_and_mul
+        elif current_platform.is_cpu():
+            self._forward_method = self.forward_native
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        d = x.shape[-1] // 2
+        return x[..., :d] * F.silu(x[..., d:])
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        output_shape = (x.shape[:-1] + (d, ))
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        self.op(out, x)
+        return out
+
+    # TODO implement forward_xpu for MulAndSilu
+    # def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
 
 
 @CustomOp.register("gelu_and_mul")
