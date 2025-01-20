@@ -206,7 +206,7 @@ def get_config(
             token=HF_TOKEN,
             **kwargs,
         )
-
+        # config_dict["model_type"] = "granite"
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
         if model_type in _CONFIG_REGISTRY:
@@ -228,6 +228,7 @@ def get_config(
                     token=HF_TOKEN,
                     **kwargs,
                 )
+                # config.model_type = 'granite'
             except ValueError as e:
                 if (not trust_remote_code
                         and "requires you to execute the configuration file"
@@ -252,6 +253,7 @@ def get_config(
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(
                 f"Can't get gguf config for {config.model_type}.")
+        # model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES['granite']
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
 
