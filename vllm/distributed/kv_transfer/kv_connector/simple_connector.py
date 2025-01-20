@@ -35,6 +35,7 @@ class SimpleConnector(KVConnectorBase):
     ):
 
         self.config = config.kv_transfer_config
+        self.tp_size = config.parallel_config.tensor_parallel_size
 
         if self.config.kv_connector == "PyNcclConnector":
             from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import (
@@ -161,7 +162,7 @@ class SimpleConnector(KVConnectorBase):
         end_layer = model_executable.model.end_layer
 
         model_config = model_executable.model.config
-        num_heads = model_config.num_key_value_heads
+        num_heads = int(model_config.num_key_value_heads / self.tp_size)
         hidden_size = model_config.hidden_size
         num_attention_heads = model_config.num_attention_heads
         head_size = int(hidden_size / num_attention_heads)
