@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
-                    Tuple, Type, TypeVar)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
+                    Protocol, Set, Tuple, Type, TypeVar)
 
 import torch
 
@@ -31,6 +31,10 @@ class AttentionType:
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
+    # For some attention backends, we allocate an output tensor before
+    # calling the custom op. When piecewise cudagraph is enabled, this
+    # makes sure the output tensor is allocated inside the cudagraph.
+    accept_output_buffer: bool = False
 
     @staticmethod
     @abstractmethod
@@ -223,6 +227,24 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
         raise NotImplementedError
 
 
+class AttentionLayer(Protocol):
+
+    _k_scale: torch.Tensor
+    _v_scale: torch.Tensor
+    _q_scale: torch.Tensor
+    _prob_scale: torch.Tensor
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        ...
+
+
 class AttentionImpl(ABC, Generic[T]):
 
     @abstractmethod
@@ -244,15 +266,12 @@ class AttentionImpl(ABC, Generic[T]):
     @abstractmethod
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        k_scale: torch.Tensor,
-        v_scale: torch.Tensor,
-        q_scale: Optional[torch.Tensor] = None,
-        prob_scale: Optional[torch.Tensor] = None,
         fp8_out_scale: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:

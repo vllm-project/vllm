@@ -72,6 +72,16 @@ class TpuPlatform(Platform):
         assert vllm_config.speculative_config is None, \
             "TPU does not support speculative decoding"
 
+        assert not vllm_config.scheduler_config.chunked_prefill_enabled, (
+            "Chunked prefill is not yet supported for TPU backend")
+        assert not vllm_config.speculative_config, (
+            "Speculative decoding is not yet supported for TPU backend")
+        if vllm_config.model_config.dtype in (torch.float16, torch.float32):
+            logger.warning(
+                "The TPU backend currently does not support %s. "
+                "Using bfloat16 instead.", vllm_config.model_config.dtype)
+            vllm_config.model_config.dtype = torch.bfloat16
+
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":

@@ -33,6 +33,7 @@ class _Backend(enum.Enum):
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
+    BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
 
 
@@ -275,6 +276,15 @@ class Platform:
                            "This may slow down the performance.")
             return False
         return True
+
+    @classmethod
+    def get_current_memory_usage(cls,
+                                 device: Optional[torch.types.Device] = None
+                                 ) -> float:
+        """
+        Return the memory usage in bytes.
+        """
+        raise NotImplementedError
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
