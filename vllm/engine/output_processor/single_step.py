@@ -102,9 +102,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         
         Args:
           seq_group: the output is associated with this :class:`SequenceGroup`
-          output: the :class:`SequenceGroupOutput` for a single scheduler step
+          outputs: the :class:`SequenceGroupOutput` for a single scheduler step
         """
-        assert len(outputs) == 1, ("Single step should only has 1 output.")
+        assert len(outputs) == 1, "Single step should only have 1 output."
         output = outputs[0]
         assert isinstance(output, CompletionSequenceGroupOutput)
         single_step_process_prompt_logprob(self, seq_group, output)

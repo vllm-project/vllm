@@ -19,8 +19,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
-from vllm.multimodal.parse import (MultiModalDataItems, VideoEmbeddingItems,
-                                   VideoProcessorItems)
+from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
+                                   VideoEmbeddingItems, VideoProcessorItems)
 from vllm.multimodal.processing import PromptReplacement
 from vllm.multimodal.profiling import ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -144,6 +144,10 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
             newline_features = height_factor
 
         return (unpadded_features, newline_features)
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        # NOTE: This hardcoded value is found via processor tests
+        return ImageSize(width=1153, height=944)
 
     def _get_num_frame_tokens(
         self,
@@ -550,10 +554,12 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
         for input_key in kwargs:
-            if input_key == "pixel_values" and "images" not in modalities:
+            if input_key in ("pixel_values",
+                             "image_embeds") and "images" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(
                     **kwargs)
-            if input_key == "pixel_values_videos" and "videos" not in modalities:  # noqa E501
+            if input_key in ("pixel_values_videos",
+                             "video_embeds") and "videos" not in modalities:
                 modalities["videos"] = self._parse_and_validate_video_input(
                     **kwargs)
 

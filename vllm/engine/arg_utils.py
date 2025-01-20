@@ -239,7 +239,7 @@ class EngineArgs:
             choices=get_args(TaskOption),
             help='The task to use the model for. Each vLLM instance only '
             'supports one task, even if the same model can be used for '
-            'multiple tasks. When the model only supports one task, "auto" '
+            'multiple tasks. When the model only supports one task, ``"auto"`` '
             'can be used to select it; otherwise, you must specify explicitly '
             'which task to use.')
         parser.add_argument(
@@ -251,7 +251,7 @@ class EngineArgs:
         parser.add_argument(
             '--skip-tokenizer-init',
             action='store_true',
-            help='Skip initialization of tokenizer and detokenizer')
+            help='Skip initialization of tokenizer and detokenizer.')
         parser.add_argument(
             '--revision',
             type=nullable_str,
@@ -401,7 +401,7 @@ class EngineArgs:
         # Parallel arguments
         parser.add_argument(
             '--distributed-executor-backend',
-            choices=['ray', 'mp'],
+            choices=['ray', 'mp', 'uni', 'external_launcher'],
             default=EngineArgs.distributed_executor_backend,
             help='Backend to use for distributed model '
             'workers, either "ray" or "mp" (multiprocessing). If the product '
@@ -414,7 +414,7 @@ class EngineArgs:
         parser.add_argument(
             '--worker-use-ray',
             action='store_true',
-            help='Deprecated, use --distributed-executor-backend=ray.')
+            help='Deprecated, use ``--distributed-executor-backend=ray``.')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,
@@ -443,7 +443,7 @@ class EngineArgs:
                             choices=[8, 16, 32, 64, 128],
                             help='Token block size for contiguous chunks of '
                             'tokens. This is ignored on neuron devices and '
-                            'set to max-model-len. On CUDA devices, '
+                            'set to ``--max-model-len``. On CUDA devices, '
                             'only block sizes up to 32 are supported. '
                             'On HPU devices, block size defaults to 128.')
 
@@ -452,12 +452,12 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             default=EngineArgs.enable_prefix_caching,
             help="Enables automatic prefix caching. "
-            "Use --no-enable-prefix-caching to disable explicitly.",
+            "Use ``--no-enable-prefix-caching`` to disable explicitly.",
         )
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
                             help='Disables sliding window, '
-                            'capping to sliding window size')
+                            'capping to sliding window size.')
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
                             default=True,
@@ -551,7 +551,7 @@ class EngineArgs:
             default=None,
             type=json.loads,
             help='RoPE scaling configuration in JSON format. '
-            'For example, {"rope_type":"dynamic","factor":2.0}')
+            'For example, ``{"rope_type":"dynamic","factor":2.0}``')
         parser.add_argument('--rope-theta',
                             default=None,
                             type=float,
@@ -620,7 +620,7 @@ class EngineArgs:
             default=None,
             type=json.loads,
             help=('Overrides for the multimodal input mapping/processing, '
-                  'e.g., image processor. For example: {"num_crops": 4}.'))
+                  'e.g., image processor. For example: ``{"num_crops": 4}``.'))
         parser.add_argument(
             '--disable-mm-preprocessor-cache',
             action='store_true',
@@ -874,7 +874,7 @@ class EngineArgs:
             "of the provided names. The model name in the model "
             "field of a response will be the first name in this "
             "list. If not specified, the model name will be the "
-            "same as the `--model` argument. Noted that this name(s) "
+            "same as the ``--model`` argument. Noted that this name(s) "
             "will also be used in `model_name` tag content of "
             "prometheus metrics, if multiple names provided, metrics "
             "tag will take the first one.")
@@ -894,7 +894,7 @@ class EngineArgs:
             default=None,
             help="Valid choices are " +
             ",".join(ALLOWED_DETAILED_TRACE_MODULES) +
-            ". It makes sense to set this only if --otlp-traces-endpoint is"
+            ". It makes sense to set this only if ``--otlp-traces-endpoint`` is"
             " set. If set, it will collect detailed traces for the specified "
             "modules. This involves use of possibly costly and or blocking "
             "operations and hence might have a performance impact.")
@@ -921,13 +921,13 @@ class EngineArgs:
             type=json.loads,
             default=None,
             help="Override or set neuron device configuration. "
-            "e.g. {\"cast_logits_dtype\": \"bloat16\"}.'")
+            "e.g. ``{\"cast_logits_dtype\": \"bloat16\"}``.")
         parser.add_argument(
             '--override-pooler-config',
             type=PoolerConfig.from_json,
             default=None,
             help="Override or set the pooling method for pooling models. "
-            "e.g. {\"pooling_type\": \"mean\", \"normalize\": false}.'")
+            "e.g. ``{\"pooling_type\": \"mean\", \"normalize\": false}``.")
 
         parser.add_argument('--compilation-config',
                             '-O',

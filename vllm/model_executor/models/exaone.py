@@ -39,8 +39,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    get_compressed_tensors_cache_scale)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -430,14 +428,6 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "lm_head": "output_embeddings",
     }
     embedding_padding_modules = ["lm_head"]
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-        "c_fc_0": ("gate_up_proj", 0),
-        "c_fc_1": ("gate_up_proj", 1),
-    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -447,6 +437,7 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.config = config
         self.lora_config = lora_config
+        self.quant_config = quant_config
 
         self.transformer = ExaoneModel(
             vllm_config=vllm_config,
@@ -540,12 +531,14 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             # processed with quantization, LoRA, fine-tuning, etc.
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
-            if scale_name := get_compressed_tensors_cache_scale(name):
-                # Loading kv cache scales for compressed-tensors quantization
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                loaded_weight = loaded_weight[0]
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
