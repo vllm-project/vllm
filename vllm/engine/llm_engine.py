@@ -694,8 +694,6 @@ class LLMEngine:
             prompt_adapter_request: The prompt adapter request to add.
             priority: The priority of the request.
                 Only applicable with priority scheduling.
-            inputs: The prompt to the LLM. See :class:`~vllm.inputs.PromptType`
-                for more details about the format of each input.
 
         Details:
             - Set arrival_time to the current time if it is None.
