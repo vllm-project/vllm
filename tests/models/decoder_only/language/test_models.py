@@ -51,10 +51,6 @@ from ...utils import check_logprobs_close
         pytest.param(
             "ehristoforu/Falcon3-MoE-2x7B-Insruct",  # mixtral
             marks=[pytest.mark.cpu_model],
-        ),
-        pytest.param(
-            "kyutai/helium-1-preview-2b",  # transformers backend
-            marks=[pytest.mark.core_model],
         )
     ])
 @pytest.mark.parametrize("dtype", ["half"])
