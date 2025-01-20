@@ -48,7 +48,7 @@ To check if the backend is `transformers`, you can simply do this:
 ```python 
 from vllm import LLM
 llm = LLM(model=..., task="generate")  # Name or path of your model
-print(llm.llm_engine.model_executor.driver_worker.model_runner.model.__class__)
+llm.apply_model(lambda model: print(model.__class__))
 ```
 
 If it is `TransformersModel` then it means it's based on `transformers`! 
