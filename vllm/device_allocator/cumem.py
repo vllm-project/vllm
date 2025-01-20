@@ -208,8 +208,11 @@ class CuMemAllocator:
             # i.e. calling torch.cuda.empty_cache()
             self.current_tag = old_tag
 
-    def get_current_usage(self):
-        sum_bytes = 0
+    def get_current_usage(self) -> int:
+        """
+        Get the total number of bytes allocated in the memory pool.
+        """
+        sum_bytes: int = 0
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle
             sum_bytes += handle[1]
