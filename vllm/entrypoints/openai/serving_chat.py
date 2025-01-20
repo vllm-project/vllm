@@ -197,7 +197,7 @@ class OpenAIServingChat(OpenAIServing):
                 if "max_tokens" in default_sampling_params:
                     server_max_tokens = min(
                         server_max_tokens,
-                        default_sampling_params.get("max_tokens"))
+                        default_sampling_params["max_tokens"])
 
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
