@@ -10,6 +10,8 @@
 /vllm/worker/worker.py @zhuohan123 @youkaichao @alexm-neuralmagic @comaniac @njhill
 /vllm/model_executor/layers/sampler.py @zhuohan123 @youkaichao @alexm-neuralmagic @comaniac @njhill
 CMakeLists.txt @tlrmchlsmth
+/vllm/model_executor/layers/quantization @mgoin @robertgshaw2-neuralmagic @tlrmchlsmth
+/vllm/model_executor/guided_decoding @mgoin @aarnphm
 
 # vLLM V1
 /vllm/v1 @WoosukKwon @robertgshaw2-neuralmagic @njhill @ywang96 @comaniac @alexm-neuralmagic
