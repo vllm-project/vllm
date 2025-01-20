@@ -5,10 +5,10 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
-                    Iterable, List, Mapping, NamedTuple, Optional)
+from typing import (TYPE_CHECKING, Callable, ClassVar, Deque, Dict, Iterable,
+                    List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple, Type, Union, cast, overload
+from typing import Set, Type, Union, cast, overload
 
 import torch
 from typing_extensions import TypeVar, deprecated
@@ -689,7 +689,9 @@ class LLMEngine:
                 :class:`~vllm.PoolingParams` for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+            lora_request: The LoRA request to add.
             trace_headers: OpenTelemetry trace headers.
+            prompt_adapter_request: The prompt adapter request to add.
             priority: The priority of the request.
                 Only applicable with priority scheduling.
 
@@ -1815,17 +1817,6 @@ class LLMEngine:
 
     def stop_profile(self) -> None:
         self.model_executor.stop_profile()
-
-    def collective_rpc(self,
-                       method: Union[str, Callable],
-                       timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
-        """
-        See LLM.collective_rpc for more details.
-        """
-        return self.model_executor.collective_rpc(method, timeout, args,
-                                                  kwargs)
 
     def sleep(self, level: int = 1) -> None:
         assert self.vllm_config.model_config.enable_sleep_mode, (
