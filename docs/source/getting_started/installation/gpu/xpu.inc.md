@@ -31,7 +31,7 @@ pip install -v -r requirements-xpu.txt
 - Finally, build and install vLLM XPU backend:
 
 ```console
-VLLM_TARGET_DEVICE=xpu python setup.py install
+VLLM_TARGET_DEVICE=xpu pip install .
 ```
 
 :::{note}

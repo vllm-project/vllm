@@ -24,86 +24,83 @@ Currently, there are no pre-built ROCm wheels.
 - [ROCm](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html)
 - [PyTorch](https://pytorch.org/)
 
-    For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.3_ubuntu24.04_py3.12_pytorch_release_2.4.0`, `rocm/pytorch-nightly`. If you are using docker image, you can skip to Step 3.
+  For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.3_ubuntu24.04_py3.12_pytorch_release_2.4.0`, `rocm/pytorch-nightly`. If you are using docker image, you can skip to Step 3.
 
-    Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/). Example:
+  Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/). Example:
 
-    ```console
-    # Install PyTorch
-    $ pip uninstall torch -y
-    $ pip install --no-cache-dir --pre torch --index-url https://download.pytorch.org/whl/rocm6.3
-    ```
+  ```console
+  # Install PyTorch
+  $ pip uninstall torch -y
+  $ pip install --no-cache-dir --pre torch --index-url https://download.pytorch.org/whl/rocm6.3
+  ```
 
 1. Install [Triton flash attention for ROCm](https://github.com/ROCm/triton)
 
-    Install ROCm's Triton flash attention (the default triton-mlir branch) following the instructions from [ROCm/triton](https://github.com/ROCm/triton/blob/triton-mlir/README.md)
+   Install ROCm's Triton flash attention (the default triton-mlir branch) following the instructions from [ROCm/triton](https://github.com/ROCm/triton/blob/triton-mlir/README.md)
 
-    ```console
-    python3 -m pip install ninja cmake wheel pybind11
-    pip uninstall -y triton
-    git clone https://github.com/OpenAI/triton.git
-    cd triton
-    git checkout e5be006
-    cd python
-    pip3 install .
-    cd ../..
-    ```
+   ```console
+   python3 -m pip install ninja cmake wheel pybind11
+   pip uninstall -y triton
+   git clone https://github.com/OpenAI/triton.git
+   cd triton
+   git checkout e5be006
+   cd python
+   pip3 install .
+   cd ../..
+   ```
 
-    :::{note}
-    If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
-    :::
+   :::{note}
+   If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
+   :::
 
 2. Optionally, if you choose to use CK flash attention, you can install [flash attention for ROCm](https://github.com/ROCm/flash-attention/tree/ck_tile)
 
-    Install ROCm's flash attention (v2.7.2) following the instructions from [ROCm/flash-attention](https://github.com/ROCm/flash-attention/tree/ck_tile#amd-gpurocm-support)
-    Alternatively, wheels intended for vLLM use can be accessed under the releases.
+   Install ROCm's flash attention (v2.7.2) following the instructions from [ROCm/flash-attention](https://github.com/ROCm/flash-attention/tree/ck_tile#amd-gpurocm-support)
+   Alternatively, wheels intended for vLLM use can be accessed under the releases.
 
-    For example, for ROCm 6.3, suppose your gfx arch is `gfx90a`. To get your gfx architecture, run `rocminfo |grep gfx`.
+   For example, for ROCm 6.3, suppose your gfx arch is `gfx90a`. To get your gfx architecture, run `rocminfo |grep gfx`.
 
-    ```console
-    git clone https://github.com/ROCm/flash-attention.git
-    cd flash-attention
-    git checkout b7d29fb
-    git submodule update --init
-    GPU_ARCHS="gfx90a" python3 setup.py install
-    cd ..
-    ```
+   ```console
+   git clone https://github.com/ROCm/flash-attention.git
+   cd flash-attention
+   git checkout b7d29fb
+   git submodule update --init
+   GPU_ARCHS="gfx90a" VLLM_TARGET_DEVICE='rocm' VLLM_ROCM_VERSION=6.2 pip install install .
+   cd ..
+   ```
 
-    :::{note}
-    You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
-    :::
+   :::{note}
+   You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
+   :::
 
 3. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
 
-    ```bash
-    $ pip install --upgrade pip
+   ```bash
+   $ pip install --upgrade pip
 
-    # Build & install AMD SMI
-    $ pip install /opt/rocm/share/amd_smi
+   # Build & install AMD SMI
+   $ pip install /opt/rocm/share/amd_smi
 
-    # Install dependencies
-    $ pip install --upgrade numba scipy huggingface-hub[cli,hf_transfer] setuptools_scm
-    $ pip install "numpy<2"
-    $ pip install -r requirements-rocm.txt
+   # Build vLLM for MI210/MI250/MI300.
+   $ export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
+   $ VLLM_TARGET_DEVICE='rocm' VLLM_ROCM_VERSION=6.2 pip install -v -e .
+   ```
 
-    # Build vLLM for MI210/MI250/MI300.
-    $ export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
-    $ python3 setup.py develop
-    ```
+   This will take a while, especially if using CK flash attention.
 
-    This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
+   :::{tip}
 
-    :::{tip}
    - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
    - Triton flash attention does not currently support sliding window attention. If using half precision, please use CK flash-attention for sliding window support.
    - To use CK flash-attention or PyTorch naive attention, please use this flag `export VLLM_USE_TRITON_FLASH_ATTN=0` to turn off triton flash attention.
    - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
-    :::
+     :::
 
 :::{tip}
+
 - For MI300x (gfx942) users, to achieve optimal performance, please refer to [MI300x tuning guide](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html) for performance optimization and tuning tips on system and workflow level.
   For vLLM, please refer to [vLLM performance optimization](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/workload.html#vllm-performance-optimization).
-:::
+  :::
 
 ## Set up using Docker (Recommended)
 
