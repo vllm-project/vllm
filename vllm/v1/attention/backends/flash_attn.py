@@ -130,13 +130,12 @@ class FlashAttentionImpl(AttentionImpl):
 
     def forward(
         self,
+        layer: torch.nn.Module,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        k_scale: torch.Tensor,
-        v_scale: torch.Tensor,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
@@ -179,8 +178,8 @@ class FlashAttentionImpl(AttentionImpl):
             value_cache,
             attn_metadata.slot_mapping,
             self.kv_cache_dtype,
-            k_scale,
-            v_scale,
+            layer._k_scale,
+            layer._v_scale,
         )
 
         # Compute attention and update output up to `num_actual_tokens`.

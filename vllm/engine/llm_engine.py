@@ -457,6 +457,11 @@ class LLMEngine:
                 # JAX-style, single-process, multi-device executor.
                 from vllm.executor.uniproc_executor import UniProcExecutor
                 executor_class = UniProcExecutor
+            elif distributed_executor_backend == "external_launcher":
+                # executor with external launcher
+                from vllm.executor.uniproc_executor import (  # noqa
+                    ExecutorWithExternalLauncher)
+                executor_class = ExecutorWithExternalLauncher
         else:
             from vllm.executor.uniproc_executor import UniProcExecutor
             executor_class = UniProcExecutor
@@ -684,7 +689,9 @@ class LLMEngine:
                 :class:`~vllm.PoolingParams` for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+            lora_request: The LoRA request to add.
             trace_headers: OpenTelemetry trace headers.
+            prompt_adapter_request: The prompt adapter request to add.
             priority: The priority of the request.
                 Only applicable with priority scheduling.
 

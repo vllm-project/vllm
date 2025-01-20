@@ -158,6 +158,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                    fullgraph=True,
                                    dynamic=False)
 
+    def get_model(self) -> nn.Module:
+        return self.model.model
+
     def _dummy_run(
         self,
         batch_size: int,
