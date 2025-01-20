@@ -52,10 +52,20 @@ class AriaImagePixelInputs(TypedDict):
 
 class AriaProjectorMLP(nn.Module):
 
-    def __init__(self, embed_dim: int, ff_dim: int, output_dim: int) -> None:
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: int,
+        output_dim: int,
+    ) -> None:
         super().__init__()
-        self.linear_in = ColumnParallelLinear(embed_dim, ff_dim, bias=False)
-        self.linear_out = RowParallelLinear(ff_dim, output_dim, bias=False)
+
+        self.linear_in = ColumnParallelLinear(in_features,
+                                              hidden_features,
+                                              bias=False)
+        self.linear_out = RowParallelLinear(hidden_features,
+                                            output_dim,
+                                            bias=False)
         self.act = get_act_fn("gelu_new")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -112,14 +122,16 @@ class AriaProjector(nn.Module):
         x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        bs = x.shape[0]
-        queries = self.query.unsqueeze(0).repeat(bs, 1, 1)
+        batch_size, num_patches = x.shape[0], x.shape[1]
 
-        query_num = self.patch_to_query_dict.get(x.shape[1], None)
-        assert (query_num is not None
-                ), f"Query number for {x.shape[1]} patches is not provided"
+        if num_patches not in self.patch_to_query_dict:
+            raise KeyError(f"Number of patches {num_patches} not found in "
+                           "patch_to_query_dict amongst possible values "
+                           f"{self.patch_to_query_dict.keys()}.")
 
-        queries = queries[:, :query_num, :]
+        query_num = self.patch_to_query_dict[num_patches]
+
+        queries = self.query[:query_num].unsqueeze(0).repeat(batch_size, 1, 1)
 
         if attn_mask is not None:
             attn_mask = attn_mask.repeat_interleave(self.num_heads, 0)
@@ -198,6 +210,7 @@ class MoELayer(nn.Module):
             config.intermediate_size * config.moe_num_shared_experts,
             "silu",
             quant_config=quant_config,
+            bias=config.mlp_bias,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -215,8 +228,8 @@ class MoELayer(nn.Module):
         router_output = torch.nn.functional.linear(hidden_states,
                                                    self.router_weight)
 
-        shared_expert_output = self.shared_experts(hidden_states)
         sparse_expert_output = self.experts(hidden_states, router_output)
+        shared_expert_output = self.shared_experts(hidden_states)
 
         return sparse_expert_output + shared_expert_output
 
