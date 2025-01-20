@@ -3,8 +3,7 @@ from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
 
 import torch
 import torch.nn as nn
-from transformers import (AriaConfig, AriaTextConfig, BatchFeature,
-                          PretrainedConfig)
+from transformers import AriaConfig, AriaTextConfig, BatchFeature
 from transformers.models.aria.modeling_aria import AriaCrossAttention
 from transformers.models.aria.processing_aria import AriaProcessor
 
