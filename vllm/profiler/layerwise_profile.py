@@ -1,7 +1,7 @@
 import copy
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple, TypeAlias, Union
+from typing import Callable, Dict, List, Optional, Tuple, TypeAlias, Union, Any
 
 import pandas as pd
 from torch._C._autograd import DeviceType, _KinetoEvent, _ProfilerResult
@@ -128,7 +128,7 @@ class LayerwiseProfileResults(profile):
         ])
         df.to_csv(filename)
 
-    def convert_stats_to_dict(self) -> dict:
+    def convert_stats_to_dict(self) -> dict[str, Any]:
         return {
             "metadata": {
                 "num_running_seqs": self.num_running_seqs
