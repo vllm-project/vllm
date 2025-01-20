@@ -13,16 +13,16 @@ Currently, vllm only supports loading single-file GGUF models. If you have a mul
 To run a GGUF model with vLLM, you can download and use the local GGUF model from [TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF](https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF) with the following command:
 
 ```console
-$ wget https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
-$ # We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
-$ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0
+wget https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+# We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
+vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
 
 You can also add `--tensor-parallel-size 2` to enable tensor parallelism inference with 2 GPUs:
 
 ```console
-$ # We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
-$ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0 --tensor-parallel-size 2
+# We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
+vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0 --tensor-parallel-size 2
 ```
 
 ```{warning}

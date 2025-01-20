@@ -25,23 +25,30 @@ from .pass_manager import PostGradPassManager
 logger = init_logger(__name__)
 
 
+@dataclasses.dataclass
+class InductorArtifact:
+    hash_str: str = ""
+    file_path: str = ""
+
+
 class InductorHashCache:
     """
     Disk format: a Python list of tuples, each tuple is
-    (runtime_shape, graph_index, hash_str)
+    (runtime_shape, graph_index, hash_str, file_path)
     We use list of tuple for readability.
 
     In-memory format: a defaultdict of dict, where the key is
     runtime_shape, and the value is a dict of graph_index to hash_str.
 
-    The data is essentially `Dict[Optional[int], Dict[int, str]]`,
+    The data is essentially `Dict[Optional[int], Dict[int, InductorArtifact]]`,
     we don't use json here because json doesn't support int as key.
 
     TODO: better off-the-shelf solution to serialize the data?
     """
 
     def __init__(self, cache_dir: str, disabled: bool = False):
-        self.cache: defaultdict = defaultdict(dict)
+        self.cache: Dict[Optional[int],
+                         Dict[int, InductorArtifact]] = defaultdict(dict)
         self.disabled = disabled
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir,
@@ -66,14 +73,25 @@ class InductorHashCache:
         # because it is a safe way to parse Python literals.
         # do not use eval(), it is unsafe.
         list_data = ast.literal_eval(data)
-        for runtime_shape, graph_index, hash_str in list_data:
-            self.cache[runtime_shape][graph_index] = hash_str
+        for item in list_data:
+            runtime_shape = item[0]
+            graph_index = item[1]
+            hash_str = item[2]
+            # for compatibility of old version,
+            # where we don't have file_path.
+            # NOTE: after running the new code, the file_path
+            # will be updated.
+            file_path = "" if len(item) == 3 else item[3]
+            self.cache[runtime_shape][graph_index] = InductorArtifact(
+                hash_str=hash_str, file_path=file_path)
 
     def serialize(self) -> str:
         data = []
-        for runtime_shape, graph_index_to_hash_str in self.cache.items():
-            for graph_index, hash_str in graph_index_to_hash_str.items():
-                data.append((runtime_shape, graph_index, hash_str))
+        for runtime_shape, value in self.cache.items():
+            for graph_index, inductor_artifact in value.items():
+                data.append(
+                    (runtime_shape, graph_index, inductor_artifact.hash_str,
+                     inductor_artifact.file_path))
         printer = pprint.PrettyPrinter(indent=4)
         return printer.pformat(data)
 
@@ -90,13 +108,14 @@ class InductorHashCache:
         return runtime_shape in self.cache and graph_index in self.cache[
             runtime_shape]
 
-    def __getitem__(self, key: Tuple[Optional[int], int]) -> str:
+    def __getitem__(self, key: Tuple[Optional[int], int]) -> InductorArtifact:
         if self.disabled:
             raise KeyError("cannot read from disabled cache")
         runtime_shape, graph_index = key
         return self.cache[runtime_shape][graph_index]
 
-    def __setitem__(self, key: Tuple[Optional[int], int], value: str):
+    def __setitem__(self, key: Tuple[Optional[int], int],
+                    value: InductorArtifact):
         # setitem for disabled cache is fine, because we
         # don't actually write to the disk
         runtime_shape, graph_index = key
@@ -145,6 +164,7 @@ def wrap_inductor(graph: fx.GraphModule,
                   example_inputs,
                   additional_inductor_config,
                   compilation_config: CompilationConfig,
+                  vllm_backend: "VllmBackend",
                   graph_index: int = 0,
                   num_graphs: int = 1,
                   runtime_shape: Optional[int] = None,
@@ -176,11 +196,12 @@ def wrap_inductor(graph: fx.GraphModule,
     # see https://github.com/pytorch/pytorch/issues/138980
     graph = copy.deepcopy(graph)
 
-    cache_data = compilation_config.inductor_hash_cache
+    cache_data = vllm_backend.inductor_hash_cache
     if (runtime_shape, graph_index) in cache_data:
         # we compiled this graph before
         # so we can directly lookup the compiled graph via hash
-        hash_str = cache_data[(runtime_shape, graph_index)]
+        inductor_artifact = cache_data[(runtime_shape, graph_index)]
+        hash_str = inductor_artifact.hash_str
         if graph_index == 0:
             # adds some info logging for the first graph
             logger.info(
@@ -196,8 +217,9 @@ def wrap_inductor(graph: fx.GraphModule,
                 hash_str, example_inputs, True, False)
             assert inductor_compiled_graph is not None, (
                 "Inductor cache lookup failed. Please remove"
-                f"the cache file {compilation_config.inductor_hash_cache.cache_file_path} and try again."  # noqa
+                f"the cache file {cache_data.cache_file_path} and try again."  # noqa
             )
+            inductor_artifact.file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
 
         # Inductor calling convention (function signature):
         # f(list) -> tuple
@@ -223,19 +245,20 @@ def wrap_inductor(graph: fx.GraphModule,
         # the assumption is that we don't have nested Inductor compilation.
         # compiled_fx_graph_hash will only be called once, and we can hook
         # it to get the hash of the compiled graph directly.
-        from torch._inductor.codecache import compiled_fx_graph_hash
+
+        inductor_artifact = InductorArtifact()
+        from torch._inductor.codecache import (FxGraphCache,
+                                               compiled_fx_graph_hash)
+        original_load = FxGraphCache.load
+
+        def hijack_load(*args, **kwargs):
+            inductor_compiled_graph = original_load(*args, **kwargs)
+            inductor_artifact.file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
+            return inductor_compiled_graph
 
         def hijack_compiled_fx_graph_hash(*args, **kwargs):
             out = compiled_fx_graph_hash(*args, **kwargs)
-            # store the hash in the cache
-            nonlocal cache_data
-            cache_data[(runtime_shape, graph_index)] = out[0]
-            if graph_index == 0:
-                # adds some info logging for the first graph
-                logger.info("Cache the graph of shape %s for later use",
-                            str(runtime_shape))
-            logger.debug("store the %s-th graph for shape %s via hash %s",
-                         graph_index, str(runtime_shape), out[0])
+            inductor_artifact.hash_str = out[0]
             return out
 
         def _check_can_cache(*args, **kwargs):
@@ -250,19 +273,45 @@ def wrap_inductor(graph: fx.GraphModule,
         def _get_shape_env() -> AlwaysHitShapeEnv:
             return AlwaysHitShapeEnv()
 
-        with patch(# for hijacking the hash of the compiled graph
-                "torch._inductor.codecache.compiled_fx_graph_hash",
-                hijack_compiled_fx_graph_hash), \
-            patch(# for providing a dummy shape environment
-                "torch._inductor.codecache.FxGraphCache._get_shape_env",
-                 _get_shape_env), \
-            patch(# for forcing the graph to be cached
-                "torch._inductor.codecache.FxGraphCache._check_can_cache",
-                _check_can_cache):
+        with ExitStack() as stack:
+            if not cache_data.disabled:
+                # compilation cache is enabled, patch several functions
+
+                # hijack to get the compiled graph itself
+                stack.enter_context(
+                    patch("torch._inductor.codecache.FxGraphCache.load",
+                          hijack_load))
+
+                # for hijacking the hash of the compiled graph
+                stack.enter_context(
+                    patch("torch._inductor.codecache.compiled_fx_graph_hash",
+                          hijack_compiled_fx_graph_hash))
+
+                # for providing a dummy shape environment
+                stack.enter_context(
+                    patch(
+                        "torch._inductor.codecache.FxGraphCache._get_shape_env",
+                        _get_shape_env))
+
+                # for forcing the graph to be cached
+                stack.enter_context(
+                    patch(
+                        "torch._inductor.codecache.FxGraphCache._check_can_cache",
+                        _check_can_cache))
+
             compiled_graph = compile_fx(graph,
                                         example_inputs,
                                         config_patches=current_config)
-
+        # store the inductor_artifact in the cache
+        cache_data[(runtime_shape, graph_index)] = inductor_artifact
+        if graph_index == 0:
+            # adds some info logging for the first graph
+            logger.info("Cache the graph of shape %s for later use",
+                        str(runtime_shape))
+        logger.debug(
+            "store the %s-th graph for shape %s via hash %s from file %s",
+            graph_index, str(runtime_shape), inductor_artifact.hash_str,
+            inductor_artifact.file_path)
     # after compiling the last graph, record the end time
     if graph_index == num_graphs - 1:
         now = time.time()
@@ -354,7 +403,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
 
     def __init__(self, module: torch.fx.GraphModule,
                  compile_submod_names: List[str], vllm_config: VllmConfig,
-                 graph_pool):
+                 graph_pool, vllm_backend: "VllmBackend"):
         super().__init__(module)
         from torch._guards import detect_fake_mode
         self.fake_mode = detect_fake_mode()
@@ -362,6 +411,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         self.compilation_config = vllm_config.compilation_config
         self.graph_pool = graph_pool
         self.vllm_config = vllm_config
+        self.vllm_backend = vllm_backend
 
     def run(self, *args):
         fake_args = [
@@ -389,6 +439,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 args,
                 self.compilation_config.inductor_compile_config,
                 self.compilation_config,
+                self.vllm_backend,
                 graph_index=index,
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None,
@@ -397,7 +448,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             self.module.__dict__[target] = PiecewiseBackend(
                 submod, self.vllm_config, self.graph_pool, index,
                 len(self.compile_submod_names), sym_shape_indices,
-                compiled_graph_for_general_shape)
+                compiled_graph_for_general_shape, self.vllm_backend)
 
             compilation_counter.num_piecewise_capturable_graphs_seen += 1
 
@@ -430,6 +481,7 @@ class VllmBackend:
     post_grad_passes: Sequence[Callable]
     sym_tensor_indices: List[int]
     input_buffers: List[torch.Tensor]
+    inductor_hash_cache: InductorHashCache
 
     def __init__(
         self,
@@ -472,6 +524,53 @@ class VllmBackend:
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
+        if not self.compilation_config.cache_dir:
+            # no provided cache dir, generate one based on the known factors
+            # that affects the compilation. if none of the factors change,
+            # the cache dir will be the same so that we can reuse the compiled
+            # graph.
+
+            # 1. factors come from the vllm_config (it mainly summarizes how the
+            #    model is created)
+            vllm_config = self.vllm_config
+            config_hash = vllm_config.compute_hash()
+
+            # 2. factors come from the code files that are traced by Dynamo (
+            #    it mainly summarizes how the model is used in forward pass)
+            forward_code_files = list(
+                sorted(self.compilation_config.traced_files))
+            self.compilation_config.traced_files.clear()
+            logger.debug(
+                "Traced files (to be considered for compilation cache):\n%s",
+                "\n".join(forward_code_files))
+            hash_content = []
+            for filepath in forward_code_files:
+                hash_content.append(filepath)
+                with open(filepath) as f:
+                    hash_content.append(f.read())
+            import hashlib
+            code_hash = hashlib.md5(
+                "\n".join(hash_content).encode()).hexdigest()
+
+            # combine the two hashes to generate the cache dir
+            hash_key = hashlib.md5(
+                f"{config_hash}_{code_hash}".encode()).hexdigest()[:10]
+            cache_dir = os.path.join(
+                envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key,
+                f"rank_{vllm_config.parallel_config.rank}")
+        else:
+            cache_dir = self.compilation_config.cache_dir
+        os.makedirs(cache_dir, exist_ok=True)
+
+        disabled = envs.VLLM_DISABLE_COMPILE_CACHE
+        self.inductor_hash_cache: InductorHashCache = InductorHashCache(
+            cache_dir, disabled=disabled)
+        if disabled:
+            logger.info("vLLM's torch.compile cache is disabled.")
+        else:
+            logger.info("Using cache directory: %s for vLLM's torch.compile",
+                        cache_dir)
+
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done
         compilation_counter.num_graphs_seen += 1
@@ -507,8 +606,8 @@ class VllmBackend:
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
         PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
-                                    self.vllm_config,
-                                    self.graph_pool).run(*example_inputs)
+                                    self.vllm_config, self.graph_pool,
+                                    self).run(*example_inputs)
 
         self._called = True
 
@@ -525,9 +624,13 @@ class VllmBackend:
         ]
 
         # index of tensors that have symbolic shapes (batch size)
+        # for weights and static buffers, they will have concrete shapes.
+        # symbolic shape only happens for input tensors.
+        from torch.fx.experimental.symbolic_shapes import is_symbolic
         self.sym_tensor_indices = [
             i for i, x in enumerate(fake_args)
-            if isinstance(x, torch._subclasses.fake_tensor.FakeTensor)
+            if isinstance(x, torch._subclasses.fake_tensor.FakeTensor) and \
+                any(is_symbolic(d) for d in x.size())
         ]
 
         # compiler managed cudagraph input buffers
@@ -577,7 +680,8 @@ class PiecewiseBackend:
     def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
                  graph_pool: Any, piecewise_compile_index: int,
                  total_piecewise_compiles: int, sym_shape_indices: List[int],
-                 compiled_graph_for_general_shape: Callable):
+                 compiled_graph_for_general_shape: Callable,
+                 vllm_backend: VllmBackend):
         """
         The backend for piecewise compilation.
         It mainly handles the compilation and cudagraph capturing.
@@ -597,6 +701,7 @@ class PiecewiseBackend:
         self.graph_pool = graph_pool
         self.piecewise_compile_index = piecewise_compile_index
         self.total_piecewise_compiles = total_piecewise_compiles
+        self.vllm_backend = vllm_backend
 
         self.is_first_graph = piecewise_compile_index == 0
         self.is_last_graph = (
@@ -634,7 +739,7 @@ class PiecewiseBackend:
         if self.is_last_graph and not self.to_be_compiled_sizes:
             # no specific sizes to compile
             # save the hash of the inductor graph for the next run
-            self.compilation_config.inductor_hash_cache.save_to_file()
+            self.vllm_backend.inductor_hash_cache.save_to_file()
             end_monitoring_torch_compile(self.vllm_config)
 
     def __call__(self, *args) -> Any:
@@ -662,6 +767,7 @@ class PiecewiseBackend:
                 args,
                 self.compilation_config.inductor_compile_config,
                 self.compilation_config,
+                self.vllm_backend,
                 graph_index=self.piecewise_compile_index,
                 num_graphs=self.total_piecewise_compiles,
                 runtime_shape=runtime_shape,

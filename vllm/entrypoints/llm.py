@@ -1,9 +1,10 @@
 import itertools
 import warnings
 from contextlib import contextmanager
-from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
-                    Union, cast, overload)
+from typing import (Any, Callable, ClassVar, Dict, List, Optional, Sequence,
+                    Tuple, Type, Union, cast, overload)
 
+import cloudpickle
 from tqdm import tqdm
 from typing_extensions import deprecated
 
@@ -21,7 +22,7 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format)
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
-from vllm.inputs.parse import parse_and_batch_prompt
+from vllm.inputs.parse import is_token_prompt, parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding.guided_fields import (
@@ -185,6 +186,13 @@ class LLM:
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
+
+        if "worker_cls" in kwargs:
+            worker_cls = kwargs["worker_cls"]
+            # if the worker_cls is not qualified string name,
+            # we serialize it using cloudpickle to avoid pickling issues
+            if isinstance(worker_cls, type):
+                kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
 
         if compilation_config is not None:
             if isinstance(compilation_config, (int, dict)):
@@ -455,9 +463,30 @@ class LLM:
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
+    def collective_rpc(self,
+                       method: Union[str, Callable],
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> List[Any]:
+        """
+        Run a method on all workers, with homogeneous arguments.
+        The main extension point for the LLM entrypoint.
+        Users can provide custom worker class through `worker_cls`
+        argument, and implement new methods in the worker class.
+        Then, users can call the new methods through this API.
+        It is recommended to use this API to only pass control messages,
+        and set up data-plane communication to pass data.
+        The method can also be a callable, which will be serialized
+        and sent to all workers to execute.
+        If the method is a callable, it should accept an additional
+        `self` argument, in addition to the arguments passed in `args`
+        and `kwargs`. The `self` argument will be the worker object.
+        """
+        return self.llm_engine.collective_rpc(method, timeout, args, kwargs)
+
     def beam_search(
         self,
-        prompts: List[Union[str, List[int]]],
+        prompts: List[Union[TokensPrompt, TextPrompt]],
         params: BeamSearchParams,
     ) -> List[BeamSearchOutput]:
         """
@@ -493,8 +522,10 @@ class LLM:
         instances: List[BeamSearchInstance] = []
 
         for prompt in prompts:
-            prompt_tokens = prompt if isinstance(
-                prompt, list) else tokenizer.encode(prompt)
+            if is_token_prompt(prompt):
+                prompt_tokens = prompt["prompt_token_ids"]
+            else:
+                prompt_tokens = tokenizer.encode(prompt["prompt"])
             instances.append(BeamSearchInstance(prompt_tokens))
 
         for _ in range(max_tokens):

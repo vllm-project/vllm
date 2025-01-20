@@ -17,7 +17,7 @@ unquantized model through a quantizer tool (e.g. AMD quantizer or NVIDIA AMMO).
 To install AMMO (AlgorithMic Model Optimization):
 
 ```console
-$ pip install --no-cache-dir --extra-index-url https://pypi.nvidia.com nvidia-ammo
+pip install --no-cache-dir --extra-index-url https://pypi.nvidia.com nvidia-ammo
 ```
 
 Studies have shown that FP8 E4M3 quantization typically only minimally degrades inference accuracy. The most recent silicon
@@ -28,7 +28,7 @@ Here is an example of how to enable this feature:
 
 ```python
 # two float8_e4m3fn kv cache scaling factor files are provided under tests/fp8_kv, please refer to
-# https://github.com/vllm-project/vllm/blob/main/examples/fp8/README.md to generate kv_cache_scales.json of your own.
+# https://github.com/vllm-project/vllm/blob/main/examples/other/fp8/README.md to generate kv_cache_scales.json of your own.
 
 from vllm import LLM, SamplingParams
 sampling_params = SamplingParams(temperature=1.3, top_p=0.8)

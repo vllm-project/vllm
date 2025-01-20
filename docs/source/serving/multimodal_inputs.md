@@ -14,7 +14,7 @@ and [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/ch
 To input multi-modal data, follow this schema in {class}`vllm.inputs.PromptType`:
 
 - `prompt`: The prompt should follow the format that is documented on HuggingFace.
-- `multi_modal_data`: This is a dictionary that follows the schema defined in {class}`vllm.multimodal.MultiModalDataDict`.
+- `multi_modal_data`: This is a dictionary that follows the schema defined in {class}`vllm.multimodal.inputs.MultiModalDataDict`.
 
 ### Image
 
@@ -60,7 +60,7 @@ for o in outputs:
     print(generated_text)
 ```
 
-Full example: <gh-file:examples/offline_inference_vision_language.py>
+Full example: <gh-file:examples/offline_inference/vision_language.py>
 
 To substitute multiple images inside the same text prompt, you can pass in a list of images instead:
 
@@ -91,7 +91,7 @@ for o in outputs:
     print(generated_text)
 ```
 
-Full example: <gh-file:examples/offline_inference_vision_language_multi_image.py>
+Full example: <gh-file:examples/offline_inference/vision_language_multi_image.py>
 
 Multi-image input can be extended to perform video captioning. We show this with [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos:
 
@@ -125,13 +125,13 @@ for o in outputs:
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
 instead of using multi-image input.
 
-Full example: <gh-file:examples/offline_inference_vision_language.py>
+Full example: <gh-file:examples/offline_inference/vision_language.py>
 
 ### Audio
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
 
-Full example: <gh-file:examples/offline_inference_audio_language.py>
+Full example: <gh-file:examples/offline_inference/audio_language.py>
 
 ### Embedding
 
@@ -199,7 +199,7 @@ for o in outputs:
     print(generated_text)
 ```
 
-## Online Inference
+## Online Serving
 
 Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
 
@@ -271,7 +271,7 @@ chat_response = client.chat.completions.create(
 print("Chat completion output:", chat_response.choices[0].message.content)
 ```
 
-Full example: <gh-file:examples/openai_chat_completion_client_for_multimodal.py>
+Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for_multimodal.py>
 
 ```{tip}
 Loading from local file paths is also supported on vLLM: You can specify the allowed local media path via `--allowed-local-media-path` when launching the API server/engine,
@@ -303,6 +303,7 @@ vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --task generate --max-model
 ```
 
 Then, you can use the OpenAI client as follows:
+
 ```python
 from openai import OpenAI
 
@@ -342,7 +343,7 @@ result = chat_completion_from_url.choices[0].message.content
 print("Chat completion output from image url:", result)
 ```
 
-Full example: <gh-file:examples/openai_chat_completion_client_for_multimodal.py>
+Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for_multimodal.py>
 
 ````{note}
 By default, the timeout for fetching videos through HTTP URL is `30` seconds.
@@ -445,7 +446,7 @@ result = chat_completion_from_url.choices[0].message.content
 print("Chat completion output from audio url:", result)
 ```
 
-Full example: <gh-file:examples/openai_chat_completion_client_for_multimodal.py>
+Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for_multimodal.py>
 
 ````{note}
 By default, the timeout for fetching audios through HTTP URL is `10` seconds.
@@ -529,4 +530,4 @@ Also important, `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of th
 example below for details.
 ```
 
-Full example: <gh-file:examples/openai_chat_embedding_client_for_multimodal.py>
+Full example: <gh-file:examples/online_serving/openai_chat_embedding_client_for_multimodal.py>

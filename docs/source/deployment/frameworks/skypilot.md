@@ -61,7 +61,7 @@ run: |
 
   echo 'Starting gradio server...'
   git clone https://github.com/vllm-project/vllm.git || true
-  python vllm/examples/gradio_openai_chatbot_webserver.py \
+  python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
     -m $MODEL_NAME \
     --port 8811 \
     --model-url http://localhost:8081/v1 \
@@ -321,7 +321,7 @@ run: |
 
   echo 'Starting gradio server...'
   git clone https://github.com/vllm-project/vllm.git || true
-  python vllm/examples/gradio_openai_chatbot_webserver.py \
+  python vllm/examples/online_serving/gradio_openai_chatbot_webserver.py \
     -m $MODEL_NAME \
     --port 8811 \
     --model-url http://$ENDPOINT/v1 \
@@ -334,12 +334,12 @@ run: |
 
 1. Start the chat web UI:
 
-```console
-sky launch -c gui ./gui.yaml --env ENDPOINT=$(sky serve status --endpoint vllm)
-```
+    ```console
+    sky launch -c gui ./gui.yaml --env ENDPOINT=$(sky serve status --endpoint vllm)
+    ```
 
 2. Then, we can access the GUI at the returned gradio link:
 
-```console
-| INFO | stdout | Running on public URL: https://6141e84201ce0bb4ed.gradio.live
-```
+    ```console
+    | INFO | stdout | Running on public URL: https://6141e84201ce0bb4ed.gradio.live
+    ```

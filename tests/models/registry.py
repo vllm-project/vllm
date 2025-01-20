@@ -22,6 +22,11 @@ class _HfExamplesInfo:
     for speculative decoding.
     """
 
+    min_transformers_version: Optional[str] = None
+    """
+    The minimum version of HF Transformers that is required to run this model.
+    """
+
     is_available_online: bool = True
     """
     Set this to ``False`` if the name of this architecture no longer exists on
@@ -64,6 +69,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "DeepseekV3ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3",  # noqa: E501
                                          trust_remote_code=True),
     "ExaoneForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct"),  # noqa: E501
+    "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),  # noqa: E501
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-2b"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
@@ -80,6 +86,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "InternLM2VEForCausalLM": _HfExamplesInfo("OpenGVLab/Mono-InternVL-2B",
                                               trust_remote_code=True),
+    "InternLM3ForCausalLM": _HfExamplesInfo("internlm/internlm3-8b-instruct",
+                                            trust_remote_code=True),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini"),
     "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Meta-Llama-3-8B"),
@@ -174,6 +182,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                     trust_remote_code=True),
     "ChatGLMForConditionalGeneration": _HfExamplesInfo("chatglm2-6b",
                                                        is_available_online=False),
+    "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny"),   # noqa: E501
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m"),
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",

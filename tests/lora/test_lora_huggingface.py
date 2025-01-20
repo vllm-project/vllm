@@ -3,6 +3,7 @@ from typing import List
 import pytest
 
 from vllm.lora.models import LoRAModel
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.model_executor.models.llama import LlamaForCausalLM
 
@@ -27,9 +28,11 @@ def test_load_checkpoints_from_huggingface(lora_fixture_name, request):
     lora_path = get_adapter_absolute_path(lora_name)
 
     # lora loading should work for either absolute path and hugggingface id.
+    peft_helper = PEFTHelper.from_local_dir(lora_path, 4096)
     lora_model = LoRAModel.from_local_checkpoint(
         lora_path,
         expected_lora_modules,
+        peft_helper=peft_helper,
         lora_model_id=1,
         device="cpu",
         embedding_modules=embedding_modules,

@@ -22,6 +22,7 @@ class RequestFuncInput:
     prompt_len: int
     output_len: int
     model: str
+    model_name: Optional[str] = None
     best_of: int = 1
     logprobs: Optional[int] = None
     extra_body: Optional[dict] = None
@@ -78,7 +79,7 @@ async def async_request_tgi(
                             continue
                         chunk_bytes = chunk_bytes.decode("utf-8")
 
-                        #NOTE: Sometimes TGI returns a ping response without
+                        # NOTE: Sometimes TGI returns a ping response without
                         # any data, we should skip it.
                         if chunk_bytes.startswith(":"):
                             continue
@@ -235,7 +236,8 @@ async def async_request_openai_completions(
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         payload = {
-            "model": request_func_input.model,
+            "model": request_func_input.model_name \
+                if request_func_input.model_name else request_func_input.model,
             "prompt": request_func_input.prompt,
             "temperature": 0.0,
             "best_of": request_func_input.best_of,
@@ -328,7 +330,8 @@ async def async_request_openai_chat_completions(
         if request_func_input.multi_modal_content:
             content.append(request_func_input.multi_modal_content)
         payload = {
-            "model": request_func_input.model,
+            "model": request_func_input.model_name \
+                if request_func_input.model_name else request_func_input.model,
             "messages": [
                 {
                     "role": "user",
@@ -417,14 +420,35 @@ def get_model(pretrained_model_name_or_path: str) -> str:
 
 
 def get_tokenizer(
-    pretrained_model_name_or_path: str, trust_remote_code: bool
+    pretrained_model_name_or_path: str,
+    tokenizer_mode: str = "auto",
+    trust_remote_code: bool = False,
+    **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     if pretrained_model_name_or_path is not None and not os.path.exists(
             pretrained_model_name_or_path):
         pretrained_model_name_or_path = get_model(
             pretrained_model_name_or_path)
-    return AutoTokenizer.from_pretrained(pretrained_model_name_or_path,
-                                         trust_remote_code=trust_remote_code)
+    if tokenizer_mode == "slow":
+        if kwargs.get("use_fast", False):
+            raise ValueError(
+                "Cannot use the fast tokenizer in slow tokenizer mode.")
+        kwargs["use_fast"] = False
+    if tokenizer_mode == "mistral":
+        try:
+            from vllm.transformers_utils.tokenizer import MistralTokenizer
+        except ImportError as e:
+            raise ImportError("MistralTokenizer requires vllm package.\n"
+                              "Please install it with `pip install vllm` "
+                              "to use mistral tokenizer mode.") from e
+        return MistralTokenizer.from_pretrained(
+            str(pretrained_model_name_or_path))
+    else:
+        return AutoTokenizer.from_pretrained(
+            pretrained_model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            **kwargs,
+        )
 
 
 ASYNC_REQUEST_FUNCS = {

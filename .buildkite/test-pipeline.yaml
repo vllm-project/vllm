@@ -38,7 +38,7 @@ steps:
   - pip install -r requirements-docs.txt
   - SPHINXOPTS=\"-W\" make html
   # Check API reference (if it fails, you may have missing mock imports)
-  - grep \"sig sig-object py\" build/html/dev/sampling_params.html
+  - grep \"sig sig-object py\" build/html/api/inference_params.html
 
 - label: Async Engine, Inputs, Utils, Worker Test # 24min
   fast_check: true
@@ -106,7 +106,7 @@ steps:
   source_file_dependencies:
   - vllm/
   commands:
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
@@ -125,11 +125,15 @@ steps:
   - tests/distributed
   - tests/spec_decode/e2e/test_integration_dist_tp4
   - tests/compile
+  - examples/offline_inference/rlhf.py
   commands:
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
+  # TODO: create a dedicated test section for multi-GPU example tests
+  # when we have multiple distributed example tests
+  - python3 ../examples/offline_inference/rlhf.py
 
 - label: Metrics, Tracing Test # 10min
   num_gpus: 2 
@@ -187,19 +191,19 @@ steps:
   - examples/
   commands:
     - pip install tensorizer # for tensorizer test
-    - python3 offline_inference.py
-    - python3 cpu_offload.py
-    - python3 offline_inference_chat.py
-    - python3 offline_inference_with_prefix.py
-    - python3 llm_engine_example.py
-    - python3 offline_inference_vision_language.py
-    - python3 offline_inference_vision_language_multi_image.py
-    - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
-    - python3 offline_inference_encoder_decoder.py
-    - python3 offline_inference_classification.py
-    - python3 offline_inference_embedding.py
-    - python3 offline_inference_scoring.py
-    - python3 offline_profile.py --model facebook/opt-125m run_num_steps --num-steps 2
+    - python3 offline_inference/basic.py
+    - python3 offline_inference/cpu_offload.py
+    - python3 offline_inference/chat.py
+    - python3 offline_inference/prefix_caching.py
+    - python3 offline_inference/llm_engine_example.py
+    - python3 offline_inference/vision_language.py
+    - python3 offline_inference/vision_language_multi_image.py
+    - python3 other/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 other/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+    - python3 offline_inference/encoder_decoder.py
+    - python3 offline_inference/classification.py
+    - python3 offline_inference/embedding.py
+    - python3 offline_inference/scoring.py
+    - python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Prefix Caching Test # 9min
   mirror_hardwares: [amd]
@@ -214,6 +218,7 @@ steps:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
   - tests/samplers
+  - tests/conftest.py
   commands:
     - pytest -v -s samplers
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
@@ -229,13 +234,15 @@ steps:
     - pytest -v -s test_logits_processor.py
     - pytest -v -s model_executor/test_guided_processors.py
 
-- label: Speculative decoding tests # 30min
+- label: Speculative decoding tests # 40min
   source_file_dependencies:
   - vllm/spec_decode
   - tests/spec_decode
+  - vllm/model_executor/models/eagle.py
   commands:
     - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
     - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py
+    - pytest -v -s spec_decode/e2e/test_eagle_correctness.py
 
 - label: LoRA Test %N # 15min each
   mirror_hardwares: [amd]
@@ -367,6 +374,7 @@ steps:
   - tests/models/encoder_decoder/vision_language
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal
     - pytest -v -s models/decoder_only/audio_language -m 'core_model or quant_model'
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/vision_language -m core_model
@@ -457,7 +465,10 @@ steps:
   - vllm/worker/worker_base.py
   - vllm/worker/worker.py
   - vllm/worker/model_runner.py
+  - entrypoints/llm/test_collective_rpc.py
   commands:
+  - pytest -v -s entrypoints/llm/test_collective_rpc.py
+  - torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'

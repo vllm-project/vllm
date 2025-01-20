@@ -13,7 +13,7 @@ numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build -t cpu-test-"$BUILDKITE_BU
 numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" -t cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2 -f Dockerfile.cpu .
 
 # Setup cleanup
-remove_docker_container() { docker rm -f cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2-"$NUMA_NODE" || true; }
+remove_docker_container() { set -e; docker rm -f cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2-"$NUMA_NODE" || true; }
 trap remove_docker_container EXIT
 remove_docker_container
 
@@ -30,15 +30,12 @@ function cpu_tests() {
   # offline inference
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2-"$NUMA_NODE" bash -c "
     set -e
-    python3 examples/offline_inference.py"
+    python3 examples/offline_inference/basic.py"
 
   # Run basic model test
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" bash -c "
     set -e
-    pip install pytest pytest-asyncio \
-      decord einops librosa peft Pillow sentence-transformers soundfile \
-      transformers_stream_generator matplotlib datamodel_code_generator
-    pip install torchvision --index-url https://download.pytorch.org/whl/cpu
+    pip install -r vllm/requirements-test.txt
     pytest -v -s tests/models/decoder_only/language -m cpu_model
     pytest -v -s tests/models/embedding/language -m cpu_model
     pytest -v -s tests/models/encoder_decoder/language -m cpu_model
@@ -64,7 +61,7 @@ function cpu_tests() {
     pytest -s -v -k cpu_model \
     tests/basic_correctness/test_chunked_prefill.py"  
 
-  # online inference
+  # online serving
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" bash -c "
     set -e
     export VLLM_CPU_KVCACHE_SPACE=10 
@@ -78,8 +75,14 @@ function cpu_tests() {
       --num-prompts 20 \
       --endpoint /v1/completions \
       --tokenizer facebook/opt-125m"
+
+  # Run multi-lora tests
+  docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" bash -c "
+    set -e
+    pytest -s -v \
+    tests/lora/test_qwen2vl.py"
 }
 
-# All of CPU tests are expected to be finished less than 25 mins.
+# All of CPU tests are expected to be finished less than 40 mins.
 export -f cpu_tests
-timeout 30m bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
+timeout 40m bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
