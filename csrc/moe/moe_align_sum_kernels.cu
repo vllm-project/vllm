@@ -8,7 +8,7 @@
 #include "../cuda_compat.h"
 #include "../dispatch_utils.h"
 
-#define CEILDIV(x, y) (((x) + (y)-1) / (y))
+#define CEILDIV(x, y) (((x) + (y) - 1) / (y))
 
 namespace vllm {
 namespace moe {
