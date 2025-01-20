@@ -1,7 +1,7 @@
 import copy
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple, TypeAlias, Union, Any
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeAlias, Union
 
 import pandas as pd
 from torch._C._autograd import DeviceType, _KinetoEvent, _ProfilerResult
