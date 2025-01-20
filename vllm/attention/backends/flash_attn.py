@@ -649,7 +649,7 @@ class FlashAttentionImpl(AttentionImpl):
             assert VLLM_FLASH_ATTN_VERSION in [2, 3]
             self.fa_version = VLLM_FLASH_ATTN_VERSION
 
-        is_fa_version_supported(self.fa_version)
+        assert is_fa_version_supported(self.fa_version)
 
     def forward(
         self,
@@ -769,6 +769,7 @@ class FlashAttentionImpl(AttentionImpl):
                     alibi_slopes=alibi_slopes,
                     softcap=logits_soft_cap,
                     out=prefill_output,
+                    fa_version=self.fa_version,
                 )
             else:
                 # prefix-enabled attention
@@ -791,6 +792,7 @@ class FlashAttentionImpl(AttentionImpl):
                     block_table=prefill_meta.block_tables,
                     softcap=logits_soft_cap,
                     out=prefill_output,
+                    fa_version=self.fa_version,
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -819,6 +821,7 @@ class FlashAttentionImpl(AttentionImpl):
                     softcap=logits_soft_cap,
                     block_table=decode_meta.block_tables,
                     out=decode_output,
+                    fa_version=self.fa_version,
                 )
             else:
                 # Use flash_attn_with_kvcache for normal decoding.
@@ -839,6 +842,7 @@ class FlashAttentionImpl(AttentionImpl):
                     alibi_slopes=alibi_slopes,
                     softcap=logits_soft_cap,
                     out=decode_output.unsqueeze(1),
+                    fa_version=self.fa_version,
                 )
         return output
 
