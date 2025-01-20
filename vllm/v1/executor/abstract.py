@@ -1,4 +1,4 @@
-from typing import Type
+from typing import Dict, Type
 
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
@@ -62,7 +62,7 @@ class Executor(ExecutorBase):
         # operators can be applied to all workers.
         return min(output)
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> Dict[str, KVCacheSpec]:
         output = self.collective_rpc("get_kv_cache_spec")
         for x in output:
             assert x == output[0]

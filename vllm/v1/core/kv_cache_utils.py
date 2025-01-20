@@ -1,12 +1,12 @@
 """KV-Cache Utilities."""
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheSpec,
-                                        KVCacheTensor)
+from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheGroup,
+                                        KVCacheSpec, KVCacheTensor)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -324,7 +324,7 @@ def hash_request_tokens(block_size: int,
 
 
 def check_enough_kv_cache_memory(vllm_config: VllmConfig,
-                                 kv_cache_spec: KVCacheSpec,
+                                 kv_cache_spec: Dict[str, KVCacheSpec],
                                  available_memory: int):
     """
     Checks whether `available_memory` is enough for the KV cache to hold at 
@@ -332,7 +332,7 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
 
     Args:
         vllm_config: The global VllmConfig
-        kv_cache_spec: The kv cache spec of the model
+        kv_cache_spec: The KVCacheSpec of each attention layer in the model
         available_memory: Memory available for KV cache in bytes.
 
     Raises:
@@ -359,12 +359,12 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
             f"`max_model_len` when initializing the engine.")
 
 
-def is_kv_cache_type_uniform(kv_cache_spec: KVCacheSpec) -> bool:
+def is_kv_cache_type_uniform(kv_cache_spec: Dict[str, KVCacheSpec]) -> bool:
     """
     Whether all layers in the given KVCacheSpec have the same type of KV cache.
 
     Args:
-        kv_cache_spec: The KVCacheSpec of the model
+        kv_cache_spec: The KVCacheSpec of each attention layer in the model
 
     Returns:
         True if all layers have the same type, False otherwise.
@@ -374,8 +374,36 @@ def is_kv_cache_type_uniform(kv_cache_spec: KVCacheSpec) -> bool:
     return len(layer_keys) == 1
 
 
+def _create_kv_cache_groups(
+        kv_cache_spec: Dict[str, KVCacheSpec],
+        grouped_layers: List[List[str]]) -> List[KVCacheGroup]:
+    """
+    Create KVCacheGroup objects for each group of layers.
+    The layers in one group should share the same KVCacheSpec.
+
+    Args:
+        kv_cache_spec (Dict[str, KVCacheSpec]):
+            A mapping from each layer name to its corresponding KVCacheSpec.
+        grouped_layers (List[List[str]]):
+            A list of layer groups, where each element is a list of layer names
+            that belongs to one group and should share the same KVCacheSpec.
+
+    Returns:
+        A list of KVCacheGroup objects, one for each group of layers.
+    """
+    kv_cache_groups = []
+    for layer_names in grouped_layers:
+        group_spec = kv_cache_spec[layer_names[0]]
+        assert all(
+            kv_cache_spec[layer_name] == group_spec
+            for layer_name in layer_names[1:]), (
+                "All layers in a group must share the same KVCacheSpec.")
+        kv_cache_groups.append(KVCacheGroup(layer_names, group_spec))
+    return kv_cache_groups
+
+
 def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
-                                      kv_cache_spec: KVCacheSpec,
+                                      kv_cache_spec: Dict[str, KVCacheSpec],
                                       available_memory: int) -> KVCacheConfig:
     """
     Generates the KV cache configuration for a model with one type of KV cache.
@@ -383,7 +411,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
 
     Args:
         vllm_config: The global VllmConfig
-        kv_cache_spec: The kv cache spec of the model
+        kv_cache_spec: The KVCacheSpec of each attention layer in the model
         available_memory: Memory available for KV cache in bytes.
 
     Returns:
@@ -408,19 +436,21 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     logger.info("# GPU blocks: %d", num_blocks)
 
     per_layer_size = page_size * num_blocks
+    layers_of_group = [[layer_name for layer_name in kv_cache_spec]]
 
-    kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,
-        tensors={
-            layer_name: KVCacheTensor(size=per_layer_size)
-            for layer_name in kv_cache_spec
-        },
-        groups=[[layer_name for layer_name in kv_cache_spec]],
-        kv_cache_spec=kv_cache_spec)
+    kv_cache_config = KVCacheConfig(num_blocks=num_blocks,
+                                    tensors={
+                                        layer_name:
+                                        KVCacheTensor(size=per_layer_size)
+                                        for layer_name in kv_cache_spec
+                                    },
+                                    groups=_create_kv_cache_groups(
+                                        kv_cache_spec, layers_of_group))
     return kv_cache_config
 
 
-def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
+def get_kv_cache_config(vllm_config: VllmConfig,
+                        kv_cache_spec: Dict[str, KVCacheSpec],
                         available_memory: int) -> KVCacheConfig:
     """
     Generates the KV cache configuration for a model
@@ -428,7 +458,7 @@ def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
 
     Args:
         vllm_config: The global VllmConfig
-        kv_cache_spec: The kv cache spec of the model
+        kv_cache_spec: The KVCacheSpec of each attention layer in the model
         available_memory: Memory available for KV cache in bytes.
 
     Returns:

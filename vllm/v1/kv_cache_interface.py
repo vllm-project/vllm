@@ -10,7 +10,7 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class KVCacheSpecBase:
+class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
     """
@@ -54,7 +54,7 @@ class KVCacheSpecBase:
 
 
 @dataclass
-class FullAttentionSpec(KVCacheSpecBase):
+class FullAttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
@@ -72,9 +72,6 @@ class FullAttentionSpec(KVCacheSpecBase):
         return cdiv(num_tokens, self.block_size) * self.page_size_bytes
 
 
-KVCacheSpec = Dict[str, KVCacheSpecBase]
-
-
 @dataclass
 class KVCacheTensor:
     """
@@ -83,6 +80,17 @@ class KVCacheTensor:
     be extended to support multiple layers sharing the same memory pool.
     """
     size: int  # The size of KV cache Tensor in bytes
+
+
+@dataclass
+class KVCacheGroup:
+    """
+    A dataclass for specifying the KV cache group of a model.
+    """
+    # The names of layers in this group
+    layer_names: List[str]
+    # The KV cache spec of this group
+    kv_cache_spec: KVCacheSpec
 
 
 @dataclass
@@ -106,6 +114,4 @@ class KVCacheConfig:
     3. (not implemented yet) A model with 2 full attention layers and 4 sliding 
     window attention layers: three groups, (full * 2), (sw * 2), (sw * 2).
     """
-    groups: List[List[str]]
-    """the KVCacheSpec of the model"""
-    kv_cache_spec: KVCacheSpec
+    groups: List[KVCacheGroup]
