@@ -176,7 +176,7 @@ class AriaFusedMoE(FusedMoE):
                 param.data.copy_(loaded_weight.transpose(1, 2))
 
 
-class MoELayer(nn.Module):
+class AriaTextMoELayer(nn.Module):
     """
     Mixture of Experts (MoE) Layer for the AriaMoE model.
 
@@ -249,7 +249,7 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
         prefix: str = "",
     ) -> None:
         super().__init__(config, cache_config, quant_config, prefix)
-        self.mlp = MoELayer(config, quant_config=quant_config)
+        self.mlp = AriaTextMoELayer(config, quant_config=quant_config)
 
 
 class AriaTextModel(LlamaModel):
