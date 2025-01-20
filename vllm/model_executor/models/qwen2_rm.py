@@ -32,7 +32,7 @@ class ReLU(nn.Module):
         return self.activation(input)
 
 
-class Qwen2ForRewardModel(nn.Module, SupportsLoRA, SupportsPP):
+class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -74,7 +74,7 @@ class Qwen2ForRewardModel(nn.Module, SupportsLoRA, SupportsPP):
                                  config.hidden_size,
                                  quant_config=quant_config),
             ReLU(),
-            RowParallelLinear(config.hidden_size, 1,
+            RowParallelLinear(config.hidden_size, config.num_labels,
                               quant_config=quant_config),
         )
         self._pooler = Pooler.from_config_with_defaults(
@@ -115,3 +115,15 @@ class Qwen2ForRewardModel(nn.Module, SupportsLoRA, SupportsPP):
         loader = AutoWeightsLoader(self,
                                    ignore_unexpected_prefixes=["lm_head."])
         return loader.load_weights(weights)
+
+
+class Qwen2ForRewardModel(Qwen2RewardBaseModel):
+    def __init__(self, *, vllm_config, prefix = ""):
+        vllm_config.model_config.hf_config.num_labels = 1
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+
+class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):
+    def __init__(self, *, vllm_config, prefix = ""):
+        vllm_config.model_config.hf_config.num_labels = 2
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
