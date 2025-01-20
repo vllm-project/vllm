@@ -1241,13 +1241,19 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
+        max_num_batched_tokens = \
+            self.scheduler_config.max_num_batched_tokens
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        self._dummy_run(max_num_batched_tokens, max_num_seqs)
+
+    def _dummy_run(self,
+                   max_num_batched_tokens: int,
+                   max_num_seqs: int = 1) -> None:
         with self.set_in_profile_run():
             # Enable top-k sampling to reflect the accurate memory usage.
             sampling_params = \
                 SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
-            max_num_batched_tokens = \
-                self.scheduler_config.max_num_batched_tokens
-            max_num_seqs = self.scheduler_config.max_num_seqs
+
             # This represents the maximum number of different requests
             # that will have unique loras, an therefore the max amount of memory
             # consumption create dummy lora request copies from the lora request
