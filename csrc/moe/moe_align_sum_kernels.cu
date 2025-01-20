@@ -235,7 +235,7 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
   bool use_global_memory = false, use_i16 = false;
   if (shared_mem_i16 > device_max_shared_mem) {
     use_global_memory = true;
-  } else if (shared_mem_i32 > device_max_shared_mem && topk_ids::numel() <= 65535) {
+  } else if (shared_mem_i32 > device_max_shared_mem && topk_ids.numel() <= 65535) {
     // when nelements of topk_ids is smaller than 65535 (max value of uint16),
     // element value of token_cnts would also smaller than 65535,
     // so we can use uint16 as dtype of token_cnts
