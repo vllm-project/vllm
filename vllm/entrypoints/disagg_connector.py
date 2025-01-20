@@ -47,6 +47,7 @@ async def lifespan(app: FastAPI):
     logger.info("success create_socket_pool sockets_decode")
     yield
     ## close zmq context
+    logger.info("shutdown disagg connector")
     logger.info("term zmqctx")
     app.state.zmqctx.destroy(linger=0)
 
