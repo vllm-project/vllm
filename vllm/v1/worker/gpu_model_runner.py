@@ -69,9 +69,7 @@ class GPUModelRunner:
 
         self.is_multimodal_model = model_config.is_multimodal_model
         self.sliding_window = model_config.get_sliding_window()
-        self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
-        self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -108,16 +106,6 @@ class GPUModelRunner:
 
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
-        # Persistent batch.
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
-            device=self.device,
-            pin_memory=self.pin_memory,
-            vocab_size=model_config.get_vocab_size(),
-            num_kv_cache_groups=1,  # TODO: update after PR #11960
-        )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
@@ -162,13 +150,17 @@ class GPUModelRunner:
                                          device="cpu",
                                          pin_memory=self.pin_memory)
         self.positions_np = self.positions_cpu.numpy()
+
+        self.kv_cache_config: KVCacheConfig = None  # Set by initialize_kv_cache
+
+        # The following 3 variables depends on KVCacheConfig, assign a
+        # placeholder value here and initialize them in `initialize_kv_cache``.
+        self.input_batch: InputBatch = None  # Persistent batch.
         self.slot_mapping_cpu = torch.zeros(
-            1,  # TODO: update after PR #11960
-            self.max_num_tokens,
-            dtype=torch.int32,
-            device="cpu",
-            pin_memory=self.pin_memory)
+            (1, ))  # Real shape: (num_kv_cache_groups, self.max_num_tokens)
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
+        self.max_num_blocks_per_req: int = 0
+
         self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
                                                dtype=torch.int32,
                                                device="cpu",
@@ -331,12 +323,12 @@ class GPUModelRunner:
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
 
         # Calculate the slot mapping.
-        # for i in range(len(self.kv_cache_config.groups)):
-        for i in range(1):  # TODO: update after PR #11960
-            # group_spec = self.kv_cache_config.kv_cache_spec[
-            #     self.kv_cache_config.groups[i][0]]
-            # block_size = group_spec.block_size
-            block_size = self.block_size
+        for i in range(len(self.kv_cache_config.groups)):
+            # the LayerSpec of all layers in the group is the same. Take the
+            # first one.
+            group_spec = self.kv_cache_config.kv_cache_spec[
+                self.kv_cache_config.groups[i][0]]
+            block_size = group_spec.block_size
             # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
             # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
             # where K is the max_num_blocks_per_req and the block size is 2.
@@ -378,18 +370,16 @@ class GPUModelRunner:
             self.device, non_blocking=True)
         # layer_name -> AttentionMetadata
         attn_metadata: Dict[str, FlashAttentionMetadata] = {}
-        # TODO: update after PR #11960
-        # for i, layer_ids in enumerate(self.kv_cache_config.groups):
-        for i in range(1):
-            layer_ids = list(self.vllm_config.compilation_config.
-                             static_forward_context.keys())
+        for i, layer_ids in enumerate(self.kv_cache_config.groups):
+            block_size = self.kv_cache_config.kv_cache_spec[
+                layer_ids[0]].block_size
             slot_mapping = self.slot_mapping_cpu[
                 i, :total_num_scheduled_tokens].to(self.device,
                                                    non_blocking=True).long()
 
             # Prepare for cascade attention if needed.
             common_prefix_len = (scheduler_output.num_common_prefix_blocks[i] *
-                                 self.block_size)
+                                 block_size)
             if common_prefix_len == 0:
                 # Common case.
                 use_cascade = False
@@ -437,8 +427,8 @@ class GPUModelRunner:
                     common_prefix_len,
                     self.input_batch.num_computed_tokens_cpu[:num_reqs].min())
                 # common_prefix_len should be a multiple of the block size.
-                common_prefix_len = (common_prefix_len // self.block_size *
-                                     self.block_size)
+                common_prefix_len = (common_prefix_len // block_size *
+                                     block_size)
                 use_cascade = FlashAttentionBackend.use_cascade_attention(
                     common_prefix_len=common_prefix_len,
                     query_lens=num_scheduled_tokens,
@@ -604,19 +594,8 @@ class GPUModelRunner:
         # Prepare the decoder inputs.
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if (self.use_cuda_graph
-                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
-            # Use piecewise CUDA graphs.
-            # Add padding to the batch size.
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                num_scheduled_tokens)
-        else:
-            # Eager mode.
-            num_input_tokens = num_scheduled_tokens
-
-        # TODO: update after PR #11960
-        attn_metadata[next(iter(
-            attn_metadata.keys()))].num_input_tokens = num_input_tokens
+        num_input_tokens = self.maybe_pad_for_cudagraph(
+            num_scheduled_tokens, attn_metadata)
 
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
@@ -708,6 +687,28 @@ class GPUModelRunner:
             logprobs_cpu=logprobs,
         )
         return model_runner_output
+
+    def maybe_pad_for_cudagraph(
+            self, num_scheduled_tokens: int,
+            attn_metadata: Dict[str, FlashAttentionMetadata]) -> int:
+        if (self.use_cuda_graph
+                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
+            # Use piecewise CUDA graphs.
+            # Add padding to the batch size.
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                num_scheduled_tokens)
+        else:
+            # Eager mode.
+            num_input_tokens = num_scheduled_tokens
+
+        # update num_input_tokens in attn_metadata
+        for layer_names in self.kv_cache_config.groups:
+            layer_name = layer_names[0]
+            # All layers in the group share the same attn_metadata object.
+            # Only need to update the num_input_tokens once.
+            attn_metadata[layer_name].num_input_tokens = num_input_tokens
+
+        return num_input_tokens
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -892,10 +893,7 @@ class GPUModelRunner:
             kv_cache_config: Configuration for the KV cache, including the KV 
             cache size of each layer
         """
-        if len(kv_cache_config.groups) > 1:
-            raise NotImplementedError(
-                "Hybrid models with more than one KV cache type are not "
-                "supported yet.")
+        self.kv_cache_config = kv_cache_config
 
         kv_caches: Dict[str, torch.Tensor] = {}
 
@@ -918,6 +916,40 @@ class GPUModelRunner:
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+
+        self._initialize_kv_related_buffers(kv_cache_config)
+
+    def _initialize_kv_related_buffers(self,
+                                       kv_cache_config: KVCacheConfig) -> None:
+        """
+        Initialize data structures (e.g., InputBatch, slot mappings) that depend 
+        on the kv cache configuration.
+
+        Args:
+            kv_cache_config (KVCacheConfig): Configuration for the KV cache
+        """
+        num_kv_cache_groups = len(kv_cache_config.groups)
+
+        min_block_size = min(
+            spec.block_size for spec in kv_cache_config.kv_cache_spec.values())
+        self.max_num_blocks_per_req = cdiv(self.max_model_len, min_block_size)
+
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.vllm_config.model_config.get_vocab_size(),
+            num_kv_cache_groups=num_kv_cache_groups,
+        )
+
+        self.slot_mapping_cpu = torch.zeros(num_kv_cache_groups,
+                                            self.max_num_tokens,
+                                            dtype=torch.int32,
+                                            device="cpu",
+                                            pin_memory=self.pin_memory)
+        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
