@@ -49,13 +49,17 @@ KV_CACHE_MODELS = [
 def test_kv_cache_model_load_and_run(vllm_runner, model_id: str):
     with vllm_runner(model_id, kv_cache_dtype="fp8") as llm:
 
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
-        attn = model.model.layers[0].self_attn.attn
-        assert isinstance(attn.quant_method, Fp8KVCacheMethod)
-        # NOTE: it is valid for scales to be 1.0 (default value), but we know
-        # these checkpoints have scales < 1.0
-        assert 0.0 < attn._k_scale < 1.0
-        assert 0.0 < attn._v_scale < 1.0
+        def check_model(model):
+            attn = model.model.layers[0].self_attn.attn
+
+            assert isinstance(attn.quant_method, Fp8KVCacheMethod)
+
+            # NOTE: it is valid for scales to be 1.0 (default value), but
+            # we know these checkpoints have scales < 1.0
+            assert 0.0 < attn._k_scale < 1.0
+            assert 0.0 < attn._v_scale < 1.0
+
+        llm.apply_model(check_model)
 
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
@@ -77,22 +81,24 @@ def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
                      quantization="fp8",
                      kv_cache_dtype=kv_cache_dtype) as llm:
 
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
-        fc1 = model.model.decoder.layers[0].fc1
-        assert isinstance(fc1.quant_method, Fp8LinearMethod)
-        if kv_cache_dtype == "fp8":
-            attn = model.model.decoder.layers[0].self_attn.attn
-            assert isinstance(attn.quant_method, Fp8KVCacheMethod)
-            assert attn._k_scale == 1.0
-            assert attn._v_scale == 1.0
+        def check_model(model):
+            fc1 = model.model.decoder.layers[0].fc1
+            assert isinstance(fc1.quant_method, Fp8LinearMethod)
+            if kv_cache_dtype == "fp8":
+                attn = model.model.decoder.layers[0].self_attn.attn
+                assert isinstance(attn.quant_method, Fp8KVCacheMethod)
+                assert attn._k_scale == 1.0
+                assert attn._v_scale == 1.0
 
-        if current_platform.has_device_capability(89) and not force_marlin:
-            # For GPUs with hardware support, we keep weights in fp8
-            assert fc1.weight.dtype == torch.float8_e4m3fn
-        else:
-            # For GPUs without hardware support, we pack the fp8 weights
-            # for weight-only quantization using Marlin kernels
-            assert fc1.weight.dtype == torch.int32
+            if current_platform.has_device_capability(89) and not force_marlin:
+                # For GPUs with hardware support, we keep weights in fp8
+                assert fc1.weight.dtype == torch.float8_e4m3fn
+            else:
+                # For GPUs without hardware support, we pack the fp8 weights
+                # for weight-only quantization using Marlin kernels
+                assert fc1.weight.dtype == torch.int32
+
+        llm.apply_model(check_model)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),

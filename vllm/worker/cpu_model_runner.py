@@ -509,6 +509,9 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
             )
             self.model = self.lora_manager.create_lora_manager(self.model)
 
+    def get_model(self) -> nn.Module:
+        return self.model
+
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
