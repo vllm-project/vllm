@@ -139,4 +139,3 @@ class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):
             softmax=True,
             step_tag_id=151651,
         )
-        
