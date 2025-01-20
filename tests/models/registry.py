@@ -302,6 +302,11 @@ class HfExampleModels:
             if info.default == model_id:
                 return info
 
+        # Fallback to extras
+        for info in self.hf_models.values():
+            if any(extra == model_id for extra in info.extras.values()):
+                return info
+
         raise ValueError(f"No example model defined for {model_id}")
 
 
