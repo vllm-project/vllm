@@ -87,5 +87,6 @@ repos:
     types: [png]
   - id: suggestion
     name: Suggestion
-    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit." 1>&2'
+    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
     language: system
+    verbose: true
