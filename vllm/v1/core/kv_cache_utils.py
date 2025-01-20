@@ -436,7 +436,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     logger.info("# GPU blocks: %d", num_blocks)
 
     per_layer_size = page_size * num_blocks
-    layers_of_group = [[layer_name for layer_name in kv_cache_spec]]
+    grouped_layers = [[layer_name for layer_name in kv_cache_spec]]
 
     kv_cache_config = KVCacheConfig(num_blocks=num_blocks,
                                     tensors={
@@ -445,7 +445,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
                                         for layer_name in kv_cache_spec
                                     },
                                     groups=_create_kv_cache_groups(
-                                        kv_cache_spec, layers_of_group))
+                                        kv_cache_spec, grouped_layers))
     return kv_cache_config
 
 

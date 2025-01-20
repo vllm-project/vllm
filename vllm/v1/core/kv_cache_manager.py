@@ -452,7 +452,7 @@ class KVCacheManager:
                 to cache.
             full_blocks: The list of blocks to update hash metadata.
             prev_block: The previous block in the chain.
-            kv_cache_group_id: The KV cache group ID that the blocks belong to
+            kv_cache_group_id: The KV cache group that the blocks belong to
         """
         num_cached_block_hashes = len(
             request.kv_block_hashes[kv_cache_group_id])
