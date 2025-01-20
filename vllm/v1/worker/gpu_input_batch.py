@@ -364,6 +364,7 @@ class InputBatch:
             # statistics.
             output_token_ids.append(req_id_output_token_ids[req_id])
             if rejection_sampling:
+                assert req_id_to_spec_token_ids is not None
                 spec_token_ids.append(req_id_to_spec_token_ids[req_id])
 
         return SamplingMetadata(

@@ -100,7 +100,7 @@ class Request:
             token_ids = [token_ids]
         self._output_token_ids.extend(token_ids)
         self._all_token_ids.extend(token_ids)
-        
+
     def append_spec_token_ids(
         self,
         token_ids: Union[int, List[int]],
@@ -108,18 +108,18 @@ class Request:
         if isinstance(token_ids, int):
             token_ids = [token_ids]
         self._spec_token_ids.extend(token_ids)
-        
+
     def clear_spec_tokens(self) -> None:
         self._spec_token_ids = []
-        
+
     @property
-    def spec_token_ids(self) -> ConstantList[int]:
-        return ConstantList(self._spec_token_ids)
+    def spec_token_ids(self) -> List[int]:
+        return self._spec_token_ids
 
     @property
     def num_tokens(self) -> int:
         return len(self._all_token_ids)
-    
+
     @property
     def num_tokens_with_spec(self) -> int:
         return len(self._all_token_ids) + len(self._spec_token_ids)

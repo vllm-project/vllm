@@ -3,8 +3,8 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
                     Tuple, Union)
 
-from vllm.config import(CacheConfig, LoRAConfig, ModelConfig,
-                        SchedulerConfig, SpeculativeConfig)
+from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -97,7 +97,8 @@ class Scheduler:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and num_tokens.
-        # num_tokens  = len(prompt_token_ids) + len(output_token_ids) + len(spec_token_ids)
+        # num_tokens  = len(prompt_token_ids) + len(output_token_ids) +
+        # len(spec_token_ids).
         # At each step, the scheduler tries to assign tokens to the requests
         # so that each request's num_computed_tokens can catch up its
         # num_tokens. This is general enough to cover chunked prefills,
@@ -131,7 +132,8 @@ class Scheduler:
             assert not has_partial_request
             assert token_budget > 0
             request = self.running[req_index]
-            num_new_tokens = request.num_tokens_with_spec - request.num_computed_tokens
+            num_new_tokens = request.num_tokens_with_spec  \
+                                - request.num_computed_tokens
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
@@ -187,10 +189,11 @@ class Scheduler:
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
-            
+
             if request.spec_token_ids:
                 spec_decode = True
-            scheduled_spec_decode_tokens[request.request_id] = request.spec_token_ids
+            scheduled_spec_decode_tokens[
+                request.request_id] = request.spec_token_ids
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
@@ -421,7 +424,7 @@ class Scheduler:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        
+
         new_running: List[Request] = []
         outputs: List[EngineCoreOutput] = []
         for request in self.running:
@@ -429,8 +432,9 @@ class Scheduler:
             req_index = model_runner_output.req_id_to_index[req_id]
             token_ids = sampled_token_ids[req_index]
             # FIXME: have a cleaner way to handle this
-            request.num_computed_tokens += num_scheduled_tokens[req_id] - (len(request.spec_token_ids) + 1 - len(token_ids))
-            
+            request.num_computed_tokens += num_scheduled_tokens[req_id] - (
+                len(request.spec_token_ids) + 1 - len(token_ids))
+
             # When the request's num_computed_tokens catches up its num_tokens,
             # the request generates output tokens. Otherwise, we ignore the
             # sampler output for the request.
@@ -477,7 +481,7 @@ class Scheduler:
         )
 
     # TODO: the following logic does not consider
-    # when multiple tokens are generated in a 
+    # when multiple tokens are generated in a
     # single forward pass
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len

@@ -28,10 +28,10 @@ class Sampler(nn.Module):
     ) -> SamplerOutput:
         if sampling_metadata.rejection_sampling:
             return self.rejection_sampler.sample(
-                logits, 
+                logits,
                 sampling_metadata,
             )
-        
+
         needs_logprobs = sampling_metadata.max_num_logprobs > 0
         if needs_logprobs:
             # NOTE(woosuk): Use the original logits (before any penalties or

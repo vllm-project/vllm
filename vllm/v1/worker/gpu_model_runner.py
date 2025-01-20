@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Tuple, cast, Optional
+from typing import TYPE_CHECKING, Dict, List, Tuple, cast
 
 import numpy as np
 import torch
@@ -383,24 +383,32 @@ class GPUModelRunner:
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
-        
+
         # Add spec decode tokens to input_batch.token_ids_cpu.
         # Get spec decode logits indices.
         spec_query_end_loc = 0
-        spec_decode_logits_indices = []
+        spec_decode_logits_indices: List[int] = []
         for i, req_id in enumerate(self.input_batch.req_ids):
             if i == num_reqs:
                 break
-            req_num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            assert req_id is not None
+            req_num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                req_id]
             num_compute_tokens = self.input_batch.num_computed_tokens_cpu[i]
             spec_query_end_loc += req_num_scheduled_tokens
-            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
+            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
+                req_id, [])
             for j, spec_token_id in enumerate(spec_token_ids):
-                # +1 here because the input for verification is [last_output_token_id] + spec_token_ids
-                self.input_batch.token_ids_cpu[i, num_compute_tokens + 1 + j] = spec_token_id
-            # -1 here because the input for verification is [last_output_token_id] + spec_token_ids
-            spec_decode_logits_indices.extend(range(spec_query_end_loc - len(spec_token_ids) - 1, spec_query_end_loc))
-                
+                # +1 here because the input for verification is
+                # [last_output_token_id] + spec_token_ids
+                self.input_batch.token_ids_cpu[i, num_compute_tokens + 1 +
+                                               j] = spec_token_id
+            # -1 here because the input for verification is
+            # [last_output_token_id] + spec_token_ids
+            spec_decode_logits_indices.extend(
+                range(spec_query_end_loc - len(spec_token_ids) - 1,
+                      spec_query_end_loc))
+
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
@@ -555,16 +563,17 @@ class GPUModelRunner:
             cu_prefix_kv_lens=cu_prefix_kv_lens,
             cu_suffix_kv_lens=cu_suffix_kv_lens,
         )
-        
+
         if scheduler_output.use_spec_decode:
-            logits_indices = torch.tensor(spec_decode_logits_indices, device=self.device)
+            logits_indices = torch.tensor(spec_decode_logits_indices,
+                                          device=self.device)
         else:
-            # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
-            # request in the batch. While we should not sample any token from this
-            # partial request, we do so for simplicity. We will ignore the sampled
-            # token from the partial request.
+            # NOTE(woosuk): Due to chunked prefills, there can be at most 1
+            # partial request in the batch. While we should not sample any
+            # token from this partial request, we do so for simplicity.
+            # We will ignore the sampled token from the partial request.
             # TODO: Support prompt logprobs.
-            logits_indices = query_start_loc[1:] - 1    
+            logits_indices = query_start_loc[1:] - 1
         return attn_metadata, logits_indices
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
@@ -639,8 +648,7 @@ class GPUModelRunner:
                 for req_id, req in self.requests.items()}
 
         sampling_metadata = self.input_batch.make_sampling_metadata(
-            req_id_output_token_ids, 
-            skip_copy,
+            req_id_output_token_ids, skip_copy,
             scheduler_output.use_spec_decode,
             scheduler_output.scheduled_spec_decode_tokens)
         return sampling_metadata
@@ -803,16 +811,19 @@ class GPUModelRunner:
                 break
             assert req_id is not None
             req_state = self.requests[req_id]
-            seq_len = req_state.num_computed_tokens + scheduler_output.num_scheduled_tokens[req_id]
-            # assert seq_len <= req_state.num_tokens
+            seq_len = req_state.num_computed_tokens + \
+                scheduler_output.num_scheduled_tokens[req_id]
             if seq_len >= req_state.num_tokens:
-                print(req_state.req_id, "output_token_ids", sampled_token_ids[i], req_state.num_computed_tokens)
+                print(req_state.req_id, "output_token_ids",
+                      sampled_token_ids[i], req_state.num_computed_tokens)
                 # We don't rewind the generator state for requests now
                 # because spec decode only supports greedy decoding for now.
                 token_ids = sampled_token_ids[i]
                 spec_token_ids = spec_tokens.get(req_id, [])
                 for j, token_id in enumerate(token_ids):
-                    self.input_batch.token_ids_cpu[i, seq_len - len(spec_token_ids) + j] = token_id
+                    self.input_batch.token_ids_cpu[i, seq_len -
+                                                   len(spec_token_ids) +
+                                                   j] = token_id
                 self.input_batch.num_tokens[i] += len(token_ids)
                 req_state.output_token_ids.extend(token_ids)
             else:
