@@ -302,9 +302,9 @@ class ModelRunnerWrapperBase:
 
     def __init__(
         self,
-        moderl_runner: ModelRunnerBase,
+        model_runner: ModelRunnerBase,
     ) -> None:
-        self.model_runner: ModelRunnerBase = moderl_runner
+        self.model_runner: ModelRunnerBase = model_runner
 
     def __getattr__(self, attr):
         return getattr(self.model_runner, attr)

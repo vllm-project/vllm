@@ -2,6 +2,7 @@ import weakref
 from typing import List, Optional, Set, Tuple
 
 import torch
+import torch.nn as nn
 
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
@@ -36,7 +37,6 @@ class NGramWorker(NonLLMProposerWorkerBase):
 
     def init_device(self):
         self.device = torch.device(f"{self.device_type}:{self.local_rank}")
-        self.load_model = lambda *args, **kwargs: None
 
         # Current NGramWorker only supports Top1Proposer
         self._proposer = Top1Proposer(
@@ -44,6 +44,12 @@ class NGramWorker(NonLLMProposerWorkerBase):
             device=self.device,
             vocab_size=self.vocab_size,
         )
+
+    def load_model(self) -> None:
+        pass  # Dummy
+
+    def get_model(self) -> nn.Module:
+        return nn.Module()  # Dummy
 
     def sampler_output(
         self,
