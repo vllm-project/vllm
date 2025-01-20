@@ -193,10 +193,12 @@ class OpenAIServingChat(OpenAIServing):
                     self.model_config.get_diff_sampling_param())
 
                 # Limit set by architecture or value in generation_config.json
-                server_max_tokens = min(
-                    self.max_model_len - len(engine_prompt["prompt_token_ids"]),
-                    default_sampling_params.get("max_tokens", float("inf")),
-                )
+                server_max_tokens = self.max_model_len - len(
+                    engine_prompt["prompt_token_ids"])
+                if "max_tokens" in default_sampling_params:
+                    server_max_tokens = min(
+                        server_max_tokens,
+                        default_sampling_params.get("max_tokens"))
 
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
