@@ -85,7 +85,7 @@ class XPUModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         self.graph_memory_pool: Optional[Tuple[
             int, int]] = None  # Set during graph capture.
         self.has_inner_state = model_config.has_inner_state
-        
+
         # When using CUDA graph, the input block tables must be padded to
         # max_seq_len_to_capture. However, creating the block table in
         # Python can be expensive. To optimize this, we cache the block table
@@ -95,7 +95,7 @@ class XPUModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         self.graph_block_tables = np.zeros(
             (self.max_batchsize_to_capture, self.get_max_block_per_batch()),
             dtype=np.int32)
-        
+
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
             self.model_config.dtype,

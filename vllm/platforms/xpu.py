@@ -99,7 +99,11 @@ class XPUPlatform(Platform):
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
+            if envs.VLLM_USE_V1:
+                parallel_config.worker_cls =\
+                    "vllm.v1.worker.xpu_worker.XPUWorker"
+            else:
+                parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
 
         if parallel_config.distributed_executor_backend is None:
             parallel_config.distributed_executor_backend = "ray"

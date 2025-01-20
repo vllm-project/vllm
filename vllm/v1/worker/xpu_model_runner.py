@@ -7,7 +7,6 @@ import torch
 
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import xpu_graph_capture
-from vllm.config import CompilationLevel, VllmConfig
 from vllm.inputs import INPUT_REGISTRY
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
@@ -16,6 +15,7 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.ipex_attn import IPEXAttentionBackend
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -312,18 +312,39 @@ class XPUModelRunner(GPUModelRunner):
         torch.xpu.synchronize()
         gc.collect()
 
-    def initialize_kv_cache(self, num_blocks: int) -> None:
-        assert len(self.kv_caches) == 0
-        kv_cache_shape = IPEXAttentionBackend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size)
-        for _ in range(self.num_attn_layers):
-            self.kv_caches.append(
-                torch.zeros(kv_cache_shape,
-                            dtype=self.kv_cache_dtype,
-                            device=self.device))
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Initialize KV cache based on `kv_cache_config`.
+        Args:
+            kv_cache_config: Configuration for the KV cache, including the KV 
+            cache size of each layer
+        """
+        if len(kv_cache_config.groups) > 1:
+            raise NotImplementedError(
+                "Hybrid models with more than one KV cache type are not "
+                "supported yet.")
+
+        kv_caches: Dict[str, torch.Tensor] = {}
+
+        for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
+            tensor_config = kv_cache_config.tensors[layer_name]
+            assert tensor_config.size % layer_spec.page_size_bytes == 0
+            num_blocks = tensor_config.size // layer_spec.page_size_bytes
+            if isinstance(layer_spec, FullAttentionSpec):
+                kv_cache_shape = IPEXAttentionBackend.get_kv_cache_shape(
+                    num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
+                    layer_spec.head_size)
+                dtype = layer_spec.dtype
+                kv_caches[layer_name] = torch.zeros(kv_cache_shape,
+                                                    dtype=dtype,
+                                                    device=self.device)
+            else:
+                raise NotImplementedError
+
         bind_kv_cache(
+            kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
-            [self.kv_caches])
+            self.kv_caches)
 
     def capture_model(self):
         if not self.use_cuda_graph:
