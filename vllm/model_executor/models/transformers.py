@@ -117,19 +117,7 @@ def replace_tp_linear_class(orig_module: nn.Linear, style: str):
 class TransformersModel(nn.Module, SupportsLoRA):
     embedding_padding_modules = ["lm_head"]
 
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj",
-    ]
-    # BitandBytes specific attributes. No remapping needed
-    bitsandbytes_stacked_params_mapping = {}
-
+    # TODO Add support for bnb and LORA
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         logger.info("Using Transformers backend.")
@@ -165,7 +153,6 @@ class TransformersModel(nn.Module, SupportsLoRA):
             
         # Model modifications
         self.replace_vocab_embed_class(self.model)
-        self.replace_rms_norm_class(self.model)
 
         # ForCausalLM modifications
         self.lm_head = ParallelLMHead(config.vocab_size,
@@ -219,16 +206,6 @@ class TransformersModel(nn.Module, SupportsLoRA):
                 setattr(module, vocab_embed_name, new_module)
                 self.log_replacement(vocab_embed_name, old_module, new_module)
                 break
-
-    def replace_rms_norm_class(self, module: nn.Module, prefix: str = ""):
-        for child_name, child_module in module.named_children():
-            qual_name = prefix + child_name
-            if "RMSNorm" in child_module.__class__.__name__:
-                rms_norm = RMSNorm(
-                    self.config.hidden_size, eps=self.config.rms_norm_eps)
-                setattr(module, child_name, rms_norm)
-                self.log_replacement(qual_name, child_module, rms_norm)
-            self.replace_rms_norm_class(child_module, prefix=f"{qual_name}.")
 
 
     def _autoset_attn_implementation(

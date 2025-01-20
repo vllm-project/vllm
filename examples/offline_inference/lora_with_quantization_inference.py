@@ -14,6 +14,7 @@ from huggingface_hub import snapshot_download
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.lora.request import LoRARequest
 
+MODEL_IMPL = "transformers"
 
 def create_test_prompts(
         lora_path: str
@@ -84,12 +85,14 @@ def initialize_engine(model: str, quantization: str,
                                  qlora_adapter_name_or_path=lora_repo,
                                  load_format="bitsandbytes",
                                  enable_lora=True,
-                                 max_lora_rank=64)
+                                 max_lora_rank=64, 
+                                 model_impl=MODEL_IMPL)
     else:
         engine_args = EngineArgs(model=model,
                                  quantization=quantization,
                                  enable_lora=True,
-                                 max_loras=4)
+                                 max_loras=4,
+                                 model_impl=MODEL_IMPL)
     return LLMEngine.from_engine_args(engine_args)
 
 
