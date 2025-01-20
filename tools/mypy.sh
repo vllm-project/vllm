@@ -1,7 +1,7 @@
 #!/bin/bash
 
 CI=${1:-0}
-PYTHON_VERSION=${2:-3.9}
+PYTHON_VERSION=${2:-local}
 
 if [ "$CI" -eq 1 ]; then
     set -e
