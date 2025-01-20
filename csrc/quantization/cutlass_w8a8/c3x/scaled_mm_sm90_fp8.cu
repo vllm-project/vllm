@@ -1,5 +1,5 @@
-#include "scaled_mm_c3x_kernels.hpp"
-#include "scaled_mm_c3x_sm90_fp8_dispatch.cuh"
+#include "scaled_mm_kernels.hpp"
+#include "scaled_mm_sm90_fp8_dispatch.cuh"
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
 namespace vllm {

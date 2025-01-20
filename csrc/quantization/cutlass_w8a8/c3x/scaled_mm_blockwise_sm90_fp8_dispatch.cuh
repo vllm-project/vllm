@@ -49,7 +49,7 @@ struct cutlass_3x_gemm_fp8_blockwise {
 
   using ElementC = void;
   using StrideC = StrideD;
-  static constexpr int AlignmentC = 4;
+  static constexpr int AlignmentC = AlignmentD;
 
   using ElementAccumulator = float;
   using ElementBlockScale = float;

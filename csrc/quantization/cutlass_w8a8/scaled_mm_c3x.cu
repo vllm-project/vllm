@@ -1,5 +1,5 @@
 #include <cudaTypedefs.h>
-#include "c3x/scaled_mm_c3x_kernels.hpp"
+#include "c3x/scaled_mm_kernels.hpp"
 
 #include "core/math.hpp"
 

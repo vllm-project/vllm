@@ -1,6 +1,6 @@
 #pragma once
 
-#include "scaled_mm_c3x.cuh"
+#include "scaled_mm.cuh"
 #include "cutlass_gemm_caller.cuh"
 
 /**
