@@ -234,7 +234,7 @@ class MoELayer(nn.Module):
         return sparse_expert_output + shared_expert_output
 
 
-class MoEDecoderLayer(LlamaDecoderLayer):
+class AriaTextDecoderLayer(LlamaDecoderLayer):
     """
     Custom Decoder Layer for the AriaMoE model which modifies the standard
     `LlamaDecoderLayer` by replacing the traditional MLP with a Mixture of
@@ -252,7 +252,7 @@ class MoEDecoderLayer(LlamaDecoderLayer):
         self.mlp = MoELayer(config, quant_config=quant_config)
 
 
-class AriaMoELMModel(LlamaModel):
+class AriaTextModel(LlamaModel):
     """
     Custom LlamaModel for the AriaMoE model which modifies the standard
     LlamaModel by replacing the `LlamaDecoderLayer` with `MoEDecoderLayer`.
@@ -261,7 +261,7 @@ class AriaMoELMModel(LlamaModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
-                         layer_type=MoEDecoderLayer)
+                         layer_type=AriaTextDecoderLayer)
 
     # Adapted from LlamaModel.load_weights with the modification of adding
     # the expert weights mapping to `stacked_params_mapping`
@@ -458,7 +458,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         )
         self.multi_modal_projector = AriaProjector(config)
         self.vocab_size = config.text_config.vocab_size
-        self.language_model = AriaMoELMModel(
+        self.language_model = AriaTextModel(
             vllm_config=vllm_config.with_hf_config(config.text_config),
             prefix=maybe_prefix(prefix, "language_model.model"),
         )
