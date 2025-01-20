@@ -277,7 +277,7 @@ class ModelConfig:
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
-        # breakpoint()
+
         hf_config = get_config(self.model, trust_remote_code, revision,
                                code_revision, config_format)
 
