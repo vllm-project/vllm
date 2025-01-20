@@ -2925,7 +2925,8 @@ class CompilationConfig(BaseModel):
 
         if self.additional_compile_sizes is None:
             self.additional_compile_sizes = []
-        self.compile_sizes = self.capture_sizes + self.additional_compile_sizes + only_compile_sizes
+        self.compile_sizes = self.capture_sizes + \
+            self.additional_compile_sizes + only_compile_sizes
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.capture_sizes.sort(reverse=True)
