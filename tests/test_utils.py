@@ -2,14 +2,17 @@ import asyncio
 import os
 import socket
 from typing import AsyncIterator, Tuple
+from unittest.mock import patch
 
 import pytest
 import torch
 from vllm_test_utils import monitor
 
-from vllm.utils import (FlexibleArgumentParser, PlaceholderModule,
-                        StoreBoolean, deprecate_kwargs, get_open_port,
-                        memory_profiling, merge_async_iterators, supports_kw)
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.utils import (FlexibleArgumentParser, MemorySnapshot,
+                        PlaceholderModule, StoreBoolean, bind_kv_cache,
+                        deprecate_kwargs, get_open_port, memory_profiling,
+                        merge_async_iterators, supports_kw)
 
 from .utils import error_on_warning, fork_new_process_for_each_test
 
@@ -281,14 +284,13 @@ def test_memory_profiling():
     # 512 MiB allocation outside of this instance
     handle1 = lib.cudaMalloc(512 * 1024 * 1024)
 
-    baseline_memory_in_bytes = \
-        torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]
+    baseline_snapshot = MemorySnapshot()
 
     # load weights
 
     weights = torch.randn(128, 1024, 1024, device='cuda', dtype=torch.float32)
 
-    weights_memory_in_bytes = 128 * 1024 * 1024 * 4 # 512 MiB
+    weights_memory = 128 * 1024 * 1024 * 4 # 512 MiB
 
     def measure_current_non_torch():
         free, total = torch.cuda.mem_get_info()
@@ -297,8 +299,8 @@ def test_memory_profiling():
         current_non_torch = current_used - current_torch
         return current_non_torch
 
-    with memory_profiling(baseline_memory_in_bytes=baseline_memory_in_bytes,
-    weights_memory_in_bytes=weights_memory_in_bytes) as result, \
+    with memory_profiling(baseline_snapshot=baseline_snapshot,
+    weights_memory=weights_memory) as result, \
         monitor(measure_current_non_torch) as monitored_values:
         # make a memory spike, 1 GiB
         spike = torch.randn(256, 1024, 1024, device='cuda', dtype=torch.float32)
@@ -313,16 +315,97 @@ def test_memory_profiling():
     assert measured_diff == 256 * 1024 * 1024
 
     # Check that the memory usage is within 5% of the expected values
-    # 5% tolerance is caused by PyTorch caching allocator,
-    # we cannot control PyTorch's behavior of its internal buffers,
+    # 5% tolerance is caused by cuda runtime.
+    # we cannot control cuda runtime in the granularity of bytes,
     # which causes a small error (<10 MiB in practice)
-    non_torch_ratio = result.non_torch_increase_in_bytes / (256 * 1024 * 1024) # noqa
-    torch_peak_ratio = result.torch_peak_increase_in_bytes / (1024 * 1024 * 1024) # noqa
+    non_torch_ratio = result.non_torch_increase / (256 * 1024 * 1024) # noqa
     assert abs(non_torch_ratio - 1) <= 0.05
-    assert abs(torch_peak_ratio - 1) <= 0.05
+    assert result.torch_peak_increase == 1024 * 1024 * 1024
     del weights
     lib.cudaFree(handle1)
     lib.cudaFree(handle2)
+
+
+def test_bind_kv_cache():
+    from vllm.attention import Attention
+
+    ctx = {
+        'layers.0.self_attn': Attention(32, 128, 0.1),
+        'layers.1.self_attn': Attention(32, 128, 0.1),
+        'layers.2.self_attn': Attention(32, 128, 0.1),
+        'layers.3.self_attn': Attention(32, 128, 0.1),
+    }
+    kv_cache = [
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+    ]
+    bind_kv_cache(ctx, [kv_cache])
+    assert ctx['layers.0.self_attn'].kv_cache[0] is kv_cache[0]
+    assert ctx['layers.1.self_attn'].kv_cache[0] is kv_cache[1]
+    assert ctx['layers.2.self_attn'].kv_cache[0] is kv_cache[2]
+    assert ctx['layers.3.self_attn'].kv_cache[0] is kv_cache[3]
+
+def test_bind_kv_cache_non_attention():
+    from vllm.attention import Attention
+
+    # example from Jamba PP=2
+    ctx = {
+        'model.layers.20.attn': Attention(32, 128, 0.1),
+        'model.layers.28.attn': Attention(32, 128, 0.1),
+    }
+    kv_cache = [
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+    ]
+    bind_kv_cache(ctx, [kv_cache])
+    assert ctx['model.layers.20.attn'].kv_cache[0] is kv_cache[0]
+    assert ctx['model.layers.28.attn'].kv_cache[0] is kv_cache[1]
+
+
+def test_bind_kv_cache_encoder_decoder():
+    from vllm.attention import Attention, AttentionType
+
+    # example from bart
+    ctx = {
+        'encoder.layers.0.self_attn.attn':
+            Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER),
+        'decoder.layers.0.encoder_attn.attn':
+            Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER_DECODER),
+        'decoder.layers.0.self_attn.attn':
+            Attention(32, 128, 0.1, attn_type=AttentionType.DECODER),
+    }
+
+    kv_cache = [
+        torch.zeros((1, )),
+    ]
+    encoder_kv_cache = ctx['encoder.layers.0.self_attn.attn'].kv_cache
+
+    bind_kv_cache(ctx, [kv_cache])
+    assert ctx['encoder.layers.0.self_attn.attn'].kv_cache is encoder_kv_cache
+    assert ctx['decoder.layers.0.encoder_attn.attn'].kv_cache[0] is kv_cache[0]
+    assert ctx['decoder.layers.0.self_attn.attn'].kv_cache[0] is kv_cache[0]
+
+
+def test_bind_kv_cache_pp():
+    with patch("vllm.utils.cuda_device_count_stateless", lambda: 2):
+        # this test runs with 1 GPU, but we simulate 2 GPUs
+        cfg = VllmConfig(
+            parallel_config=ParallelConfig(pipeline_parallel_size=2))
+    with set_current_vllm_config(cfg):
+        from vllm.attention import Attention
+
+        ctx = {
+            'layers.0.self_attn': Attention(32, 128, 0.1),
+        }
+        kv_cache = [
+            [torch.zeros((1, ))],
+            [torch.zeros((1, ))]
+        ]
+        bind_kv_cache(ctx, kv_cache)
+        assert ctx['layers.0.self_attn'].kv_cache[0] is kv_cache[0][0]
+        assert ctx['layers.0.self_attn'].kv_cache[1] is kv_cache[1][0]
 
 
 def test_placeholder_module_error_handling():

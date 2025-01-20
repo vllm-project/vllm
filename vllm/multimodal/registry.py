@@ -100,8 +100,7 @@ class _MultiModalLimits(UserDict["ModelConfig", Dict[str, int]]):
 
 class MultiModalRegistry:
     """
-    A registry that dispatches data processing to the
-    :class:`~vllm.multimodal.MultiModalPlugin` for each modality.
+    A registry that dispatches data processing according to the model.
     """
 
     DEFAULT_PLUGINS = (ImagePlugin(), AudioPlugin(), VideoPlugin())
@@ -253,14 +252,14 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
     ) -> Mapping[str, int]:
         """
-        Get the maximum number of tokens per data item from each modality
-        for profiling the memory usage of a model.
-
-        Note:
-            This is currently directly used only in V1.
+        Get the maximum number of tokens per data item from each modality based 
+        on underlying model configuration.
         """
         if self.has_processor(model_config):
-            tokenizer = cached_get_tokenizer(model_config.tokenizer)
+            tokenizer = cached_get_tokenizer(
+                model_config.tokenizer,
+                trust_remote_code=model_config.trust_remote_code,
+            )
             processor = self.create_processor(model_config, tokenizer)
             seq_len = model_config.max_model_len
             return processor.info.get_mm_max_tokens_per_item(seq_len)
@@ -268,6 +267,28 @@ class MultiModalRegistry:
         return {
             key: plugin.get_max_multimodal_tokens(model_config)
             for key, plugin in self._plugins.items()
+        }
+
+    def get_max_tokens_per_item_by_nonzero_modality(
+        self,
+        model_config: "ModelConfig",
+    ) -> Mapping[str, int]:
+        """
+        Get the maximum number of tokens per data item from each modality based
+        on underlying model configuration, excluding modalities that user 
+        explicitly disabled via `limit_mm_per_prompt`.
+
+        Note:
+            This is currently directly used only in V1 for profiling the memory 
+            usage of a model.
+        """
+        limits_per_plugin = self._limits_by_model[model_config]
+
+        return {
+            key: max_tokens_per_mm_item
+            for key, max_tokens_per_mm_item in
+            self.get_max_tokens_per_item_by_modality(model_config).items()
+            if limits_per_plugin[key] > 0
         }
 
     def get_max_tokens_by_modality(
@@ -367,8 +388,7 @@ class MultiModalRegistry:
         invoked to transform the data into a dictionary of model inputs.
 
         See also:
-            - :ref:`input-processing-pipeline`
-            - :ref:`enabling-multimodal-inputs`
+            :ref:`mm-processing`
         """
 
         def wrapper(model_cls: N) -> N:
@@ -398,6 +418,9 @@ class MultiModalRegistry:
     def has_processor(self, model_config: "ModelConfig") -> bool:
         """
         Test whether a multi-modal processor is defined for a specific model.
+
+        See also:
+            :ref:`mm-processing`
         """
         return self._get_model_cls(model_config) in self._processor_factories
 
@@ -408,6 +431,9 @@ class MultiModalRegistry:
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
         Create a multi-modal processor for a specific model and tokenizer.
+
+        See also:
+            :ref:`mm-processing`
         """
         model_cls = self._get_model_cls(model_config)
         factories = self._processor_factories[model_cls]

@@ -11,9 +11,6 @@ INPUT_REGISTRY = InputRegistry()
 """
 The global :class:`~InputRegistry` which is used by :class:`~vllm.LLMEngine`
 to dispatch data processing according to the target model.
-
-See also:
-    :ref:`input-processing-pipeline`
 """
 
 __all__ = [

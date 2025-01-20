@@ -51,4 +51,4 @@ docker run --rm -it --device=/dev/neuron0 --device=/dev/neuron1 --network host \
        -e "NEURON_COMPILE_CACHE_URL=${NEURON_COMPILE_CACHE_MOUNT}" \
        --name "${container_name}" \
        ${image_name} \
-       /bin/bash -c "python3 /workspace/vllm/examples/offline_inference/offline_inference_neuron.py"
+       /bin/bash -c "python3 /workspace/vllm/examples/offline_inference/neuron.py"
