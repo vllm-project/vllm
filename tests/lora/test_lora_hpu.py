@@ -41,7 +41,7 @@ def createLoraMask(indices, batch_size, seq_len, max_loras, max_lora_rank,
 @pytest.mark.parametrize("rank", RANKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_apply_lora(m, n, k, rank, dtype) -> None:
-    manager = DummyLoRAManager()
+    manager = DummyLoRAManager(device="hpu")
 
     module_name = "module"
     weight = torch.rand([m, n], device="hpu", dtype=dtype)
@@ -111,7 +111,7 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype) -> None:
     if m // 2 not in TENSOR_SIZES:
         pytest.skip("m//2 must be in TENSOR_SIZES")
 
-    manager = DummyLoRAManager()
+    manager = DummyLoRAManager(device="hpu")
 
     module_name = "module"
     weight = torch.rand([m // 2, n], device="hpu", dtype=dtype)
@@ -183,7 +183,7 @@ def test_apply_lora_packed_2slice(m, n, k, rank, dtype) -> None:
 @pytest.mark.parametrize("rank", RANKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_apply_lora_packed_3slice(qkv, n, k, rank, dtype) -> None:
-    manager = DummyLoRAManager()
+    manager = DummyLoRAManager(device="hpu")
 
     module_name = "module"
     weight_q = torch.empty(qkv[0], n, device="hpu", dtype=dtype)
