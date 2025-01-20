@@ -157,6 +157,13 @@ class Request:
     def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:
         self._kv_block_hashes.append(block_hash)
 
+    def crop(self, num_total_token: int) -> None:
+        if num_total_token < self.num_prompt_tokens:
+            raise ValueError("Cannot crop the prompt tokens.")
+        num_output_token = num_total_token - self.num_prompt_tokens
+        self._output_token_ids = self._output_token_ids[:num_output_token]
+        self._all_token_ids = self._all_token_ids[:num_total_token]
+
 
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
