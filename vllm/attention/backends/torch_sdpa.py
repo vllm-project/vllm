@@ -7,6 +7,7 @@ import torch
 from torch.nn.functional import scaled_dot_product_attention
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionType)
@@ -429,7 +430,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
 
     def forward(
         self,
-        layer: torch.nn.Module,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,

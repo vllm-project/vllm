@@ -11,6 +11,7 @@ import vllm_hpu_extension.ops as ops
 from vllm_hpu_extension.utils import Matmul, Softmax, VLLMKVCache
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.hpu_paged_attn import (HPUPagedAttention,
@@ -152,7 +153,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
     def forward(
         self,
-        layer: torch.nn.Module,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,

@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
@@ -358,7 +359,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
 
     def forward(
         self,
-        layer: torch.nn.Module,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
