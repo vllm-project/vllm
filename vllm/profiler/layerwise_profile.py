@@ -128,7 +128,7 @@ class LayerwiseProfileResults(profile):
         ])
         df.to_csv(filename)
 
-    def convert_stats_to_dict(self) -> str:
+    def convert_stats_to_dict(self) -> dict:
         return {
             "metadata": {
                 "num_running_seqs": self.num_running_seqs
@@ -227,7 +227,7 @@ class LayerwiseProfileResults(profile):
             [self._cumulative_cuda_time(root) for root in self._module_tree])
 
     def _build_stats_trees(self):
-        summary_dict: Dict[str, self.StatsTreeNode] = {}
+        summary_dict: Dict[str, _StatsTreeNode] = {}
         total_cuda_time = self._total_cuda_time()
 
         def pct_cuda_time(cuda_time_us):
