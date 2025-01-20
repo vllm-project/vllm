@@ -194,6 +194,11 @@ class ExecutorBase(ABC):
         self.collective_rpc("stop_profile")
 
     def sleep(self, level: int = 1):
+        if level == 2 and self.cache_config.enable_prefix_caching:
+            # TODO: support level 2 sleep with prefix caching
+            # by resetting the prefix cache state.
+            raise ValueError(
+                "Cannot sleep with level 2 when prefix caching is enabled.")
         self.collective_rpc("sleep", kwargs=dict(level=level))
 
     def wake_up(self):
