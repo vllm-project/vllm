@@ -32,7 +32,7 @@ class LLMPredictor:
 
     def __init__(self):
         # Create an LLM.
-        self.llm = LLM(model="kyutai/helium-1-preview-2b",
+        self.llm = LLM(model="meta-llama/Llama-2-7b-chat-hf",
                        tensor_parallel_size=tensor_parallel_size)
 
     def __call__(self, batch: Dict[str, np.ndarray]) -> Dict[str, list]:
