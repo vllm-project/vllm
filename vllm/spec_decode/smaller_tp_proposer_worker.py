@@ -16,6 +16,10 @@ from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 logger = init_logger(__name__)
 
 
+class _DummyModel(nn.Module):
+    pass
+
+
 class SmallerTpProposerWorker(ProposerWorkerBase):
     """Class which allows a speculative draft model to run with smaller tensor
     parallel degree than target model.
@@ -141,6 +145,9 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
                 execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
     def get_model(self) -> nn.Module:
+        if self._is_dummy:
+            return _DummyModel()
+
         with self._patch_tensor_parallel_group():
             return self._worker.get_model()
 

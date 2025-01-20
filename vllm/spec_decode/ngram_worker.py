@@ -11,6 +11,10 @@ from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
 
 
+class _DummyModel(nn.Module):
+    pass
+
+
 class NGramWorker(NonLLMProposerWorkerBase):
     """NGramWorker provides a light drafter without need for model.
 
@@ -49,7 +53,7 @@ class NGramWorker(NonLLMProposerWorkerBase):
         pass  # Dummy
 
     def get_model(self) -> nn.Module:
-        return nn.Module()  # Dummy
+        return _DummyModel()
 
     def sampler_output(
         self,

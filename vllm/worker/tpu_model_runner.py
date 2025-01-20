@@ -159,7 +159,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                    dynamic=False)
 
     def get_model(self) -> nn.Module:
-        return self.model
+        return self.model.model
 
     def _dummy_run(
         self,
