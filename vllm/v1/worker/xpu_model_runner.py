@@ -10,12 +10,13 @@ from vllm.distributed.parallel_state import xpu_graph_capture
 from vllm.inputs import INPUT_REGISTRY
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
-                        bind_kv_cache, cdiv, is_pin_memory_available)
+                        cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.ipex_attn import IPEXAttentionBackend
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
