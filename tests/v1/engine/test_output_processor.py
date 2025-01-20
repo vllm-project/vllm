@@ -103,8 +103,6 @@ def _validate_logprobs(
         prompt_logprobs = gen_prompt_logprobs[req_id]
         cumulative_logprob = gen_cumulative_logprob[req_id]
         prompt_token_ids = dtv.prompt_tokens[req_idx]
-        ref_logprobs = dtv.generation_logprobs[req_idx]
-        ref_prompt_logprobs = dtv.prompt_logprobs[req_idx]
 
         if num_sample_logprobs:
             # Sample logprobs required by this request
