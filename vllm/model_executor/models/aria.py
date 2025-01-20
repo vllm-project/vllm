@@ -51,64 +51,6 @@ class AriaImagePixelInputs(TypedDict):
     """
 
 
-class AriaVisionModel(nn.Module):
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        *,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-
-        self.vision_model = Idefics3VisionTransformer(
-            config,
-            quant_config,
-            prefix=f"{prefix}.vision_model",
-        )
-
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        pixel_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        patch_attention_mask = self._create_patch_attention_mask(pixel_mask)
-
-        vit_oup = self.vision_model(
-            pixel_values=pixel_values,
-            patch_attention_mask=patch_attention_mask,
-        )
-
-        image_atts = self._create_image_attention_mask(patch_attention_mask)
-
-        return vit_oup, image_atts
-
-    def _create_patch_attention_mask(
-            self, pixel_mask: Optional[torch.Tensor]) -> torch.Tensor:
-        if pixel_mask is None:
-            return None
-
-        patches_subgrid = pixel_mask.unfold(
-            dimension=1,
-            size=self.vision_model.config.patch_size,
-            step=self.vision_model.config.patch_size,
-        ).unfold(
-            dimension=2,
-            size=self.vision_model.config.patch_size,
-            step=self.vision_model.config.patch_size,
-        )
-        return (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
-
-    def _create_image_attention_mask(
-            self, patch_attention_mask: torch.Tensor) -> torch.Tensor:
-        if patch_attention_mask is None:
-            return None
-
-        flattened_mask = patch_attention_mask.flatten(1)
-        return torch.logical_not(flattened_mask)
-
-
 class AriaProjectorMLP(nn.Module):
 
     def __init__(self, embed_dim: int, ff_dim: int, output_dim: int) -> None:
@@ -497,7 +439,11 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        self.vision_tower = AriaVisionModel(config.vision_config)
+        self.vision_tower = Idefics3VisionTransformer(
+            config.vision_config,
+            quant_config,
+            prefix=f"{prefix}.vision_tower",
+        )
         self.multi_modal_projector = AriaProjector(config)
         self.vocab_size = config.text_config.vocab_size
         self.language_model = AriaMoELMModel(
@@ -551,6 +497,22 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             pixel_mask=pixel_mask,
         )
 
+    def _create_patch_attention_mask(
+            self, pixel_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        if pixel_mask is None:
+            return None
+
+        patches_subgrid = pixel_mask.unfold(
+            dimension=1,
+            size=self.vision_model.config.patch_size,
+            step=self.vision_model.config.patch_size,
+        ).unfold(
+            dimension=2,
+            size=self.vision_model.config.patch_size,
+            step=self.vision_model.config.patch_size,
+        )
+        return (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
+
     def _process_image_input(
         self, image_input: AriaImagePixelInputs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -559,9 +521,18 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         pixel_values = image_input['pixel_values']
         pixel_mask = image_input['pixel_mask']
 
-        image_feature, image_attn_mask = self.vision_tower(
-            pixel_values, pixel_mask=pixel_mask)
-        return self.multi_modal_projector(image_feature, image_attn_mask)
+        patch_attention_mask = self._create_patch_attention_mask(pixel_mask)
+
+        image_outputs = self.vision_tower(
+            pixel_values=pixel_values,
+            patch_attention_mask=patch_attention_mask,
+        )
+        image_attn_mask = None
+        if patch_attention_mask is not None:
+            flattened_mask = patch_attention_mask.flatten(1)
+            image_attn_mask = torch.logical_not(flattened_mask)
+
+        return self.multi_modal_projector(image_outputs, image_attn_mask)
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
