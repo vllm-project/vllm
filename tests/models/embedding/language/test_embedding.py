@@ -17,14 +17,15 @@ from ..utils import check_embeddings_close
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
         pytest.param("intfloat/multilingual-e5-large"),
-        # [Encoder-decoder]
-        pytest.param("intfloat/e5-mistral-7b-instruct",
-                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        # [Decoder-only]
         pytest.param("BAAI/bge-multilingual-gemma2",
                      marks=[pytest.mark.core_model]),
-        pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
+        pytest.param("intfloat/e5-mistral-7b-instruct",
+                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
         pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
         pytest.param("Alibaba-NLP/gte-Qwen2-7B-instruct"),
+        pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
+        # [Encoder-decoder]
         pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
 )
