@@ -34,6 +34,10 @@ repos:
   hooks:
   - id: pymarkdown
     files: docs/.*
+- repo: https://github.com/rhysd/actionlint
+  rev: v1.7.6
+  hooks:
+  - id: actionlint
 - repo: local
   hooks:
   - id: mypy-local
@@ -81,7 +85,8 @@ repos:
     entry: tools/png-lint.sh
     language: script
     types: [png]
-- repo: https://github.com/rhysd/actionlint
-  rev: v1.7.6
-  hooks:
-  - id: actionlint
+  - id: suggestion
+    name: Suggestion
+    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
+    language: system
+    verbose: true
