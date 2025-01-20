@@ -27,8 +27,7 @@
 inline int get_cuda_max_shared_memory_per_block_opt_in(int const device) {
   int max_shared_mem_per_block_opt_in = 0;
   cudaDeviceGetAttribute(&max_shared_mem_per_block_opt_in,
-                        cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                        device);
+                         cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
   return max_shared_mem_per_block_opt_in;
 }
 
