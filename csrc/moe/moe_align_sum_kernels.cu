@@ -70,7 +70,7 @@ __global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
                           block_size) *
                       block_size;
     }
-    *total_tokens_post_pad = (int32_t)cumsum[num_experts];
+    *total_tokens_post_pad = static_cast<int32_t>(cumsum[num_experts]);
   }
 
   __syncthreads();
