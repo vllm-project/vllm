@@ -503,12 +503,12 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         patches_subgrid = pixel_mask.unfold(
             dimension=1,
-            size=self.vision_model.config.patch_size,
-            step=self.vision_model.config.patch_size,
+            size=self.vision_tower.config.patch_size,
+            step=self.vision_tower.config.patch_size,
         ).unfold(
             dimension=2,
-            size=self.vision_model.config.patch_size,
-            step=self.vision_model.config.patch_size,
+            size=self.vision_tower.config.patch_size,
+            step=self.vision_tower.config.patch_size,
         )
         return (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
 
