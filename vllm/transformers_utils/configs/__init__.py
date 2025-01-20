@@ -1,4 +1,3 @@
-from vllm.transformers_utils.configs.aria import AriaConfig
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
 from vllm.transformers_utils.configs.cohere2 import Cohere2Config
 from vllm.transformers_utils.configs.dbrx import DbrxConfig

@@ -4,6 +4,7 @@ from typing import (Callable, Iterable, List, Mapping, Optional, Set, Tuple,
 import torch
 import torch.nn as nn
 from transformers import BatchFeature, PretrainedConfig
+from transformers.models.aria import AriaTextConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
@@ -26,8 +27,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.aria import (AriaMoELMConfig,
-                                                  AriaVisionConfig)
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import SupportsMultiModal
@@ -39,87 +38,12 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
 
 class AriaImagePixelInputs(TypedDict):
     pixel_values: torch.Tensor
-    pixel_mask: Optional[torch.Tensor]
+    patch_attention_mask: Optional[torch.Tensor]
     """
     Shape: 
         pixel_values: `(batch_size * num_images, num_channels, height, width)`
         pixel_mask: `(batch_size * num_images, height, width)`
     """
-
-
-class AriaVisionTransformer(Idefics2VisionTransformer):
-    """
-    AriaVisionTransformer is a modified version of Idefics2VisionTransformer
-    that replaces the post-layernorm with an identity layer.
-    """
-
-    def __init__(
-        self,
-        config: AriaVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config, quant_config, prefix)
-        self.post_layernorm = nn.Identity()
-
-
-class AriaVisionModel(nn.Module):
-    config_class = AriaVisionConfig
-
-    def __init__(
-        self,
-        config: AriaVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        *,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-
-        self.vision_model = AriaVisionTransformer(
-            config,
-            quant_config,
-            prefix=f"{prefix}.vision_model",
-        )
-
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        pixel_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        patch_attention_mask = self._create_patch_attention_mask(pixel_mask)
-
-        vit_oup = self.vision_model(
-            pixel_values=pixel_values,
-            patch_attention_mask=patch_attention_mask,
-        )
-
-        image_atts = self._create_image_attention_mask(patch_attention_mask)
-
-        return vit_oup, image_atts
-
-    def _create_patch_attention_mask(
-            self, pixel_mask: Optional[torch.Tensor]) -> torch.Tensor:
-        if pixel_mask is None:
-            return None
-
-        patches_subgrid = pixel_mask.unfold(
-            dimension=1,
-            size=self.vision_model.config.patch_size,
-            step=self.vision_model.config.patch_size,
-        ).unfold(
-            dimension=2,
-            size=self.vision_model.config.patch_size,
-            step=self.vision_model.config.patch_size,
-        )
-        return (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
-
-    def _create_image_attention_mask(
-            self, patch_attention_mask: torch.Tensor) -> torch.Tensor:
-        if patch_attention_mask is None:
-            return None
-
-        flattened_mask = patch_attention_mask.flatten(1)
-        return torch.logical_not(flattened_mask)
 
 
 class FFN(nn.Module):
@@ -150,7 +74,7 @@ class CrossAttention(nn.Module):
         self.linear = nn.Linear(embed_dim, embed_dim)
 
         self.layer_norm = nn.LayerNorm(embed_dim)
-        self.ln_kv = nn.LayerNorm(kv_dim)
+        self.layer_norm_kv = nn.LayerNorm(kv_dim)
 
     def forward(
         self,
@@ -161,7 +85,7 @@ class CrossAttention(nn.Module):
         normed_hidden_states = self.layer_norm(hidden_states)
         query = self.q_proj(normed_hidden_states).permute(1, 0, 2)
 
-        x = self.ln_kv(x)
+        x = self.layer_norm_kv(x)
         key = self.k_proj(x).permute(1, 0, 2)
         value = self.v_proj(x).permute(1, 0, 2)
 
@@ -218,8 +142,8 @@ class AriaProjector(nn.Module):
 
         self.cross_attn = CrossAttention(kv_dim, embed_dim, num_heads)
 
-        self.ln_ffn = norm_layer(embed_dim)
-        self.ffn = FFN(embed_dim, ff_dim, output_dim)
+        self.layer_norm = norm_layer(embed_dim)
+        self.feed_forward = FFN(embed_dim, ff_dim, output_dim)
 
     def forward(
         self,
@@ -241,7 +165,7 @@ class AriaProjector(nn.Module):
 
         attention_out = self.cross_attn(x, queries, attn_mask=attn_mask)
 
-        out = self.ffn(self.ln_ffn(attention_out))
+        out = self.feed_forward(self.layer_norm(attention_out))
 
         return out
 
@@ -289,7 +213,7 @@ class MoELayer(nn.Module):
 
     def __init__(
         self,
-        config: AriaMoELMConfig,
+        config: AriaTextConfig,
         quant_config: Optional[QuantizationConfig],
     ) -> None:
         super().__init__()
@@ -303,13 +227,13 @@ class MoELayer(nn.Module):
             num_experts=config.moe_num_experts,
             top_k=config.moe_topk,
             hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
+            intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             reduce_results=True,
         )
         self.shared_experts = LlamaMLP(
             config.hidden_size,
-            config.moe_intermediate_size * config.moe_num_shared_experts,
+            config.intermediate_size * config.moe_num_shared_experts,
             "silu",
             quant_config=quant_config,
         )
@@ -344,7 +268,7 @@ class MoEDecoderLayer(LlamaDecoderLayer):
 
     def __init__(
         self,
-        config: AriaMoELMConfig,
+        config: AriaTextConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -450,7 +374,7 @@ class AriaProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
-    def get_vision_config(self) -> AriaVisionConfig:
+    def get_vision_config(self):
         return self.get_hf_config().vision_config
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -483,8 +407,8 @@ class AriaDummyInputsBuilder(BaseDummyInputsBuilder[AriaProcessingInfo]):
                                    num_images=num_images)
         }
 
-        hf_processor = self.info.get_hf_processor()
-        image_token: str = hf_processor.image_token  # type: ignore
+        # hf_processor = self.info.get_hf_processor()
+        image_token: str = '<|img|>'
 
         return ProcessorInputs(
             prompt_text=image_token * num_images,
@@ -554,7 +478,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        self.vision_tower = AriaVisionModel(config.vision_config)
+        self.vision_tower = Idefics2VisionTransformer(config.vision_config)
         self.multi_modal_projector = build_mm_projector(config)
         self.vocab_size = config.text_config.vocab_size
         self.language_model = AriaMoELMModel(
@@ -581,6 +505,30 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             raise ValueError("All images must be the same size")
         return images
 
+    def _create_patch_attention_mask(
+            self, pixel_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        if pixel_mask is None:
+            return None
+
+        patches_subgrid = pixel_mask.unfold(
+            dimension=1,
+            size=self.config.vision_config.patch_size,
+            step=self.config.vision_config.patch_size,
+        ).unfold(
+            dimension=2,
+            size=self.config.vision_config.patch_size,
+            step=self.config.vision_config.patch_size,
+        )
+        return (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
+
+    def _create_image_attention_mask(
+            self, patch_attention_mask: torch.Tensor) -> torch.Tensor:
+        if patch_attention_mask is None:
+            return None
+
+        flattened_mask = patch_attention_mask.flatten(1)
+        return torch.logical_not(flattened_mask)
+
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[AriaImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -596,6 +544,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         pixel_values = self._validate_image_sizes(pixel_values)
         pixel_values = flatten_bn(pixel_values, concat=True)
 
+        patch_attention_mask = None
         if pixel_mask is not None:
             if not isinstance(pixel_mask, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel mask. "
@@ -603,9 +552,12 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
             pixel_mask = flatten_bn(pixel_mask, concat=True)
 
+            patch_attention_mask = self._create_patch_attention_mask(
+                pixel_mask)
+
         return AriaImagePixelInputs(
             pixel_values=pixel_values,
-            pixel_mask=pixel_mask,
+            patch_attention_mask=patch_attention_mask,
         )
 
     def _process_image_input(
@@ -614,10 +566,12 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         assert self.vision_tower is not None
 
         pixel_values = image_input['pixel_values']
-        pixel_mask = image_input['pixel_mask']
+        patch_attention_mask = image_input['patch_attention_mask']
 
-        image_feature, image_attn_mask = self.vision_tower(
-            pixel_values, pixel_mask=pixel_mask)
+        image_feature = self.vision_tower(
+            pixel_values, patch_attention_mask=patch_attention_mask)
+        image_attn_mask = self._create_image_attention_mask(
+            patch_attention_mask)
         return self.multi_modal_projector(image_feature, image_attn_mask)
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
