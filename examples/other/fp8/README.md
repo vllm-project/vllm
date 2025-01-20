@@ -1,3 +1,6 @@
+> [!NOTE] 
+>The examples in this folder are **NOT** Intel Gaudi specific and come from the original vllm-project repository from where this fork was created. For FP8 examples on Intel Gaudi please refer to <a href=https://github.com/HabanaAI/vllm-fork/blob/habana_main/README_GAUDI.md#quantization-fp8-inference-and-model-calibration-process><b>Intel® Gaudi® README</b></a>.
+
 # FP8 KV Cache 
 
 This utility extracts the KV cache scaling factors from a quantized HF (Hugging Face) model. The extracted scaling factors are saved to a JSON file, which can later be used by vLLM (variable-length language model) during runtime. This tool is particularly useful when the KV cache data type is FP8 and is intended for use on ROCm (AMD GPU) platforms.
