@@ -232,7 +232,8 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
       ((num_thread + 1) * num_experts) * sizeof(uint16_t) +
       (num_experts + 1) * sizeof(int32_t);
 
-  bool use_global_memory = false, use_i16 = false;
+  bool use_global_memory = false;
+  bool use_i16 = false; // Use uint16_t for shared memory token counts
   if (shared_mem_i16 > device_max_shared_mem) {
     use_global_memory = true;
   } else if (shared_mem_i32 > device_max_shared_mem &&
