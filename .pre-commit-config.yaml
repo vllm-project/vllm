@@ -42,7 +42,7 @@ repos:
   hooks:
   - id: mypy-local
     name: Run mypy for local Python installation
-    entry: tools/mypy.sh
+    entry: tools/mypy.sh 0 "local"
     language: python
     types: [python]
     additional_dependencies: &mypy_deps [mypy==1.11.1, types-setuptools, types-PyYAML, types-requests]
