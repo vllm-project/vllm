@@ -30,5 +30,6 @@ def test_basic_specdecode(monkeypatch):
         spec_outputs = spec_llm.generate(prompts, sampling_params)
         for ref_output, spec_output in zip(ref_outputs, spec_outputs):
             assert ref_output.outputs[0].text == spec_output.outputs[0].text, \
-                f"ref_output: {ref_output.outputs[0].text}, spec_output: {spec_output.outputs[0].text}"
+                (f"ref_output: {ref_output.outputs[0].text},"
+                 f"spec_output: {spec_output.outputs[0].text}")
         del spec_llm
