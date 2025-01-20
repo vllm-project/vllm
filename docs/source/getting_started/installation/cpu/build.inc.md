@@ -6,16 +6,10 @@ sudo apt-get install -y gcc-12 g++-12 libnuma-dev
 sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 ```
 
-Second, install Python packages for vLLM CPU backend building:
+Build and install vLLM CPU backend:
 
 ```console
-pip install --upgrade pip
-pip install "cmake>=3.26" wheel packaging ninja "setuptools-scm>=8" numpy
-pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
-```
-
-Finally, build and install vLLM CPU backend:
-
-```console
-VLLM_TARGET_DEVICE=cpu python setup.py install
+env PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu \
+    VLLM_TARGET_DEVICE=cpu \
+    pip install .
 ```
