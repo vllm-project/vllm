@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import AbstractSet, Literal, Mapping, Optional
+from typing import AbstractSet, Any, Literal, Mapping, Optional
 
 import pytest
 from packaging.version import Version
@@ -41,6 +41,9 @@ class _HfExamplesInfo:
 
     trust_remote_code: bool = False
     """The ``trust_remote_code`` level required to load the model."""
+
+    hf_overrides: dict[str, Any] = field(default_factory=dict)
+    """The ``hf_overrides`` required to load the model."""
 
     def check_transformers_version(
         self,
@@ -93,8 +96,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "ArcticForCausalLM": _HfExamplesInfo("Snowflake/snowflake-arctic-instruct",
                                          trust_remote_code=True),
-    "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria",
-                                                    min_transformers_version="4.48"),
     "BaiChuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan-7B",
                                          trust_remote_code=True),
     "BaichuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan2-7B-chat",
@@ -220,6 +221,8 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
 
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
+    "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria",
+                                                    min_transformers_version="4.48"),
     "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b"),  # noqa: E501
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),  # noqa: E501
     "ChatGLMModel": _HfExamplesInfo("THUDM/glm-4v-9b",
@@ -227,7 +230,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                     trust_remote_code=True),
     "ChatGLMForConditionalGeneration": _HfExamplesInfo("chatglm2-6b",
                                                        is_available_online=False),
-    "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny"),   # noqa: E501
+    "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
+                                               hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]}),  # noqa: E501
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m"),
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
@@ -238,7 +242,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-v1.6-mistral-7b-hf"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": _HfExamplesInfo("llava-hf/LLaVA-NeXT-Video-7B-hf"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),  # noqa: E501
-    "MantisForConditionalGeneration": _HfExamplesInfo("TIGER-Lab/Mantis-8B-siglip-llama3"),  # noqa: E501
+    "MantisForConditionalGeneration": _HfExamplesInfo("TIGER-Lab/Mantis-8B-siglip-llama3",  # noqa: E501
+                                                      hf_overrides={"architectures": ["MantisForConditionalGeneration"]}),  # noqa: E501
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
                                 trust_remote_code=True),
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
@@ -290,6 +295,13 @@ class HfExampleModels:
 
     def get_hf_info(self, model_arch: str) -> _HfExamplesInfo:
         return self.hf_models[model_arch]
+
+    def find_hf_info(self, model_id: str) -> _HfExamplesInfo:
+        for info in self.hf_models.values():
+            if info.default == model_id:
+                return info
+
+        raise ValueError(f"No example model defined for {model_id}")
 
 
 HF_EXAMPLE_MODELS = HfExampleModels(_EXAMPLE_MODELS)
