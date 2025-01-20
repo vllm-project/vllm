@@ -773,6 +773,7 @@ class _attention(torch.autograd.Function):
         else:
             bias_strides = (0, 0, 0, 0)
 
+        print(f"ROCM FP FLASH ATTENTION!")
         attn_fwd[grid](
             q,
             k,
