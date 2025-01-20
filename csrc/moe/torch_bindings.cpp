@@ -19,7 +19,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "moe_align_block_size(Tensor topk_ids, int num_experts,"
       "                     int block_size, Tensor! sorted_token_ids,"
       "                     Tensor! experts_ids,"
-      "                     Tensor! num_tokens_post_pad) -> ()");
+      "                     Tensor! num_tokens_post_pad,"
+      "                     bool use_shared_memory) -> ()");
   m.impl("moe_align_block_size", torch::kCUDA, &moe_align_block_size);
 
 #ifndef USE_ROCM
