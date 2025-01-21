@@ -888,8 +888,8 @@ class FlashInferImpl(AttentionImpl):
                     kv_cache,
                     logits_soft_cap=logits_soft_cap,
                     causal=True,
-                    k_scale=layer._k_scale,
-                    v_scale=layer._v_scale,
+                    k_scale=layer._k_scale_float,
+                    v_scale=layer._v_scale_float,
                     window_left=window_left)
         if decode_meta := attn_metadata.decode_metadata:
             assert decode_meta is not None
@@ -899,8 +899,8 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache,
                 sm_scale=softmax_scale,
                 logits_soft_cap=logits_soft_cap,
-                k_scale=layer._k_scale,
-                v_scale=layer._v_scale,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
                 window_left=window_left)
 
         if prefill_output is None and decode_output is not None:
