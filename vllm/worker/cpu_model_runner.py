@@ -140,7 +140,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             self.input_mrope_positions: List[List[int]] = [[]
                                                            for _ in range(3)]
 
-    def __init__(self, runner: "CPUModelRunner") -> None:
+    def __init__(self,
+                 runner: "CPUModelRunner",
+                 finished_requests_ids: Optional[List[str]] = None) -> None:
         super().__init__()
         self.runner = runner
         self.chunked_prefill = (runner.scheduler_config.chunked_prefill_enabled
@@ -154,6 +156,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.enable_lora = self.runner.lora_config is not None
         self.att_metadata_builder = self.runner.attn_backend.get_builder_cls()(
             self)
+
+        self.prepare(finished_requests_ids)
 
     def prepare(self,
                 finished_requests_ids: Optional[List[str]] = None) -> None:
