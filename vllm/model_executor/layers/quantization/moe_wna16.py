@@ -273,16 +273,39 @@ class MoeWNA16Method(FusedMoEMethodBase):
     def get_weight_loader(layer, weight_loader):
 
         def convert_awq_tensor(tensor, tensor_type):
+            # convert awq qweight/qzeros to a standard format (assume int4)
+            # qweight: (k, n // pack_factor_bit32) -> (n, k // pack_factor_bit8)
+            # qzeros: (k // group_size, n // pack_factor_bit32) ->
+            #         (n // pack_factor_bit8, k // group_size)
+            # pack_factor_bit32 = 32 // weight_bits
+            # pack_factor_bit8 = 8 // weight_bits
+
+            # 0. suppose origin shape (a, b), dtype int32
+            # 1. convert to uint8, shape (a, b) -> (a, 4 * b)
             size0 = tensor.size(0)
             tensor = tensor.view(torch.uint8)
+
+            # 2. unpack to uint4 (only when weight_bits == 4)
+            #    shape (a, 4 * b) -> (a, 4 * b, 2)
             shifter = torch.tensor([0, 4],
                                    dtype=torch.uint8,
                                    device=tensor.device)
             tensor = (tensor[:, :, None] >> shifter) & 0xF
-            tensor = tensor.view(-1,
-                                 8)[:,
-                                    [0, 4, 1, 5, 2, 6, 3, 7]].view(size0, -1)
+
+            # 3. change order, see
+            # https://github.com/casper-hansen/AutoAWQ/blob/v0.2.8/awq/utils/quant_utils.py
+            # shape -> (a, 4 * b * pack_factor_bit8)
+            reverse_awq_pack_order = [0, 4, 1, 5, 2, 6, 3, 7]
+            tensor = tensor.view(-1, 8)[:, reverse_awq_pack_order]
+            tensor = tensor.view(size0, -1)
+
+            # 4. transpose, shape -> (4 * b * pack_factor_bit8, a)
             tensor = tensor.T.contiguous()
+
+            # 5. repack (only when weight_bits == 4)
+            # qweight shape -> (4 * b * pack_factor_bit8, a // pack_factor_bit8)
+            # qzeros shape -> (4 * b, a)
+
             if tensor_type == "qweight":
                 tensor = tensor[:, 1::2] * 16 + tensor[:, ::2]
             elif tensor_type == "qzeros":
@@ -329,6 +352,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
                     loaded_weight = loaded_weight.T.contiguous().view(
                         torch.uint8)
                 elif "zeros" in weight_name:
+                    # add 1 to gptq qzeros to align with awq
                     loaded_weight = loaded_weight.view(torch.uint8)
                     if layer.quant_config.weight_bits == 4:
                         loaded_weight = convert_gptq_int4_qzeros(
