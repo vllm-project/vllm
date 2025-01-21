@@ -18,8 +18,8 @@ from vllm.utils import LRUCache, flatten_2d_lists, full_groupby
 
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                     MultiModalInputsV2, MultiModalKwargs,
-                     MultiModalKwargsItem, PlaceholderRange)
+                     MultiModalInputs, MultiModalKwargs, MultiModalKwargsItem,
+                     PlaceholderRange)
 from .parse import MultiModalDataItems, MultiModalDataParser
 
 if TYPE_CHECKING:
@@ -609,7 +609,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt: str,
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> MultiModalInputsV2:
+    ) -> MultiModalInputs:
         return self.apply(prompt, mm_data, hf_processor_mm_kwargs)
 
     def _get_data_parser(self) -> MultiModalDataParser:
@@ -1067,7 +1067,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> MultiModalInputsV2:
+    ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
 
@@ -1169,7 +1169,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return MultiModalInputsV2(
+        return MultiModalInputs(
             type="multimodal",
             prompt=prompt,
             prompt_token_ids=prompt_ids,
