@@ -12,10 +12,10 @@ from transformers import AutoConfig
 
 from vllm.model_executor.layers.fused_moe.fused_moe import *
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser, is_navi
+from vllm.utils import FlexibleArgumentParser
 
 FP8_DTYPE = torch.float8_e4m3fnuz if current_platform.is_rocm(
-) and not is_navi() else torch.float8_e4m3fn
+) else torch.float8_e4m3fn
 
 
 class BenchmarkConfig(TypedDict):
