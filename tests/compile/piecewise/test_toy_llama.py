@@ -265,7 +265,7 @@ def run_model(llama_config,
         compilation_config = CompilationConfig(
             level=CompilationLevel.PIECEWISE,
             use_cudagraph=True,
-            cudagraph_capture_sizes=[1, 2],
+            capture_sizes=[1, 2],
         )
         if split_attn:
             compilation_config.splitting_ops = ["silly.attention"]
@@ -389,12 +389,12 @@ def benchmark():
                 level=CompilationLevel.PIECEWISE,
                 use_cudagraph=True,
                 splitting_ops=["silly.attention"],
-                cudagraph_capture_sizes=cudagraph_sizes,
+                capture_sizes=cudagraph_sizes,
             )
         else:
             compilation_config = CompilationConfig(
                 level=CompilationLevel.PIECEWISE,
-                cudagraph_capture_sizes=cudagraph_sizes,
+                capture_sizes=cudagraph_sizes,
             )
 
         vllm_config = VllmConfig(compilation_config=compilation_config)

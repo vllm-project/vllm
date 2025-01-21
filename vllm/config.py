@@ -2687,7 +2687,7 @@ class CompilationConfig(BaseModel):
             outside of compilation.
             TODO: move outside cudagraph logic into compilation.
             torch.compile will handle cudagraph capture logic in the future.
-        - cudagraph_capture_sizes: sizes to capture cudagraph.
+        - capture_sizes: sizes to capture cudagraph.
             - None (default): capture sizes are inferred from vllm config.
             - List[int]: capture sizes are specified as given.
         - cudagraph_num_of_warmups: number of warmup runs for cudagraph.
@@ -2742,7 +2742,7 @@ class CompilationConfig(BaseModel):
 
     use_cudagraph: bool = False
     cudagraph_num_of_warmups: int = 0
-    cudagraph_capture_sizes: Optional[List[int]] = None
+    capture_sizes: Optional[List[int]] = None
     cudagraph_copy_inputs: bool = False
 
     class PassConfig(BaseModel):
@@ -2785,7 +2785,6 @@ class CompilationConfig(BaseModel):
 
     # not configurable, computed after init
     compile_sizes: List[int] = PrivateAttr
-    capture_sizes: List[int] = PrivateAttr
     max_capture_size: int = PrivateAttr
     # optimization:
     # Intuitively, bs_to_padded_graph_size should be Dict[int, int].
@@ -2916,13 +2915,12 @@ class CompilationConfig(BaseModel):
         """To complete the initialization of config,
         we need to know the cudagraph sizes."""
 
-        if self.cudagraph_capture_sizes is None:
+        if self.capture_sizes is None:
             self.capture_sizes = cudagraph_capture_sizes
         else:
-            self.capture_sizes = self.cudagraph_capture_sizes
             logger.info(("cudagraph sizes specified by model runner"
                          " %s is overridden by config %s"),
-                        cudagraph_capture_sizes, self.cudagraph_capture_sizes)
+                        cudagraph_capture_sizes, self.capture_sizes)
 
         if self.backend_compile_sizes is None:
             self.backend_compile_sizes = []
