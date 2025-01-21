@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
@@ -89,8 +90,7 @@ class BlocksparseFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        # For attention layer compatibility
-        return "FLASH_ATTN"
+        return "BLOCK_SPARSE_FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> Type["BlocksparseFlashAttentionImpl"]:
@@ -300,6 +300,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         assert blocksparse_params is not None
         assert alibi_slopes is None, ValueError(
@@ -350,16 +351,20 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             active_head_range=self.blocksparse_params.active_head_range,
         )
 
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "BlocksparseFlashAttentionImpl")
+
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: BlocksparseFlashAttentionMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
-        attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
@@ -375,12 +380,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "BlocksparseFlashAttentionImpl")
-
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -402,8 +401,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                k_scale,
-                v_scale,
+                layer._k_scale,
+                layer._v_scale,
             )
 
         if prefill_meta := attn_metadata.prefill_metadata:
@@ -440,8 +439,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                k_scale,
-                v_scale,
+                layer._k_scale,
+                layer._v_scale,
                 tp_rank=self.tp_rank,
                 blocksparse_local_blocks=self.local_blocks,
                 blocksparse_vert_stride=self.vert_stride,

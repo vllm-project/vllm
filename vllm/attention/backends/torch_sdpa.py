@@ -7,14 +7,18 @@ import torch
 from torch.nn.functional import scaled_dot_product_attention
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.ipex_attn import PagedAttention
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
-from vllm.utils import make_tensor_with_pad, print_warning_once
+from vllm.logger import init_logger
+from vllm.utils import make_tensor_with_pad
 from vllm.worker.cpu_model_runner import ModelInputForCPUBuilder
+
+logger = init_logger(__name__)
 
 
 class TorchSDPABackend(AttentionBackend):
@@ -390,13 +394,14 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
                 "Torch SPDA does not support block-sparse attention.")
         if logits_soft_cap is not None:
-            print_warning_once("Torch SPDA does not support logits soft cap. "
-                               "Outputs may be slightly off.")
+            logger.warning_once("Torch SPDA does not support logits soft cap. "
+                                "Outputs may be slightly off.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -421,17 +426,16 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             raise NotImplementedError(
                 "Torch SDPA backend does not support FP8 KV cache. "
                 "Please use xFormers backend instead.")
+        self.attn_type = attn_type
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: TorchSDPAMetadata,  # type: ignore
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
-        attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with torch SDPA and PagedAttention.
@@ -447,7 +451,8 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert k_scale == 1.0 and v_scale == 1.0
+        assert layer._k_scale == 1.0 and layer._v_scale == 1.0
+        attn_type = self.attn_type
         if (attn_type == AttentionType.ENCODER
                 and (not attn_metadata.is_all_encoder_attn_metadata_set)):
             raise AttributeError("Encoder attention requires setting "
@@ -488,11 +493,9 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                     # Update self-attention KV cache (prefill/decode)
                     updated_slot_mapping = attn_metadata.slot_mapping
 
-                PagedAttention.write_to_paged_cache(key, value, key_cache,
-                                                    value_cache,
-                                                    updated_slot_mapping,
-                                                    self.kv_cache_dtype,
-                                                    k_scale, v_scale)
+                PagedAttention.write_to_paged_cache(
+                    key, value, key_cache, value_cache, updated_slot_mapping,
+                    self.kv_cache_dtype, layer._k_scale, layer._v_scale)
 
         if attn_type != AttentionType.ENCODER:
             # Decoder self-attention supports chunked prefill.
@@ -566,8 +569,8 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                k_scale,
-                v_scale,
+                layer._k_scale,
+                layer._v_scale,
             )
 
         # Reshape the output tensor.

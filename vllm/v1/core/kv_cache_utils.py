@@ -3,7 +3,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, List, NamedTuple, Optional, Tuple
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheSpec,
+                                        KVCacheTensor)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -11,8 +14,10 @@ logger = init_logger(__name__)
 
 class BlockHashType(NamedTuple):
     """Hash value of a block (int), the token IDs in the block, and extra keys.
-    The reason we keep a tuple of token IDs and extra keys is to make sure
-    no hash collision happens when the hash value is the same.
+    We keep a tuple of token IDs and extra keys to reduce the likelihood of
+    hash collisions when the hash value is the same. But please note that 
+    hash collisions can still theoretically occur, albeit with an extremely 
+    low probability.
     """
     # Hash value of the block in an integer.
     hash_value: int
@@ -191,7 +196,7 @@ def generate_block_hash_extra_keys(
         raise ValueError(
             "The number of multi-modal positions and hashes must match. This "
             "is likely because you do not enable MM preprocessor hashing. "
-            "Please set mm_cache_preprocessor=True.")
+            "Please set disable_mm_preprocessor_cache=False.")
 
     # Note that we assume mm_positions is sorted by offset.
     # We do not need to check all mm inputs if the start token index is out of
@@ -218,8 +223,8 @@ def generate_block_hash_extra_keys(
                 continue
 
             # The block contains the current mm input.
-            mm_start = max(0, start_token_idx - offset)
-            extra_keys.append((mm_hashes[curr_mm_idx], mm_start))
+            extra_keys.append(mm_hashes[curr_mm_idx])
+
             if end_token_idx >= offset + length:
                 # If this block contains the end of the current mm input,
                 # move to the next mm input as this block may also contain
@@ -303,3 +308,124 @@ def hash_request_tokens(block_size: int,
         ret.append(block_hash)
         parent_block_hash_value = block_hash.hash_value
     return ret
+
+
+def check_enough_kv_cache_memory(vllm_config: VllmConfig,
+                                 kv_cache_spec: KVCacheSpec,
+                                 available_memory: int):
+    """
+    Checks whether `available_memory` is enough for the KV cache to hold at 
+    least one request with the model's max_model_len.
+
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_spec: The kv cache spec of the model
+        available_memory: Memory available for KV cache in bytes.
+
+    Raises:
+        ValueError: If there is not enough memory available for the KV cache.
+    """
+
+    if available_memory <= 0:
+        raise ValueError("No available memory for the cache blocks. "
+                         "Try increasing `gpu_memory_utilization` when "
+                         "initializing the engine.")
+
+    max_model_len = vllm_config.model_config.max_model_len
+    needed_memory = 0
+    for layer_spec in kv_cache_spec.values():
+        needed_memory += layer_spec.bytes_for_tokens(max_model_len)
+
+    if needed_memory > available_memory:
+        raise ValueError(
+            f"To serve at least one request with the models's max seq len "
+            f"({max_model_len}), ({needed_memory/1024/1024/1024:.2f} GB KV "
+            f"cache is needed, which is larger than the available KV cache "
+            f"memory ({available_memory/1024/1024/1024:.2f} GB). Try "
+            f"increasing `gpu_memory_utilization` or decreasing "
+            f"`max_model_len` when initializing the engine.")
+
+
+def is_kv_cache_type_uniform(kv_cache_spec: KVCacheSpec) -> bool:
+    """
+    Whether all layers in the given KVCacheSpec have the same type of KV cache.
+
+    Args:
+        kv_cache_spec: The KVCacheSpec of the model
+
+    Returns:
+        True if all layers have the same type, False otherwise.
+    """
+
+    layer_keys = set(layer.type_id for layer in kv_cache_spec.values())
+    return len(layer_keys) == 1
+
+
+def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
+                                      kv_cache_spec: KVCacheSpec,
+                                      available_memory: int) -> KVCacheConfig:
+    """
+    Generates the KV cache configuration for a model with one type of KV cache.
+    Divide the available memory equally among all layers.
+
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_spec: The kv cache spec of the model
+        available_memory: Memory available for KV cache in bytes.
+
+    Returns:
+        The generated KVCacheConfig
+    """
+
+    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
+    assert len(page_sizes) == 1
+    page_size = page_sizes.pop()
+
+    num_blocks = int(available_memory // page_size // len(kv_cache_spec))
+    num_blocks = max(num_blocks, 0)
+
+    if vllm_config.cache_config.num_gpu_blocks_override is not None:
+        num_gpu_blocks_override = \
+            vllm_config.cache_config.num_gpu_blocks_override
+        logger.info(
+            "Overriding num_gpu_blocks=%d with "
+            "num_gpu_blocks_override=%d", num_blocks, num_gpu_blocks_override)
+        num_blocks = num_gpu_blocks_override
+
+    logger.info("# GPU blocks: %d", num_blocks)
+
+    per_layer_size = page_size * num_blocks
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        tensors={
+            layer_name: KVCacheTensor(size=per_layer_size)
+            for layer_name in kv_cache_spec
+        },
+        groups=[[layer_name for layer_name in kv_cache_spec]],
+        kv_cache_spec=kv_cache_spec)
+    return kv_cache_config
+
+
+def get_kv_cache_config(vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec,
+                        available_memory: int) -> KVCacheConfig:
+    """
+    Generates the KV cache configuration for a model
+    TODO: support hybrid models with more than one type of KV cache.
+
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_spec: The kv cache spec of the model
+        available_memory: Memory available for KV cache in bytes.
+
+    Returns:
+        The generated KVCacheConfig
+    """
+    check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
+    if is_kv_cache_type_uniform(kv_cache_spec):
+        # KV cache of all layers are the same, which is true for most models.
+        # Allocate the same amount of memory for each layer.
+        return _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
+                                                 available_memory)
+    else:
+        raise NotImplementedError

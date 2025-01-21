@@ -667,6 +667,7 @@ class SequenceGroup:
                                       first_scheduled_time=None,
                                       first_token_time=None,
                                       time_in_queue=None)
+        self.last_token_latency = 0.0
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
@@ -709,15 +710,27 @@ class SequenceGroup:
 
     @property
     def multi_modal_data(self) -> MultiModalDataDict:
-        return self.first_seq.multi_modal_data
+        if self.first_seq.multi_modal_data:
+            return self.first_seq.multi_modal_data
+        elif self.encoder_seq is not None:
+            return self.encoder_seq.multi_modal_data
+        return {}
 
     @property
     def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
-        return self.first_seq.multi_modal_placeholders
+        if self.first_seq.multi_modal_data:
+            return self.first_seq.multi_modal_placeholders
+        elif self.encoder_seq is not None:
+            return self.encoder_seq.multi_modal_placeholders
+        return {}
 
     @property
     def mm_processor_kwargs(self) -> Dict[str, Any]:
-        return self.first_seq.mm_processor_kwargs
+        if self.first_seq.multi_modal_data:
+            return self.first_seq.mm_processor_kwargs
+        elif self.encoder_seq is not None:
+            return self.encoder_seq.mm_processor_kwargs
+        return {}
 
     @property
     def lora_int_id(self) -> int:
@@ -762,18 +775,21 @@ class SequenceGroup:
             assert num_lookahead_slots + 1 == num_scheduler_steps or is_prefill
             self.init_multi_step(num_steps=num_lookahead_slots + 1)
 
-    def get_last_latency(self, now: float) -> float:
+    def set_last_token_time(self, now: float) -> None:
         """Sets the last token time for Request level timings."""
-        # If still in prefill phase, raise Error.
-        if self.is_prefill():
-            raise ValueError(
-                "seq_group.get_last_latency() should not be called "
-                "if the seq_group is in prefill phase.")
-
-        # Otherwise return token latency.
-        latency = now - self.metrics.last_token_time
+        # If still in prefill phase, assertion fails.
+        assert not self.is_prefill(), (
+            "seq_group.set_last_token_time() should not be called "
+            "if the seq_group is in prefill phase.")
+        self.last_token_latency = now - self.metrics.last_token_time
         self.metrics.last_token_time = now
-        return latency
+
+    def get_last_token_latency(self) -> float:
+        """Returns the latency of the last token."""
+        assert not self.is_prefill(), (
+            "seq_group.get_last_token_latency() should not be called "
+            "if the seq_group is in prefill phase.")
+        return self.last_token_latency
 
     def maybe_set_first_token_time(self, time: float) -> None:
         """Sets the first token time for Request level timings."""
@@ -1092,6 +1108,13 @@ class IntermediateTensors:
 
     tensors: Dict[str, torch.Tensor]
 
+    def __init__(self, tensors):
+        # manually define this function, so that
+        # Dynamo knows `IntermediateTensors()` comes from this file.
+        # Otherwise, dataclass will generate this function by evaluating
+        # a string, and we will lose the information about the source file.
+        self.tensors = tensors
+
     def __getitem__(self, key: Union[str, slice]):
         if isinstance(key, str):
             return self.tensors[key]
@@ -1368,7 +1391,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
     @staticmethod
     def add_request(request_id: str, engine, params, **kwargs):
         original_params = params
-        params = copy.deepcopy(original_params)
+        params = original_params.clone()
         params.n = 1
         group = ParallelSampleSequenceGroup(request_id)
         seqs = []

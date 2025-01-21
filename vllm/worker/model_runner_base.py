@@ -7,12 +7,12 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
                     Optional, Type, TypeVar)
 
 import torch
+import torch.nn as nn
 from torch import is_tensor
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 
 if TYPE_CHECKING:
@@ -265,13 +265,17 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
-    @current_platform.inference_mode()
+    @abstractmethod
+    def get_model(self) -> nn.Module:
+        raise NotImplementedError
+
     def execute_model(
         self,
         model_input: T,
         kv_caches: Optional[List[torch.Tensor]],
-        intermediate_tensors: Optional[IntermediateTensors],
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs,
     ) -> Optional[List[SamplerOutput]]:
         """
         Execute the model on the given input.
@@ -298,9 +302,9 @@ class ModelRunnerWrapperBase:
 
     def __init__(
         self,
-        moderl_runner: ModelRunnerBase,
+        model_runner: ModelRunnerBase,
     ) -> None:
-        self.model_runner: ModelRunnerBase = moderl_runner
+        self.model_runner: ModelRunnerBase = model_runner
 
     def __getattr__(self, attr):
         return getattr(self.model_runner, attr)

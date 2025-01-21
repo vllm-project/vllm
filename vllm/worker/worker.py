@@ -21,7 +21,8 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.utils import GiB_bytes, memory_profiling
+from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
+                        memory_profiling)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -55,9 +56,6 @@ class Worker(LocalOrDistributedWorkerBase):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
-        if is_driver_worker:
-            assert rank % self.parallel_config.tensor_parallel_size == 0, \
-                   "Driver worker should be rank 0 of tensor parallel group."
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -140,7 +138,8 @@ class Worker(LocalOrDistributedWorkerBase):
             _check_if_gpu_supports_dtype(self.model_config.dtype)
             gc.collect()
             torch.cuda.empty_cache()
-            self.init_gpu_memory = torch.cuda.mem_get_info()[0]
+            torch.cuda.reset_peak_memory_stats()
+            self.baseline_snapshot = MemorySnapshot()
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -195,19 +194,17 @@ class Worker(LocalOrDistributedWorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(baseline_memory_in_bytes=total_gpu_memory -
-                              self.init_gpu_memory,
-                              weights_memory_in_bytes=self.model_runner.
-                              model_memory_usage) as result:
+        with memory_profiling(
+                self.baseline_snapshot,
+                weights_memory=self.model_runner.model_memory_usage) as result:
             self.model_runner.profile_run()
-            torch.cuda.synchronize()
 
         self._assert_memory_footprint_increased_during_profiling()
 
         memory_for_current_instance = total_gpu_memory * \
             self.cache_config.gpu_memory_utilization
         available_kv_cache_memory = (memory_for_current_instance -
-                                     result.non_kv_cache_memory_in_bytes)
+                                     result.non_kv_cache_memory)
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
@@ -230,11 +227,11 @@ class Worker(LocalOrDistributedWorkerBase):
                f"({self.cache_config.gpu_memory_utilization:.2f})"
                f" = {(memory_for_current_instance / GiB_bytes):.2f}GiB\n"
                "model weights take "
-               f"{(result.weights_memory_in_bytes / GiB_bytes):.2f}GiB;"
+               f"{(result.weights_memory / GiB_bytes):.2f}GiB;"
                " non_torch_memory takes "
-               f"{(result.non_torch_increase_in_bytes / GiB_bytes):.2f}GiB;"
+               f"{(result.non_torch_increase / GiB_bytes):.2f}GiB;"
                " PyTorch activation peak memory takes "
-               f"{(result.torch_peak_increase_in_bytes / GiB_bytes):.2f}GiB;"
+               f"{(result.torch_peak_increase / GiB_bytes):.2f}GiB;"
                " the rest of the memory reserved for KV Cache is "
                f"{(available_kv_cache_memory / GiB_bytes):.2f}GiB.")
 
@@ -250,11 +247,13 @@ class Worker(LocalOrDistributedWorkerBase):
     def _assert_memory_footprint_increased_during_profiling(self):
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        free_gpu_memory, _ = torch.cuda.mem_get_info()
-        assert self.init_gpu_memory - free_gpu_memory > 0, (
+        free_gpu_memory, total = torch.cuda.mem_get_info()
+        cuda_memory = total - free_gpu_memory
+        assert self.baseline_snapshot.cuda_memory < cuda_memory, (
             "Error in memory profiling. "
-            f"Initial free memory {self.init_gpu_memory}, current free memory"
-            f" {free_gpu_memory}. This happens when the GPU memory was "
+            f"Initial used memory {self.baseline_snapshot.cuda_memory}, "
+            f"currently used memory {cuda_memory}. "
+            f"This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
     def initialize_cache(self, num_gpu_blocks: int,
@@ -285,6 +284,8 @@ class Worker(LocalOrDistributedWorkerBase):
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
+        bind_kv_cache(self.compilation_config.static_forward_context,
+                      self.gpu_cache)
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:

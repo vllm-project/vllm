@@ -541,19 +541,12 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         short_cache = self._compute_cos_sin_cache(
             original_max_position_embeddings, short_factor, short_mscale)
         short_cache = short_cache.to(dtype)
-        self.register_buffer("short_cos_sin_cache",
-                             short_cache,
-                             persistent=False)
 
         long_cache = self._compute_cos_sin_cache(max_position_embeddings,
                                                  long_factor, long_mscale)
         long_cache = long_cache.to(dtype)
-        self.register_buffer("long_cos_sin_cache",
-                             long_cache,
-                             persistent=False)
 
-        long_short_cache = torch.cat(
-            [self.short_cos_sin_cache, self.long_cos_sin_cache], dim=0)
+        long_short_cache = torch.cat([short_cache, long_cache], dim=0)
         self.register_buffer("long_short_cos_sin_cache",
                              long_short_cache,
                              persistent=False)
@@ -593,8 +586,6 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
                               torch.full_like(positions, k)).long()
         idx = (torch.add(positions, long_prompt_offset)
                if long_prompt_offset is not None else positions)
-        self.long_short_cos_sin_cache: torch.Tensor = (
-            self.long_short_cos_sin_cache.to(idx.device))
         idx = torch.add(idx, offsets) if offsets is not None else idx
         cos_sin = torch.index_select(self.long_short_cos_sin_cache, 0, idx)
 
@@ -677,7 +668,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         cos = (freqs.cos() * self.mscale)
         sin = (freqs.sin() * self.mscale)
         cache = torch.cat((cos, sin), dim=-1)
-        print("Cache shape", cache.shape)
         return cache
 
     def forward(
@@ -851,6 +841,37 @@ class MRotaryEmbedding(RotaryEmbedding):
     ) -> Tuple[List[List[int]], int]:
         """Get mrope input positions and delta value."""
 
+        llm_positions, mrope_position_delta = \
+            MRotaryEmbedding.get_input_positions_tensor(
+                input_tokens,
+                image_grid_thw,
+                video_grid_thw,
+                image_token_id,
+                video_token_id,
+                vision_start_token_id,
+                vision_end_token_id,
+                spatial_merge_size,
+                context_len,
+                seq_len,
+            )
+
+        return llm_positions.tolist(), mrope_position_delta
+
+    @staticmethod
+    def get_input_positions_tensor(
+        input_tokens: List[int],
+        image_grid_thw: Union[List[List[int]], torch.Tensor],
+        video_grid_thw: Union[List[List[int]], torch.Tensor],
+        image_token_id: int,
+        video_token_id: int,
+        vision_start_token_id: int,
+        vision_end_token_id: int,
+        spatial_merge_size: int,
+        context_len: int = 0,
+        seq_len: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, int]:
+        """Get mrope input positions and delta value."""
+
         if isinstance(image_grid_thw, torch.Tensor):
             image_grid_thw = image_grid_thw.tolist()
         if isinstance(video_grid_thw, torch.Tensor):
@@ -926,7 +947,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                                 len(input_tokens)).item()
         llm_positions = llm_positions[:, context_len:seq_len]
 
-        return llm_positions.tolist(), mrope_position_delta
+        return llm_positions, mrope_position_delta
 
     @staticmethod
     def get_next_input_positions(
@@ -939,6 +960,17 @@ class MRotaryEmbedding(RotaryEmbedding):
                 range(context_len + mrope_position_delta,
                       seq_len + mrope_position_delta)) for _ in range(3)
         ]
+
+    @staticmethod
+    def get_next_input_positions_tensor(
+        mrope_position_delta: int,
+        context_len: int,
+        seq_len: int,
+    ) -> torch.Tensor:
+        return torch.arange(
+            mrope_position_delta + context_len,
+            mrope_position_delta + seq_len,
+        ).expand(3, -1)
 
 
 _ROPE_DICT: Dict[Tuple, RotaryEmbedding] = {}

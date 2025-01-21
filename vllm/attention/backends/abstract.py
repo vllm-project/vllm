@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
-                    Tuple, Type, TypeVar)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
+                    Protocol, Set, Tuple, Type, TypeVar)
 
 import torch
 
@@ -31,6 +31,10 @@ class AttentionType:
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
+    # For some attention backends, we allocate an output tensor before
+    # calling the custom op. When piecewise cudagraph is enabled, this
+    # makes sure the output tensor is allocated inside the cudagraph.
+    accept_output_buffer: bool = False
 
     @staticmethod
     @abstractmethod
@@ -219,6 +223,22 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
         raise NotImplementedError
 
 
+class AttentionLayer(Protocol):
+
+    _k_scale: float
+    _v_scale: float
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        ...
+
+
 class AttentionImpl(ABC, Generic[T]):
 
     @abstractmethod
@@ -233,20 +253,19 @@ class AttentionImpl(ABC, Generic[T]):
         kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         raise NotImplementedError
 
     @abstractmethod
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
-        attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError

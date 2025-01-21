@@ -1,14 +1,10 @@
 from typing import Any, Dict, List, Optional
 
-import PIL
-from blake3 import blake3
-
 from vllm.config import ModelConfig
-from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
                              MultiModalKwargs, MultiModalRegistry)
-from vllm.v1.utils import LRUDictCache
+from vllm.utils import LRUCache
 
 logger = init_logger(__name__)
 
@@ -43,8 +39,8 @@ class MMInputMapperClient:
         self.mm_registry.init_mm_limits_per_prompt(model_config)
 
         # Init cache
-        self.use_cache = model_config.mm_cache_preprocessor
-        self.mm_cache = LRUDictCache[str, MultiModalKwargs](MM_CACHE_SIZE)
+        self.use_cache = not model_config.disable_mm_preprocessor_cache
+        self.mm_cache = LRUCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
         # DEBUG: Set to None to disable
         self.mm_debug_cache_hit_ratio_steps = None
@@ -119,8 +115,8 @@ class MMInputMapperClient:
 class MMInputMapperServer:
 
     def __init__(self, model_config):
-        self.use_cache = model_config.mm_cache_preprocessor
-        self.mm_cache = LRUDictCache[str, MultiModalKwargs](MM_CACHE_SIZE)
+        self.use_cache = not model_config.disable_mm_preprocessor_cache
+        self.mm_cache = LRUCache[str, MultiModalKwargs](MM_CACHE_SIZE)
 
     def process_inputs(
         self,
@@ -144,33 +140,3 @@ class MMInputMapperServer:
             full_mm_inputs.append(mm_input)
 
         return full_mm_inputs
-
-
-class MMHasher:
-
-    def __init__(self):
-        pass
-
-    def hash(self, prompt: PromptType) -> Optional[List[str]]:
-        if "multi_modal_data" not in prompt:
-            return None
-
-        mm_data = prompt["multi_modal_data"]
-        image_inputs = mm_data["image"]
-        if not isinstance(image_inputs, list):
-            image_inputs = [image_inputs]
-        assert len(image_inputs) > 0
-
-        ret = []
-        for image in image_inputs:
-            assert isinstance(image, PIL.Image.Image)
-
-            # Convert image to bytes
-            bytes = image.tobytes()
-
-            # Hash image bytes
-            hasher = blake3()
-            hasher.update(bytes)
-            ret.append(hasher.hexdigest())
-
-        return ret
