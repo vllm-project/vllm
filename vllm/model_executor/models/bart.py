@@ -43,7 +43,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .utils import maybe_prefix
+from .utils import QKVCrossParallelLinear, maybe_prefix
 
 logger = logging.get_logger(__name__)
 
@@ -300,14 +300,22 @@ class BartCrossAttention(nn.Module):
                              f" and `num_heads`: {num_heads}).")
         self.scaling = self.head_dim**-0.5
 
-        self.qkv_proj = QKVParallelLinear(
-            self.d_model,
-            self.d_model // self.total_num_heads,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=bias,
-            quant_config=quant_config,
-        )
+        # self.q_proj = ColumnParallelLinear(
+        #     input_size=self.embed_dim,
+        #     output_size=self.embed_dim,
+        #     bias=bias,
+        #     quant_config=quant_config,
+        # )
+
+        # self.kv_proj = QKVParallelLinear(
+        #     hidden_size=self.d_model,
+        #     head_size=self.d_model // self.total_num_heads,
+        #     total_num_heads=0,
+        #     total_num_kv_heads=self.total_num_kv_heads,
+        #     bias=bias,
+        #     quant_config=quant_config,
+        # )
+        self.qkv_proj = QKVCrossParallelLinear(self.d_model, self.d_model // self.total_num_heads, self.total_num_heads, self.total_num_kv_heads, bias, quant_config=quant_config)
 
         self.out_proj = RowParallelLinear(
             embed_dim,
@@ -350,18 +358,16 @@ class BartCrossAttention(nn.Module):
     ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
 
-        # (afeldman-nm 2024/07/22) TODO:
-        # Need a more efficient solution for q/k/v
-        qkv_dec, _ = self.qkv_proj(decoder_hidden_states)
-        q, _, _ = qkv_dec.split([self.q_size, self.kv_size, self.kv_size],
-                                dim=-1)
-        if encoder_hidden_states is None:
-            k = None
-            v = None
-        else:
-            qkv_enc, _ = self.qkv_proj(encoder_hidden_states)
-            _, k, v = qkv_enc.split([self.q_size, self.kv_size, self.kv_size],
-                                    dim=-1)
+        # q, _ = self.q_proj(decoder_hidden_states)
+
+        # if encoder_hidden_states is None:
+        #     k = None
+        #     v = None
+        # else:
+        #     # Prefill, cache encoder KV.
+        #     kv_enc, _ = self.kv_proj(encoder_hidden_states)
+        #     k, v = kv_enc.split(self.kv_size, dim=-1)
+        q, k, v = self.qkv_proj(decoder_hidden_states, encoder_hidden_states)
 
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
