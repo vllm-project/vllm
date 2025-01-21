@@ -11,7 +11,7 @@ import vllm.envs as envs
 from vllm.inputs import DummyData
 from vllm.logger import init_logger
 
-from .inputs import MultiModalDataDict, MultiModalInputsV2
+from .inputs import MultiModalDataDict, MultiModalInputs
 from .processing import BaseMultiModalProcessor, BaseProcessingInfo
 
 logger = init_logger(__name__)
@@ -131,7 +131,7 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> MultiModalInputsV2:
+    ) -> MultiModalInputs:
         factory = self.dummy_inputs
         processor_inputs = factory.get_dummy_processor_inputs(
             seq_len, mm_counts)
