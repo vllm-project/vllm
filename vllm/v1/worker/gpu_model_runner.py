@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
 import numpy as np
 import torch
 import torch.distributed
+import torch.nn as nn
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
