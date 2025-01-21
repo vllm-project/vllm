@@ -1,4 +1,5 @@
 from functools import lru_cache
+from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
@@ -496,28 +497,17 @@ def group_mm_inputs_by_modality(
     if not mm_inputs:
         return []
 
-    grouped_mm_inputs = []
-    current_group = [mm_inputs[0]]
-
-    for mm_input in mm_inputs[1:]:
-        # If the current input has multiple modalities, finalize the current
-        # group and start a new standalone group for this input.
+    def modality_group_func(mm_input: "MultiModalKwargs") -> Union[str, int]:
+        # If the input has multiple modalities, return a id as the unique key
+        # for the mm_input input.
         if len(mm_input.modalities) > 1:
-            grouped_mm_inputs.append(current_group)
-            current_group = [mm_input]
-        else:
-            # If the current input has the same single modality as the previous
-            # one, add it to the current group.
-            if (len(current_group[-1].modalities) == 1
-                    and mm_input.modalities == current_group[-1].modalities):
-                current_group.append(mm_input)
-            else:
-                # Otherwise, finalize the current group and start a new one.
-                grouped_mm_inputs.append(current_group)
-                current_group = [mm_input]
+            return id(mm_input)
 
-    # Add the last group to the result.
-    if current_group:
-        grouped_mm_inputs.append(current_group)
+        # Otherwise return the modality string
+        return list(mm_input.modalities)[0]
+
+    grouped_mm_inputs = []
+    for key, group in groupby(mm_inputs, key=modality_group_func):
+        grouped_mm_inputs.append(list(group))
 
     return grouped_mm_inputs
