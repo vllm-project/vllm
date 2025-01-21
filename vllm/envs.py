@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN: bool = True
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
     VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
+    VLLM_USE_ATER: bool = False
     RANK: int = 0
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -256,6 +257,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # use quantized q,k,v,softmax(qk^T), attn output during prefill
     "VLLM_USE_ROCM_FP8_FLASH_ATTN":
     lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
+             ("true", "1")),
+
+    # use ater ops
+    "VLLM_USE_ATER":
+    lambda: (os.getenv("VLLM_USE_ATER", "False").lower() in
              ("true", "1")),
 
     # rank of the process in the distributed setting, used to determine

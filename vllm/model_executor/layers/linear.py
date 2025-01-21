@@ -13,8 +13,11 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.tuned_gemm import tgemm
-# yapf: disable
+from vllm.envs import VLLM_USE_ATER
+if VLLM_USE_ATER:
+    from ater.tuned_gemm import tgemm
+else:
+    from vllm.model_executor.layers.tuned_gemm import tgemm
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            BlockQuantScaleParameter,
                                            PackedColumnParameter,
@@ -135,8 +138,14 @@ class UnquantizedLinearMethod(LinearMethodBase):
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return tgemm.mm(x, layer.weight, bias)
+              bias: Optional[torch.Tensor] = None,
+              out_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+        if VLLM_USE_ATER:
+            return tgemm.mm(x, layer.weight, bias, out_dtype)
+        elif out_dtype:
+            return tgemm.mm(x, layer.weight, bias).to(out_dtype)
+        else:
+            return tgemm.mm(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):
@@ -238,11 +247,14 @@ class ReplicatedLinear(LinearBase):
         param.data.copy_(loaded_weight)
 
     def forward(
-        self, x: torch.Tensor
+        self, x: torch.Tensor, out_dtype: Optional[torch.dtype] = None
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
-        output = self.quant_method.apply(self, x, bias)
+        if type(self.quant_method) == UnquantizedLinearMethod:
+            output = self.quant_method.apply(self, x, bias, out_dtype)
+        else:
+            output = self.quant_method.apply(self, x, bias)
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
