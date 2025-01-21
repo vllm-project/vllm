@@ -432,21 +432,43 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def get_prefix_cache_hit_rate(self) -> float:
         return self.metric_data.get_hit_rate()
 
-    def reset_prefix_cache(self):
-        """Reset prefix cache."""
+    def reset_prefix_cache(self) -> bool:
+        """Reset prefix cache. This function may be used in RLHF
+        flows to invalid prefix caching after the weights are updated,
+        or used for resetting prefix caching status for benchmarking.
+
+        Returns:
+            bool: True if the prefix cache is successfully reset,
+            False otherwise.
+        """
         num_used_blocks = (self.get_num_total_blocks() -
                            self.get_num_free_blocks())
         if num_used_blocks > 0:
             logger.warning(
                 "Failed to reset prefix cache because some "
                 "blocks (%d) are not freed yet", num_used_blocks)
-            return
+            return False
+
+        # Free all blocks in the evictor.
+        while (block_id :=
+               self._maybe_allocate_evicted_block_id()) is not None:
+            self._hashless_allocator.free_block_id(block_id)
+
+        # Should not have any cached blocks because all blocks are evicted.
+        assert not self._cached_blocks
 
         # Reset the evictor.
         self.evictor = make_evictor(self.eviction_policy)
 
+        # Reset the block tracker.
+        for block_id in self._block_tracker:
+            self._block_tracker[block_id] = BlockTracker()
+
         # Reset the metrics.
         self.metric_data = CacheMetricData()
+
+        logger.info("Successfully reset prefix cache")
+        return True
 
     def is_block_cached(self, block: Block) -> bool:
         assert block.content_hash is not None

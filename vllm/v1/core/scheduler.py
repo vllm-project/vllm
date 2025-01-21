@@ -529,8 +529,8 @@ class Scheduler:
     def has_unfinished_requests(self) -> bool:
         return self.get_num_unfinished_requests() > 0
 
-    def reset_prefix_cache(self):
-        self.kv_cache_manager.reset_prefix_cache()
+    def reset_prefix_cache(self) -> bool:
+        return self.kv_cache_manager.reset_prefix_cache()
 
     def make_stats(self) -> SchedulerStats:
         return SchedulerStats(
