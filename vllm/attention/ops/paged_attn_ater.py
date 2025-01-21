@@ -77,7 +77,7 @@ class PagedAttention:
     ) -> None:
         # print(f"{key.shape=}{key.dtype}")
         # print(f"{key_cache.shape=}{key_cache.dtype}")
-        print(f"{value_cache.shape=}{value_cache.dtype}")
+        # print(f"{value_cache.shape=}{value_cache.dtype}")
         # print(f"{k_scale.shape=}{k_scale.dtype}")
         # print(f"{v_scale.shape=}{v_scale.dtype}")
         # print(f"{k_scale.numel()=}")
