@@ -37,7 +37,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputsV2, MultiModalKwargs,
+                                    MultiModalInputs, MultiModalKwargs,
                                     NestedTensors, PlaceholderRange)
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
@@ -245,7 +245,7 @@ class Qwen2AudioMultiModalProcessor(
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> MultiModalInputsV2:
+    ) -> MultiModalInputs:
         result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
 
         # Only <|AUDIO|> tokens should be considered as placeholders,
