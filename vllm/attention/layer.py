@@ -180,6 +180,8 @@ class Attention(nn.Module):
     def calc_kv_scales(self, key, value):
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
         self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+        self._k_scale_float = self._k_scale.item()
+        self._v_scale_float = self._v_scale.item()
         # We only calculate the scales once
         self.calculate_kv_scales = False
 
