@@ -214,6 +214,12 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
 
     @abstractmethod
     def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
+        """Create the builder, remember some configuration and parameters."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare(self) -> None:
+        """Prepare for one batch."""
         raise NotImplementedError
 
     @abstractmethod
