@@ -73,13 +73,49 @@ class FullAttentionSpec(KVCacheSpec):
 
 
 @dataclass
-class KVCacheTensor:
+class SlidingWindowSpec(KVCacheSpec):
+    num_kv_heads: int
+    head_size: int
+    dtype: torch.dtype
+    sliding_window: int
+
+    @property
+    def type_id(self) -> str:
+        return f"sliding_window_{self.sliding_window}_{self.block_size}_{self.page_size_bytes}"  # noqa
+
+    @property
+    def page_size_bytes(self) -> int:
+        return  2 * self.block_size * self.num_kv_heads * self.head_size \
+                * get_dtype_size(self.dtype)
+
+    def bytes_for_tokens(self, num_tokens: int) -> int:
+        num_tokens = min(num_tokens, self.sliding_window)
+        return cdiv(num_tokens, self.block_size) * self.page_size_bytes
+
+
+@dataclass
+class KVCacheTensorBase:
     """
     A dataclass for specifying how the workers should initialize the KV cache
-    for a layer. Only contains the size of KV cache for that layer for now. Will
-    be extended to support multiple layers sharing the same memory pool.
+    for a layer.
+    """
+    pass
+
+
+@dataclass
+class KVCacheNewTensor(KVCacheTensorBase):
+    """
+    Initialize the KV cache with a tensor of `size` bytes.
     """
     size: int  # The size of KV cache Tensor in bytes
+
+
+@dataclass
+class KVCacheReuseTensor(KVCacheTensorBase):
+    """
+    Reuse the KV cache tensor of `layer_name` for the current layer.
+    """
+    reused_layer_name: str
 
 
 @dataclass
@@ -101,7 +137,7 @@ class KVCacheConfig:
     """The number of KV cache blocks"""
     num_blocks: int
     """layer_name -> how to initialize KV cache for that layer"""
-    tensors: Dict[str, KVCacheTensor]
+    tensors: Dict[str, KVCacheTensorBase]
     """
     A list of kv-cache groups. Each group includes a set of layers with
     the same kv-cache spec, and the total page_size of layers inside a group

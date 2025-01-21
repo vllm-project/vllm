@@ -1,12 +1,15 @@
 """KV-Cache Utilities."""
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
+import math
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheGroup,
-                                        KVCacheSpec, KVCacheTensor)
+                                        KVCacheNewTensor, KVCacheReuseTensor,
+                                        KVCacheSpec)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -374,6 +377,21 @@ def is_kv_cache_type_uniform(kv_cache_spec: Dict[str, KVCacheSpec]) -> bool:
     return len(layer_keys) == 1
 
 
+def is_kv_cache_page_size_uniform(kv_cache_spec: KVCacheSpec):
+    """
+    Whether all layers in the given KVCacheSpec have the same page size.
+
+    Args:
+        kv_cache_spec: The KVCacheSpec of each attention layer in the model
+    
+    Returns:
+        True if all layers have the same page size, False otherwise.
+    """
+
+    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
+    return len(page_sizes) == 1
+
+
 def _create_kv_cache_groups(
         kv_cache_spec: Dict[str, KVCacheSpec],
         grouped_layers: List[List[str]]) -> List[KVCacheGroup]:
@@ -441,11 +459,52 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     kv_cache_config = KVCacheConfig(num_blocks=num_blocks,
                                     tensors={
                                         layer_name:
-                                        KVCacheTensor(size=per_layer_size)
+                                        KVCacheNewTensor(size=per_layer_size)
                                         for layer_name in kv_cache_spec
                                     },
                                     groups=_create_kv_cache_groups(
                                         kv_cache_spec, grouped_layers))
+    return kv_cache_config
+
+
+def _get_kv_cache_config_uniform_page_size(
+        vllm_config: VllmConfig, kv_cache_spec: Dict[str, KVCacheSpec],
+        available_memory: int) -> KVCacheConfig:
+    # Grouped allocation
+    # TODO(Chen): explain it, need test
+
+    # Group all layers by type_id
+    same_type_layers: Dict[str, List[str]] = defaultdict(list)
+    for layer_name, layer_spec in kv_cache_spec.items():
+        same_type_layers[layer_spec.type_id].append(layer_name)
+
+    # Split each group into smaller groups, to make the number of layers in
+    # each group identical
+    # E.g., 2 full attention layers and 4 sliding window attention layers,
+    # split from (full * 2), (sw * 4) to (full * 2), (sw * 2), (sw * 2).
+    group_size_gcd = math.gcd(
+        *[len(layers) for layers in same_type_layers.values()])
+    grouped_layers = []
+    for layers in same_type_layers.values():
+        for i in range(0, len(layers), group_size_gcd):
+            grouped_layers.append(layers[i:i + group_size_gcd])
+
+    # TODO: explain it
+    kv_cache_spec_first_group = {
+        layer_name: kv_cache_spec[layer_name]
+        for layer_name in grouped_layers[0]
+    }
+    kv_cache_config = _get_kv_cache_config_uniform_type(
+        vllm_config, kv_cache_spec_first_group, available_memory)
+
+    for layers in grouped_layers[1:]:
+        for layer_name, layer_name_first_group in zip(layers,
+                                                      grouped_layers[0]):
+            kv_cache_config.tensors[layer_name] = KVCacheReuseTensor(
+                reused_layer_name=layer_name_first_group)
+
+    kv_cache_config.groups = _create_kv_cache_groups(kv_cache_spec,
+                                                     grouped_layers)
     return kv_cache_config
 
 
@@ -470,5 +529,10 @@ def get_kv_cache_config(vllm_config: VllmConfig,
         # Allocate the same amount of memory for each layer.
         return _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
                                                  available_memory)
+    elif is_kv_cache_page_size_uniform(kv_cache_spec):
+        # TODO: add comments
+        return _get_kv_cache_config_uniform_page_size(vllm_config,
+                                                      kv_cache_spec,
+                                                      available_memory)
     else:
         raise NotImplementedError

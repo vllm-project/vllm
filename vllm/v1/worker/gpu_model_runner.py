@@ -25,7 +25,8 @@ from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+                                        KVCacheNewTensor, KVCacheReuseTensor,
+                                        KVCacheSpec, SlidingWindowSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import bind_kv_cache
@@ -1012,34 +1013,65 @@ class GPUModelRunner:
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 
+    def _initialize_kv_cache_buffer(
+            self, kv_cache_config: KVCacheConfig) -> Dict[str, torch.Tensor]:
+        # TODO: add docstring
+        kv_cache_raw_tensors: Dict[str, torch.Tensor] = {}
+        for layer_name, tensor_config in kv_cache_config.tensors.items():
+            if isinstance(tensor_config, KVCacheNewTensor):
+                # A new tensor with `tensor_config.size` bytes
+                kv_cache_raw_tensors[layer_name] = torch.zeros(
+                    tensor_config.size, dtype=torch.int8, device=self.device)
+        for layer_name, tensor_config in kv_cache_config.tensors.items():
+            if isinstance(tensor_config, KVCacheReuseTensor):
+                # Reuse the tensor from `kv_cache_raw_tensors`
+                kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[
+                    tensor_config.reused_layer_name]
+        assert len(kv_cache_raw_tensors) == len(
+            kv_cache_config.tensors), "Some layers are not initialized"
+        return kv_cache_raw_tensors
+
+    def _setup_kv_cache_shapes(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_raw_tensors: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        # TODO: add docstring
+        kv_caches: Dict[str, torch.Tensor] = {}
+        for kv_cache_group in kv_cache_config.groups:
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            for layer_name in kv_cache_group.layer_names:
+                raw_tensor = kv_cache_raw_tensors[layer_name]
+                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                num_blocks = raw_tensor.numel(
+                ) // kv_cache_spec.page_size_bytes
+                if isinstance(kv_cache_spec,
+                              (FullAttentionSpec, SlidingWindowSpec)):
+                    kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+                        num_blocks, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    dtype = kv_cache_spec.dtype
+                    kv_caches[layer_name] = kv_cache_raw_tensors[
+                        layer_name].view(dtype).view(kv_cache_shape)
+                else:
+                    raise NotImplementedError
+        return kv_caches
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
             kv_cache_config: Configuration for the KV cache, including the KV 
             cache size of each layer
+        # TODO: two "buffer" is confusing
         """
         self.kv_cache_config = kv_cache_config
-
-        kv_caches: Dict[str, torch.Tensor] = {}
-
-        for kv_cache_group in kv_cache_config.groups:
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            for layer_name in kv_cache_group.layer_names:
-                tensor_config = kv_cache_config.tensors[layer_name]
-                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
-                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
-                if isinstance(kv_cache_spec, FullAttentionSpec):
-                    kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-                        num_blocks, kv_cache_spec.block_size,
-                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
-                    dtype = kv_cache_spec.dtype
-                    kv_caches[layer_name] = torch.zeros(kv_cache_shape,
-                                                        dtype=dtype,
-                                                        device=self.device)
-                else:
-                    raise NotImplementedError
-
+        # Initialize the memory buffer for KV cache
+        kv_cache_raw_tensors = self._initialize_kv_cache_buffer(
+            kv_cache_config)
+        # Change the memory buffer to the desired shape
+        kv_caches = self._setup_kv_cache_shapes(kv_cache_config,
+                                                kv_cache_raw_tensors)
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
@@ -1096,12 +1128,21 @@ class GPUModelRunner:
             # cross-attention, MLA.
             assert isinstance(attn_module, Attention)
             if attn_module.attn_type == AttentionType.DECODER:
-                kv_cache_spec[layer_name] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=attn_module.num_kv_heads,
-                    head_size=attn_module.head_size,
-                    dtype=attn_module.dtype,
-                )
+                if attn_module.sliding_window is not None:
+                    kv_cache_spec[layer_name] = SlidingWindowSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=attn_module.dtype,
+                        sliding_window=attn_module.sliding_window,
+                    )
+                else:
+                    kv_cache_spec[layer_name] = FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=attn_module.dtype,
+                    )
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
@@ -1111,5 +1152,4 @@ class GPUModelRunner:
             else:
                 raise ValueError(
                     f"Unknown attention type: {attn_module.attn_type}")
-
         return kv_cache_spec
