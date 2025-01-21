@@ -128,8 +128,12 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
                           max_parallel_loading_workers)
         self.driver_exec_model = make_async(self.driver_worker.execute_model)
         self.pp_locks: Optional[List[asyncio.Lock]] = None
+        self.shutdown_workers = True
 
     def shutdown(self):
+        if getattr(self, 'shutdown_workers', False):
+            self._run_workers("shutdown")
+            self.shutdown_workers = False
         if (worker_monitor := getattr(self, "worker_monitor",
                                       None)) is not None:
             worker_monitor.close()
