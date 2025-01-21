@@ -572,19 +572,7 @@ def get_requirements() -> List[str]:
     if _no_device():
         requirements = _read_requirements("requirements-common.txt")
     elif _is_cuda():
-        import torch
-
         requirements = _read_requirements("requirements-cuda.txt")
-        cuda_major, cuda_minor = torch.version.cuda.split(".")
-        modified_requirements = []
-        for req in requirements:
-            if ("vllm-flash-attn" in req
-                    and not (cuda_major == "12" and cuda_minor == "1")):
-                # vllm-flash-attn is built only for CUDA 12.1.
-                # Skip for other versions.
-                continue
-            modified_requirements.append(req)
-        requirements = modified_requirements
     elif _is_hip():
         requirements = _read_requirements("requirements-rocm.txt")
     elif _is_neuron():
