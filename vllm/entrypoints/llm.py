@@ -1132,6 +1132,9 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
+    def reset_prefix_cache(self) -> None:
+        self.llm_engine.reset_prefix_cache()
+
     # LEGACY
     def _convert_v1_inputs(
         self,

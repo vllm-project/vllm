@@ -324,6 +324,10 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def get_prefix_cache_hit_rate(self) -> float:
         return -1
+    
+    def reset_prefix_cache(self):
+        """No effect."""
+        pass
 
     def find_cached_blocks_prefix(self, block_hashes: List[int]) -> List[int]:
         # Not applicable for naive block allocator.

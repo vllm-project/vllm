@@ -339,6 +339,11 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         assert device in self._allocators
         return self._allocators[device].get_prefix_cache_hit_rate()
 
+    def reset_prefix_cache(self):
+        """Reset prefix cache for all devices."""
+        for allocator in self._allocators.values():
+            allocator.reset_prefix_cache()
+
     def get_and_reset_swaps(self) -> List[Tuple[int, int]]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called after every swapping operations for now, and after every

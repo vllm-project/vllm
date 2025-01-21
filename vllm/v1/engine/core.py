@@ -135,6 +135,9 @@ class EngineCore:
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
 
+    def reset_prefix_cache(self):
+        self.scheduler.reset_prefix_cache()
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""

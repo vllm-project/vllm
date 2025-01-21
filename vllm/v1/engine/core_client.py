@@ -108,11 +108,14 @@ class InprocClient(EngineCoreClient):
         if len(request_ids) > 0:
             self.engine_core.abort_requests(request_ids)
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         self.engine_core.shutdown()
 
     def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
+
+    def reset_prefix_cache(self) -> None:
+        self.engine_core.reset_prefix_cache()
 
 
 class MPClient(EngineCoreClient):

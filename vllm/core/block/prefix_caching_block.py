@@ -105,7 +105,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # Evitor used to maintain how we want to handle those computed blocks
         # if we find memory pressure is high.
-        self.evictor: Evictor = make_evictor(eviction_policy)
+        self.eviction_policy = eviction_policy
+        self.evictor: Evictor = make_evictor(self.eviction_policy)
 
         # We share the refcounter between allocators. This allows us to promote
         # blocks originally allocated in the hashless allocator to immutable
@@ -427,6 +428,19 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def get_prefix_cache_hit_rate(self) -> float:
         return self.metric_data.get_hit_rate()
+    
+    def reset_prefix_cache(self):
+        """Reset prefix cache."""
+        num_used_blocks = self.get_num_total_blocks - self.get_num_free_blocks
+        if num_used_blocks > 0:
+            raise RuntimeError("Failed to reset prefix cache because some "
+                               f"blocks ({num_used_blocks}) are not freed yet")
+        
+        # Reset the evictor.
+        self.evictor = make_evictor(self.eviction_policy)
+
+        # Reset the metrics.
+        self.metric_data = CacheMetricData()
 
     def is_block_cached(self, block: Block) -> bool:
         assert block.content_hash is not None
