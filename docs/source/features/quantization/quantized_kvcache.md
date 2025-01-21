@@ -37,7 +37,7 @@ Here is an example of how to enable FP8 quantization:
 ```python
 from vllm import LLM, SamplingParams
 
-sampling_params = SamplingParams(temperature=1.3, top_p=0.8)
+sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
 llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", kv_cache_dtype="fp8")
 prompt = "London is the capital of"
 out = llm.generate(prompt, sampling_params)[0].outputs[0].text
@@ -131,3 +131,15 @@ tokenizer.save_pretrained(SAVE_DIR)
 ```
 
 The above script will create a folder in your current directory containing your quantized model (e.g., `Llama-3.1-8B-Instruct-FP8-KV`) with calibrated scales.
+
+When running the model you must specify `kv_cache_dtype="fp8"` in order to enable the kv cache quantization and use the scales.
+
+```python
+from vllm import LLM, SamplingParams
+
+sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
+llm = LLM(model="Llama-3.1-8B-Instruct-FP8-KV", kv_cache_dtype="fp8")
+prompt = "London is the capital of"
+out = llm.generate(prompt, sampling_params)[0].outputs[0].text
+print(out)
+```
