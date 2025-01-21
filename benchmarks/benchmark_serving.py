@@ -525,6 +525,7 @@ async def benchmark(
     api_url: str,
     base_url: str,
     model_id: str,
+    model_name: str,
     tokenizer: PreTrainedTokenizerBase,
     input_requests: List[Tuple[str, int, int]],
     logprobs: Optional[int],
@@ -553,6 +554,7 @@ async def benchmark(
             "Multi-modal content is only supported on 'openai-chat' backend.")
     test_input = RequestFuncInput(
         model=model_id,
+        model_name=model_name,
         prompt=test_prompt,
         api_url=api_url,
         prompt_len=test_prompt_len,
@@ -573,6 +575,7 @@ async def benchmark(
     if profile:
         print("Starting profiler...")
         profile_input = RequestFuncInput(model=model_id,
+                                         model_name=model_name,
                                          prompt=test_prompt,
                                          api_url=base_url + "/start_profile",
                                          prompt_len=test_prompt_len,
@@ -616,6 +619,7 @@ async def benchmark(
     async for request in get_request(input_requests, request_rate, burstiness):
         prompt, prompt_len, output_len, mm_content = request
         request_func_input = RequestFuncInput(model=model_id,
+                                              model_name=model_name,
                                               prompt=prompt,
                                               api_url=api_url,
                                               prompt_len=prompt_len,
@@ -780,6 +784,7 @@ def main(args: argparse.Namespace):
 
     backend = args.backend
     model_id = args.model
+    model_name = args.served_model_name
     tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
     tokenizer_mode = args.tokenizer_mode
 
@@ -877,6 +882,7 @@ def main(args: argparse.Namespace):
             api_url=api_url,
             base_url=base_url,
             model_id=model_id,
+            model_name=model_name,
             tokenizer=tokenizer,
             input_requests=input_requests,
             logprobs=args.logprobs,
@@ -1221,6 +1227,13 @@ if __name__ == "__main__":
         'fast tokenizer if available.\n* "slow" will '
         'always use the slow tokenizer. \n* '
         '"mistral" will always use the `mistral_common` tokenizer.')
+
+    parser.add_argument("--served-model-name",
+                        type=str,
+                        default=None,
+                        help="The model name used in the API. "
+                        "If not specified, the model name will be the "
+                        "same as the ``--model`` argument. ")
 
     args = parser.parse_args()
     main(args)
