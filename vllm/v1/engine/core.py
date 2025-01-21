@@ -23,6 +23,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
                             EngineCoreRequestUnion)
 from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
 from vllm.version import __version__ as VLLM_VERSION
@@ -49,10 +50,9 @@ class EngineCore:
         self.model_executor = executor_class(vllm_config)
 
         # Setup KV Caches and update CacheConfig after profiling.
-        num_gpu_blocks, num_cpu_blocks = self._initialize_kv_caches(
-            vllm_config)
-        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
-        vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
+        kv_cache_config = self._initialize_kv_caches(vllm_config)
+        vllm_config.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
+        vllm_config.cache_config.num_cpu_blocks = 0
 
         # Setup scheduler.
         self.scheduler = Scheduler(
@@ -60,13 +60,12 @@ class EngineCore:
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
-        )
+            kv_cache_config=kv_cache_config)
 
         self.mm_input_mapper_server = MMInputMapperServer(
             vllm_config.model_config)
 
-    def _initialize_kv_caches(self,
-                              vllm_config: VllmConfig) -> Tuple[int, int]:
+    def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
 
         # Get all kv cache needed by the model
@@ -79,8 +78,6 @@ class EngineCore:
         # Get the kv cache tensor size
         kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                               availble_gpu_memory)
-        num_gpu_blocks = kv_cache_config.num_blocks
-        num_cpu_blocks = 0
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize(kv_cache_config)
@@ -88,7 +85,7 @@ class EngineCore:
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
-        return num_gpu_blocks, num_cpu_blocks
+        return kv_cache_config
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""

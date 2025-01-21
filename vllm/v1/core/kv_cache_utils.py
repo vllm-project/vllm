@@ -33,7 +33,8 @@ class BlockHashType(NamedTuple):
 @dataclass
 class KVCacheBlock:
     """KV-cache block metadata."""
-    # Block ID, ranging from 0 to num_gpu_blocks - 1.
+    # Block ID, ranging from 0 to num_gpu_blocks - 1, and a special null_block
+    # with block_id = -1.
     block_id: int
     # Reference count.
     ref_cnt: int = 0
@@ -282,14 +283,15 @@ def hash_block_tokens(
                          tuple(curr_block_token_ids), extra_keys)
 
 
-def hash_request_tokens(block_size: int,
-                        request: Request) -> List[BlockHashType]:
+def hash_request_tokens(block_size: int, request: Request,
+                        group_id: int) -> List[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
     Args:
         block_size: The size of each block.
         request: The request object.
+        group_id: TODO
 
     Returns:
         The list of computed hash values.
@@ -301,8 +303,7 @@ def hash_request_tokens(block_size: int,
             "The number of multi-modal positions and hashes must match.")
 
     # TODO: Extend this to support other features such as LoRA.
-    need_extra_keys = bool(mm_positions)
-    extra_keys = None
+    need_mm_keys = bool(mm_positions)
     curr_mm_idx = 0
 
     ret = []
@@ -314,13 +315,17 @@ def hash_request_tokens(block_size: int,
         if len(block_token_ids) < block_size:
             break
 
+        extra_keys = [group_id]
+
         # Add extra keys if the block is a multi-modal block.
-        if need_extra_keys:
-            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+        if need_mm_keys:
+            mm_keys, curr_mm_idx = generate_block_hash_extra_keys(
                 request, start, end, curr_mm_idx)
+        if mm_keys is not None:
+            extra_keys.extend(mm_keys)
 
         block_hash = hash_block_tokens(parent_block_hash_value,
-                                       block_token_ids, extra_keys)
+                                       block_token_ids, tuple(extra_keys))
         ret.append(block_hash)
         parent_block_hash_value = block_hash.hash_value
     return ret
