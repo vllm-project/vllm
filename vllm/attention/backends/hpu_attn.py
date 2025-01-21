@@ -76,6 +76,7 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     is_prompt: bool
     attn_bias: Optional[torch.Tensor]
     seq_lens_tensor: Optional[torch.Tensor]
+    context_lens_tensor: Optional[torch.Tensor]
 
 
 class HPUAttentionImpl(AttentionImpl, torch.nn.Module):

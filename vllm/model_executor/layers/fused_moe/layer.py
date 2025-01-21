@@ -186,6 +186,26 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_expert_group,
         )
 
+    def forward_hpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        **kwargs,
+    ):
+        assert not use_grouped_topk, "use_grouped_topk must be False on HPU"
+        assert num_expert_group is None, ('num_expert_group is '
+                                          'not supported on HPU')
+        assert topk_group is None, "topk_group is not supported on HPU"
+        if layer is not None:
+            return layer.hpu_fused_moe(x, layer.w13_weight, layer.w2_weight,
+                                       router_logits, top_k)
+
     def forward_tpu(
         self,
         layer: torch.nn.Module,
@@ -285,6 +305,9 @@ class FusedMoE(torch.nn.Module):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
+        if current_platform.is_hpu():
+            from vllm_hpu_extension.ops import DynamicFusedMOE
+            self.hpu_fused_moe = DynamicFusedMOE(self.num_experts)
 
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
