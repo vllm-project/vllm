@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
@@ -629,19 +630,45 @@ class GPUModelRunner:
             for input_id in encoder_input_ids:
                 mm_inputs.append(req_state.mm_inputs[input_id])
                 req_input_ids.append((req_id, input_id))
-        batched_mm_inputs = MultiModalKwargs.batch(mm_inputs)
-        batched_mm_inputs = MultiModalKwargs.as_kwargs(batched_mm_inputs,
-                                                       device=self.device)
 
-        # Run the encoder.
-        # `encoder_outputs` is either of the following:
-        # 1. A tensor of shape [num_images, feature_size, hidden_size]
-        # in case when feature_size is fixed across all images.
-        # 2. A list (length: num_images) of tensors, each of shape
-        # [feature_size, hidden_size] in case when the feature size is
-        # dynamic depending on input images.
-        encoder_outputs = self.model.get_multimodal_embeddings(
-            **batched_mm_inputs)
+        # Batch mm inputs as much as we can: if a request has multiple or
+        # a different modality than the previous one, we process it
+        # separately to preserve item order.
+        # FIXME(ywang96): This is a hacky way to deal with multiple modalities
+        # in the same batch while still being able to benefit from batching
+        # multimodal inputs. The proper solution should be reordering the
+        # encoder outputs.
+        grouped_mm_inputs_list = group_mm_inputs_by_modality(mm_inputs)
+
+        # If there is only one group (single modality), we can return the
+        # result directly.
+        if len(grouped_mm_inputs_list) == 1:
+            batched_mm_inputs = MultiModalKwargs.batch(
+                grouped_mm_inputs_list[0])
+            batched_mm_inputs = MultiModalKwargs.as_kwargs(batched_mm_inputs,
+                                                           device=self.device)
+            # Run the encoder.
+            # `encoder_outputs` is either of the following:
+            # 1. A tensor of shape [num_items, feature_size, hidden_size]
+            # in case when feature_size is fixed across all multimodal items.
+            # 2. A list of tuple (length: num_items) of tensors, each of shape
+            # (feature_size, hidden_size) in case when the feature size is
+            # dynamic depending on input multimodal items.
+            encoder_outputs = self.model.get_multimodal_embeddings(
+                **batched_mm_inputs)
+
+        # If there are multiple groups, we process them one by one
+        # and concatenate the results.
+        else:
+            encoder_outputs = []
+            for grouped_mm_inputs in grouped_mm_inputs_list:
+                batched_mm_inputs = MultiModalKwargs.batch(grouped_mm_inputs)
+                batched_mm_inputs = MultiModalKwargs.as_kwargs(
+                    batched_mm_inputs, device=self.device)
+                curr_group_outputs = self.model.get_multimodal_embeddings(
+                    **batched_mm_inputs)
+                for output in curr_group_outputs:
+                    encoder_outputs.append(output)
 
         # Cache the encoder outputs.
         for (req_id, input_id), output in zip(req_input_ids, encoder_outputs):

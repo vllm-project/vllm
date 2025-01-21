@@ -26,7 +26,7 @@ _M = TypeVar("_M")
 
 if TYPE_CHECKING:
     from .hasher import MultiModalHashDict
-    from .inputs import MultiModalPlaceholderDict
+    from .inputs import MultiModalKwargs, MultiModalPlaceholderDict
 
 
 class MediaConnector:
@@ -477,3 +477,47 @@ def merge_and_sort_multimodal_metadata(
         merged_hashes = None
 
     return sorted_modalities, merged_placeholders, merged_hashes
+
+
+def group_mm_inputs_by_modality(
+        mm_inputs: list["MultiModalKwargs"]) -> list[list["MultiModalKwargs"]]:
+    """Group consecutive MultiModalKwargs from mm_inputs with the same modality 
+    together into the same list for batching purpose. For MultiModalKwargs with 
+    multiple modalities, put them into their own list.
+
+    Args:
+        mm_inputs: List of MultiModalKwargs.
+
+    Returns:
+        list[list[MultiModalKwargs]]: List of list of MultiModalKwargs, each 
+        inner list contains consecutive MultiModalKwargs with same modality, or
+        one with multimodal modalities.
+    """
+    if not mm_inputs:
+        return []
+
+    grouped_mm_inputs = []
+    current_group = [mm_inputs[0]]
+
+    for mm_input in mm_inputs[1:]:
+        # If the current input has multiple modalities, finalize the current
+        # group and start a new standalone group for this input.
+        if len(mm_input.modalities) > 1:
+            grouped_mm_inputs.append(current_group)
+            current_group = [mm_input]
+        else:
+            # If the current input has the same single modality as the previous
+            # one, add it to the current group.
+            if (len(current_group[-1].modalities) == 1
+                    and mm_input.modalities == current_group[-1].modalities):
+                current_group.append(mm_input)
+            else:
+                # Otherwise, finalize the current group and start a new one.
+                grouped_mm_inputs.append(current_group)
+                current_group = [mm_input]
+
+    # Add the last group to the result.
+    if current_group:
+        grouped_mm_inputs.append(current_group)
+
+    return grouped_mm_inputs
