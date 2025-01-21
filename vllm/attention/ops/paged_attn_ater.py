@@ -77,7 +77,7 @@ class PagedAttention:
     ) -> None:
         # print(f"{key.shape=}{key.dtype}")
         # print(f"{key_cache.shape=}{key_cache.dtype}")
-        # print(f"{value_cache.shape=}{value_cache.dtype}")
+        print(f"{value_cache.shape=}{value_cache.dtype}")
         # print(f"{k_scale.shape=}{k_scale.dtype}")
         # print(f"{v_scale.shape=}{v_scale.dtype}")
         # print(f"{k_scale.numel()=}")
@@ -150,9 +150,10 @@ class PagedAttention:
         # TODO(woosuk): Tune this heuristic.
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
 
+        max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
         if kv_cache_dtype not in ['int8', 'fp8', 'fp8', 'fp8_e5m2', 'fp8_e4m3']:
             k_scale, v_scale = (None, None)
-        return ater.pa_fwd_asm(query, key_cache, value_cache, block_tables, seq_lens, k_scale, v_scale)
+        return ater.pa_fwd_asm(query, key_cache, value_cache, block_tables, seq_lens, max_num_blocks_per_seq, k_scale, v_scale)
 
     @staticmethod
     def forward_prefix(
