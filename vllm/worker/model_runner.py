@@ -473,6 +473,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.block_aligned_sliding_window = \
                 self.sliding_window_blocks * self.block_size
 
+        self.prepare(finished_requests_ids)
+
     def prepare(self,
                 finished_requests_ids: Optional[List[str]] = None) -> None:
         self.finished_requests_ids = finished_requests_ids
