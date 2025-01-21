@@ -615,6 +615,16 @@ class VllmBackend:
                                     self.vllm_config, self.graph_pool,
                                     self).run(*example_inputs)
 
+        graph_path = os.path.join(local_cache_dir, "computation_graph.py")
+        if not os.path.exists(graph_path):
+            # code adapted from https://github.com/thuml/depyf/blob/dab831108a752d1facc00acdd6d4243891845c37/depyf/explain/patched_lazy_format_graph_code.py#L30 # noqa
+            # use `print_readable` because it can include submodules
+            src = "from __future__ import annotations\nimport torch\n" + \
+                self.split_gm.print_readable(print_output=False)
+            src = src.replace("<lambda>", "GraphModule")
+            with open(graph_path, "w") as f:
+                f.write(src)
+
         self._called = True
 
         if not self.compilation_config.use_cudagraph or \
