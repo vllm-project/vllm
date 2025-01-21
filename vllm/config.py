@@ -2914,8 +2914,7 @@ class CompilationConfig(BaseModel):
     def init_with_specific_sizes(self,
                                  cudagraph_capture_sizes: List[int]) -> None:
         """To complete the initialization of config,
-        we need to know the cudagraph sizes, and the
-        sizes we only compile but not capture cudagraph."""
+        we need to know the cudagraph sizes."""
 
         if self.cudagraph_capture_sizes is None:
             self.capture_sizes = cudagraph_capture_sizes
