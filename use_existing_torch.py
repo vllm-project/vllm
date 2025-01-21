@@ -7,7 +7,7 @@ for file in requires_files:
     with open(file) as f:
         lines = f.readlines()
     # filter out comments
-    lines = [ line.split(" #")[0] for line in lines ]
+    lines = [line.split(" #")[0] for line in lines]
     if "torch" in "".join(lines).lower():
         print("removed:")
         with open(file, 'w') as f:
