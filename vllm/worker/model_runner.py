@@ -484,6 +484,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.inter_data_list: List[
             ModelInputForGPUBuilder.InterDataForSeqGroup] = []
 
+        self.attn_metadata_builder.prepare()
+
     def _compute_lens(self, inter_data: InterDataForSeqGroup, seq_idx: int,
                       seq_group_metadata: SequenceGroupMetadata):
         """Compute context length, sequence length and tokens
