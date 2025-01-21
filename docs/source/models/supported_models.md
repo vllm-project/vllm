@@ -470,6 +470,11 @@ of the whole prompt are extracted from the normalized hidden state corresponding
   - `Qwen/Qwen2.5-Math-RM-72B`, etc.
   - ✅︎
   - ✅︎
+* - `Qwen2ForProcessRewardModel`
+  - Qwen2-based
+  - `Qwen/Qwen2.5-Math-PRM-7B`, `Qwen/Qwen2.5-Math-PRM-72B`, etc.
+  - ✅︎
+  - ✅︎
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
@@ -754,7 +759,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `Qwen/QVQ-72B-Preview`, `Qwen/Qwen2-VL-7B-Instruct`, `Qwen/Qwen2-VL-72B-Instruct`, etc.
   - ✅︎
   - ✅︎
-  -
+  - ✅︎
 * - `UltravoxModel`
   - Ultravox
   - T + A<sup>E+</sup>
