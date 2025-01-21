@@ -4,11 +4,8 @@ from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple, Union
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
-from vllm.logger import init_logger
 
 Refcount = int
-
-logger = init_logger(__name__)
 
 
 class NaiveBlockAllocator(BlockAllocator):
