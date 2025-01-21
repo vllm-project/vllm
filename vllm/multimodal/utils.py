@@ -506,8 +506,6 @@ def group_mm_inputs_by_modality(
         # Otherwise return the modality string
         return list(mm_input.modalities)[0]
 
-    grouped_mm_inputs = []
-    for key, group in groupby(mm_inputs, key=modality_group_func):
-        grouped_mm_inputs.append(list(group))
-
-    return grouped_mm_inputs
+    return [
+        list(group) for _, group in groupby(mm_inputs, key=modality_group_func)
+    ]
