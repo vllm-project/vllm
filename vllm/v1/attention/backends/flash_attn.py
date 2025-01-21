@@ -143,7 +143,7 @@ class FlashAttentionImpl(AttentionImpl):
             assert VLLM_FLASH_ATTN_VERSION in [2, 3]
             self.fa_version = VLLM_FLASH_ATTN_VERSION
 
-        is_fa_version_supported(self.fa_version)
+        assert is_fa_version_supported(self.fa_version)
 
     def forward(
         self,
