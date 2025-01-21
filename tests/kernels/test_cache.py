@@ -160,7 +160,7 @@ def test_reshape_and_cache(
         cloned_value_cache = value_cache.clone()
 
     # Using default kv_scale
-    k_scale = v_scale = 1.0
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # Call the reshape_and_cache kernel.
     opcheck(torch.ops._C_cache_ops.reshape_and_cache,
