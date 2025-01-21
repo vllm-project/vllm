@@ -106,7 +106,7 @@ class MultiModalProfiler(Generic[_I]):
     def dummy_inputs(self) -> BaseDummyInputsBuilder[_I]:
         return self.processor.dummy_inputs
 
-    def _get_mm_limits(self) -> Mapping[str, int]:
+    def get_mm_limits(self) -> Mapping[str, int]:
         mm_config = self.processing_info.ctx.get_mm_config()
         mm_limit_per_prompt = mm_config.limit_per_prompt
 
@@ -146,7 +146,7 @@ class MultiModalProfiler(Generic[_I]):
         # Avoid circular import
         from vllm.sequence import SequenceData
 
-        mm_counts = self._get_mm_limits()
+        mm_counts = self.get_mm_limits()
 
         info = self.processing_info
         mm_max_tokens_per_item = info.get_mm_max_tokens_per_item(seq_len)
