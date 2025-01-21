@@ -14,7 +14,7 @@ from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
                             EngineCoreRequest, EngineCoreRequestType,
-                            EngineCoreRequestUnion)
+                            EngineCoreRequestUnion, EngineCoreResetPrefixCache)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import PickleEncoder
@@ -69,6 +69,9 @@ class EngineCoreClient(ABC):
     def profile(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
+    def reset_prefix_cache(self) -> None:
+        raise NotImplementedError
+
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
@@ -79,6 +82,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def profile_async(self, is_start: bool = True) -> None:
+        raise NotImplementedError
+
+    async def reset_prefix_cache_async(self) -> None:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
@@ -232,6 +238,10 @@ class SyncMPClient(MPClient):
         self._send_input(EngineCoreRequestType.PROFILE,
                          EngineCoreProfile(is_start))
 
+    def reset_prefix_cache(self) -> None:
+        self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE,
+                         EngineCoreResetPrefixCache())
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
@@ -269,3 +279,7 @@ class AsyncMPClient(MPClient):
     async def profile_async(self, is_start: bool = True) -> None:
         await self._send_input(EngineCoreRequestType.PROFILE,
                                EngineCoreProfile(is_start))
+
+    async def reset_prefix_cache_async(self) -> None:
+        await self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE,
+                               EngineCoreResetPrefixCache())

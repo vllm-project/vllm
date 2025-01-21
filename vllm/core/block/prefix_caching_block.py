@@ -12,6 +12,7 @@ from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId, Device,
 from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
+from vllm.logger import init_logger
 from vllm.sequence import Sequence
 
 PrefixHash = int
@@ -20,6 +21,8 @@ PrefixHash = int
 # so that if we find one block is still hold _DEFAULT_LAST_ACCESSED_TIME,
 # then we know this block hasn't been accessed yet.
 _DEFAULT_LAST_ACCESSED_TIME = -1
+
+logger = init_logger(__name__)
 
 
 class BlockTracker:
@@ -428,14 +431,17 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def get_prefix_cache_hit_rate(self) -> float:
         return self.metric_data.get_hit_rate()
-    
+
     def reset_prefix_cache(self):
         """Reset prefix cache."""
-        num_used_blocks = self.get_num_total_blocks - self.get_num_free_blocks
+        num_used_blocks = (self.get_num_total_blocks() -
+                           self.get_num_free_blocks())
         if num_used_blocks > 0:
-            raise RuntimeError("Failed to reset prefix cache because some "
-                               f"blocks ({num_used_blocks}) are not freed yet")
-        
+            logger.warning(
+                "Failed to reset prefix cache because some "
+                "blocks (%d) are not freed yet", num_used_blocks)
+            return
+
         # Reset the evictor.
         self.evictor = make_evictor(self.eviction_policy)
 

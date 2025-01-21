@@ -123,9 +123,9 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def reset_prefix_cache(self, device: Device):
-        """Reset prefix cache."""
-        pass 
+    def reset_prefix_cache(self):
+        """Reset prefix cache for all devices."""
+        pass
 
     @abstractmethod
     def get_num_cached_tokens(self, seq: Sequence) -> int:
