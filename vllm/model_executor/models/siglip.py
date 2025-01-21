@@ -345,7 +345,7 @@ class SiglipMLP(nn.Module):
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
         # Special handling for BNB quantization
-        if quant_config.__class__.__name__ == "BitsAndBytesConfig":
+        if quant_config and quant_config.get_name() == "bitsandbytes":
             quantizable = True
         else:
             # For other quantization, we require the hidden size to be a 
