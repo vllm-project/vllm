@@ -16,7 +16,6 @@ try:
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL)
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.semconv_ai import SpanAttributes as BaseSpanAttributes
     from opentelemetry.trace import SpanKind, Tracer, set_tracer_provider
     from opentelemetry.trace.propagation.tracecontext import (
         TraceContextTextMapPropagator)
@@ -92,21 +91,30 @@ def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
     return {h: headers[h] for h in TRACE_HEADERS if h in headers}
 
 
-class SpanAttributes(BaseSpanAttributes):
-    # The following span attribute names are added here because they are missing
-    # from the Semantic Conventions for LLM.
-    LLM_REQUEST_ID = "gen_ai.request.id"
-    LLM_REQUEST_N = "gen_ai.request.n"
-    LLM_USAGE_NUM_SEQUENCES = "gen_ai.usage.num_sequences"
-    LLM_LATENCY_TIME_IN_QUEUE = "gen_ai.latency.time_in_queue"
-    LLM_LATENCY_TIME_TO_FIRST_TOKEN = "gen_ai.latency.time_to_first_token"
-    LLM_LATENCY_E2E = "gen_ai.latency.e2e"
-    LLM_LATENCY_TIME_IN_SCHEDULER = "gen_ai.latency.time_in_scheduler"
+class SpanAttributes:
+    # Attribute names copied from here to avoid version conflicts:
+    # https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/gen-ai-spans.md
+    GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
+    GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
+    GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
+    GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
+    GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
+    GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
+    # Attribute names added until they are added to the semantic conventions:
+    GEN_AI_REQUEST_ID = "gen_ai.request.id"
+    GEN_AI_REQUEST_N = "gen_ai.request.n"
+    GEN_AI_USAGE_NUM_SEQUENCES = "gen_ai.usage.num_sequences"
+    GEN_AI_LATENCY_TIME_IN_QUEUE = "gen_ai.latency.time_in_queue"
+    GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN = "gen_ai.latency.time_to_first_token"
+    GEN_AI_LATENCY_E2E = "gen_ai.latency.e2e"
+    GEN_AI_LATENCY_TIME_IN_SCHEDULER = "gen_ai.latency.time_in_scheduler"
     # Time taken in the forward pass for this across all workers
-    LLM_LATENCY_TIME_IN_MODEL_FORWARD = "gen_ai.latency.time_in_model_forward"
+    GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD = (
+        "gen_ai.latency.time_in_model_forward")
     # Time taken in the model execute function. This will include model
     # forward, block/sync across workers, cpu-gpu sync time and sampling time.
-    LLM_LATENCY_TIME_IN_MODEL_EXECUTE = "gen_ai.latency.time_in_model_execute"
+    GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE = (
+        "gen_ai.latency.time_in_model_execute")
 
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:
