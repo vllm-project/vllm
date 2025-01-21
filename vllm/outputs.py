@@ -172,9 +172,9 @@ class RequestOutput:
         if seq_group.request_id in seq_id_to_seq_group:
             group: SequenceGroupBase = seq_id_to_seq_group[
                 seq_group.request_id]
+            assembled_seq_group = group.maybe_assemble_group(seq_group)
             if finished:
                 group.finish_seq(seq_group)
-            assembled_seq_group = group.maybe_assemble_group(seq_group)
             if assembled_seq_group is None:
                 return None
             return cls.from_seq_group(assembled_seq_group, use_cache,
