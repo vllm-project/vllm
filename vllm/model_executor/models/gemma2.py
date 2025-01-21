@@ -327,6 +327,11 @@ class Gemma2Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
+            if self.quant_config and self.quant_config.get_name() == "gguf" \
+                and name.endswith("norm.weight"):
+                # Revert +1 during llama.cpp conversion
+                # see: https://github.com/ggerganov/llama.cpp/blob/2e2f8f093cd4fb6bbb87ba84f6b9684fa082f3fa/convert_hf_to_gguf.py#L3313-L3315
+                loaded_weight -= 1
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache scales for compressed-tensors quantization
