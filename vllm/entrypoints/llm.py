@@ -5,8 +5,8 @@ from typing import (Any, Callable, ClassVar, Dict, List, Optional, Sequence,
                     Tuple, Type, Union, cast, overload)
 
 import cloudpickle
-import torch.nn as nn
 import torch
+import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
 
@@ -1049,7 +1049,7 @@ class LLM:
 
             raise ValueError(" ".join(messages))
 
-        if self.llm_engine.model_config.task not in ["embed", "score"]:
+        if self.llm_engine.model_config.task not in ("embed", "score"):
             raise ValueError(
                 "Score API is only enabled for `--task embed or score`")
 
@@ -1130,21 +1130,22 @@ class LLM:
             return [ScoringRequestOutput.from_base(item) for item in items]
 
         elif self.llm_engine.model_config.runner_type == "pooling":
-            encoded_text = self.encode(text_1 + text_2)
-            encoded_text_1 = encoded_text[0:len(text_1)]
-            encoded_text_2 = encoded_text[len(text_1):]
+            encoded_output = self.encode(text_1 + text_2)
+            encoded_output_1 = encoded_output[0:len(text_1)]
+            encoded_output_2 = encoded_output[len(text_1):]
 
-            if len(encoded_text_1) == 1:
-                encoded_text_1 = encoded_text_1 * len(encoded_text_2)
+            if len(encoded_output_1) == 1:
+                encoded_output_1 = encoded_output_1 * len(encoded_output_2)
 
-            output_pairs = [(t1, t2)
-                            for t1, t2 in zip(encoded_text_1, encoded_text_2)]
+            output_pairs = [
+                (t1, t2) for t1, t2 in zip(encoded_output_1, encoded_output_2)
+            ]
 
             scores = []
-            cosSim = torch.nn.CosineSimilarity(0)
+            scorer = torch.nn.CosineSimilarity(0)
 
             for embed_1, embed_2 in output_pairs:
-                pair_score = cosSim(embed_1.outputs.data, embed_2.outputs.data)
+                pair_score = scorer(embed_1.outputs.data, embed_2.outputs.data)
 
                 if getattr(tokenizer, "pad_token", None) is None:
                     tokens = embed_1.prompt_token_ids + embed_2.prompt_token_ids
