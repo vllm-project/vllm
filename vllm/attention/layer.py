@@ -70,8 +70,21 @@ class Attention(nn.Module):
         # expect the pre-quantized k/v_scale to be loaded along
         # with the model weights.
         self.kv_cache_dtype = kv_cache_dtype
-        self._k_scale = 1.0
-        self._v_scale = 1.0
+        k_scales_lists = v_scales_lists = [1.0]
+        # k_scales_lists = [0.16]
+        # v_scales_lists = [0.005]
+        self._k_scales = torch.Tensor(k_scales_lists).type(torch.float32).to("cuda")
+        self._v_scales = torch.Tensor(v_scales_lists).type(torch.float32).to("cuda")
+        self._quant_group = cache_config.kv_quant_group
+        if cache_config.cache_dtype.startswith("int8"):
+            if cache_config.kv_quant_params_path is not None:
+                k_scales_lists = cache_config.kv_quant_params[0].pop(0)
+                v_scales_lists = cache_config.kv_quant_params[1].pop(0)
+                self._k_scales = torch.Tensor(k_scales_lists).type(torch.float32).to("cuda")
+                self._v_scales = torch.Tensor(v_scales_lists).type(torch.float32).to("cuda")
+                if self._quant_group !=0:
+                    self._k_scales = self._k_scales.reshape((-1, num_kv_heads, head_size//self._quant_group))
+                    self._v_scales = self._v_scales.reshape((-1, num_kv_heads, head_size//self._quant_group))
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
         if quant_method is not None:
@@ -135,6 +148,7 @@ class Attention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+
         if self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)

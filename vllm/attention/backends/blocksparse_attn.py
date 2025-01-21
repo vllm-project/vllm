@@ -401,8 +401,9 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
+                layer._quant_group,
+                layer._k_scales,
+                layer._v_scales,
             )
 
         if prefill_meta := attn_metadata.prefill_metadata:
@@ -439,8 +440,9 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                layer._k_scale,
-                layer._v_scale,
+                layer._quant_group,
+                layer._k_scales,
+                layer._v_scales,
                 tp_rank=self.tp_rank,
                 blocksparse_local_blocks=self.local_blocks,
                 blocksparse_vert_stride=self.vert_stride,

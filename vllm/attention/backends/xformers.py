@@ -526,7 +526,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # profiling run.
                 PagedAttention.write_to_paged_cache(
                     key, value, key_cache, value_cache, updated_slot_mapping,
-                    self.kv_cache_dtype, layer._k_scale, layer._v_scale)
+                    self.kv_cache_dtype, layer._quant_group, layer._k_scales, layer._v_scales)
         (num_prefill_query_tokens, num_prefill_kv_tokens,
         num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
@@ -578,8 +578,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                     self.sliding_window,
-                    layer._k_scale,
-                    layer._v_scale,
+                    layer._quant_group,
+                    layer._k_scales,
+                    layer._v_scales,
                 )
                 assert output[:num_prefill_query_tokens].shape == out.shape
                 output[:num_prefill_query_tokens] = out
@@ -605,8 +606,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                layer._k_scale,
-                layer._v_scale,
+                layer._quant_group,
+                layer._k_scales,
+                layer._v_scales,
             )
 
         # Reshape the output tensor.

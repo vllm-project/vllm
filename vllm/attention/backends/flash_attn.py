@@ -657,7 +657,7 @@ class FlashAttentionImpl(AttentionImpl):
         NOTE: It in-place updates the output tensor.
         """
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
-        assert layer._k_scale == 1.0 and layer._v_scale == 1.0, (
+        assert layer._k_scales.shape != torch.Size([]) and layer._v_scales.shape != torch.Size([]), (
             "key/v_scale is not supported in FlashAttention.")
 
         assert output is not None, "Output tensor must be provided."
@@ -709,8 +709,9 @@ class FlashAttentionImpl(AttentionImpl):
                     kv_cache[1],
                     updated_slot_mapping.flatten(),  # type: ignore[union-attr]
                     kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
+                    layer._quant_group,
+                    layer._k_scales,
+                    layer._v_scales,
                 )
 
         (num_prefill_query_tokens, num_prefill_kv_tokens,
@@ -906,3 +907,4 @@ def _get_causal_option(attn_type: str) -> bool:
     return not (attn_type == AttentionType.ENCODER
                 or attn_type == AttentionType.ENCODER_ONLY
                 or attn_type == AttentionType.ENCODER_DECODER)
+

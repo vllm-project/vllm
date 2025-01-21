@@ -66,6 +66,10 @@ template <>
 struct FloatVec<uint4> {
   using Type = Float8_;
 };
+template<>
+struct FloatVec<uint8_t> {
+    using Type = float;
+};
 
 // Utility functions for type conversions.
 inline __device__ uint32_t h0_h0(uint16_t a) {

@@ -193,7 +193,9 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert layer._k_scale == 1.0 and layer._v_scale == 1.0
+        # assert layer._k_scales[0] == 1.0 and layer._v_scales[0] == 1.0
+        assert layer._k_scales.shape != torch.Size([]) and layer._v_scales.shape != torch.Size([])
+
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -210,8 +212,9 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                 value_cache,
                 attn_metadata.slot_mapping.flatten(),
                 self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
+                layer._quant_group,
+                layer._k_scales,
+                layer._v_scales,
             )
 
         if attn_metadata.is_prompt:
@@ -296,8 +299,9 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
+                    layer._quant_group,
+                    layer._k_scales,
+                    layer._v_scales,
                 )
             else:
                 # Run PagedAttention V2.
@@ -329,8 +333,9 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
+                    layer._quant_group,
+                    layer._k_scales,
+                    layer._v_scales,
                 )
 
             # Reshape the output tensor.

@@ -150,7 +150,8 @@ class FlashAttentionImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
-        assert layer._k_scale == 1.0 and layer._v_scale == 1.0, (
+        # assert layer._k_scales[0] == 1.0 and layer._v_scales[0] == 1.0, (
+        assert layer._k_scales.shape != torch.Size([]) and layer._v_scales.shape != torch.Size([]), (
             "key/v_scale is not supported in FlashAttention.")
 
         assert output is not None, "Output tensor must be provided."
@@ -182,8 +183,9 @@ class FlashAttentionImpl(AttentionImpl):
             value_cache,
             attn_metadata.slot_mapping,
             self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
+            layer._quant_group,
+            layer._k_scales,
+            layer._v_scales,
         )
 
         # Compute attention and update output up to `num_actual_tokens`.

@@ -451,7 +451,9 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert layer._k_scale == 1.0 and layer._v_scale == 1.0
+        # assert layer._k_scales[0] == 1.0 and layer._v_scales[0] == 1.0
+        assert layer._k_scales.shape != torch.Size([]) and layer._v_scales.shape != torch.Size([])
+
         attn_type = self.attn_type
         if (attn_type == AttentionType.ENCODER
                 and (not attn_metadata.is_all_encoder_attn_metadata_set)):
@@ -495,7 +497,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
 
                 PagedAttention.write_to_paged_cache(
                     key, value, key_cache, value_cache, updated_slot_mapping,
-                    self.kv_cache_dtype, layer._k_scale, layer._v_scale)
+                    self.kv_cache_dtype, layer._quant_group, layer._k_scales, layer._v_scales)
 
         if attn_type != AttentionType.ENCODER:
             # Decoder self-attention supports chunked prefill.
@@ -569,8 +571,9 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                layer._k_scale,
-                layer._v_scale,
+                layer._quant_group,
+                layer._k_scales,
+                layer._v_scales,
             )
 
         # Reshape the output tensor.

@@ -457,9 +457,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
+                self.kv_cache_dtype,\
+                layer._quant_group,
+                layer._k_scales,
+                layer._v_scales,
             )
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
@@ -567,8 +568,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                     self.sliding_window[0],
-                    layer._k_scale,
-                    layer._v_scale,
+                    layer._quant_group,
+                    layer._k_scales,
+                    layer._v_scales,
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -613,8 +615,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
+                    layer._quant_group,
+                    layer._k_scales,
+                    layer._v_scales,
                 )
             else:
                 output[num_prefill_tokens:] = PagedAttention.forward_decode(
@@ -628,8 +631,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.num_kv_heads,
                     self.scale,
                     self.alibi_slopes,
-                    layer._k_scale,
-                    layer._v_scale,
+                    layer._quant_group,
+                    layer._k_scales,
+                    layer._v_scales,
                 )
 
         # Reshape the output tensor.
