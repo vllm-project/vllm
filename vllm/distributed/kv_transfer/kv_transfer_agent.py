@@ -68,7 +68,7 @@ class KVTransferAgent:
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor]
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], List[bool],
                "ModelInputForGPUWithSamplingMetadata"]:
 
         return self.connector.recv_kv_caches_and_hidden_states(

@@ -87,7 +87,7 @@ class KVConnectorBase(ABC):
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor]
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], List[bool],
                "ModelInputForGPUWithSamplingMetadata"]:
         """
         Receive KV caches and hidden states from the connector.
@@ -110,7 +110,7 @@ class KVConnectorBase(ABC):
             IntermediateTensors): 
                 Concatenated hidden states if all required data is retrieved, 
                 otherwise `None`.
-            - bypass_model_exec (bool): 
+            - bypass_model_exec (List[bool]): 
                 Indicates whether the model execution can be skipped (True) or 
                 needs to be redone (False).
             - model_input (ModelInputForGPUWithSamplingMetadata): 
