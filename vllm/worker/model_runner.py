@@ -1101,7 +1101,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
               SamplingMetadataCache() \
                 if self.parallel_config.pipeline_parallel_size == 1 else None
 
-        self.builder = self._builder_cls(weakref.proxy(self))
+        if hasattr(self, "_builder_cls"):
+            self.builder = self._builder_cls(weakref.proxy(self))
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)

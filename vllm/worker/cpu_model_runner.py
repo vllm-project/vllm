@@ -483,7 +483,8 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
-        self.builder = self._builder_cls(weakref.proxy(self))
+        if hasattr(self, "_builder_cls"):
+            self.builder = self._builder_cls(weakref.proxy(self))
 
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config)
