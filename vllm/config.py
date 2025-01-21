@@ -2785,6 +2785,7 @@ class CompilationConfig(BaseModel):
     compile_sizes: List[int] = PrivateAttr
     capture_sizes: List[int] = PrivateAttr
     max_capture_size: int = PrivateAttr
+    local_cache_dir: str = PrivateAttr  # local cache dir for one rank
     # optimization:
     # Intuitively, bs_to_padded_graph_size should be Dict[int, int].
     # since we know all keys are in a range [0, max_capture_size],
