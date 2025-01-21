@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 from vllm.model_executor.utils import set_weight_attrs
 
 
-class MoeQuantIntConfig(QuantizationConfig):
+class MoeWNA16Config(QuantizationConfig):
     """Config class for Int8 experts quantization."""
 
     def __init__(self, linear_quant_method: str, weight_bits: int,
@@ -38,7 +38,7 @@ class MoeQuantIntConfig(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> str:
-        return "moe_quant_int"
+        return "moe_wna16"
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
@@ -53,7 +53,7 @@ class MoeQuantIntConfig(QuantizationConfig):
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "MoeQuantIntConfig":
+    def from_config(cls, config: Dict[str, Any]) -> "MoeWNA16Config":
         linear_quant_method = cls.get_from_keys(config, ["quant_method"])
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
@@ -67,7 +67,7 @@ class MoeQuantIntConfig(QuantizationConfig):
             modules_to_not_convert = cls.get_from_keys(
                 config, ["modules_to_not_convert"])
         else:
-            raise ValueError("moe_quant_int only support gptq and awq.")
+            raise ValueError("moe_wna16 only support gptq and awq.")
 
         return cls(linear_quant_method, weight_bits, group_size, has_zp,
                    lm_head_quantized, modules_to_not_convert, config)
@@ -75,15 +75,14 @@ class MoeQuantIntConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
-        can_convert = cls.is_moe_quant_int_compatible(hf_quant_cfg)
-        is_valid_user_quant = (user_quant is None
-                               or user_quant == "moe_quant_int")
+        can_convert = cls.is_moe_wna16_compatible(hf_quant_cfg)
+        is_valid_user_quant = (user_quant is None or user_quant == "moe_wna16")
         if can_convert and is_valid_user_quant:
             return cls.get_name()
         return None
 
     @classmethod
-    def is_moe_quant_int_compatible(cls, quant_config: Dict[str, Any]):
+    def is_moe_wna16_compatible(cls, quant_config: Dict[str, Any]):
         # Extract data from quant config.
         quant_method = quant_config.get("quant_method", "").lower()
         num_bits = quant_config.get("bits")
@@ -110,9 +109,9 @@ class MoeQuantIntConfig(QuantizationConfig):
                 awq_config = AWQMarlinConfig.from_config(self.full_config)
                 return AWQMarlinLinearMethod(awq_config)
             else:
-                raise ValueError("moe_quant_int only support gptq and awq.")
+                raise ValueError("moe_wna16 only support gptq and awq.")
         elif isinstance(layer, FusedMoE):
-            return MoeQuantIntMethod(self)
+            return MoeWNA16Method(self)
         return None
 
 
@@ -120,9 +119,9 @@ def is_layer_skipped_quant(prefix: str, modules_to_not_convert: List[str]):
     return any(module_name in prefix for module_name in modules_to_not_convert)
 
 
-class MoeQuantIntMethod(FusedMoEMethodBase):
+class MoeWNA16Method(FusedMoEMethodBase):
 
-    def __init__(self, quant_config: MoeQuantIntConfig):
+    def __init__(self, quant_config: MoeWNA16Config):
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -152,7 +151,7 @@ class MoeQuantIntMethod(FusedMoEMethodBase):
 
         assert 'weight_loader' in extra_weight_attrs
         weight_loader = extra_weight_attrs['weight_loader']
-        wrapped_weight_loader = MoeQuantIntMethod.get_weight_loader(
+        wrapped_weight_loader = MoeWNA16Method.get_weight_loader(
             layer, weight_loader)
         extra_weight_attrs['weight_loader'] = wrapped_weight_loader
 
@@ -300,10 +299,10 @@ class MoeQuantIntMethod(FusedMoEMethodBase):
             tensor = tensor[:, :, 0] + tensor[:, :, 1] * 16
             return tensor
 
-        def moe_quant_int_weight_loader(param: torch.nn.Parameter,
-                                        loaded_weight: torch.Tensor,
-                                        weight_name: str, shard_id: str,
-                                        expert_id: int):
+        def moe_wna16_weight_loader(param: torch.nn.Parameter,
+                                    loaded_weight: torch.Tensor,
+                                    weight_name: str, shard_id: str,
+                                    expert_id: int):
             if "g_idx" in weight_name:
                 return
             if not layer.quant_config.has_zp and "qzeros" in weight_name:
@@ -359,4 +358,4 @@ class MoeQuantIntMethod(FusedMoEMethodBase):
                 weight_loader(param, loaded_weight, weight_name, shard_id,
                               expert_id)
 
-        return moe_quant_int_weight_loader
+        return moe_wna16_weight_loader

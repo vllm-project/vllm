@@ -66,9 +66,9 @@ def test_fused_moe(
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.parametrize("has_zp", [True, False])
 @pytest.mark.parametrize("weight_bits", [4, 8])
-def test_fused_moe_quant_int(m: int, n: int, k: int, e: int, topk: int,
-                             dtype: torch.dtype, group_size: int, has_zp: bool,
-                             weight_bits: int):
+def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
+                        dtype: torch.dtype, group_size: int, has_zp: bool,
+                        weight_bits: int):
     print(m, n, k, e, topk, dtype, group_size, has_zp, weight_bits)
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10

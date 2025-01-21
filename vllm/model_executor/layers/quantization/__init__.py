@@ -27,7 +27,7 @@ QUANTIZATION_METHODS: List[str] = [
     "neuron_quant",
     "ipex",
     "quark",
-    "moe_quant_int"
+    "moe_wna16"
 ]
 
 
@@ -56,7 +56,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .ipex_quant import IPEXConfig
     from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config
-    from .moe_quant_int import MoeQuantIntConfig
+    from .moe_wna16 import MoeWNA16Config
     from .neuron_quant import NeuronQuantConfig
     from .qqq import QQQConfig
     from .tpu_int8 import Int8TpuConfig
@@ -85,7 +85,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "neuron_quant": NeuronQuantConfig,
         "ipex": IPEXConfig,
         "quark": QuarkConfig,
-        "moe_quant_int": MoeQuantIntConfig,
+        "moe_wna16": MoeWNA16Config,
     }
 
     return method_to_config[quantization]
