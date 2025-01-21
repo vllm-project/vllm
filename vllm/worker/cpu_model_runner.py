@@ -154,8 +154,6 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.device = self.runner.device
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.enable_lora = self.runner.lora_config is not None
-        self.att_metadata_builder = self.runner.attn_backend.get_builder_cls()(
-            self)
 
         self.prepare(finished_requests_ids)
 
@@ -164,6 +162,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
         self.input_data = ModelInputForCPUBuilder.ModelInputData(
             self.runner.model_config.uses_mrope)
+        self.att_metadata_builder = self.runner.attn_backend.get_builder_cls()(
+            self)
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         self.seq_group_metadata_list.append(seq_group_metadata)

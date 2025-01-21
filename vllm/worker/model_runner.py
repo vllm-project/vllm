@@ -459,10 +459,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.decode_only = True
 
-        # Attention metadata inputs.
-        self.attn_metadata_builder = self.attn_backend.make_metadata_builder(
-            weakref.proxy(self))
-
         # Engine/Model configurations.
         self.chunked_prefill_enabled = (
             self.scheduler_config is not None
@@ -483,6 +479,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # the current sequence group.
         self.inter_data_list: List[
             ModelInputForGPUBuilder.InterDataForSeqGroup] = []
+
+        # Attention metadata inputs.
+        self.attn_metadata_builder = self.attn_backend.make_metadata_builder(
+            weakref.proxy(self))
 
     def _compute_lens(self, inter_data: InterDataForSeqGroup, seq_idx: int,
                       seq_group_metadata: SequenceGroupMetadata):
