@@ -16,7 +16,7 @@
 """ PyTorch Fuyu model."""
 import math
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+                    TypedDict)
 
 import torch
 import torch.nn as nn
@@ -30,13 +30,13 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, MultiModalKwargs,
-                                    NestedTensors, PlaceholderRange)
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptReplacementDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -215,9 +215,13 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
                 image_width=image_size.width,
                 image_height=image_size.height,
             )
+            image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
+                            [_NEWLINE_TOKEN_ID]) * nrows
 
-            return (([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows +
-                    [bos_token_id])
+            return PromptReplacementDetails(
+                full=image_tokens + [bos_token_id],
+                features=image_tokens,
+            )
 
         return [
             PromptReplacement(
@@ -226,26 +230,6 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
                 replacement=get_replacement_fuyu,
             )
         ]
-
-    def apply(
-        self,
-        prompt: Union[str, list[int]],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> MultiModalInputs:
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
-
-        # Only |SPEAKER| (image) tokens should be considered as placeholders,
-        # so we ignore the trailing bos_token_id
-        result["mm_placeholders"] = {
-            modality: [
-                PlaceholderRange(offset=p["offset"], length=p["length"] - 1)
-                for p in ps
-            ]
-            for modality, ps in result["mm_placeholders"].items()
-        }
-
-        return result
 
 
 @MULTIMODAL_REGISTRY.register_processor(FuyuMultiModalProcessor,
