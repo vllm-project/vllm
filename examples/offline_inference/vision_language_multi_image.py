@@ -393,7 +393,7 @@ def load_qwen2_vl(question, image_urls: List[str]) -> ModelRequestData:
 
 model_example_map = {
     "aria": load_aria,
-    "deepseek_vl2": load_deepseek_vl2,
+    "deepseek_vl_v2": load_deepseek_vl2,
     "h2ovl_chat": load_h2onvl,
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,
