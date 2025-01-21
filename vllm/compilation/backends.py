@@ -625,6 +625,8 @@ class VllmBackend:
             with open(graph_path, "w") as f:
                 f.write(src)
 
+            logger.info("Computation graph saved to %s", graph_path)
+
         self._called = True
 
         if not self.compilation_config.use_cudagraph or \

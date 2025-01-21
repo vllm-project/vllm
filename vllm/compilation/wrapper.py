@@ -85,8 +85,8 @@ class TorchCompileWrapperWithCustomDispatcher:
             return
 
         self.compiled_codes.append(new_code)
-        decompiled_file = os.path.join(self.compilation_config.local_cache_dir,
-                                       "transformed_code.py")
+        local_cache_dir = self.vllm_config.compilation_config.local_cache_dir
+        decompiled_file = os.path.join(local_cache_dir, "transformed_code.py")
         if not os.path.exists(decompiled_file):
             try:
                 # usually the decompilation will succeed for most models, as
@@ -97,11 +97,11 @@ class TorchCompileWrapperWithCustomDispatcher:
                 src = depyf.decompile(new_code)
                 with open(decompiled_file, "w") as f:
                     f.write(src)
+
+                logger.info("Dynamo transformed code saved to %s",
+                            decompiled_file)
             except Exception:
                 pass
-
-        if os.path.exists(decompiled_file):
-            logger.info("Dynamo transformed code saved to %s", decompiled_file)
 
         if self.vllm_config.compilation_config.use_cudagraph and \
             "update" in new_code.co_names:
