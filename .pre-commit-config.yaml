@@ -17,7 +17,7 @@ repos:
   rev: v2.3.0
   hooks:
   - id: codespell
-    exclude: 'benchmarks/sonnet.txt|(build|tests/(lora/data|models/fixtures|prompts))/.*'
+    exclude: 'benchmarks/sonnet.txt|(build|tests/(lora/data|models/fixtures|prompts))/.*|csrc/rocm/.*|csrc/gradlib/.*'
 - repo: https://github.com/PyCQA/isort
   rev: 5.13.2
   hooks:

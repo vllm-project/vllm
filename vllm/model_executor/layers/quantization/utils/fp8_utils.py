@@ -36,8 +36,8 @@ def apply_w8a8_block_fp8_linear(
 
 
 def input_to_float8(
-    x: torch.Tensor,
-    dtype: Optional[torch.dtype] = None
+        x: torch.Tensor,
+        dtype: Optional[torch.dtype] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """This function quantizes input values to float8 values "
     "with tensor-wise quantization."""
