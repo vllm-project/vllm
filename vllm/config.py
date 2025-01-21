@@ -2703,9 +2703,9 @@ class CompilationConfig(BaseModel):
         - use_inductor: whether to use inductor compilation.
             - False: inductor compilation is not used. graph runs in eager.
             - True: inductor compilation is used. one graph for symbolic shape
-                is compiled. In addition, compile for backend_compile_sizes,
+                is compiled. In addition, compile for compile_sizes,
                 using configurations in inductor_compile_config.
-        - backend_compile_sizes: sizes to compile for inductor. In addition
+        - compile_sizes: sizes to compile for inductor. In addition
             to integers, it also supports "cudagraph" to
             specify the sizes for cudagraph capture.
         - inductor_compile_config: additional configurations for inductor.
@@ -2735,8 +2735,7 @@ class CompilationConfig(BaseModel):
     splitting_ops: List[str] = Field(default=None)  # type: ignore
 
     use_inductor: bool = True
-    backend_compile_sizes: Optional[List[Union[int,
-                                               str]]] = Field(default=None)
+    compile_sizes: Optional[List[Union[int, str]]] = Field(default=None)
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
 
@@ -2784,7 +2783,6 @@ class CompilationConfig(BaseModel):
     pass_config: PassConfig = Field(default_factory=PassConfig)
 
     # not configurable, computed after init
-    compile_sizes: List[int] = PrivateAttr
     max_capture_size: int = PrivateAttr
     # optimization:
     # Intuitively, bs_to_padded_graph_size should be Dict[int, int].
@@ -2922,19 +2920,18 @@ class CompilationConfig(BaseModel):
                          " %s is overridden by config %s"),
                         cudagraph_capture_sizes, self.capture_sizes)
 
-        if self.backend_compile_sizes is None:
-            self.backend_compile_sizes = []
-
-        self.compile_sizes = []
-        for x in self.backend_compile_sizes:
-            if isinstance(x, str):
-                assert x == "cudagraph", \
-                "Unrecognized size type in backend_compile_sizes, " \
-                f"expect cudagraph, got {x}"
-                self.compile_sizes.extend(self.capture_sizes)
-            else:
-                assert isinstance(x, int)
-                self.compile_sizes.append(x)
+        computed_compile_sizes = []
+        if self.compile_sizes is not None:
+            for x in self.compile_sizes:
+                if isinstance(x, str):
+                    assert x == "cudagraph", \
+                    "Unrecognized size type in compile_sizes, " \
+                    f"expect 'cudagraph', got {x}"
+                    computed_compile_sizes.extend(self.capture_sizes)
+                else:
+                    assert isinstance(x, int)
+                    computed_compile_sizes.append(x)
+        self.compile_sizes = computed_compile_sizes
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.capture_sizes.sort(reverse=True)
