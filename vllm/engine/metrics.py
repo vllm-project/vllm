@@ -114,6 +114,10 @@ class Metrics:
             name="vllm:generation_tokens_total",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames)
+        self.counter_queue_tokens = self._counter_cls(
+            name="vllm:queue_tokens_total",
+            documentation="Number of tokens waiting in the queue.",
+            labelnames=labelnames)
         self.counter_tokens = self._counter_cls(
             name="vllm:tokens_total",
             documentation="Number of prefill plus generation tokens processed.",
@@ -440,6 +444,7 @@ class LoggingStatLogger(StatLoggerBase):
         # Save tracked stats for token counters.
         self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
         self.num_generation_tokens.append(stats.num_generation_tokens_iter)
+        self.num_queue_tokens.append(stats.num_queue_tokens_iter)
 
         # Update spec decode metrics
         self.maybe_update_spec_decode_metrics(stats)
@@ -496,6 +501,7 @@ class LoggingStatLogger(StatLoggerBase):
         # Reset tracked stats for next interval.
         self.num_prompt_tokens = []
         self.num_generation_tokens = []
+        self.num_queue_tokens = []
         self.last_local_log = stats.now
         self.spec_decode_metrics = None
         self.last_prompt_throughput = prompt_throughput
@@ -591,6 +597,8 @@ class PrometheusStatLogger(StatLoggerBase):
                           stats.num_prompt_tokens_iter)
         self._log_counter(self.metrics.counter_generation_tokens,
                           stats.num_generation_tokens_iter)
+        self._log_counter(self.metrics.counter_queue_tokens,
+                          stats.num_queue_tokens_iter)
         self._log_histogram(self.metrics.histogram_iteration_tokens,
                             [stats.num_tokens_iter])
         self._log_histogram(self.metrics.histogram_time_to_first_token,
@@ -635,7 +643,8 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.max_tokens_requests)
 
     def _log_prometheus_interval(self, prompt_throughput: float,
-                                 generation_throughput: float) -> None:
+                                 generation_throughput: float,
+                                 queue_throughput: float) -> None:
         # Logs metrics to prometheus that are computed every logging_interval.
         # Support legacy gauge metrics that make throughput calculations on
         # the vLLM side. Moving forward, we should use counters like
@@ -656,6 +665,7 @@ class PrometheusStatLogger(StatLoggerBase):
         # Save tracked stats for token counters.
         self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
         self.num_generation_tokens.append(stats.num_generation_tokens_iter)
+        self.num_queue_tokens.append(stats.num_queue_tokens_iter)
 
         # Update spec decode metrics
         self.maybe_update_spec_decode_metrics(stats)
@@ -672,10 +682,14 @@ class PrometheusStatLogger(StatLoggerBase):
                 self.num_generation_tokens,
                 now=stats.now,
                 last_log=self.last_local_log)
+            queue_throughput = get_throughput(self.num_queue_tokens,
+                                              now=stats.now,
+                                              last_log=self.last_local_log)
 
             self._log_prometheus_interval(
                 prompt_throughput=prompt_throughput,
-                generation_throughput=generation_throughput)
+                generation_throughput=generation_throughput,
+                queue_throughput=queue_throughput)
 
             if self.spec_decode_metrics is not None:
                 self._log_gauge(
@@ -696,6 +710,7 @@ class PrometheusStatLogger(StatLoggerBase):
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []
             self.num_generation_tokens = []
+            self.num_queue_tokens = []
             self.last_local_log = stats.now
             self.spec_decode_metrics = None
 

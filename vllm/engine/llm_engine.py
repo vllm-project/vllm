@@ -1575,6 +1575,7 @@ class LLMEngine:
         # Iteration stats
         num_prompt_tokens_iter = 0
         num_generation_tokens_iter = 0
+        num_queue_tokens_iter = 0
         num_tokens_iter = 0
         time_to_first_tokens_iter: List[float] = []
         time_per_output_tokens_iter: List[float] = []
@@ -1617,6 +1618,77 @@ class LLMEngine:
         max_lora_stat = "0"
         if self.lora_config:
             max_lora_stat = str(self.lora_config.max_loras)
+
+        # calculate tokens waiting in the queue
+        # relies on similar scheduler logic to determine
+        # if a waiting seqgroup can fit into the existing running group:
+        # https://github.com/vllm-project/vllm/blob/3db0cafdf1fe7f4cd7e41a145f78e8a568b4d63c/vllm/core/scheduler.py#L1662
+        for scheduler in self.scheduler:
+            for waiting_seq_group in scheduler.waiting:
+                # Add prompt tokens
+                prompt_length = len(waiting_seq_group.prompt_token_ids)
+                num_queue_tokens_iter += prompt_length
+                # Add expected generation tokens
+                # if waiting_seq_group.sampling_params:
+                #     num_queue_tokens_iter +=\
+                #         waiting_seq_group.sampling_params.max_tokens
+            # for seq_group in scheduler.waiting: 
+            #     num_cached_new_tokens = 0
+            #     num_uncached_new_tokens = 0
+
+            #     seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
+            #     # Compute the number of new uncached and cached tokens
+            #     # for each sequence.
+            #     for seq in seqs:
+            #         if not seq.is_prefill():
+            #             # Decode sequences should always just have 1
+            #             # uncached token
+            #             # TODO(rickyx): Actually is this still
+            #             # correct for multi-step?
+            #             num_uncached_new_tokens += 1
+            #             continue
+
+                    # num_computed_tokens_seq = seq.get_num_computed_tokens()
+                    # all_num_new_tokens_seq = seq.get_len(
+                    # ) - num_computed_tokens_seq
+                    # if not self.cache_config.enable_prefix_caching:
+                    #     # If prefix caching is not enabled, all
+                    #     # new tokens are uncached.
+                    #     num_uncached_new_tokens += all_num_new_tokens_seq
+                    #     continue
+
+                    # # NOTE: the cache token might be currently in
+                    # # a block that's in an
+                    # # evictor meaning that it's not yet allocated.
+                    # # However, we don't
+                    # # exclude such tokens in the cache count because
+                    # # it will be
+                    # # guaranteed to be allocated later if the sequence
+                    # # can be allocated.
+                    # num_cached_tokens_seq = scheduler.block_manager.get_num_cached_tokens(
+                    #     seq)
+
+                #     num_cached_new_tokens_seq = max(
+                #         0, num_cached_tokens_seq - num_computed_tokens_seq)
+                #     num_uncached_new_tokens_seq = (all_num_new_tokens_seq -
+                #                                    num_cached_new_tokens_seq)
+
+                #     num_uncached_new_tokens += num_uncached_new_tokens_seq
+                #     num_cached_new_tokens += num_cached_new_tokens_seq
+
+                # if num_uncached_new_tokens == 0 and num_cached_new_tokens > 0:
+                #     # For a fully cached hit sequence, we actually need
+                #     # to recompute the
+                #     # last token. So we need at least 1 uncached token
+                #     # to schedule.
+                #     # See ModelRunner._compute_for_prefix_cache_hit for
+                #     # more details.
+                #     num_uncached_new_tokens = 1
+                #     num_cached_new_tokens -= 1
+
+                # # If prefill, add both
+                # # If pre-empted, only add uncached new tokens
+                # num_queue_tokens_iter += num_uncached_new_tokens
 
         # NOTE: This loop assumes prefill seq_groups are before
         # decode seq_groups in scheduled_seq_groups.
@@ -1762,6 +1834,7 @@ class LLMEngine:
             # Iteration stats
             num_prompt_tokens_iter=num_prompt_tokens_iter,
             num_generation_tokens_iter=num_generation_tokens_iter,
+            num_queue_tokens_iter=num_queue_tokens_iter,
             num_tokens_iter=num_tokens_iter,
             time_to_first_tokens_iter=time_to_first_tokens_iter,
             time_per_output_tokens_iter=time_per_output_tokens_iter,

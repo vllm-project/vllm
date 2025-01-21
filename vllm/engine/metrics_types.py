@@ -40,6 +40,7 @@ class Stats:
     # Iteration stats (should have _iter suffix)
     num_prompt_tokens_iter: int
     num_generation_tokens_iter: int
+    num_queue_tokens_iter: int
     num_tokens_iter: int
     time_to_first_tokens_iter: List[float]
     time_per_output_tokens_iter: List[float]
@@ -82,6 +83,7 @@ class StatLoggerBase(ABC):
         # Tracked stats over current local logging interval.
         self.num_prompt_tokens: List[int] = []
         self.num_generation_tokens: List[int] = []
+        self.num_queue_tokens: List[int] = []
         self.last_local_log = time.time()
         self.local_interval = local_interval
         self.spec_decode_metrics: Optional[SpecDecodeWorkerMetrics] = None
