@@ -2911,8 +2911,8 @@ class CompilationConfig(BaseModel):
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)
 
-    def init_with_specific_sizes(self,
-                                 cudagraph_capture_sizes: List[int]) -> None:
+    def init_with_cudagraph_sizes(self,
+                                  cudagraph_capture_sizes: List[int]) -> None:
         """To complete the initialization of config,
         we need to know the cudagraph sizes."""
 
@@ -3264,7 +3264,7 @@ class VllmConfig:
                 batch_size_capture_list = [1, 2, 4
                                            ] + [i for i in range(8, 513, 8)]
 
-        self.compilation_config.init_with_specific_sizes(
+        self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
 
     def __str__(self):
