@@ -262,7 +262,7 @@ class MoeQuantIntMethod(FusedMoEMethodBase):
                              topk_weights=topk_weights,
                              topk_ids=topk_ids,
                              inplace=True,
-                             use_int4_w8a16=weight_bits == 4,
+                             use_int4_w4a16=weight_bits == 4,
                              use_int8_w8a16=weight_bits == 8,
                              w1_scale=layer.w13_scales,
                              w2_scale=layer.w2_scales,
