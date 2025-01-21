@@ -242,8 +242,6 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
     // element value of token_cnts would also smaller than 65535,
     // so we can use uint16 as dtype of token_cnts
     use_i16 = true;
-  } else {
-    use_global_memory = true;
   }
 
   if (use_global_memory) {
