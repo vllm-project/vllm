@@ -4,9 +4,12 @@ steps:
     #depends_on: ~
   - label: "Clean H100"
     key: clean-h100
+    agents:
+      queue: H100
     depends_on: ~
     command:
     - docker system prune -af --volumes
+
   - label: "H100"
     # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
