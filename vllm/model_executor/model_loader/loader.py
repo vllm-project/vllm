@@ -1076,8 +1076,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # weight tensor. So TP does not work with pre_quantized bnb models.
         if pre_quant and get_tensor_model_parallel_world_size() > 1:
             raise ValueError(
-                "Prequant BitsAndBytes models with TP is not supported."
-                "Please try with PP.")
+                "Prequant BitsAndBytes models with tensor parallelism is not "
+                "supported. Please try with pipeline parallelism.")
 
         load_8bit = False
         if pre_quant:
