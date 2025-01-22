@@ -194,11 +194,6 @@ class ExecutorBase(ABC):
         self.collective_rpc("stop_profile")
 
     def sleep(self, level: int = 1):
-        if self.cache_config.enable_prefix_caching:
-            # TODO: support sleep with prefix caching
-            # by resetting the prefix cache state,
-            # after https://github.com/vllm-project/vllm/pull/12284
-            raise ValueError("Cannot sleep when prefix caching is enabled.")
         self.collective_rpc("sleep", kwargs=dict(level=level))
 
     def wake_up(self):
