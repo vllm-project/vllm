@@ -148,7 +148,7 @@ class IncrementalDetokenizer:
                 finish_reason = "stop"  # TODO: use constant
                 stop_reason = stop_str
 
-        # 3) Makes the RequestOutput object with the new text.
+        # 3) Makes the DetokenizerOutput object with the new text.
         finished = bool(finish_reason)
         if self.output_kind == RequestOutputKind.FINAL_ONLY \
             and not finished:
