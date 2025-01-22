@@ -8,7 +8,7 @@ Quantizing the KV cache to FP8 reduces its memory footprint. This increases the 
 
 ### FP8 Formats
 
-[OCP (Open Compute Project)](www.opencompute.org) specifies two common 8-bit floating point data formats:
+[OCP (Open Compute Project)](https://www.opencompute.org) specifies two common 8-bit floating point data formats:
 
 - E5M2 (5 exponent bits and 2 mantissa bits)
 - E4M3FN (4 exponent bits and 3 mantissa bits, often shortened as E4M3)
