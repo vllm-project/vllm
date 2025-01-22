@@ -871,13 +871,35 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
+        # NOTE: In v1, inputs_embeds is always generated at model runner from
+        # `get_multimodal_embeddings` and `get_input_embeddings`, this
+        # condition is only for v0 compatibility.
         elif inputs_embeds is None:
-            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      multimodal_embeddings)
-            input_ids = None
+            image_input = self._parse_and_validate_image_input(**kwargs)
+            video_input = self._parse_and_validate_video_input(**kwargs)
+
+            if image_input is None and video_input is None:
+                inputs_embeds = None
+            else:
+                inputs_embeds = self.get_input_embeddings(input_ids)
+                if image_input is not None:
+                    image_embeds = self._process_image_input(image_input)
+                    inputs_embeds = merge_multimodal_embeddings(
+                        input_ids,
+                        inputs_embeds,
+                        image_embeds,
+                        placeholder_token_id=self.config.image_token_index,
+                    )
+
+                if video_input is not None:
+                    video_embeds = self._process_video_pixels(video_input)
+                    inputs_embeds = merge_multimodal_embeddings(
+                        input_ids,
+                        inputs_embeds,
+                        video_embeds,
+                        placeholder_token_id=self.config.video_token_index,
+                    )
+                input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,

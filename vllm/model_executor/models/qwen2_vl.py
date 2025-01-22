@@ -1301,22 +1301,42 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
+        # NOTE: In v1, inputs_embeds is always generated at model runner from
+        # `get_multimodal_embeddings` and `get_input_embeddings`, this
+        # condition is only for v0 compatibility.
         elif inputs_embeds is None:
-            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
 
-            # We need to check for usage of mrope here in case there is
-            # multimodal data.
-            # TODO (ywang96): move this to model runner in V1.
-            if multimodal_embeddings is not None and uses_mrope(self.config):
-                assert positions.ndim == 2 and positions.size(0) == 3, (
-                    "multimodal section rotary embedding requires "
-                    f"(3, seq_len) positions, but got {positions.size()}")
+            image_input = self._parse_and_validate_image_input(**kwargs)
+            video_input = self._parse_and_validate_video_input(**kwargs)
 
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      multimodal_embeddings)
-            input_ids = None
+            if image_input is None and video_input is None:
+                inputs_embeds = None
+            else:
+                if uses_mrope(self.config):
+                    assert positions.ndim == 2 and positions.size(0) == 3, (
+                        "multimodal section rotary embedding requires "
+                        f"(3, seq_len) positions, but got {positions.size()}")
+
+                inputs_embeds = self.get_input_embeddings(input_ids)
+
+                if image_input is not None:
+                    image_embeds = self._process_image_input(image_input)
+                    inputs_embeds = merge_multimodal_embeddings(
+                        input_ids,
+                        inputs_embeds,
+                        image_embeds,
+                        placeholder_token_id=self.config.image_token_id,
+                    )
+
+                if video_input is not None:
+                    video_embeds = self._process_video_input(video_input)
+                    inputs_embeds = merge_multimodal_embeddings(
+                        input_ids,
+                        inputs_embeds,
+                        video_embeds,
+                        placeholder_token_id=self.config.video_token_id,
+                    )
+                input_ids = None
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,
