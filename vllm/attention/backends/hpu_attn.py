@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
+import math
 import vllm_hpu_extension.kernels as kernels
 import vllm_hpu_extension.ops as ops
 from vllm_hpu_extension.flags import enabled_flags
@@ -156,6 +157,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
         self.attn_type = attn_type
+        self.prompt_attn_bias = None
         if (self.attn_type != AttentionType.DECODER
                 and self.attn_type != AttentionType.ENCODER_DECODER):
             raise NotImplementedError("Encoder self-attention "
@@ -224,11 +226,16 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             kv_shape = (batch_size, seq_len_kv, self.num_kv_heads,
                         self.head_size)
             if attn_metadata is None or attn_metadata.block_list is None:
+                valid_seq_lengths=attn_metadata.seq_lens_tensor
                 if not self.prefill_use_fusedsdpa:
                     # TODO: move this outside of model
                     assert attn_metadata.attn_bias is not None, \
                             'attn_bias must be set before calling model.forward'
                     attn_bias = attn_metadata.attn_bias
+                    # Force to use fused for performance/memory benefit
+                    # Also the non fusedsdpa has accuracy issue to be fixed
+                    if self.sliding_window is None:
+                        self.fused_scaled_dot_product_attention = None
                     if self.alibi_slopes is not None:
                         position_bias = _make_alibi_bias(
                             self.alibi_slopes, self.num_kv_heads,
@@ -238,6 +245,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                         attn_bias.add_(position_bias)
                 else:
                     attn_bias = None
+                if self.sliding_window:
+                    if self.prompt_attn_bias is None:
+                        attn_bias = _make_sliding_window_bias(batch_size, seq_len, attn_metadata.seq_lens_tensor, self.sliding_window, query.dtype)
+                    valid_seq_lengths = None #TODO: remove after fusedsdpa optimization is done
 
                 out = ops.prompt_attention(
                     query.view(query_shape),
@@ -249,7 +260,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                     matmul_qk_op=self.matmul_qk,
                     softmax_op=self.softmax,
                     matmul_av_op=self.matmul_av,
-                    valid_seq_lengths=attn_metadata.seq_lens_tensor,
+                    valid_seq_lengths=valid_seq_lengths,
                     fsdpa_op=self.fused_scaled_dot_product_attention,
                 )
             else:
@@ -270,6 +281,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                     values_fetch_func=self.v_cache.fetch_from_cache)
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
+            self.prompt_attn_bias = None
             # Decoding run.
             output = HPUPagedAttention.forward_decode(
                 query=query,
@@ -432,3 +444,23 @@ def _make_alibi_bias(
     if num_heads != num_kv_heads:
         bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))
     return bias
+
+def _make_sliding_window_bias(
+    batch_size: int,
+    seq_len: int,
+    query_lens_t: torch.tensor,
+    window_size:int,
+    dtype: torch.dtype,
+):
+    shift = 0
+    query_lens_t = query_lens_t.reshape(batch_size, 1)
+    tensor = torch.full((batch_size, 1, seq_len, seq_len), dtype=dtype, fill_value=1)
+    mask = torch.tril(tensor, diagonal=shift)
+
+    len_mask = torch.arange(0, seq_len, device=query_lens_t.device, dtype=torch.int32).view(seq_len,1)
+    len_mask = len_mask.ge(query_lens_t.unsqueeze(-1)).view(batch_size, 1, seq_len, 1)
+    len_mask= torch.where(len_mask == False, 1, 0)
+    mask = mask.logical_and(len_mask)
+    mask = torch.triu(mask, diagonal=shift - window_size + 1)
+    attn_bias = torch.where(mask, 0, -math.inf)
+    return attn_bias
