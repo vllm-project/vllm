@@ -60,6 +60,9 @@ class AriaVisionTransformer(Idefics3VisionTransformer):
         prefix: str = "",
     ) -> None:
         super().__init__(config, quant_config, prefix)
+        # Unlike Idefics3VisionTransformer which uses LayerNorm after the
+        # final layer, Aria omits this normalization, so we replace it with an
+        # Identity layer
         self.post_layernorm = nn.Identity()
 
     def load_weights(self, weights: Iterable[Tuple[str,
