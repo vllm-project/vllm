@@ -1,9 +1,9 @@
 """vllm.entrypoints.api_server with some extra logging for testing."""
 from typing import Any, Dict, Iterable
 
-import uvicorn
 from fastapi.responses import JSONResponse, Response
 
+import uvicorn
 import vllm.entrypoints.api_server
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine

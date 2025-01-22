@@ -3,9 +3,9 @@ import signal
 from http import HTTPStatus
 from typing import Any
 
-import uvicorn
 from fastapi import FastAPI, Request, Response
 
+import uvicorn
 from vllm import envs
 from vllm.engine.async_llm_engine import AsyncEngineDeadError
 from vllm.engine.multiprocessing import MQEngineDeadError
