@@ -102,7 +102,7 @@ class IncrementalDetokenizer:
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
             2) Evaluate stop criteria.
-            3) Make the `RequestOutput` object with new text.
+            3) Make the `DetokenizerOutput` object with new text.
         """
         new_token_ids = output.new_token_ids
         finish_reason = output.finish_reason
