@@ -130,6 +130,7 @@ class UsageMessage:
         self.total_memory: Optional[int] = None
         self.architecture: Optional[str] = None
         self.platform: Optional[str] = None
+        self.cuda_runtime: Optional[str] = None
         self.gpu_count: Optional[int] = None
         self.gpu_type: Optional[str] = None
         self.gpu_memory_per_device: Optional[int] = None
@@ -169,6 +170,8 @@ class UsageMessage:
             self.gpu_count = torch.cuda.device_count()
             self.gpu_type = device_property.name
             self.gpu_memory_per_device = device_property.total_memory
+        if current_platform.is_cuda():
+            self.cuda_runtime = torch.version.cuda
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
         self.platform = platform.platform()

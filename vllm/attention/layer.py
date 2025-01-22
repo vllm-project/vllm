@@ -245,8 +245,7 @@ def unified_attention(
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
-    return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                             self._k_scale, self._v_scale)
+    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
 
 def unified_attention_fake(
@@ -280,13 +279,12 @@ def unified_attention_with_output(
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
-    self.impl.forward(query,
+    self.impl.forward(self,
+                      query,
                       key,
                       value,
                       kv_cache,
                       attn_metadata,
-                      self._k_scale,
-                      self._v_scale,
                       output=output)
 
 

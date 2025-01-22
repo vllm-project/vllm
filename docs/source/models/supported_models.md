@@ -470,6 +470,11 @@ of the whole prompt are extracted from the normalized hidden state corresponding
   - `Qwen/Qwen2.5-Math-RM-72B`, etc.
   - ✅︎
   - ✅︎
+* - `Qwen2ForProcessRewardModel`
+  - Qwen2-based
+  - `Qwen/Qwen2.5-Math-PRM-7B`, `Qwen/Qwen2.5-Math-PRM-72B`, etc.
+  - ✅︎
+  - ✅︎
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
