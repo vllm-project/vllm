@@ -965,11 +965,11 @@ def apply_hf_chat_template(
     tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
 ) -> str:
-    if chat_template is None and tokenizer.chat_template is None:
-        raise ValueError(
-            "As of transformers v4.44, default chat template is no longer "
-            "allowed, so you must provide a chat template if the tokenizer "
-            "does not define one.")
+    # if chat_template is None and tokenizer.chat_template is None:
+    #     raise ValueError(
+    #         "As of transformers v4.44, default chat template is no longer "
+    #         "allowed, so you must provide a chat template if the tokenizer "
+    #         "does not define one.")
 
     return tokenizer.apply_chat_template(
         conversation=conversation,  # type: ignore[arg-type]

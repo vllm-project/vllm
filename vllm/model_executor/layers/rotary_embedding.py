@@ -643,7 +643,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
         pos_freqs = self.base**(torch.arange(
-            0, self.rotary_dim, 2, dtype=torch.float, device="cuda") /
+            0, self.rotary_dim, 2, dtype=torch.float) /
                                 self.rotary_dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
@@ -662,7 +662,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = torch.arange(self.max_position_embeddings * self.scaling_factor,
-                         device="cuda",
                          dtype=torch.float32)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = (freqs.cos() * self.mscale)

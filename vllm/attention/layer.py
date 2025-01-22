@@ -229,7 +229,8 @@ class MultiHeadAttention(nn.Module):
                                                  value,
                                                  scale=self.scale)
             out = out.transpose(1, 2)
-        return out.view(bsz, q_len, -1)
+        #return out.view(bsz, q_len, -1)
+        return out.reshape(bsz, q_len, -1)
 
 
 def unified_attention(

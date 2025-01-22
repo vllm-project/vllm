@@ -22,6 +22,10 @@ if current_platform.is_tpu():
     from .moe_pallas import fused_moe as fused_moe_pallas
 else:
     fused_moe_pallas = None  # type: ignore
+if current_platform.is_xpu():
+    from .moe_pallas import fused_moe_xpu
+else:
+    fused_moe_xpu = None  # type: ignore
 logger = init_logger(__name__)
 
 
@@ -146,6 +150,37 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         raise NotImplementedError(
             "The CPU backend currently does not support MoE.")
 
+    def forward_xpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        # assert not use_grouped_topk
+        # assert num_expert_group is None
+        # assert topk_group is None
+        # assert custom_routing_function is None
+        # if scoring_func != "softmax":
+        #     raise NotImplementedError(
+        #         "Only softmax scoring function is supported for TPU.")
+        # if e_score_correction_bias is not None:
+        #     raise NotImplementedError(
+        #         "Expert score correction bias is not supported for TPU.")
+        return fused_moe_xpu(hidden_states=x,
+                                w1=layer.w13_weight,
+                                w2=layer.w2_weight,
+                                topk=top_k,
+                                gating_output=router_logits,
+                                renormalize=renormalize)
+
     def forward_tpu(
         self,
         layer: torch.nn.Module,
@@ -177,7 +212,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                 gating_output=router_logits,
                                 renormalize=renormalize)
 
-    forward_native = forward_cuda
+    forward_native = forward_xpu
 
 
 class FusedMoE(torch.nn.Module):

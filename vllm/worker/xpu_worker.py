@@ -191,4 +191,10 @@ class XPUWorker(Worker):
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
         # global all_reduce needed for overall oneccl warm up
-        torch.distributed.all_reduce(torch.zeros(1).xpu())
+        # torch.distributed.all_reduce(torch.zeros(1).xpu())
+        from vllm.distributed.parallel_state import get_pp_group
+        if parallel_config.pipeline_parallel_size > 1:
+            # torch-ccl xpu need a collective API warm up
+            # before calling send/recv API
+            get_pp_group().all_gather(torch.zeros(1).xpu())
+

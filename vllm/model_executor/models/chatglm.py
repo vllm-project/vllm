@@ -569,8 +569,8 @@ class ChatGLMModel(nn.Module):
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input["pixel_values"] is None:
             return None
-        pixel_values = image_input["pixel_values"].to(
-            dtype=self.config.torch_dtype)
+        dtype = self.embedding.weight.dtype
+        pixel_values = image_input["pixel_values"].to(dtype)
         vision_embeddings = self.vision(pixel_values)
         return vision_embeddings
 
