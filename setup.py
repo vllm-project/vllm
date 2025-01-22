@@ -666,7 +666,7 @@ def get_vllm_version() -> str:
     sep = "+" if "+" not in version else "."
 
     if _no_device():
-        if envs.VLLM_TARGET_DEVICE == "empty":
+        if VLLM_TARGET_DEVICE == "empty":
             version += f"{sep}empty"
     elif _is_cuda():
         if envs.VLLM_USE_PRECOMPILED:
