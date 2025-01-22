@@ -272,7 +272,8 @@ def main(args: argparse.Namespace):
         args.tokenizer, trust_remote_code=args.trust_remote_code)
     if args.dataset is None:
         # Synthesize a prompt with the given input length.
-        prompt = "hi" * (args.input_len - 1)
+        prompt = { "prompt_token_ids" : [42] * (args.input_len - 1) } \
+            if args.skip_tokenizer_init else "hi" * (args.input_len - 1)
         requests = [(prompt, args.input_len, args.output_len)
                     for _ in range(args.num_prompts)]
     else:
