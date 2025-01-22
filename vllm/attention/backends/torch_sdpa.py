@@ -282,7 +282,10 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
     def __init__(self, input_builder: ModelInputForCPUBuilder) -> None:
         self.chunked_prefill = input_builder.chunked_prefill
-        self.input_data = input_builder.input_data
+        self.input_builder = input_builder
+
+    def prepare(self):
+        self.input_data = self.input_builder.input_data
 
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int) -> TorchSDPAMetadata:
