@@ -76,7 +76,9 @@ steps:
   - tests/basic_correctness/test_basic_correctness
   - tests/basic_correctness/test_cpu_offload
   - tests/basic_correctness/test_preemption
+  - tests/basic_correctness/test_cumem.py
   commands:
+  - pytest -v -s basic_correctness/test_cumem.py
   - pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
