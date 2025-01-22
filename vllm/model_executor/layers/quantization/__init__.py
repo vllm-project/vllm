@@ -80,11 +80,11 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         raise ValueError(f"Invalid quantization method: {quantization}")
 
     # lazy import to avoid triggering `torch.compile` too early
+    from vllm_hpu_extension.awq_hpu import AWQHPUConfig
+
     from vllm_hpu_extension.gptq_hpu import GPTQHPUConfig
 
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
-
-    from vllm_hpu_extension.awq_hpu import AWQHPUConfig
 
     from .aqlm import AQLMConfig
     from .awq import AWQConfig
