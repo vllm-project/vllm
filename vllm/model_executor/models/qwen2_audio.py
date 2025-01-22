@@ -188,7 +188,9 @@ class Qwen2AudioMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        processor = self.info.get_hf_processor()
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
 
         # Use getattr with default to be compatible with transformers<4.48
         audio_token = getattr(processor, "audio_token", "<|AUDIO|>")
@@ -196,6 +198,10 @@ class Qwen2AudioMultiModalProcessor(
                                   "<|audio_bos|>")
         audio_eos_token = getattr(processor, "audio_eos_token",
                                   "<|audio_eos|>")
+
+        audio_token_id = vocab[audio_token]
+        audio_bos_id = vocab[audio_bos_token]
+        audio_eos_id = vocab[audio_eos_token]
 
         feature_attention_mask = out_mm_kwargs.get("feature_attention_mask")
         if feature_attention_mask is None:
@@ -208,22 +214,18 @@ class Qwen2AudioMultiModalProcessor(
             audio_output_lengths = audio_output_lens.tolist()
 
         def get_replacement_qwen2_audio(item_idx: int):
-            num_placeholders = audio_output_lengths[item_idx]
-            if num_placeholders == 0:
+            num_features = audio_output_lengths[item_idx]
+            if num_features == 0:
                 audios = mm_items.get_items("audio", AudioProcessorItems)
                 audio = audios.get(item_idx)
                 raise ValueError(
                     f"The audio {audio} (len={len(audio)}) is too short "
                     "to be represented inside the model")
 
-            audio_tokens = audio_token * num_placeholders
+            audio_tokens = [audio_token_id] * num_features
 
             return PromptReplacementDetails(
-                full="".join([
-                    audio_bos_token,
-                    audio_tokens,
-                    audio_eos_token,
-                ]),
+                full=[audio_bos_id] + audio_tokens + [audio_eos_id],
                 features=audio_tokens,
             )
 
