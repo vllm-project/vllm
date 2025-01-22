@@ -218,7 +218,7 @@ class UltravoxMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target='<|audio|>',
+                target="<|audio|>",
                 replacement=get_replacement_ultravox,
             )
         ]
