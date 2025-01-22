@@ -29,6 +29,7 @@ from outlines.fsm.parsing import PartialLark
 from outlines_core.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
+from vllm.platforms import current_platform
 
 
 class BaseLogitsProcessor:
@@ -89,7 +90,10 @@ class BaseLogitsProcessor:
         allowed_tokens = allowed_tokens.masked_select(
             allowed_tokens < scores.shape[-1])
         mask.index_fill_(0, allowed_tokens, 0)
-        scores.add_(mask)
+        if current_platform.is_hpu():
+            scores = scores.add(mask)
+        else:
+            scores.add_(mask)
         return scores
 
 
