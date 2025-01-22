@@ -632,9 +632,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.is_profile_run: bool = False
 
         if self.global_hyperparameters is None:
-            # Infer global hyperparameters, since currently we only support models
-            # in which all layers share the same values for the following
-            # hyperparameters:
+            # Infer global hyperparameters, since currently we only support
+            # models in which all layers share the same values for the
+            # following hyperparameters:
             # - `window_left`
             # - `logits_soft_cap`
             # - `sm_scale`
