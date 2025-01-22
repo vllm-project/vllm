@@ -206,6 +206,7 @@ class BoundPromptReplacement:
 
         if not isinstance(replacement, PromptReplacementDetails):
             replacement = PromptReplacementDetails.from_seq(replacement)
+            assert isinstance(replacement, PromptReplacementDetails)
 
         bound_full = _BoundPromptSequence.from_seq(self.tokenizer,
                                                    replacement.full)
