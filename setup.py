@@ -503,7 +503,12 @@ def get_vllm_version() -> str:
     version = get_version(
         write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
     )
-    sep = "+" if "+" not in version else "."  # dev versions might contain +
+    if "sdist" in sys.argv:
+        # skip local version specifiers for source distribution builds
+        return version
+
+    # dev versions might already contain local version specifiers
+    sep = "+" if "+" not in version else "."
 
     if _no_device():
         if envs.VLLM_TARGET_DEVICE == "empty":
@@ -515,9 +520,7 @@ def get_vllm_version() -> str:
         cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
-            # skip this for source tarball, required for pypi
-            if "sdist" not in sys.argv:
-                version += f"{sep}cu{cuda_version_str}"
+            version += f"{sep}cu{cuda_version_str}"
     elif _is_hip():
         import torch
 
