@@ -796,6 +796,44 @@ class TestPrefixCachingBlockAllocator:
             block_hashes=block_hashes_seq1)
         assert len(cached_blocks) == len(blocks_seq1) - num_evicted_blocks
 
+    # Test reset prefix cache
+    @staticmethod
+    @pytest.mark.parametrize("num_blocks", [10])
+    @pytest.mark.parametrize("block_size", [16])
+    def test_reset_prefix_cache(num_blocks: int, block_size: int):
+        """This test case simulates the case of resetting the prefix cache."""
+
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
+                                                block_size=block_size)
+        token_ids = list(range(3 * block_size))
+
+        first_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids,
+            allocator=allocator,
+        )
+        second_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids,
+            allocator=allocator,
+        )
+
+        # Free each block in the first chain.
+        for block in first_chain:
+            allocator.free(block)
+
+        # Failed to reset prefix cache because some blocks are not freed yet.
+        assert not allocator.reset_prefix_cache()
+        assert allocator.get_prefix_cache_hit_rate() > 0.0
+
+        # Free each block in the second chain.
+        for block in second_chain:
+            allocator.free(block)
+
+        # Reset prefix cache.
+        assert allocator.reset_prefix_cache()
+        assert allocator.get_prefix_cache_hit_rate() == 0.0
+
     @staticmethod
     def create_immutable_chain(
         block_size: int,

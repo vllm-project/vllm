@@ -321,6 +321,9 @@ class AsyncLLM(EngineClient):
     async def stop_profile(self) -> None:
         await self.engine_core.profile_async(False)
 
+    async def reset_prefix_cache(self) -> None:
+        await self.engine_core.reset_prefix_cache_async()
+
     @property
     def is_running(self) -> bool:
         return True

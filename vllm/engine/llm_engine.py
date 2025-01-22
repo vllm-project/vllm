@@ -914,6 +914,14 @@ class LLMEngine:
         """
         return self.scheduler[virtual_engine].has_unfinished_seqs()
 
+    def reset_prefix_cache(self) -> bool:
+        """Reset prefix cache for all devices."""
+
+        success = True
+        for scheduler in self.scheduler:
+            success = success and scheduler.reset_prefix_cache()
+        return success
+
     @staticmethod
     def _process_sequence_group_outputs(
         seq_group: SequenceGroup,
