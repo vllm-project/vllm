@@ -200,6 +200,7 @@ class EngineArgs:
     kv_transfer_config: Optional[KVTransferConfig] = None
 
     generation_config: Optional[str] = None
+    enable_sleep_mode: bool = False
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -975,6 +976,12 @@ class EngineArgs:
             "loaded from model. If set to a folder path, the generation config "
             "will be loaded from the specified folder path.")
 
+        parser.add_argument("--enable-sleep-mode",
+                            action="store_true",
+                            default=False,
+                            help="Enable sleep mode for the engine. "
+                            "(only cuda platform is supported)")
+
         return parser
 
     @classmethod
@@ -1019,7 +1026,9 @@ class EngineArgs:
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
-            generation_config=self.generation_config)
+            generation_config=self.generation_config,
+            enable_sleep_mode=self.enable_sleep_mode,
+        )
 
     def create_load_config(self) -> LoadConfig:
         return LoadConfig(
