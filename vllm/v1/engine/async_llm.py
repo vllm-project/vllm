@@ -2,9 +2,12 @@ import asyncio
 import os
 from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
 
+import numpy as np
+
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
+from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -16,7 +19,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import kill_process_tree
+from vllm.utils import cdiv, kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.processor import Processor
@@ -205,17 +208,15 @@ class AsyncLLM(EngineClient):
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
-            while True:
+            finished = False
+            while not finished:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
-                out = q.get_nowait() if q.qsize() > 0 else await q.get()
+                out = q.get_nowait() if not q.empty() else await q.get()
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
-                if out.finished:
-                    yield out
-                    break
-
+                finished = out.finished
                 yield out
 
         # If the request is disconnected by the client, the
@@ -233,22 +234,41 @@ class AsyncLLM(EngineClient):
                 # 1) Pull EngineCoreOutputs from the EngineCore.
                 outputs = await self.engine_core.get_output_async()
 
-                # 2) Process EngineCoreOutputs.
-                processed_outputs = self.output_processor.process_outputs(
-                    outputs.outputs)
-                # NOTE: RequestOutputs are pushed to their queues.
-                assert len(processed_outputs.request_outputs) == 0
+                # Split outputs into chunks of at most
+                # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
+                # event loop for too long.
+                num_outputs = len(outputs.outputs)
+                if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
+                    slices = (outputs.outputs, )
+                else:
+                    slices = np.array_split(
+                        outputs.outputs,
+                        cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE))
 
-                # 3) Abort any reqs that finished due to stop strings.
-                await self.engine_core.abort_requests_async(
-                    processed_outputs.reqs_to_abort)
+                iteration_stats = None
+                for i, outputs_slice in enumerate(slices):
+                    # 2) Process EngineCoreOutputs.
+                    processed_outputs = self.output_processor.process_outputs(
+                        outputs_slice, iteration_stats)
+                    # NOTE: RequestOutputs are pushed to their queues.
+                    assert not processed_outputs.request_outputs
+                    iteration_stats = processed_outputs.iteration_stats
+
+                    # Allow other asyncio tasks to run between chunks
+                    if i + 1 < len(slices):
+                        await asyncio.sleep(0)
+
+                    # 3) Abort any reqs that finished due to stop strings.
+                    await self.engine_core.abort_requests_async(
+                        processed_outputs.reqs_to_abort)
 
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once we add Prometheus.
+                assert iteration_stats is not None
                 self._log_stats(
                     scheduler_stats=outputs.scheduler_stats,
-                    iteration_stats=processed_outputs.iteration_stats,
+                    iteration_stats=iteration_stats,
                 )
 
         except Exception as e:
