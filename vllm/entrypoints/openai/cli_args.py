@@ -117,7 +117,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "or JSON format. "
         "Example (old format): ``'name=path'`` "
         "Example (new format): "
-        "``{\"name\": \"name\", \"local_path\": \"path\", "
+        "``{\"name\": \"name\", \"path\": \"lora_path\", "
         "\"base_model_name\": \"id\"}``")
     parser.add_argument(
         "--prompt-adapters",
