@@ -415,3 +415,35 @@ def test_compressed_tensors_2of4_sparse(vllm_runner, args_2of4):
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         print(output)
         assert output
+
+
+@pytest.mark.skipif(not sparse_cutlass_supported(),
+                    reason="Cutlass is not yet supported on this GPU type.")
+@pytest.mark.parametrize(
+    "args_2of4",
+    [("nm-testing/llama2.c-stories42M-pruned2.4-compressed")])
+def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
+    model = args_2of4
+    with vllm_runner(model) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+            assert isinstance(qkv_proj.quant_method,
+                              CompressedTensorsLinearMethod)
+            assert isinstance(qkv_proj.scheme, CompressedTensors24)
+
+            assert qkv_proj.scheme.weight_quant is None
+            assert qkv_proj.scheme.input_quant is None
+            assert not qkv_proj.scheme.quantized
+            assert qkv_proj.quant_method.quantization_config.sparsity_scheme_map
+            sparsity_map = qkv_proj.quant_method.quantization_config.sparsity_scheme_map  # noqa: E501
+            assert sparsity_map.get("Linear").format == "sparse-24-bitmask"
+            assert sparsity_map.get("Linear").sparsity_structure == "2:4"
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        print(output)
+        assert output
