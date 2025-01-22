@@ -225,8 +225,9 @@ class CuMemAllocator:
         """
         if tag is None:
             tag = CuMemAllocator.default_tag
-        else:
-            assert isinstance(tag, str)
+
+        assert isinstance(tag, str)
+
         old_tag = self.current_tag
         self.current_tag = tag
         with use_memory_pool_with_allocator(self.python_malloc_callback,
