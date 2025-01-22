@@ -597,6 +597,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.sliding_window = input_builder.sliding_window
         self.block_size = input_builder.block_size
 
+        self.global_hyperparameters: Optional[GlobalHyperparameters] = None
+
     def prepare(self):
         self.slot_mapping: List[int] = []
         self.prefill_seq_lens: List[int] = []
@@ -629,17 +631,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.total_blocks = 0
         self.is_profile_run: bool = False
 
-        # Infer global hyperparameters, since currently we only support models
-        # in which all layers share the same values for the following
-        # hyperparameters:
-        # - `window_left`
-        # - `logits_soft_cap`
-        # - `sm_scale`
-        model = self.runner.model
-        inferred_params = infer_global_hyperparameters(model)
-        self.window_left = inferred_params.window_left
-        self.logits_soft_cap = inferred_params.logits_soft_cap
-        self.sm_scale = inferred_params.sm_scale
+        if self.global_hyperparameters is None:
+            # Infer global hyperparameters, since currently we only support models
+            # in which all layers share the same values for the following
+            # hyperparameters:
+            # - `window_left`
+            # - `logits_soft_cap`
+            # - `sm_scale`
+            model = self.runner.model
+            inferred_params = infer_global_hyperparameters(model)
+            self.global_hyperparameters = inferred_params
+            self.window_left = inferred_params.window_left
+            self.logits_soft_cap = inferred_params.logits_soft_cap
+            self.sm_scale = inferred_params.sm_scale
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
