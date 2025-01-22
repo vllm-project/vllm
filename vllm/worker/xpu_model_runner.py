@@ -121,6 +121,9 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         self.block_size = self.runner.block_size
         self.device = self.runner.device
 
+    def prepare(self) -> None:
+        pass
+
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         self.seq_group_metadata_list.append(seq_group_metadata)
 
