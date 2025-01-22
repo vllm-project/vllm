@@ -852,6 +852,34 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                 [self.config.image_token_index, self.config.video_token_index])
         return inputs_embeds
 
+    def get_input_embeddings_v0(
+        self,
+        input_ids: torch.Tensor,
+        image_input: Optional[NestedTensors] = None,
+        video_input: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+
+        inputs_embeds = self.get_input_embeddings(input_ids)
+        if image_input is not None:
+            image_embeds = self._process_image_input(image_input)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                image_embeds,
+                placeholder_token_id=self.config.image_token_index,
+            )
+
+        if video_input is not None:
+            video_embeds = self._process_video_pixels(video_input)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                video_embeds,
+                placeholder_token_id=self.config.video_token_index,
+            )
+
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -881,24 +909,10 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             if image_input is None and video_input is None:
                 inputs_embeds = None
             else:
-                inputs_embeds = self.get_input_embeddings(input_ids)
-                if image_input is not None:
-                    image_embeds = self._process_image_input(image_input)
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids,
-                        inputs_embeds,
-                        image_embeds,
-                        placeholder_token_id=self.config.image_token_index,
-                    )
-
-                if video_input is not None:
-                    video_embeds = self._process_video_pixels(video_input)
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids,
-                        inputs_embeds,
-                        video_embeds,
-                        placeholder_token_id=self.config.video_token_index,
-                    )
+                inputs_embeds = self.get_input_embeddings_v0(
+                    input_ids,
+                    image_input=image_input,
+                    video_input=video_input)
                 input_ids = None
 
         hidden_states = self.language_model.model(input_ids,

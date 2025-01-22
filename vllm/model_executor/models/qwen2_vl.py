@@ -1268,6 +1268,33 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 [self.config.image_token_id, self.config.video_token_id])
         return inputs_embeds
 
+    def get_input_embeddings_v0(
+        self,
+        input_ids: torch.Tensor,
+        image_input: Optional[tuple[torch.Tensor, ...]] = None,
+        video_input: Optional[tuple[torch.Tensor, ...]] = None,
+    ) -> torch.Tensor:
+
+        inputs_embeds = self.get_input_embeddings(input_ids)
+        if image_input is not None:
+            image_embeds = self._process_image_input(image_input)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                image_embeds,
+                placeholder_token_id=self.config.image_token_id,
+            )
+
+        if video_input is not None:
+            video_embeds = self._process_video_input(video_input)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                video_embeds,
+                placeholder_token_id=self.config.video_token_id,
+            )
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1305,7 +1332,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         # `get_multimodal_embeddings` and `get_input_embeddings`, this
         # condition is only for v0 compatibility.
         elif inputs_embeds is None:
-
             image_input = self._parse_and_validate_image_input(**kwargs)
             video_input = self._parse_and_validate_video_input(**kwargs)
 
@@ -1316,26 +1342,10 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                     assert positions.ndim == 2 and positions.size(0) == 3, (
                         "multimodal section rotary embedding requires "
                         f"(3, seq_len) positions, but got {positions.size()}")
-
-                inputs_embeds = self.get_input_embeddings(input_ids)
-
-                if image_input is not None:
-                    image_embeds = self._process_image_input(image_input)
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids,
-                        inputs_embeds,
-                        image_embeds,
-                        placeholder_token_id=self.config.image_token_id,
-                    )
-
-                if video_input is not None:
-                    video_embeds = self._process_video_input(video_input)
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids,
-                        inputs_embeds,
-                        video_embeds,
-                        placeholder_token_id=self.config.video_token_id,
-                    )
+                inputs_embeds = self.get_input_embeddings_v0(
+                    input_ids,
+                    image_input=image_input,
+                    video_input=video_input)
                 input_ids = None
 
         hidden_states = self.language_model.model(
