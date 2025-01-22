@@ -285,6 +285,33 @@ class KVCacheManager:
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
 
+    def reset_prefix_cache(self) -> bool:
+        """Reset prefix cache. This function may be used in RLHF
+        flows to invalid prefix caching after the weights are updated,
+        or used for resetting prefix caching status for benchmarking.
+
+        Returns:
+            bool: True if the prefix cache is successfully reset,
+            False otherwise.
+        """
+        num_used_blocks = (self.num_gpu_blocks -
+                           self.free_block_queue.num_free_blocks)
+        if num_used_blocks > 0:
+            logger.warning(
+                "Failed to reset prefix cache because some "
+                "blocks (%d) are not freed yet", num_used_blocks)
+            return False
+
+        # Remove all hashes so that no new blocks will hit.
+        self.cached_block_hash_to_block = defaultdict(dict)
+
+        # Remove all hashes from all blocks.
+        for block in self.block_pool:
+            block.reset_hash()
+
+        logger.info("Successfully reset prefix cache")
+        return True
+
     def get_num_common_prefix_blocks(
         self,
         request: Request,
