@@ -23,6 +23,7 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionState, AttentionType)
@@ -792,13 +793,12 @@ class FlashInferImpl(AttentionImpl):
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
@@ -826,8 +826,8 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache[:, 1],
                 attn_metadata.slot_mapping.flatten(),
                 kv_cache_dtype,
-                k_scale,
-                v_scale,
+                layer._k_scale,
+                layer._v_scale,
             )
             # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
             # to process the cache when the kv_cache_dtype is fp8
@@ -886,8 +886,8 @@ class FlashInferImpl(AttentionImpl):
                     kv_cache,
                     logits_soft_cap=logits_soft_cap,
                     causal=True,
-                    k_scale=k_scale,
-                    v_scale=v_scale,
+                    k_scale=layer._k_scale,
+                    v_scale=layer._v_scale,
                     window_left=window_left)
         if decode_meta := attn_metadata.decode_metadata:
             assert decode_meta is not None
@@ -897,8 +897,8 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache,
                 sm_scale=softmax_scale,
                 logits_soft_cap=logits_soft_cap,
-                k_scale=k_scale,
-                v_scale=v_scale,
+                k_scale=layer._k_scale,
+                v_scale=layer._v_scale,
                 window_left=window_left)
 
         if prefill_output is None and decode_output is not None:

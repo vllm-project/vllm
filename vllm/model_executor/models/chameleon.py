@@ -28,12 +28,12 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputsV2, MultiModalKwargs,
-                                    NestedTensors, PlaceholderRange)
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptReplacementDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -141,38 +141,22 @@ class ChameleonMultiModalProcessor(
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        image_tokens = processor.image_token * self.info.get_num_image_tokens()
 
         return [
             PromptReplacement(
                 modality="image",
                 target="<image>",
-                replacement="".join([
-                    processor.image_start_token,
-                    processor.image_token * self.info.get_num_image_tokens(),
-                    processor.image_end_token,
-                ]),
+                replacement=PromptReplacementDetails(
+                    full="".join([
+                        processor.image_start_token,
+                        image_tokens,
+                        processor.image_end_token,
+                    ]),
+                    features=image_tokens,
+                ),
             )
         ]
-
-    def apply(
-        self,
-        prompt: Union[str, list[int]],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> MultiModalInputsV2:
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
-
-        # Only <image> tokens should be considered as placeholders,
-        # so we ignore the image_start_token and image_end_token
-        result["mm_placeholders"] = {
-            modality: [
-                PlaceholderRange(offset=p["offset"] + 1,
-                                 length=p["length"] - 2) for p in ps
-            ]
-            for modality, ps in result["mm_placeholders"].items()
-        }
-
-        return result
 
 
 class ChameleonLayerNorm(nn.LayerNorm):

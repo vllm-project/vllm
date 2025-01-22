@@ -1,3 +1,6 @@
+default_stages:
+  - pre-commit # Run locally
+  - manual # Run in CI
 repos:
 - repo: https://github.com/google/yapf
   rev: v0.32.0
@@ -31,32 +34,47 @@ repos:
   hooks:
   - id: pymarkdown
     files: docs/.*
+- repo: https://github.com/rhysd/actionlint
+  rev: v1.7.6
+  hooks:
+  - id: actionlint
 - repo: local
   hooks:
+  - id: mypy-local
+    name: Run mypy for local Python installation
+    entry: tools/mypy.sh 0 "local"
+    language: python
+    types: [python]
+    additional_dependencies: &mypy_deps [mypy==1.11.1, types-setuptools, types-PyYAML, types-requests]
+    stages: [pre-commit] # Don't run in CI
   - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.9
     entry: tools/mypy.sh 1 "3.9"
     language: python
     types: [python]
-    additional_dependencies: &mypy_deps [mypy==1.11.1, types-setuptools, types-PyYAML, types-requests]
+    additional_dependencies: *mypy_deps
+    stages: [manual] # Only run in CI
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: tools/mypy.sh 1 "3.10"
     language: python
     types: [python]
     additional_dependencies: *mypy_deps
+    stages: [manual] # Only run in CI
   - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.11
     entry: tools/mypy.sh 1 "3.11"
     language: python
     types: [python]
     additional_dependencies: *mypy_deps
+    stages: [manual] # Only run in CI
   - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.12
     entry: tools/mypy.sh 1 "3.12"
     language: python
     types: [python]
     additional_dependencies: *mypy_deps
+    stages: [manual] # Only run in CI
   - id: shellcheck
     name: Lint shell scripts
     entry: tools/shellcheck.sh
@@ -67,7 +85,8 @@ repos:
     entry: tools/png-lint.sh
     language: script
     types: [png]
-- repo: https://github.com/rhysd/actionlint
-  rev: v1.7.6
-  hooks:
-  - id: actionlint
+  - id: suggestion
+    name: Suggestion
+    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
+    language: system
+    verbose: true
