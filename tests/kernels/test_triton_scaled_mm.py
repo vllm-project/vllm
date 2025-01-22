@@ -52,8 +52,8 @@ def test_rocm_compressed_tensors_w8a8(vllm_runner, example_prompts, model_path,
     dtype = "bfloat16"
 
     with vllm_runner(model_path, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+        vllm_model.generate_greedy_logprobs(example_prompts, max_tokens,
+                                            num_logprobs)
 
 
 @pytest.mark.parametrize("M", [1, 33, 64, 512])
