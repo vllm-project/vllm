@@ -3,7 +3,7 @@
 import re
 import time
 from argparse import Namespace
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -42,23 +42,31 @@ class OpenAIBaseModel(BaseModel):
     # OpenAI API does allow extra fields
     model_config = ConfigDict(extra="allow")
 
+    # Cache class field names
+    field_names: ClassVar[Optional[Set[str]]] = None
+
     @model_validator(mode="before")
     @classmethod
     def __log_extra_fields__(cls, data):
-        if isinstance(data, dict):
+
+        field_names = cls.field_names
+        if field_names is None:
+            if not isinstance(data, dict):
+                return data
             # Get all class field names and their potential aliases
             field_names = set()
             for field_name, field in cls.model_fields.items():
                 field_names.add(field_name)
-                if hasattr(field, 'alias') and field.alias:
-                    field_names.add(field.alias)
+                if alias := getattr(field, 'alias', None):
+                    field_names.add(alias)
+            cls.field_names = field_names
 
-            # Compare against both field names and aliases
-            extra_fields = data.keys() - field_names
-            if extra_fields:
-                logger.warning(
-                    "The following fields were present in the request "
-                    "but ignored: %s", extra_fields)
+        # Compare against both field names and aliases
+        if any(k not in field_names for k in data):
+            logger.warning(
+                "The following fields were present in the request "
+                "but ignored: %s",
+                data.keys() - field_names)
         return data
 
 
