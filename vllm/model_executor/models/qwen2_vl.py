@@ -55,7 +55,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors, VideoItem)
+                                    VideoItem)
 from vllm.multimodal.parse import (ImageSize, ModalityDataItems,
                                    MultiModalDataItems, MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -1231,7 +1231,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return modalities
 
     def get_multimodal_embeddings(
-            self, **kwargs) -> Optional[List[Tuple[NestedTensors, str]]]:
+            self, **kwargs) -> Optional[tuple[torch.Tensor, ...]]:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
@@ -1258,8 +1258,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[List[Tuple[NestedTensors,
-                                                   str]]] = None,
+        multimodal_embeddings: Optional[tuple[torch.Tensor, ...]] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:

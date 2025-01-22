@@ -816,7 +816,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         return image_feature
 
     def get_multimodal_embeddings(
-            self, **kwargs) -> Optional[List[Tuple[NestedTensors, str]]]:
+            self, **kwargs) -> Optional[tuple[torch.Tensor, ...]]:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return None
@@ -842,8 +842,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[List[Tuple[NestedTensors,
-                                                   str]]] = None,
+        multimodal_embeddings: Optional[tuple[torch.Tensor, ...]] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
