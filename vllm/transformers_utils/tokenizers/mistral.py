@@ -18,7 +18,7 @@ from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
                                                      Tekkenizer)
 
 from vllm.logger import init_logger
-from vllm.utils import is_list_of
+from vllm.utils import is_list_of, generate_valid_mistral_tool_id
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
@@ -61,6 +61,8 @@ def maybe_serialize_tool_calls(request: ChatCompletionRequest):
             while True:
                 try:
                     tool_call = next(tool_calls_validator)  # type: ignore
+                    tool_call['id'] = generate_valid_mistral_tool_id()
+                    logger.warning(f"Assigned new tool_id: {tool_call['id']} for tool: {tool_call}")
                     validated_tool_calls.append(tool_call)
                 except StopIteration:
                     break

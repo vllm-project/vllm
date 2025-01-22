@@ -28,6 +28,7 @@ from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
+from vllm.utils import generate_valid_mistral_tool_id
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
 
@@ -709,6 +710,11 @@ class OpenAIServingChat(OpenAIServing):
                     " if tools should be extracted. Returning a standard chat "
                     "completion.")
                 message = ChatMessage(role=role, content=output.text)
+
+            if isinstance(tokenizer, MistralTokenizer):
+                for tool_call in message.tool_calls:
+                    tool_call.id = generate_valid_mistral_tool_id()
+                    logger.warning(f"Assigned new tool_id: {tool_call.id} for tool: {tool_call}")
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,

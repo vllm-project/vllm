@@ -52,10 +52,15 @@ from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 
+from random import choices
+from string import ascii_letters, digits
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+ALPHANUMERIC = ascii_letters + digits
 
 # Exception strings for non-implemented encoder/decoder scenarios
 
@@ -2206,3 +2211,8 @@ def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
     else:
         func = partial(method, obj)  # type: ignore
     return func(*args, **kwargs)
+
+def generate_valid_mistral_tool_id():
+    # Mistral Tool Call Ids must be alphanumeric with a maximum length of 9.
+    # https://github.com/mistralai/mistral-common/blob/21ee9f6cee3441e9bb1e6ed2d10173f90bd9b94b/src/mistral_common/protocol/instruct/validator.py#L299
+    return "".join(choices(ALPHANUMERIC, k=9))
