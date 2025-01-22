@@ -439,4 +439,4 @@ class InputBatch:
 
     @property
     def no_prompt_logprob(self) -> bool:
-        return len(self.num_prompt_logprobs) == 0
+        return not self.num_prompt_logprobs
