@@ -37,7 +37,7 @@ class EngineCoreRequest:
 
 class EngineCoreOutput(
         msgspec.Struct,
-        array_like=False,  # type: ignore[call-arg]
+        array_like=True,  # type: ignore[call-arg]
         omit_defaults=True,  # type: ignore[call-arg]
         gc=False):  # type: ignore[call-arg]
 

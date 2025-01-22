@@ -491,8 +491,6 @@ class Scheduler:
                     new_token_ids=[],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
-                    new_logprobs_token_ids=[],
-                    new_logprobs=[],
                     new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
                     new_prompt_logprobs=prompt_logprobs,
                     stop_reason=request.stop_reason)

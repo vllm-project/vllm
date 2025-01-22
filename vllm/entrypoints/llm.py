@@ -1,12 +1,13 @@
 import itertools
 import warnings
 from contextlib import contextmanager
-from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
-                    Union, cast, overload)
+from typing import (Any, Callable, ClassVar, Dict, List, Optional, Sequence,
+                    Tuple, Type, Union, cast, overload)
 
 import cloudpickle
+import torch.nn as nn
 from tqdm import tqdm
-from typing_extensions import deprecated
+from typing_extensions import TypeVar, deprecated
 
 from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
@@ -41,6 +42,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
 
 logger = init_logger(__name__)
+
+_R = TypeVar("_R", default=Any)
 
 
 class LLM:
@@ -464,21 +467,42 @@ class LLM:
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def collective_rpc(self,
-                       method: str,
+                       method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       kwargs: Optional[Dict[str, Any]] = None) -> List[_R]:
         """
-        Run a method on all workers, with homogeneous arguments.
-        The main extension point for the LLM entrypoint.
-        Users can provide custom worker class through `worker_cls`
-        argument, and implement new methods in the worker class.
-        Then, users can call the new methods through this API.
-        It is recommended to use this API to only pass control messages,
-        and set up data-plane communication to pass data.
+        Execute an RPC call on all workers.
+
+        Args:
+            method: Name of the worker method to execute, or a callable that
+                is serialized and sent to all workers to execute.
+
+                If the method is a callable, it should accept an additional
+                `self` argument, in addition to the arguments passed in `args`
+                and `kwargs`. The `self` argument will be the worker object.
+            timeout: Maximum time in seconds to wait for execution. Raises a
+                :exc:`TimeoutError` on timeout. `None` means wait indefinitely.
+            args: Positional arguments to pass to the worker method.
+            kwargs: Keyword arguments to pass to the worker method.
+
+        Returns:
+            A list containing the results from each worker.
+        
+        Note:
+            It is recommended to use this API to only pass control messages,
+            and set up data-plane communication to pass data.
         """
-        return self.llm_engine.model_executor.collective_rpc(
-            method, timeout, args, kwargs)
+        executor = self.llm_engine.model_executor
+        return executor.collective_rpc(method, timeout, args, kwargs)
+
+    def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
+        """
+        Run a function directly on the model inside each worker,
+        returning the result for each of them.
+        """
+        executor = self.llm_engine.model_executor
+        return executor.apply_model(func)
 
     def beam_search(
         self,
@@ -1107,6 +1131,29 @@ class LLM:
 
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
+
+    def sleep(self, level: int = 1):
+        """
+        Put the engine to sleep. The engine should not process any requests.
+        The caller should guarantee that no requests are being processed
+        during the sleep period, before `wake_up` is called.
+
+        :param level: The sleep level. Level 1 sleep will offload the model 
+            weights and discard the kv cache. The content of kv cache is 
+            forgotten. Level 1 sleep is good for sleeping and waking up the 
+            engine to run the same model again. The model weights are backed 
+            up in CPU memory. Please make sure there's enough CPU memory to 
+            store the model weights. Level 2 sleep will discard both the model 
+            weights and the kv cache. The content of both the model weights 
+            and kv cache is forgotten. Level 2 sleep is good for sleeping and 
+            waking up the engine to run a different model or update the model, 
+            where previous model weights are not needed. It reduces CPU memory 
+            pressure.
+        """
+        self.llm_engine.sleep(level=level)
+
+    def wake_up(self):
+        self.llm_engine.wake_up()
 
     # LEGACY
     def _convert_v1_inputs(

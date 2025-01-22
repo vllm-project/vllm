@@ -689,7 +689,9 @@ class LLMEngine:
                 :class:`~vllm.PoolingParams` for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+            lora_request: The LoRA request to add.
             trace_headers: OpenTelemetry trace headers.
+            prompt_adapter_request: The prompt adapter request to add.
             priority: The priority of the request.
                 Only applicable with priority scheduling.
 
@@ -1816,6 +1818,16 @@ class LLMEngine:
     def stop_profile(self) -> None:
         self.model_executor.stop_profile()
 
+    def sleep(self, level: int = 1) -> None:
+        assert self.vllm_config.model_config.enable_sleep_mode, (
+            "Sleep mode is not enabled in the model config")
+        self.model_executor.sleep(level=level)
+
+    def wake_up(self) -> None:
+        assert self.vllm_config.model_config.enable_sleep_mode, (
+            "Sleep mode is not enabled in the model config")
+        self.model_executor.wake_up()
+
     def check_health(self) -> None:
         if self.tokenizer:
             self.tokenizer.check_health()
@@ -1855,46 +1867,44 @@ class LLMEngine:
             metrics = seq_group.metrics
             ttft = metrics.first_token_time - metrics.arrival_time
             e2e_time = metrics.finished_time - metrics.arrival_time
-            # attribute names are based on
-            # https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/llm-spans.md
-            seq_span.set_attribute(SpanAttributes.LLM_RESPONSE_MODEL,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_RESPONSE_MODEL,
                                    self.model_config.model)
-            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_ID,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID,
                                    seq_group.request_id)
-            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_TEMPERATURE,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TEMPERATURE,
                                    seq_group.sampling_params.temperature)
-            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_TOP_P,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P,
                                    seq_group.sampling_params.top_p)
-            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_MAX_TOKENS,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS,
                                    seq_group.sampling_params.max_tokens)
-            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_N,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N,
                                    seq_group.sampling_params.n)
-            seq_span.set_attribute(SpanAttributes.LLM_USAGE_NUM_SEQUENCES,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_USAGE_NUM_SEQUENCES,
                                    seq_group.num_seqs())
-            seq_span.set_attribute(SpanAttributes.LLM_USAGE_PROMPT_TOKENS,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS,
                                    len(seq_group.prompt_token_ids))
             seq_span.set_attribute(
-                SpanAttributes.LLM_USAGE_COMPLETION_TOKENS,
+                SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
                 sum([
                     seq.get_output_len()
                     for seq in seq_group.get_finished_seqs()
                 ]))
-            seq_span.set_attribute(SpanAttributes.LLM_LATENCY_TIME_IN_QUEUE,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
                                    metrics.time_in_queue)
             seq_span.set_attribute(
-                SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
-            seq_span.set_attribute(SpanAttributes.LLM_LATENCY_E2E, e2e_time)
+                SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
+            seq_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E, e2e_time)
             if metrics.scheduler_time is not None:
                 seq_span.set_attribute(
-                    SpanAttributes.LLM_LATENCY_TIME_IN_SCHEDULER,
+                    SpanAttributes.GEN_AI_LATENCY_TIME_IN_SCHEDULER,
                     metrics.scheduler_time)
             if metrics.model_forward_time is not None:
                 seq_span.set_attribute(
-                    SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_FORWARD,
+                    SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD,
                     metrics.model_forward_time / 1000.0)
             if metrics.model_execute_time is not None:
                 seq_span.set_attribute(
-                    SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_EXECUTE,
+                    SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE,
                     metrics.model_execute_time)
 
     def _validate_model_inputs(self, inputs: ProcessorInputs,

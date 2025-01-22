@@ -74,7 +74,7 @@ def convert_prompt_ids_to_tokens(
     return new_tokens, prefix_offset, read_offset
 
 
-def detokenize_non_incrementally(
+def detokenize(
     tokenizer: AnyTokenizer,
     token_ids: torch.Tensor,
 ) -> List[str]:
