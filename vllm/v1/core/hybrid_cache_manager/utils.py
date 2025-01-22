@@ -5,7 +5,7 @@ from typing import List
 @dataclass
 class ComputedTokenRange:
     """
-    [start, end)
+    (start, end]
     """
     start: int
     end: int

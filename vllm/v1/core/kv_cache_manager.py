@@ -132,7 +132,10 @@ class KVCacheManager:
             # NOTE(woosuk): Since incomplete blocks are not eligible for
             # sharing, `num_computed_tokens` is always a multiple of
             # `block_size`.
-            num_computed_tokens = len(computed_blocks[0]) * self.block_size
+            if len(computed_tokens[0]) == 0:
+                num_computed_tokens = 0
+            else:
+                num_computed_tokens = computed_tokens[0][-1].end
         else:
             # find the common cached prefix of all groups. This path also works
             # for the single group case, but it is less efficient.
