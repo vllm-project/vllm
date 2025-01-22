@@ -286,21 +286,6 @@ def set_multiprocessing_worker_envs(parallel_config):
     process before worker processes are created"""
 
     _check_multiproc_method()
-    if (current_platform.is_hpu()
-            and parallel_config.distributed_executor_backend == 'mp'
-            and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
-        if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) is not None:
-            logger.warning("On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork might "
-                           "cause application hangs on exit. Using "
-                           "VLLM_WORKER_MULTIPROC_METHOD=fork anyway, "
-                           "as it was explicitly requested.")
-        else:
-            logger.warning("On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork might "
-                           "cause application hangs on exit. Setting "
-                           "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-                           "To override that behavior, please set "
-                           "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
-            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     # Configure thread parallelism if OMP_NUM_THREADS isn't set
     #
