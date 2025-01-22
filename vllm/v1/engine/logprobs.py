@@ -6,7 +6,8 @@ import torch
 from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
-from vllm.transformers_utils.detokenizer_utils import AnyTokenizer, detokenize
+from vllm.transformers_utils.detokenizer_utils import (
+    AnyTokenizer, convert_id_to_token, convert_ids_tensor_to_tokens)
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -96,7 +97,8 @@ class LogprobsProcessor:
             topk_logprobs = logprobs[1:]
 
             # Detokenize non-incrementally.
-            decoded_tokens = detokenize(self.tokenizer, topk_token_ids)
+            decoded_tokens = convert_ids_tensor_to_tokens(
+                self.tokenizer, topk_token_ids)
 
             # Make the dict of top-token Logprob objects associated with the
             # current sequence offset
@@ -108,9 +110,10 @@ class LogprobsProcessor:
                 # If the sampled token is not one of the top tokens
                 # at this sequence offset, inject the sampled token
                 # & its Logprob instance into the dict
-                sample_logprob_obj = Logprob(
-                    logprob=sampled_token_logprob,
-                    decoded_token=self.tokenizer.decode(sampled_token_id))
+                sample_logprob_obj = Logprob(logprob=sampled_token_logprob,
+                                             decoded_token=convert_id_to_token(
+                                                 self.tokenizer,
+                                                 sampled_token_id))
                 pos_logprobs_dict = self._make_pos_logprob_dict(
                     topk_logprobs.tolist(), topk_token_ids.tolist(),
                     decoded_tokens, self.num_logprobs,
@@ -170,7 +173,8 @@ class LogprobsProcessor:
         # Detokenize non-incrementally.
         # NOTE(rob): the output is flattened:
         # [num_tok, num_lps] -> [num_tok * num_lps]
-        decoded_tokens = detokenize(self.tokenizer, token_ids)
+        decoded_tokens = convert_ids_tensor_to_tokens(self.tokenizer,
+                                                      token_ids)
 
         # Make Logprob for each token.
         num_chunk_tokens, decoded_tokens_stride = prompt_logprobs.shape

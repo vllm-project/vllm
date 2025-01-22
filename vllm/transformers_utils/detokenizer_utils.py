@@ -74,18 +74,46 @@ def convert_prompt_ids_to_tokens(
     return new_tokens, prefix_offset, read_offset
 
 
-def detokenize(
+def convert_id_to_token(
+    tokenizer: AnyTokenizer,
+    token_id: int,
+) -> str:
+    """Detokenize a single input id.
+    
+    Args:
+      tokenizer: tokenizer used by model under test
+      token_id: convert this token
+
+    Returns:
+      String representation of single input token.
+    """
+    token_str_lst = tokenizer.convert_ids_to_tokens([token_id])
+    replace_none_with_empty(token_str_lst)
+    return token_str_lst[0]
+
+
+def convert_ids_tensor_to_tokens(
     tokenizer: AnyTokenizer,
     token_ids: torch.Tensor,
 ) -> List[str]:
-    """Detokenize the input ids individually."""
+    """Detokenize the input ids individually.
 
+    Args:
+      tokenizer: tokenizer used by model under test
+      token_ids: convert these tokens
+
+    Returns:
+      Python list of token string representations
+    
+    """
     # Flatten input to shape [N, 1]. Tokenizers then
     # treats it as decoding batch N seq_len 1, such
     # that they all happen independently.
     flat_token_ids = token_ids.reshape(-1,
                                        1).squeeze().to(torch.int32).tolist()
-    return tokenizer.convert_ids_to_tokens(flat_token_ids)
+    token_str_lst = tokenizer.convert_ids_to_tokens(flat_token_ids)
+    replace_none_with_empty(token_str_lst)
+    return token_str_lst
 
 
 # Based on
