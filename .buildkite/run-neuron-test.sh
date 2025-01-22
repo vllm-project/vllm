@@ -25,8 +25,11 @@ if [ -f /tmp/neuron-docker-build-timestamp ]; then
     last_build=$(cat /tmp/neuron-docker-build-timestamp)
     current_time=$(date +%s)
     if [ $((current_time - last_build)) -gt 86400 ]; then
+        # Remove dangling images (those that are not tagged and not used by any container)
         docker image prune -f
-        docker system prune -f
+        # Remove unused volumes / force the system prune for old images as well.
+        docker volume prune -f && docker system prune -f
+        # Remove huggingface model artifacts and compiler cache
         rm -rf "${HF_MOUNT:?}/*"
         rm -rf "${NEURON_COMPILE_CACHE_MOUNT:?}/*"
         echo "$current_time" > /tmp/neuron-docker-build-timestamp
