@@ -518,6 +518,18 @@ TASK_HANDLERS: Dict[str, Dict[str, tuple]] = {
     },
 }
 
+if envs.VLLM_SERVER_DEV_MODE:
+
+    @router.post("/reset_prefix_cache")
+    async def reset_prefix_cache(raw_request: Request):
+        """
+        Reset the prefix cache. Note that we currently do not check if the
+        prefix cache is successfully reset in the API server.
+        """
+        logger.info("Resetting prefix cache...")
+        await engine_client(raw_request).reset_prefix_cache()
+        return Response(status_code=200)
+
 
 @router.post("/invocations")
 async def invocations(raw_request: Request):
