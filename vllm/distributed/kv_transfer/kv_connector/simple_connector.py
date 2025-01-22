@@ -2,7 +2,8 @@
 Simple KV Cache Connector for Distributed Machine Learning Inference
 
 The SimpleConnector transfers KV caches between prefill vLLM worker (KV cache 
-producer) and decode vLLM worker (KV cache consumer) using PyNcclPipe.
+producer) and decode vLLM worker (KV cache consumer) using PyNcclPipe or
+MooncakePipe.
 
 But the logic can be extended to support other pipe and lookup buffer.
 """
@@ -15,7 +16,6 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
     SimpleBuffer)
-from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import PyNcclPipe
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
@@ -35,14 +35,40 @@ class SimpleConnector(KVConnectorBase):
     ):
 
         self.config = config.kv_transfer_config
+        self.tp_size = config.parallel_config.tensor_parallel_size
 
-        logger.info("Initializing PyNcclConfig under kv_transfer_config %s",
+        if self.config.kv_connector == "PyNcclConnector":
+            from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import (
+                PyNcclPipe)
+            logger.info(
+                "Initializing PyNcclConfig under kv_transfer_config %s",
+                self.config)
+        elif self.config.kv_connector == "MooncakeConnector":
+            # Check if MOONCAKE_CONFIG_PATH is set
+            import os
+            use_mooncake_distributed_pipe = os.getenv(
+                'MOONCAKE_CONFIG_PATH') is not None
+
+            if not use_mooncake_distributed_pipe:
+                raise ValueError(
+                    "To use MooncakeConnector, you need to pass the ENV: "
+                    "'MOONCAKE_CONFIG_PATH=/path/to/mooncake_config.json'.")
+            else:
+                from vllm.distributed.kv_transfer.kv_pipe.mooncake_pipe import (  # noqa: E501
+                    MooncakePipe)
+                logger.info(
+                    "Initializing MooncakeConfig under kv_transfer_config %s",
                     self.config)
 
         self.lookup_buffer_size = self.config.kv_buffer_size
 
         self.producer_buffer: Optional[SimpleBuffer] = None
         self.consumer_buffer: Optional[SimpleBuffer] = None
+
+        self.producer_data_pipe: Union[PyNcclPipe, MooncakePipe]
+        self.consumer_data_pipe: Union[PyNcclPipe, MooncakePipe]
+        self.producer_signal_pipe: Union[PyNcclPipe, MooncakePipe]
+        self.consumer_signal_pipe: Union[PyNcclPipe, MooncakePipe]
 
         # 2 pipes for every rank in the world
         port_offset_base = 2 * rank
@@ -51,17 +77,26 @@ class SimpleConnector(KVConnectorBase):
         # and the decode vLLM only uses recv pipe
         if self.config.is_kv_producer:
 
-            self.producer_data_pipe = PyNcclPipe(
-                local_rank=local_rank,
-                config=self.config,
-                port_offset=port_offset_base,
-            )
-            self.producer_signal_pipe = PyNcclPipe(
-                local_rank=local_rank,
-                config=self.config,
-                port_offset=port_offset_base + 1,
-                device="cpu",
-            )
+            if self.config.kv_connector == "PyNcclConnector":
+                self.producer_data_pipe = PyNcclPipe(
+                    local_rank=local_rank,
+                    config=self.config,
+                    port_offset=port_offset_base,
+                )
+                self.producer_signal_pipe = PyNcclPipe(
+                    local_rank=local_rank,
+                    config=self.config,
+                    port_offset=port_offset_base + 1,
+                    device="cpu",
+                )
+            elif self.config.kv_connector == "MooncakeConnector":
+                self.producer_data_pipe = MooncakePipe(
+                    local_rank=local_rank,
+                    config=self.config,
+                )
+                # We only need to initialize MooncakePipe once
+                self.producer_signal_pipe = self.producer_data_pipe
+
             self.producer_buffer = SimpleBuffer(self.producer_signal_pipe,
                                                 self.producer_data_pipe,
                                                 self.config.kv_buffer_size)
@@ -70,17 +105,25 @@ class SimpleConnector(KVConnectorBase):
 
             # the current vLLM instance is KV consumer, so it needs to connect
             # its recv pipe to the send pipe of KV producder
-            self.consumer_data_pipe = PyNcclPipe(
-                local_rank=local_rank,
-                config=self.config,
-                port_offset=port_offset_base,
-            )
-            self.consumer_signal_pipe = PyNcclPipe(
-                local_rank=local_rank,
-                config=self.config,
-                port_offset=port_offset_base + 1,
-                device="cpu",
-            )
+            if self.config.kv_connector == "PyNcclConnector":
+                self.consumer_data_pipe = PyNcclPipe(
+                    local_rank=local_rank,
+                    config=self.config,
+                    port_offset=port_offset_base,
+                )
+                self.consumer_signal_pipe = PyNcclPipe(
+                    local_rank=local_rank,
+                    config=self.config,
+                    port_offset=port_offset_base + 1,
+                    device="cpu",
+                )
+            elif self.config.kv_connector == "MooncakeConnector":
+                self.consumer_data_pipe = MooncakePipe(
+                    local_rank=local_rank,
+                    config=self.config,
+                )
+                self.consumer_signal_pipe = self.consumer_data_pipe
+
             self.consumer_buffer = SimpleBuffer(
                 self.consumer_signal_pipe,
                 self.consumer_data_pipe,
@@ -119,7 +162,7 @@ class SimpleConnector(KVConnectorBase):
         end_layer = model_executable.model.end_layer
 
         model_config = model_executable.model.config
-        num_heads = model_config.num_key_value_heads
+        num_heads = int(model_config.num_key_value_heads / self.tp_size)
         hidden_size = model_config.hidden_size
         num_attention_heads = model_config.num_attention_heads
         head_size = int(hidden_size / num_attention_heads)
@@ -260,6 +303,11 @@ class SimpleConnector(KVConnectorBase):
 
     def close(self):
         self.producer_data_pipe.close()
-        self.producer_signal_pipe.close()
         self.consumer_data_pipe.close()
-        self.consumer_signal_pipe.close()
+        if self.config.kv_connector == "PyNcclConnector":
+            self.producer_signal_pipe.close()
+            self.consumer_signal_pipe.close()
+        elif self.config.kv_connector == "MooncakeConnector":
+            # MooncakePipe reuses data_pipe for signal_pipe, so we only have to
+            # close the data_pipe.
+            pass

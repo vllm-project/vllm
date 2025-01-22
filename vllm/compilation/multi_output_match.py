@@ -7,6 +7,7 @@ from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor import pattern_matcher as pm
 from torch._ops import OpOverload
+from torch.fx import Node
 
 from vllm.compilation.fx_utils import find_auto_fn
 
@@ -97,7 +98,7 @@ class MultiOutputMatch(abc.ABC):
                 self.graph.call_function(operator.getitem, (tuple_node, idx))
                 for idx in indices)
 
-    def insert_auto_fn(self, op: OpOverload, kwargs):
+    def insert_auto_fn(self, op: OpOverload, kwargs) -> Node:
         """
         Insert an auto_functionalized node with the given op and kwargs.
         """

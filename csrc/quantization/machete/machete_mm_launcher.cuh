@@ -13,23 +13,23 @@ struct MMArgs {
   torch::Tensor const& A;
   torch::Tensor const& B;
   vllm::ScalarType const& b_type;
-  c10::optional<at::ScalarType> const& maybe_out_type;
-  c10::optional<torch::Tensor> const& maybe_group_scales;
-  c10::optional<torch::Tensor> const& maybe_group_zeros;
-  c10::optional<int64_t> maybe_group_size;
-  c10::optional<torch::Tensor> const& maybe_channel_scales;
-  c10::optional<torch::Tensor> const& maybe_token_scales;
-  c10::optional<std::string> maybe_schedule;
+  std::optional<at::ScalarType> const& maybe_out_type;
+  std::optional<torch::Tensor> const& maybe_group_scales;
+  std::optional<torch::Tensor> const& maybe_group_zeros;
+  std::optional<int64_t> maybe_group_size;
+  std::optional<torch::Tensor> const& maybe_channel_scales;
+  std::optional<torch::Tensor> const& maybe_token_scales;
+  std::optional<std::string> maybe_schedule;
 };
 
 struct SupportedSchedulesArgs {
   at::ScalarType a_type;
   vllm::ScalarType b_type;
-  c10::optional<at::ScalarType> maybe_group_scales_type;
-  c10::optional<at::ScalarType> maybe_group_zeros_type;
-  c10::optional<at::ScalarType> maybe_channel_scales_type;
-  c10::optional<at::ScalarType> maybe_token_scales_type;
-  c10::optional<at::ScalarType> maybe_out_type;
+  std::optional<at::ScalarType> maybe_group_scales_type;
+  std::optional<at::ScalarType> maybe_group_zeros_type;
+  std::optional<at::ScalarType> maybe_channel_scales_type;
+  std::optional<at::ScalarType> maybe_token_scales_type;
+  std::optional<at::ScalarType> maybe_out_type;
 };
 
 torch::Tensor mm_dispatch(MMArgs args);

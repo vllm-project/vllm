@@ -8,6 +8,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionType)
@@ -28,6 +29,8 @@ from vllm.vllm_flash_attn import (flash_attn_varlen_func,
 
 
 class FlashAttentionBackend(AttentionBackend):
+
+    accept_output_buffer: bool = True
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
@@ -372,6 +375,12 @@ class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
+        self.input_builder = input_builder
+        self.runner = input_builder.runner
+        self.sliding_window = input_builder.sliding_window
+        self.block_size = input_builder.block_size
+
+    def prepare(self):
         self.slot_mapping: List[int] = []
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
@@ -384,11 +393,6 @@ class FlashAttentionMetadataBuilder(
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
         self.has_prefix_cache_hit = False
-
-        self.input_builder = input_builder
-        self.runner = input_builder.runner
-        self.sliding_window = input_builder.sliding_window
-        self.block_size = input_builder.block_size
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -600,6 +604,7 @@ class FlashAttentionImpl(AttentionImpl):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
@@ -627,17 +632,16 @@ class FlashAttentionImpl(AttentionImpl):
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
                 f"Supported head sizes are: {support_head_sizes}.")
+        self.attn_type = attn_type
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
-        attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
@@ -654,11 +658,12 @@ class FlashAttentionImpl(AttentionImpl):
         NOTE: It in-place updates the output tensor.
         """
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
-        assert k_scale == 1.0 and v_scale == 1.0, (
+        assert layer._k_scale == 1.0 and layer._v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
 
         assert output is not None, "Output tensor must be provided."
 
+        attn_type = self.attn_type
         if (attn_type == AttentionType.ENCODER
                 and (not attn_metadata.is_all_encoder_attn_metadata_set)):
             raise AttributeError("Encoder attention requires setting "
@@ -705,8 +710,8 @@ class FlashAttentionImpl(AttentionImpl):
                     kv_cache[1],
                     updated_slot_mapping.flatten(),  # type: ignore[union-attr]
                     kv_cache_dtype,
-                    k_scale,
-                    v_scale,
+                    layer._k_scale,
+                    layer._v_scale,
                 )
 
         (num_prefill_query_tokens, num_prefill_kv_tokens,
