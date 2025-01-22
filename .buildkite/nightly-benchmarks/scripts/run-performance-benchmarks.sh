@@ -341,7 +341,12 @@ run_serving_tests() {
   done
 }
 
+clean_docker() {
+  docker system prune -af --volumes
+}
+
 main() {
+  clean_docker
   check_gpus
   check_hf_token
 
