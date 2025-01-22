@@ -25,6 +25,7 @@ On the client side, run:
 import argparse
 import asyncio
 import base64
+import gc
 import io
 import json
 import os
@@ -423,7 +424,7 @@ def calculate_metrics(
     tokenizer: PreTrainedTokenizerBase,
     selected_percentile_metrics: List[str],
     selected_percentiles: List[float],
-    gootput_config_dict: Dict[str, float],
+    goodput_config_dict: Dict[str, float],
 ) -> Tuple[BenchmarkMetrics, List[int]]:
     actual_output_lens: List[int] = []
     total_input = 0
@@ -436,19 +437,23 @@ def calculate_metrics(
     e2els: List[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
-            # We use the tokenizer to count the number of output tokens for all
-            # serving backends instead of looking at len(outputs[i].itl) since
-            # multiple output tokens may be bundled together
-            # Note : this may inflate the output token count slightly
-            output_len = len(
-                tokenizer(outputs[i].generated_text,
-                          add_special_tokens=False).input_ids)
+            output_len = outputs[i].output_tokens
+
+            if output_len is None:
+                # We use the tokenizer to count the number of output tokens
+                # for some serving backends instead of looking at
+                # len(outputs[i].itl) since multiple output tokens may be
+                # bundled together
+                # Note : this may inflate the output token count slightly
+                output_len = len(
+                    tokenizer(outputs[i].generated_text,
+                              add_special_tokens=False).input_ids)
             actual_output_lens.append(output_len)
             total_input += input_requests[i][1]
             tpot = 0
             if output_len > 1:
-                tpot = (outputs[i].latency - outputs[i].ttft) / (output_len -
-                                                                 1)
+                latency_minus_ttft = outputs[i].latency - outputs[i].ttft
+                tpot = latency_minus_ttft / (output_len - 1)
                 tpots.append(tpot)
             # Note: if output_len <= 1, we regard tpot as 0 for goodput
             all_tpots.append(tpot)
@@ -459,21 +464,21 @@ def calculate_metrics(
         else:
             actual_output_lens.append(0)
 
-    if gootput_config_dict:
+    if goodput_config_dict:
         valid_metrics = []
         slo_values = []
 
-        if "ttft" in gootput_config_dict:
+        if "ttft" in goodput_config_dict:
             valid_metrics.append(ttfts)
-            slo_values.append(gootput_config_dict["ttft"] /
+            slo_values.append(goodput_config_dict["ttft"] /
                               MILLISECONDS_TO_SECONDS_CONVERSION)
-        if "tpot" in gootput_config_dict:
+        if "tpot" in goodput_config_dict:
             valid_metrics.append(all_tpots)
-            slo_values.append(gootput_config_dict["tpot"] /
+            slo_values.append(goodput_config_dict["tpot"] /
                               MILLISECONDS_TO_SECONDS_CONVERSION)
-        if "e2el" in gootput_config_dict:
+        if "e2el" in goodput_config_dict:
             valid_metrics.append(e2els)
-            slo_values.append(gootput_config_dict["e2el"] /
+            slo_values.append(goodput_config_dict["e2el"] /
                               MILLISECONDS_TO_SECONDS_CONVERSION)
 
         for req_metric in zip(*valid_metrics):
@@ -537,7 +542,7 @@ async def benchmark(
     selected_percentile_metrics: List[str],
     selected_percentiles: List[str],
     ignore_eos: bool,
-    gootput_config_dict: Dict[str, float],
+    goodput_config_dict: Dict[str, float],
     max_concurrency: Optional[int],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
@@ -661,7 +666,7 @@ async def benchmark(
         tokenizer=tokenizer,
         selected_percentile_metrics=selected_percentile_metrics,
         selected_percentiles=selected_percentiles,
-        gootput_config_dict=gootput_config_dict,
+        goodput_config_dict=goodput_config_dict,
     )
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
@@ -673,7 +678,7 @@ async def benchmark(
                                  metrics.total_output))
     print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
                                     metrics.request_throughput))
-    if gootput_config_dict:
+    if goodput_config_dict:
         print("{:<40} {:<10.2f}".format("Request goodput (req/s):",
                                         metrics.request_goodput))
     print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
@@ -688,7 +693,7 @@ async def benchmark(
         "total_output_tokens": metrics.total_output,
         "request_throughput": metrics.request_throughput,
         "request_goodput:":
-        metrics.request_goodput if gootput_config_dict else None,
+        metrics.request_goodput if goodput_config_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
         "input_lens": [output.prompt_len for output in outputs],
@@ -744,11 +749,11 @@ async def benchmark(
 
 def check_goodput_args(args):
     # Check and parse goodput arguments
-    gootput_config_dict = {}
+    goodput_config_dict = {}
     VALID_NAMES = ["ttft", "tpot", "e2el"]
     if args.goodput:
-        gootput_config_dict = parse_goodput(args.goodput)
-        for slo_name, slo_val in gootput_config_dict.items():
+        goodput_config_dict = parse_goodput(args.goodput)
+        for slo_name, slo_val in goodput_config_dict.items():
             if slo_name not in VALID_NAMES:
                 raise ValueError(
                     f"Invalid metric name found, {slo_name}: {slo_val}. "
@@ -759,22 +764,22 @@ def check_goodput_args(args):
                     f"Invalid value found, {slo_name}: {slo_val}. "
                     "The service level objective value should be "
                     "non-negative.")
-    return gootput_config_dict
+    return goodput_config_dict
 
 
 def parse_goodput(slo_pairs):
-    gootput_config_dict = {}
+    goodput_config_dict = {}
     try:
         for slo_pair in slo_pairs:
             slo_name, slo_val = slo_pair.split(":")
-            gootput_config_dict[slo_name] = float(slo_val)
+            goodput_config_dict[slo_name] = float(slo_val)
     except ValueError as err:
         raise argparse.ArgumentTypeError(
             "Invalid format found for service level objectives. "
             "Specify service level objectives for goodput as \"KEY:VALUE\" "
             "pairs, where the key is a metric name, and the value is a "
             "number in milliseconds.") from err
-    return gootput_config_dict
+    return goodput_config_dict
 
 
 def main(args: argparse.Namespace):
@@ -874,7 +879,11 @@ def main(args: argparse.Namespace):
     else:
         raise ValueError(f"Unknown dataset: {args.dataset_name}")
 
-    gootput_config_dict = check_goodput_args(args)
+    goodput_config_dict = check_goodput_args(args)
+
+    # Avoid GC processing "static" data - reduce pause times.
+    gc.collect()
+    gc.freeze()
 
     benchmark_result = asyncio.run(
         benchmark(
@@ -896,7 +905,7 @@ def main(args: argparse.Namespace):
                 float(p) for p in args.metric_percentiles.split(",")
             ],
             ignore_eos=args.ignore_eos,
-            gootput_config_dict=gootput_config_dict,
+            goodput_config_dict=goodput_config_dict,
             max_concurrency=args.max_concurrency,
         ))
 
