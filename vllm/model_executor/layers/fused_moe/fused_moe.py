@@ -16,6 +16,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
+import aiter
+
 logger = init_logger(__name__)
 padding_size = 128 if envs.VLLM_MOE_PADDING else 0
 
@@ -463,17 +465,23 @@ def fused_topk(
                                         dtype=torch.int32,
                                         device=hidden_states.device)
 
-    ops.topk_softmax(
-        topk_weights,
-        topk_ids,
-        token_expert_indicies,
-        gating_output.float(),  # TODO(woosuk): Optimize this.
-    )
+    # ops.topk_softmax(
+    #     topk_weights,
+    #     topk_ids,
+    #     token_expert_indicies,
+    #     gating_output.float(),  # TODO(woosuk): Optimize this.
+    # )
+    # del token_expert_indicies  # Not used. Will be used in the future.
+
+    # if renormalize:
+    #     topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    
+    aiter.topk_softmax(topk_weights,
+                       topk_ids,
+                       token_expert_indicies,
+                       gating_output.float(),
+                       renormalize)
     del token_expert_indicies  # Not used. Will be used in the future.
-
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-
     return topk_weights, topk_ids
 
 
