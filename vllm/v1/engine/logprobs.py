@@ -6,8 +6,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
-from vllm.transformers_utils.detokenizer_utils import (
-    AnyTokenizer, detokenize_non_incrementally)
+from vllm.transformers_utils.detokenizer_utils import AnyTokenizer, detokenize
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -97,8 +96,7 @@ class LogprobsProcessor:
             topk_logprobs = logprobs[1:]
 
             # Detokenize non-incrementally.
-            decoded_tokens = detokenize_non_incrementally(
-                self.tokenizer, topk_token_ids)
+            decoded_tokens = detokenize(self.tokenizer, topk_token_ids)
 
             # Make the dict of top-token Logprob objects associated with the
             # current sequence offset
@@ -172,8 +170,7 @@ class LogprobsProcessor:
         # Detokenize non-incrementally.
         # NOTE(rob): the output is flattened:
         # [num_tok, num_lps] -> [num_tok * num_lps]
-        decoded_tokens = detokenize_non_incrementally(self.tokenizer,
-                                                      token_ids)
+        decoded_tokens = detokenize(self.tokenizer, token_ids)
 
         # Make Logprob for each token.
         num_chunk_tokens, decoded_tokens_stride = prompt_logprobs.shape
