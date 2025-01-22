@@ -666,8 +666,9 @@ class QKVCrossParallelLinear(torch.nn.Module):
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         super().__init__()
-        self.weight = torch.nn.Parameter() # placeholder for loading
-        self.bias = torch.nn.Parameter() # placeholder for loading
+        # Empty placeholders for loading as a single module.
+        self.weight = torch.nn.Parameter() 
+        self.bias = torch.nn.Parameter()
 
         self.q_proj_decoder = ColumnParallelLinear(
             input_size=hidden_size,
@@ -690,16 +691,11 @@ class QKVCrossParallelLinear(torch.nn.Module):
         )
 
         set_weight_attrs(self.weight, {
-                "output_dim": 0,
-                "weight_loader": self.weight_loader_weight,
+            "weight_loader": self.weight_loader_weight,
         })
         set_weight_attrs(self.bias, {
-                "output_dim": 0,
-                "weight_loader": self.weight_loader_bias,
+            "weight_loader": self.weight_loader_bias,
         })
-        # Do not show placeholders after loading the model.
-        # delattr(self, "weight")
-        # delattr(self, "bias")
 
     def forward(self, decoder_hidden_states, encoder_hidden_states):
         q, _ = self.q_proj_decoder(decoder_hidden_states)
