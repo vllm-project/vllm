@@ -997,6 +997,90 @@ class LLM:
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
 
+    def _embedding_score(self, tokenizer, text_1: List[str],
+                         text_2: List[str]) -> List[ScoringRequestOutput]:
+
+        encoded_output = self.encode(text_1 + text_2)
+        encoded_output_1 = encoded_output[0:len(text_1)]
+        encoded_output_2 = encoded_output[len(text_1):]
+
+        if len(encoded_output_1) == 1:
+            encoded_output_1 = encoded_output_1 * len(encoded_output_2)
+
+        output_pairs = [(t1, t2)
+                        for t1, t2 in zip(encoded_output_1, encoded_output_2)]
+
+        scores = []
+        scorer = torch.nn.CosineSimilarity(0)
+
+        for embed_1, embed_2 in output_pairs:
+            pair_score = scorer(embed_1.outputs.data, embed_2.outputs.data)
+
+            if getattr(tokenizer, "pad_token", None) is None:
+                tokens = embed_1.prompt_token_ids + embed_2.prompt_token_ids
+            else:
+                tokens = embed_1.prompt_token_ids + [
+                    tokenizer.pad_token_type_id
+                ] + embed_2.prompt_token_ids
+
+            scores.append(
+                PoolingRequestOutput(
+                    request_id=f"{embed_1.request_id}_{embed_2.request_id}",
+                    outputs=pair_score,
+                    prompt_token_ids=tokens,
+                    finished=True))
+
+        items = self.engine_class.validate_outputs(scores,
+                                                   PoolingRequestOutput)
+        return [ScoringRequestOutput.from_base(item) for item in items]
+
+    def _cross_encoding_score(
+            self, tokenizer, truncate_prompt_tokens,
+            text_1: List[str | TextPrompt | TokensPrompt],
+            text_2: List[str | TextPrompt | TokensPrompt], use_tqdm,
+            lora_request,
+            prompt_adapter_request) -> List[ScoringRequestOutput]:
+
+        if isinstance(tokenizer, MistralTokenizer):
+            raise ValueError(
+                "MistralTokenizer not supported for cross-encoding")
+
+        if len(text_1) == 1:
+            text_1 = text_1 * len(text_2)
+
+        input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
+
+        pooling_params = PoolingParams()
+
+        tokenization_kwargs: Dict[str, Any] = {}
+        if truncate_prompt_tokens is not None:
+            tokenization_kwargs["truncation"] = True
+            tokenization_kwargs["max_length"] = truncate_prompt_tokens
+
+        parsed_prompts = []
+
+        for q, t in input_pairs:
+            prompt_inputs = tokenizer(text=q,
+                                      text_pair=t,
+                                      **tokenization_kwargs)
+            engine_prompt = TokensPrompt(
+                prompt_token_ids=prompt_inputs["input_ids"],
+                token_type_ids=prompt_inputs.get("token_type_ids"))
+            parsed_prompts.append(engine_prompt)
+
+        self._validate_and_add_requests(
+            prompts=parsed_prompts,
+            params=pooling_params,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
+        )
+
+        outputs = self._run_engine(use_tqdm=use_tqdm)
+        items = self.engine_class.validate_outputs(outputs,
+                                                   PoolingRequestOutput)
+
+        return [ScoringRequestOutput.from_base(item) for item in items]
+
     def score(
         self,
         text_1: Union[SingletonPrompt, Sequence[SingletonPrompt]],
@@ -1033,87 +1117,6 @@ class LLM:
             A list of ``ScoringRequestOutput`` objects containing the
             generated scores in the same order as the input prompts.
         """
-
-        def _embedding_score(tokenizer, text_1: List[str],
-                             text_2: List[str]) -> List[ScoringRequestOutput]:
-            encoded_output = self.encode(text_1 + text_2)
-            encoded_output_1 = encoded_output[0:len(text_1)]
-            encoded_output_2 = encoded_output[len(text_1):]
-
-            if len(encoded_output_1) == 1:
-                encoded_output_1 = encoded_output_1 * len(encoded_output_2)
-
-            output_pairs = [
-                (t1, t2) for t1, t2 in zip(encoded_output_1, encoded_output_2)
-            ]
-
-            scores = []
-            scorer = torch.nn.CosineSimilarity(0)
-
-            for embed_1, embed_2 in output_pairs:
-                pair_score = scorer(embed_1.outputs.data, embed_2.outputs.data)
-
-                if getattr(tokenizer, "pad_token", None) is None:
-                    tokens = embed_1.prompt_token_ids + embed_2.prompt_token_ids
-                else:
-                    tokens = embed_1.prompt_token_ids + [
-                        tokenizer.pad_token_type_id
-                    ] + embed_2.prompt_token_ids
-
-                scores.append(
-                    PoolingRequestOutput(
-                        request_id=f"{embed_1.request_id}_{embed_2.request_id}",
-                        outputs=pair_score,
-                        prompt_token_ids=tokens,
-                        finished=True))
-
-            items = self.engine_class.validate_outputs(scores,
-                                                       PoolingRequestOutput)
-            return [ScoringRequestOutput.from_base(item) for item in items]
-
-        def _cross_encoding_score(
-            tokenizer, text_1: List[str | TextPrompt | TokensPrompt],
-            text_2: List[str | TextPrompt | TokensPrompt]
-        ) -> List[ScoringRequestOutput]:
-            if isinstance(tokenizer, MistralTokenizer):
-                raise ValueError(
-                    "MistralTokenizer not supported for cross-encoding")
-
-            if len(text_1) == 1:
-                text_1 = text_1 * len(text_2)
-
-            input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
-
-            pooling_params = PoolingParams()
-
-            tokenization_kwargs: Dict[str, Any] = {}
-            if truncate_prompt_tokens is not None:
-                tokenization_kwargs["truncation"] = True
-                tokenization_kwargs["max_length"] = truncate_prompt_tokens
-
-            parsed_prompts = []
-
-            for q, t in input_pairs:
-                prompt_inputs = tokenizer(text=q,
-                                          text_pair=t,
-                                          **tokenization_kwargs)
-                engine_prompt = TokensPrompt(
-                    prompt_token_ids=prompt_inputs["input_ids"],
-                    token_type_ids=prompt_inputs.get("token_type_ids"))
-                parsed_prompts.append(engine_prompt)
-
-            self._validate_and_add_requests(
-                prompts=parsed_prompts,
-                params=pooling_params,
-                lora_request=lora_request,
-                prompt_adapter_request=prompt_adapter_request,
-            )
-
-            outputs = self._run_engine(use_tqdm=use_tqdm)
-            items = self.engine_class.validate_outputs(outputs,
-                                                       PoolingRequestOutput)
-
-            return [ScoringRequestOutput.from_base(item) for item in items]
 
         runner_type = self.llm_engine.model_config.runner_type
         if runner_type != "pooling":
@@ -1170,9 +1173,12 @@ class LLM:
             raise ValueError("At least one text_pair element must be given")
 
         if self.llm_engine.model_config.is_cross_encoder:
-            return _cross_encoding_score(tokenizer, text_1, text_2)
+            return self._cross_encoding_score(tokenizer,
+                                              truncate_prompt_tokens, text_1,
+                                              text_2, use_tqdm, lora_request,
+                                              prompt_adapter_request)
         else:
-            return _embedding_score(tokenizer, text_1, text_2)
+            return self._embedding_score(tokenizer, text_1, text_2)
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()
