@@ -159,8 +159,6 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             attn_backend = self.runner.attn_backend
             self.att_metadata_builder = attn_backend.get_builder_cls()(self)
 
-        self.prepare(finished_requests_ids)
-
     def prepare(self,
                 finished_requests_ids: Optional[List[str]] = None) -> None:
         self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
