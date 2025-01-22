@@ -35,6 +35,13 @@ from .utils import AutoWeightsLoader, WeightsMapper, make_layers
 logger = init_logger(__name__)
 
 
+def _cast_overflow_values(x: torch.Tensor) -> torch.Tensor:
+    if x.isinf().any() or x.isnan().any():
+        clamp_value = torch.finfo(x.dtype).max - 1000
+        x = torch.clamp(x, min=-clamp_value, max=clamp_value)
+    return x
+
+
 class WhisperAudioInputs(TypedDict):
     input_features: NestedTensors
     """Shape: `(batch_size, 128, M)`"""
@@ -295,12 +302,7 @@ class WhisperEncoderLayer(nn.Module):
         hidden_states = self.final_layer_norm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-
-        if hidden_states.isinf().any() or hidden_states.isnan().any():
-            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-            hidden_states = torch.clamp(hidden_states,
-                                        min=-clamp_value,
-                                        max=clamp_value)
+        hidden_states = _cast_overflow_values(hidden_states)
 
         return hidden_states
 
