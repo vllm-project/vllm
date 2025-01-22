@@ -168,10 +168,8 @@ class CuMemAllocator:
         All data in the memory allocation with the specified tag will be 
         offloaded to CPU memory, and others will be discarded.
 
-        Args:
-            offload_tags: The tags of the memory allocation that will be
+        :param offload_tags: The tags of the memory allocation that will be
             offloaded. The rest of the memory allocation will be discarded.
-
         """
         if offload_tags is None:
             # by default, allocated tensors are offloaded
@@ -220,10 +218,8 @@ class CuMemAllocator:
         All memory allocation created inside the context will be allocated 
         in the memory pool, and has the specified tag.
 
-        Args:
-            tag: The tag of the memory allocation. If None, the default tag 
+        :param tag: The tag of the memory allocation. If None, the default tag
             will be used.
-
         """
         if tag is None:
             tag = CuMemAllocator.default_tag

@@ -1138,8 +1138,7 @@ class LLM:
         The caller should guarantee that no requests are being processed
         during the sleep period, before `wake_up` is called.
 
-        Args:
-            level: The sleep level. Level 1 sleep will offload the model 
+        :param level: The sleep level. Level 1 sleep will offload the model 
             weights and discard the kv cache. The content of kv cache is 
             forgotten. Level 1 sleep is good for sleeping and waking up the 
             engine to run the same model again. The model weights are backed 
@@ -1150,7 +1149,6 @@ class LLM:
             waking up the engine to run a different model or update the model, 
             where previous model weights are not needed. It reduces CPU memory 
             pressure.
-
         """
         self.llm_engine.sleep(level=level)
 
