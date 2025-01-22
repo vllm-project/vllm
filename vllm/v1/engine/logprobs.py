@@ -208,9 +208,10 @@ class LogprobsProcessor:
                 # If the prompt token is not one of the top tokens
                 # at this prompt offset, inject the prompt token
                 # & its Logprob instance into the dict
-                prompt_logprob_obj = Logprob(
-                    logprob=prompt_token_logprob,
-                    decoded_token=self.tokenizer.decode(prompt_token_id))
+                prompt_logprob_obj = Logprob(logprob=prompt_token_logprob,
+                                             decoded_token=convert_id_to_token(
+                                                 self.tokenizer,
+                                                 prompt_token_id))
                 self.prompt_logprobs.append(
                     self._make_pos_logprob_dict(
                         topk_logprobs.tolist(), topk_token_ids.tolist(),
