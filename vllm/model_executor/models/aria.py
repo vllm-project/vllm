@@ -342,13 +342,7 @@ class AriaProcessingInfo(BaseProcessingInfo):
         return self.get_hf_config().vision_config
 
     def get_hf_processor(self):
-        processor = self.ctx.get_hf_processor(AriaProcessor)
-
-        # Patch for https://github.com/huggingface/transformers/issues/35768
-        processor.tokenizer.image_token = "<|img|>"
-        processor.image_token = "<|img|>"
-
-        return processor
+        return self.ctx.get_hf_processor(AriaProcessor)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -381,7 +375,7 @@ class AriaDummyInputsBuilder(BaseDummyInputsBuilder[AriaProcessingInfo]):
         }
 
         hf_processor = self.info.get_hf_processor()
-        image_token: str = hf_processor.image_token  # type: ignore
+        image_token: str = hf_processor.tokenizer.image_token  # type: ignore
 
         return ProcessorInputs(
             prompt_text=image_token * num_images,

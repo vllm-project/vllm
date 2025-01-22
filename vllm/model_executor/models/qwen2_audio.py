@@ -36,13 +36,13 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, MultiModalKwargs,
-                                    NestedTensors, PlaceholderRange)
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptReplacementDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -216,11 +216,16 @@ class Qwen2AudioMultiModalProcessor(
                     f"The audio {audio} (len={len(audio)}) is too short "
                     "to be represented inside the model")
 
-            return "".join([
-                audio_bos_token,
-                audio_token * num_placeholders,
-                audio_eos_token,
-            ])
+            audio_tokens = audio_token * num_placeholders
+
+            return PromptReplacementDetails(
+                full="".join([
+                    audio_bos_token,
+                    audio_tokens,
+                    audio_eos_token,
+                ]),
+                features=audio_tokens,
+            )
 
         return [
             PromptReplacement(
@@ -239,26 +244,6 @@ class Qwen2AudioMultiModalProcessor(
         # audios are short (the corresponding placeholders may take up fewer
         # tokens than the number of audio items)
         return not hasattr(self.info.get_hf_processor(), "audio_token")
-
-    def apply(
-        self,
-        prompt: Union[str, list[int]],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> MultiModalInputs:
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
-
-        # Only <|AUDIO|> tokens should be considered as placeholders,
-        # so we ignore the audio_bos_token and audio_eos_token
-        result["mm_placeholders"] = {
-            modality: [
-                PlaceholderRange(offset=p["offset"] + 1,
-                                 length=p["length"] - 2) for p in ps
-            ]
-            for modality, ps in result["mm_placeholders"].items()
-        }
-
-        return result
 
 
 @MULTIMODAL_REGISTRY.register_processor(
