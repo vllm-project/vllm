@@ -217,7 +217,12 @@ class CuMemAllocator:
         """
         A context manager to use the memory pool.
         All memory allocation created inside the context will be allocated 
-        in the memory pool, and has the specified tag."""
+        in the memory pool, and has the specified tag.
+
+        Args:
+            tag: The tag of the memory allocation. If None, the default tag 
+            will be used.
+        """
         if tag is None:
             tag = CuMemAllocator.default_tag
         else:
