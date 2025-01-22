@@ -65,11 +65,6 @@ class AttentionBackend(ABC):
     def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
         raise NotImplementedError
 
-    @classmethod
-    def make_metadata_builder(cls, *args,
-                              **kwargs) -> "AttentionMetadataBuilder":
-        return cls.get_builder_cls()(*args, **kwargs)
-
     @staticmethod
     @abstractmethod
     def get_kv_cache_shape(

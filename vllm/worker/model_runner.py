@@ -460,8 +460,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.decode_only = True
 
         # Attention metadata inputs.
-        self.attn_metadata_builder = self.attn_backend.make_metadata_builder(
-            weakref.proxy(self))
+        if self.attn_backend is not None:
+            # spec decode (e.g. Medusa) does not have atten backend
+            self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
+                weakref.proxy(self))
 
         # Engine/Model configurations.
         self.chunked_prefill_enabled = (

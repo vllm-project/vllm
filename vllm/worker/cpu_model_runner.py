@@ -154,8 +154,10 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.device = self.runner.device
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.enable_lora = self.runner.lora_config is not None
-        self.att_metadata_builder = self.runner.attn_backend.get_builder_cls()(
-            self)
+        if self.runner.attn_backend is not None:
+            # spec decode (e.g. Medusa) does not have atten backend
+            attn_backend = self.runner.attn_backend
+            self.att_metadata_builder = attn_backend.get_builder_cls()(self)
 
         self.prepare(finished_requests_ids)
 
