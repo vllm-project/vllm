@@ -142,8 +142,8 @@ class Sampler(nn.Module):
         # Concatenate with the token_ids
         token_ids = token_ids.unsqueeze(-1)
         sampled_logprobs = logprobs.gather(-1, token_ids.to(torch.int64))
-        topk_indices = torch.cat([token_ids, topk_indices], dim=1)
-        topk_logprobs = torch.cat([sampled_logprobs, topk_logprobs], dim=1)
+        topk_indices = torch.cat((token_ids, topk_indices), dim=1)
+        topk_logprobs = torch.cat((sampled_logprobs, topk_logprobs), dim=1)
 
         return topk_logprobs.cpu(), topk_indices.cpu()
 
