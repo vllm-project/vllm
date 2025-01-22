@@ -118,6 +118,19 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
+    def propose_tokens(self):
+        assert self.scheduler.speculative_config is not None
+        # Append tokens to requests directly
+        # to mimic ngram proposal.
+        # Only change requests in the decoding phase.
+        # We don't handle spec decode kv cache for now.
+        for req in self.scheduler.running:
+            # Ignore requests that are doing chunked prefill.
+            if req.num_computed_tokens >= req.num_tokens:
+                req.append_spec_token_ids(
+                    [1] *
+                    self.scheduler.speculative_config.num_speculative_tokens)
+
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
@@ -125,17 +138,8 @@ class EngineCore:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
-        if self.scheduler.speculative_config and \
-            self.scheduler.speculative_config.num_speculative_tokens > 0:
-            # Append tokens to requests directly
-            # to mimic ngram proposal.
-            # Only change requests in the running queue.
-            # We don't do spec decode in the prefill phase for now.
-            # We don't handle spec decode kv cache for now.
-            for req in self.scheduler.running:
-                req.append_spec_token_ids(
-                    [1] *
-                    self.scheduler.speculative_config.num_speculative_tokens)
+        if self.scheduler.speculative_config:
+            self.propose_tokens()
 
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
