@@ -180,7 +180,7 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         lm_head_weight: torch.Tensor,
     ) -> None:
         if self._is_dummy:
-            return []
+            return
 
         with self._patch_tensor_parallel_group():
             weight_loader = getattr(
