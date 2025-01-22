@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
-                    Tuple, Type, TypeVar)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
+                    Protocol, Set, Tuple, Type, TypeVar)
 
 import torch
 
@@ -64,11 +64,6 @@ class AttentionBackend(ABC):
     @abstractmethod
     def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
         raise NotImplementedError
-
-    @classmethod
-    def make_metadata_builder(cls, *args,
-                              **kwargs) -> "AttentionMetadataBuilder":
-        return cls.get_builder_cls()(*args, **kwargs)
 
     @staticmethod
     @abstractmethod
@@ -214,6 +209,12 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
 
     @abstractmethod
     def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
+        """Create the builder, remember some configuration and parameters."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare(self) -> None:
+        """Prepare for one batch."""
         raise NotImplementedError
 
     @abstractmethod
@@ -221,6 +222,22 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
               cuda_graph_pad_size: int, batch_size: int) -> T:
         """Build attention metadata with on-device tensors."""
         raise NotImplementedError
+
+
+class AttentionLayer(Protocol):
+
+    _k_scale: float
+    _v_scale: float
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        ...
 
 
 class AttentionImpl(ABC, Generic[T]):
@@ -244,13 +261,12 @@ class AttentionImpl(ABC, Generic[T]):
     @abstractmethod
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError

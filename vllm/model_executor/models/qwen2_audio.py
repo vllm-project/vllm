@@ -41,7 +41,8 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptReplacementDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -153,28 +154,23 @@ class Qwen2AudioMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, Any],
     ) -> BatchFeature:
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
+        # Text-only input not supported in composite processor
+        if not mm_data or not mm_data.get("audios", []):
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        if audios:
-            mm_data["audios"] = audios
+        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+        mm_kwargs = dict(
+            **mm_kwargs,
+            sampling_rate=feature_extractor.sampling_rate,
+        )
 
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-            mm_kwargs = dict(
-                **mm_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
-            )
-        else:
-            # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
-            pass
-
-        processed_outputs = super()._call_hf_processor(
+        return super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
-
-        return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -192,8 +188,20 @@ class Qwen2AudioMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_config = self.info.get_hf_config()
-        placeholder = hf_config.audio_token_index
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        # Use getattr with default to be compatible with transformers<4.48
+        audio_token = getattr(processor, "audio_token", "<|AUDIO|>")
+        audio_bos_token = getattr(processor, "audio_bos_token",
+                                  "<|audio_bos|>")
+        audio_eos_token = getattr(processor, "audio_eos_token",
+                                  "<|audio_eos|>")
+
+        audio_token_id = vocab[audio_token]
+        audio_bos_id = vocab[audio_bos_token]
+        audio_eos_id = vocab[audio_eos_token]
 
         feature_attention_mask = out_mm_kwargs.get("feature_attention_mask")
         if feature_attention_mask is None:
@@ -206,20 +214,25 @@ class Qwen2AudioMultiModalProcessor(
             audio_output_lengths = audio_output_lens.tolist()
 
         def get_replacement_qwen2_audio(item_idx: int):
-            num_placeholders = audio_output_lengths[item_idx]
-            if num_placeholders == 0:
+            num_features = audio_output_lengths[item_idx]
+            if num_features == 0:
                 audios = mm_items.get_items("audio", AudioProcessorItems)
                 audio = audios.get(item_idx)
                 raise ValueError(
                     f"The audio {audio} (len={len(audio)}) is too short "
                     "to be represented inside the model")
 
-            return [placeholder] * num_placeholders
+            audio_tokens = [audio_token_id] * num_features
+
+            return PromptReplacementDetails(
+                full=[audio_bos_id] + audio_tokens + [audio_eos_id],
+                features=audio_tokens,
+            )
 
         return [
             PromptReplacement(
                 modality="audio",
-                target=[placeholder],
+                target=audio_token,
                 replacement=get_replacement_qwen2_audio,
             )
         ]
