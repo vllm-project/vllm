@@ -113,7 +113,6 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                  runner: "XPUModelRunner",
                  finished_requests_ids: Optional[List[str]] = None) -> None:
         super().__init__()
-        self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
         self.runner = runner
         self.model_input_cls = self.runner._model_input_cls
         self.attn_backend = self.runner.attn_backend
@@ -123,7 +122,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
 
     def prepare(self,
                 finished_requests_ids: Optional[List[str]] = None) -> None:
-        pass
+        self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         self.seq_group_metadata_list.append(seq_group_metadata)
