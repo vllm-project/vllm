@@ -75,8 +75,14 @@ function cpu_tests() {
       --num-prompts 20 \
       --endpoint /v1/completions \
       --tokenizer facebook/opt-125m"
+
+  # Run multi-lora tests
+  docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" bash -c "
+    set -e
+    pytest -s -v \
+    tests/lora/test_qwen2vl.py"
 }
 
-# All of CPU tests are expected to be finished less than 25 mins.
+# All of CPU tests are expected to be finished less than 40 mins.
 export -f cpu_tests
-timeout 30m bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
+timeout 40m bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"

@@ -9,7 +9,7 @@ from typing import Type
 
 import pytest
 from transformers import AutoModelForVision2Seq
-from transformers.utils import is_flash_attn_2_available
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
@@ -139,9 +139,7 @@ VLM_TEST_SETTINGS = {
     #### Extended model tests
     "aria": VLMTestInfo(
         models=["rhymes-ai/Aria"],
-        tokenizer_mode="slow",
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        dtype="bfloat16",
         prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
         img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
         max_model_len=4096,
@@ -157,8 +155,8 @@ VLM_TEST_SETTINGS = {
         max_tokens=64,
         marks=[
             pytest.mark.skipif(
-                not is_flash_attn_2_available(),
-                reason="Model needs flash-attn for numeric convergence.",
+                TRANSFORMERS_VERSION < "4.48.0",
+                reason="HF model requires transformers>=4.48.0",
             ),
             large_gpu_mark(min_gb=64),
         ],
@@ -187,6 +185,30 @@ VLM_TEST_SETTINGS = {
         comparator=check_outputs_equal,
         max_tokens=8,
         dtype="bfloat16",
+    ),
+    "deepseek_vl_v2": VLMTestInfo(
+        models=["Isotr0py/deepseek-vl2-tiny"], # model repo using dynamic module
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|User|>: {img_prompt}\n\n<|Assistant|>: ", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<image>\nWhat's the content in the center of the image?", # noqa: E501
+            "cherry_blossom": "<image>\nPlease infer the season with reason in details.",   # noqa: E501
+        }),
+        multi_image_prompt="image_1:<image>\nimage_2:<image>\nWhich image can we see the car and the tower?",    # noqa: E501
+        vllm_runner_kwargs={"hf_overrides": {"architectures": ["DeepseekVLV2ForCausalLM"]}},  # noqa: E501
+        patch_hf_runner=model_utils.deepseekvl2_patch_hf_runner,
+        postprocess_inputs=model_utils.cast_dtype_post_processor("images"),
+        hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
+        stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],  # noqa: E501
+        image_size_factors=[(), (1.0, ), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
+        marks=[
+            pytest.mark.skipif(
+                TRANSFORMERS_VERSION >= "4.48.0",
+                reason="HF model is not compatible with transformers>=4.48.0",
+            )
+        ],
     ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],

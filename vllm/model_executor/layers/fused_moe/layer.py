@@ -20,7 +20,8 @@ if current_platform.is_cuda_alike():
 else:
     fused_experts = None  # type: ignore
 if current_platform.is_tpu():
-    from .moe_pallas import fused_moe as fused_moe_pallas
+    # the iterative moe implementation is used until the moe_pallas is fixed
+    from .moe_torch_iterative import fused_moe as fused_moe_pallas
 else:
     fused_moe_pallas = None  # type: ignore
 logger = init_logger(__name__)

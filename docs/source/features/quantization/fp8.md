@@ -41,7 +41,7 @@ Currently, we load the model at original precision before quantizing down to 8-b
 To produce performant FP8 quantized models with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:
 
 ```console
-$ pip install llmcompressor
+pip install llmcompressor
 ```
 
 ## Quantization Process
@@ -54,16 +54,15 @@ The quantization process involves three main steps:
 
 ### 1. Loading the Model
 
-Use `SparseAutoModelForCausalLM`, which wraps `AutoModelForCausalLM`, for saving and loading quantized models:
+Load your model and tokenizer using the standard `transformers` AutoModel classes:
 
 ```python
-from llmcompressor.transformers import SparseAutoModelForCausalLM
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
-
-model = SparseAutoModelForCausalLM.from_pretrained(
-  MODEL_ID, device_map="auto", torch_dtype="auto")
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID, device_map="auto", torch_dtype="auto",
+)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 ```
 
@@ -98,7 +97,7 @@ tokenizer.save_pretrained(SAVE_DIR)
 Install `vllm` and `lm-evaluation-harness`:
 
 ```console
-$ pip install vllm lm-eval==0.4.4
+pip install vllm lm-eval==0.4.4
 ```
 
 Load and run the model in `vllm`:

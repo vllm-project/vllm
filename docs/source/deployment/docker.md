@@ -2,6 +2,8 @@
 
 # Using Docker
 
+(deployment-docker-pre-built-image)=
+
 ## Use vLLM's Official Docker Image
 
 vLLM offers an official Docker image for deployment.
@@ -17,25 +19,32 @@ $ docker run --runtime nvidia --gpus all \
     --model mistralai/Mistral-7B-v0.1
 ```
 
+You can add any other <project:#engine-args> you need after the image tag (`vllm/vllm-openai:latest`).
+
 ```{note}
 You can either use the `ipc=host` flag or `--shm-size` flag to allow the
 container to access the host's shared memory. vLLM uses PyTorch, which uses shared
 memory to share data between processes under the hood, particularly for tensor parallel inference.
 ```
 
+(deployment-docker-build-image-from-source)=
+
 ## Building vLLM's Docker Image from Source
 
 You can build and run vLLM from source via the provided <gh-file:Dockerfile>. To build vLLM:
 
 ```console
-$ # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
-$ DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai
+# optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
+DOCKER_BUILDKIT=1 docker build . --target vllm-openai --tag vllm/vllm-openai
 ```
 
 ```{note}
 By default vLLM will build for all GPU types for widest distribution. If you are just building for the
 current GPU type the machine is running on, you can add the argument `--build-arg torch_cuda_arch_list=""`
 for vLLM to find the current GPU type and build for that.
+
+If you are using Podman instead of Docker, you might need to disable SELinux labeling by
+adding `--security-opt label=disable` when running `podman build` command to avoid certain [existing issues](https://github.com/containers/buildah/discussions/4184).
 ```
 
 ## Building for Arm64/aarch64

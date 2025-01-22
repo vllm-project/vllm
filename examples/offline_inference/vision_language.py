@@ -26,14 +26,12 @@ def run_aria(question: str, modality: str):
 
     # NOTE: Need L40 (or equivalent) to avoid OOM
     llm = LLM(model=model_name,
-              tokenizer_mode="slow",
-              dtype="bfloat16",
               max_model_len=4096,
               max_num_seqs=2,
-              trust_remote_code=True,
+              dtype="bfloat16",
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
 
-    prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>\n{question}"
+    prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>{question}"
               "<|im_end|>\n<|im_start|>assistant\n")
 
     stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]
@@ -62,6 +60,23 @@ def run_chameleon(question: str, modality: str):
               max_model_len=4096,
               max_num_seqs=2,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+# Deepseek-VL2
+def run_deepseek_vl2(question: str, modality: str):
+    assert modality == "image"
+
+    model_name = "deepseek-ai/deepseek-vl2-tiny"
+
+    llm = LLM(model=model_name,
+              max_model_len=4096,
+              max_num_seqs=2,
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+              hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]})
+
+    prompt = f"<|User|>: <image>\n{question}\n\n<|Assistant|>:"
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -308,7 +323,6 @@ def run_mllama(question: str, modality: str):
         model=model_name,
         max_model_len=4096,
         max_num_seqs=16,
-        enforce_eager=True,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
@@ -498,6 +512,7 @@ model_example_map = {
     "aria": run_aria,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
+    "deepseek_vl_v2": run_deepseek_vl2,
     "fuyu": run_fuyu,
     "glm4v": run_glm4v,
     "h2ovl_chat": run_h2ovl,
