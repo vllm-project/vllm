@@ -5,7 +5,7 @@ import torch
 from .tokenizer import AnyTokenizer
 
 
-def _replace_none_with_empty(tokens: List[Optional[str]]):
+def replace_none_with_empty(tokens: List[Optional[str]]):
     for i, token in enumerate(tokens):
         if token is None:
             tokens[i] = ""
@@ -70,7 +70,7 @@ def convert_prompt_ids_to_tokens(
     prefix_offset = max(
         read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
     # This is required to guard against out-of-vocab prompt token ids
-    _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
+    replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
     return new_tokens, prefix_offset, read_offset
 
 
@@ -83,10 +83,9 @@ def detokenize(
     # Flatten input to shape [N, 1]. Tokenizers then
     # treats it as decoding batch N seq_len 1, such
     # that they all happen independently.
-    flat_token_ids = token_ids.reshape(-1, 1)
-    # FIXME(andy): deal with MistralTokenizer not having
-    # batch_decode. Follow up if hard?
-    return tokenizer.batch_decode(flat_token_ids)  # type: ignore
+    flat_token_ids = token_ids.reshape(-1,
+                                       1).squeeze().to(torch.int32).tolist()
+    return tokenizer.convert_ids_to_tokens(flat_token_ids)
 
 
 # Based on
@@ -130,17 +129,14 @@ def detokenize_incrementally(
     is_first_iter = prev_tokens is None
     if is_first_iter:
         (prev_tokens, prefix_offset,
-         read_offset) = convert_prompt_ids_to_tokens(
-             tokenizer,
-             all_input_ids[:-1],
-             skip_special_tokens=skip_special_tokens)
+         read_offset) = convert_prompt_ids_to_tokens(tokenizer,
+                                                     all_input_ids[:-1])
     assert prev_tokens is not None
 
     # If the new token id is out of bounds, return an empty string.
     if 0 <= new_token_id < len(tokenizer):
         # Put new_token_id in a list so skip_special_tokens is respected
-        new_tokens = tokenizer.convert_ids_to_tokens(
-            [new_token_id], skip_special_tokens=skip_special_tokens)
+        new_tokens = tokenizer.convert_ids_to_tokens([new_token_id])
         if isinstance(new_tokens, str):
             new_tokens = [new_tokens]
     else:

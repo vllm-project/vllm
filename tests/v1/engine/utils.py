@@ -152,7 +152,7 @@ def _create_random_top_token_test_matrix(
                      dim=1)
 
 
-def _decode_token(
+def decode_token(
     tok_id: int,
     tokenizer: PreTrainedTokenizer,
 ) -> str:
@@ -165,7 +165,7 @@ def _decode_token(
     Returns:
       string representation of token
     """
-    return tokenizer.batch_decode([tok_id])[0]
+    return tokenizer.convert_ids_to_tokens(tok_id)
 
 
 def generate_dummy_sample_logprobs(

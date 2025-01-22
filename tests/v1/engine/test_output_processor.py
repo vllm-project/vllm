@@ -5,11 +5,31 @@ import pytest
 
 from tests.v1.engine.utils import (STOP_STRINGS,
                                    DummyOutputProcessorTestVectors,
-                                   MockEngineCore, _decode_token)
+                                   MockEngineCore)
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import PromptLogprobs, SampleLogprobs
+from vllm.transformers_utils.detokenizer_utils import replace_none_with_empty
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
+
+
+def _convert_id_to_token(
+    tokenizer: AnyTokenizer,
+    token_id: int,
+) -> str:
+    """Convert token id to string representation; handle `None` case.
+
+    Args:
+      tokenizer: tokenizer used by the model under test
+      token_id: convert this token id
+
+    Returns:
+      String representation of input token id
+    """
+    tok_str_lst = tokenizer.convert_ids_to_tokens([token_id])
+    replace_none_with_empty(tok_str_lst)
+    return tok_str_lst[0]
 
 
 @pytest.mark.parametrize(
@@ -215,7 +235,8 @@ def _validate_logprobs(
                     # Confirm that sample logprob decoded token matches
                     # the logprob token id at this sequence position
                     decoded_token = pos_logprob_dict[lp_tok].decoded_token
-                    ref_decoded_token = _decode_token(lp_tok, dtv.tokenizer)
+                    ref_decoded_token = _convert_id_to_token(
+                        dtv.tokenizer, lp_tok)
                     assert decoded_token == ref_decoded_token, (
                         f"Sampled logprob token id {lp_tok} decodes to"
                         f" {ref_decoded_token} but Logprob decoded"
@@ -273,7 +294,8 @@ def _validate_logprobs(
                     # Confirm that prompt logprob decoded token matches
                     # the logprob token id at this sequence position
                     decoded_token = pos_logprob_dict[plp_tok].decoded_token
-                    ref_decoded_token = _decode_token(plp_tok, dtv.tokenizer)
+                    ref_decoded_token = _convert_id_to_token(
+                        dtv.tokenizer, plp_tok)
                     assert decoded_token == ref_decoded_token, (
                         f"Prompt logprob token id {plp_tok} decodes to"
                         f" {ref_decoded_token} but Logprob decoded"
