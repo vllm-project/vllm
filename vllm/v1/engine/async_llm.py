@@ -1,5 +1,4 @@
 import asyncio
-import math
 import os
 from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
 
@@ -8,6 +7,7 @@ import numpy as np
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
+from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -19,7 +19,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import kill_process_tree
+from vllm.utils import cdiv, kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.processor import Processor
@@ -28,11 +28,6 @@ from vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
-
-# For now determined empirically.
-# Larger => higher ITL variance
-# Smaller => higher TTFT, throughput impacted
-OUTPUT_PROCESSING_CHUNK_SIZE = 128
 
 
 class AsyncLLM(EngineClient):
@@ -240,19 +235,18 @@ class AsyncLLM(EngineClient):
                 outputs = await self.engine_core.get_output_async()
 
                 # Split outputs into chunks of at most
-                # OUTPUT_PROCESSING_CHUNK_SIZE, so that we don't block the
+                # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                 # event loop for too long.
                 num_outputs = len(outputs.outputs)
-                if num_outputs <= OUTPUT_PROCESSING_CHUNK_SIZE:
+                if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
                     slices = (outputs.outputs, )
                 else:
                     slices = np.array_split(
                         outputs.outputs,
-                        math.ceil(num_outputs / OUTPUT_PROCESSING_CHUNK_SIZE))
+                        cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE))
 
                 iteration_stats = None
                 for i, outputs_slice in enumerate(slices):
-
                     # 2) Process EngineCoreOutputs.
                     processed_outputs = self.output_processor.process_outputs(
                         outputs_slice, iteration_stats)

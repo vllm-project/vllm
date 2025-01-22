@@ -249,9 +249,10 @@ class AsyncMPClient(MPClient):
     async def get_output_async(self) -> EngineCoreOutputs:
         if self.outputs_queue is None:
             # Perform IO in separate task to parallelize as much as possible
-            self.outputs_queue: asyncio.Queue[bytes] = asyncio.Queue()
+            self.outputs_queue = asyncio.Queue()
 
             async def process_outputs_socket():
+                assert self.outputs_queue is not None
                 while True:
                     (frame, ) = await self.output_socket.recv_multipart(
                         copy=False)
