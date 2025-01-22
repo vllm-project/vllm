@@ -258,8 +258,8 @@ def test_reshape_and_cache_flash(
     del key_caches
     del value_caches
 
-    k_scale = key.amax() / 256.0
-    v_scale = value.amax() / 256.0
+    k_scale = (key.amax() / 256.0).to(torch.float32)
+    v_scale = (value.amax() / 256.0).to(torch.float32)
 
     # Clone the KV caches.
     if kv_cache_dtype == "fp8":
@@ -284,12 +284,12 @@ def test_reshape_and_cache_flash(
         result_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
         ops.convert_fp8(result_key_cache,
                         key_cache,
-                        k_scale,
+                        k_scale.item(),
                         kv_dtype=kv_cache_dtype)
         result_value_cache = torch.empty_like(value_cache, dtype=torch.float16)
         ops.convert_fp8(result_value_cache,
                         value_cache,
-                        v_scale,
+                        v_scale.item(),
                         kv_dtype=kv_cache_dtype)
 
     # Run the reference implementation.
