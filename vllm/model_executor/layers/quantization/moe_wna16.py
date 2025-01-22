@@ -7,13 +7,18 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization.awq import (AWQConfig,
+                                                         AWQLinearMethod)
 from vllm.model_executor.layers.quantization.awq_marlin import (
     AWQMarlinConfig, AWQMarlinLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.gptq import (GPTQConfig,
+                                                          GPTQLinearMethod)
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig, GPTQMarlinLinearMethod)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 
 class MoeWNA16Config(QuantizationConfig):
@@ -30,6 +35,25 @@ class MoeWNA16Config(QuantizationConfig):
         self.lm_head_quantized = lm_head_quantized
         self.linear_quant_method = linear_quant_method
         self.full_config = full_config
+        self.use_marlin = False
+        if self.linear_quant_method == "gptq":
+            self.use_marlin = GPTQMarlinConfig.is_gptq_marlin_compatible(
+                full_config)
+        elif self.linear_quant_method == "awq":
+            capability_tuple = current_platform.get_device_capability()
+            device_capability = (-1 if capability_tuple is None else
+                                 capability_tuple.to_int())
+            awq_min_capability = AWQConfig.get_min_capability()
+            if device_capability < awq_min_capability:
+                raise ValueError(
+                    "The quantization method moe_wna16 + awq is not supported "
+                    "for the current GPU. "
+                    f"Minimum capability: {awq_min_capability}. "
+                    f"Current capability: {device_capability}.")
+            self.use_marlin = AWQMarlinConfig.is_awq_marlin_compatible(
+                full_config)
+        else:
+            raise ValueError("moe_wna16 only support gptq and awq.")
 
         if modules_to_not_convert is None:
             self.modules_to_not_convert = []
@@ -46,7 +70,7 @@ class MoeWNA16Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 80
+        return 70
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -88,12 +112,15 @@ class MoeWNA16Config(QuantizationConfig):
         num_bits = quant_config.get("bits")
         desc_act = quant_config.get("desc_act")
 
+        capability_tuple = current_platform.get_device_capability()
+        device_capability = (-1 if capability_tuple is None else
+                             capability_tuple.to_int())
+        awq_min_capability = AWQConfig.get_min_capability()
+
         gptq_compatible = quant_method == "gptq" and \
-                not desc_act and num_bits in [4, 8] and \
-                GPTQMarlinConfig.is_gptq_marlin_compatible(quant_config)
-        awq_compatible = quant_method == "awq" and \
-                num_bits == 4 and \
-                AWQMarlinConfig.is_awq_marlin_compatible(quant_config)
+                not desc_act and num_bits in [4, 8]
+        awq_compatible = quant_method == "awq" and num_bits == 4 and \
+            device_capability >= awq_min_capability
 
         return gptq_compatible or awq_compatible
 
@@ -102,12 +129,19 @@ class MoeWNA16Config(QuantizationConfig):
         if is_layer_skipped_quant(prefix, self.modules_to_not_convert):
             return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
-            if self.linear_quant_method == "gptq":
-                gptq_config = GPTQMarlinConfig.from_config(self.full_config)
-                return GPTQMarlinLinearMethod(gptq_config)
-            elif self.linear_quant_method == "awq":
-                awq_config = AWQMarlinConfig.from_config(self.full_config)
-                return AWQMarlinLinearMethod(awq_config)
+            method_map = {
+                # key: (quant_method, use_marlin)
+                # value: (QuantizationConfig, QuantizationLinearMethod)
+                ("gptq", True): (GPTQMarlinConfig, GPTQMarlinLinearMethod),
+                ("gptq", False): (GPTQConfig, GPTQLinearMethod),
+                ("awq", True): (AWQMarlinConfig, AWQMarlinLinearMethod),
+                ("awq", False): (AWQConfig, AWQLinearMethod)
+            }
+
+            if (self.linear_quant_method, self.use_marlin) in method_map:
+                quant_config_cls, quant_method_cls = method_map[(
+                    self.linear_quant_method, self.use_marlin)]
+                return quant_method_cls(quant_config_cls(self.full_config))
             else:
                 raise ValueError("moe_wna16 only support gptq and awq.")
         elif isinstance(layer, FusedMoE):
