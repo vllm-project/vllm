@@ -66,7 +66,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal, SupportsV0Only
 from .llama import LlamaDecoderLayer, LlamaMLP
-from .utils import maybe_prefix
+from .utils import QKVCrossParallelLinear, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -811,8 +811,7 @@ class MllamaTextCrossAttention(nn.Module):
         self.q_local_size = self.num_local_heads * self.head_dim
         self.kv_local_size = self.num_local_key_value_heads * self.head_dim
 
-        # TODO: change to Q/KV separate linear after #7448 is merged
-        self.qkv_proj = QKVParallelLinear(
+        self.qkv_proj = QKVCrossParallelLinear(
             self.hidden_size,
             self.head_dim,
             self.num_heads,
@@ -851,21 +850,12 @@ class MllamaTextCrossAttention(nn.Module):
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        qkv_dec, _ = self.qkv_proj(hidden_states)
-        q, _, _ = qkv_dec.split(
-            [self.q_local_size, self.kv_local_size, self.kv_local_size],
-            dim=-1)
-        if cross_attention_states is None:
-            k = None
-            v = None
-        else:
-            qkv_enc, _ = self.qkv_proj(cross_attention_states)
-            _, k, v = qkv_enc.split(
-                [self.q_local_size, self.kv_local_size, self.kv_local_size],
-                dim=-1)
+        q, k, v = self.qkv_proj(hidden_states, cross_attention_states)
+        if cross_attention_states is not None:
             k = k.view(-1, self.num_local_key_value_heads, self.head_dim)
             v = v.view(-1, self.num_local_key_value_heads, self.head_dim)
             k = self.k_norm(k)
+
         q = q.view(-1, self.num_local_heads, self.head_dim)
         q = self.q_norm(q)
 
@@ -889,6 +879,7 @@ class MllamaTextCrossAttention(nn.Module):
         kv_cache = self.attn.kv_cache[self.pipeline_parallel_rank]
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
         # Skip writing kv-cache for the initial profiling run.
+        # TODO (NickLucche) replace with custom attn bias and use standard attn
         if len(kv_cache.shape) > 1:
             i = torch.ones(1, dtype=torch.float32)
             if self.attn.backend in (_Backend.FLASH_ATTN,
