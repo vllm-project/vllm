@@ -17,7 +17,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_fp8_linear)
 from vllm.platforms import current_platform
-from vllm.utils import is_navi
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -35,13 +34,10 @@ class PTPCFp8Config(Fp8Config):
         if not current_platform.is_rocm():
             raise ValueError(
                 "ptpc_fp8 quantization is supported only on ROCm.")
+
         if not current_platform.has_device_capability(94):
             raise ValueError(
                 "ptpc_fp8 quantization is supported only on AMD Instinct MI300 GPUs and newer."  # noqa: E501
-            )
-        if is_navi():
-            raise ValueError(
-                "ptpc_fp8 quantization is supported only on AMD Instinct GPUs."
             )
         if activation_scheme == "static":
             raise ValueError(
