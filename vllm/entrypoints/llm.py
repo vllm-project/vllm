@@ -1138,17 +1138,18 @@ class LLM:
         The caller should guarantee that no requests are being processed
         during the sleep period, before `wake_up` is called.
 
-        Level 1 sleep will offload the model weights, and discard the kv cache.
-        The content of kv cache is forgotten. Level 1 sleep is good for
-        sleep and wake up the engine and run the same model again. The model
-        weights are backed up in CPU memory. Please make sure there's enough
-        CPU memory to store the model weights.
-
-        Level 2 sleep will discard both the model weights and the kv cache.
-        The content of both the model weights and kv cache is forgotten.
-        Level 2 sleep is good for sleep and wake up the engine and run
-        a different model or update the model, where previous model weights
-        are not needed. It reduces CPU memory pressure.
+        Args:
+            level: The sleep level. Level 1 sleep will offload the model 
+            weights and discard the kv cache. The content of kv cache is 
+            forgotten. Level 1 sleep is good for sleeping and waking up the 
+            engine to run the same model again. The model weights are backed 
+            up in CPU memory. Please make sure there's enough CPU memory to 
+            store the model weights. Level 2 sleep will discard both the model 
+            weights and the kv cache. The content of both the model weights 
+            and kv cache is forgotten. Level 2 sleep is good for sleeping and 
+            waking up the engine to run a different model or update the model, 
+            where previous model weights are not needed. It reduces CPU memory 
+            pressure.
         """
         self.llm_engine.sleep(level=level)
 
