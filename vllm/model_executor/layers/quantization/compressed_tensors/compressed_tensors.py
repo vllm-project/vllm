@@ -113,7 +113,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         :return: A dictionary mapping target layer names to their corresponding
             sparsity compression configurations
         """
-        if (sparsity_config := config.get(SPARSITY_CONFIG_NAME)) is None:
+        if not (sparsity_config := config.get(SPARSITY_CONFIG_NAME)):
             return dict()
 
         sparsity_config = SparsityCompressionConfig.model_validate(
@@ -411,6 +411,22 @@ class CompressedTensorsConfig(QuantizationConfig):
         # (e.g. fp8 needs ada lovelace)
         self._check_scheme_supported(scheme.get_min_capability())
         return scheme
+
+    def get_cache_scale(self, name: str) -> Optional[str]:
+        """
+        Check whether the param name matches the format for k/v cache scales
+        in compressed-tensors. If this is the case, return its equivalent
+        param name expected by vLLM
+
+        :param name: param name
+        :return: matching param name for KV cache scale in vLLM
+        """
+        if name.endswith(".output_scale") and ".k_proj" in name:
+            return name.replace(".k_proj.output_scale", ".attn.k_scale")
+        if name.endswith(".output_scale") and ".v_proj" in name:
+            return name.replace(".v_proj.output_scale", ".attn.v_scale")
+        # If no matches, return None
+        return None
 
     @staticmethod
     def supports_cutlass_24(

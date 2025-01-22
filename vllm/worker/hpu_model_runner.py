@@ -21,6 +21,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
 import torch
+import torch.nn as nn
 from vllm_hpu_extension.ops import LoraMask as LoraMask
 from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
                                          HabanaMemoryProfiler, format_bytes)
@@ -28,6 +29,7 @@ from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.distributed.parallel_state import get_world_group
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -40,7 +42,8 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
-from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.utils import (bind_kv_cache, is_pin_memory_available,
+                        make_tensor_with_pad)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -287,12 +290,14 @@ def modify_decoder_layer(module: torch.nn.Module, suffix="DecoderLayer"):
 
 class HpuModelAdapter:
 
-    def __init__(self, model, block_size, dtype, enforce_eager):
+    def __init__(self, model, vllm_config):
         self.model = model
         self.prefill_use_fusedsdpa = os.getenv('VLLM_PROMPT_USE_FUSEDSDPA',
                                                '0').lower() in ['1', 'true']
-        self.block_size = block_size
-        self.dtype = dtype
+        self.vllm_config = vllm_config
+        self.block_size = vllm_config.cache_config.block_size
+        self.dtype = vllm_config.model_config.dtype
+        enforce_eager = vllm_config.model_config.enforce_eager
         if not htorch.utils.internal.is_lazy() and not enforce_eager:
             self.model = torch.compile(self.model,
                                        backend='hpu_backend',
@@ -351,14 +356,20 @@ class HpuModelAdapter:
         selected_token_indices = kwargs.pop('selected_token_indices')
         if 'warmup_mode' in kwargs:
             kwargs.pop('warmup_mode')
+        virtual_engine = 0
+        if 'virtual_engine' in kwargs:
+            virtual_engine = kwargs.pop('virtual_engine')
         input_ids = kwargs['input_ids']
         kwargs['attn_metadata'] = self._update_metadata(
             kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1),
             input_ids.device, self.dtype)
         LoraMask.setLoraMask(kwargs.pop('lora_mask'))
-        hidden_states = self.model(*args, **kwargs)
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        hidden_states = hidden_states.index_select(0, selected_token_indices)
+        with set_forward_context(kwargs['attn_metadata'], self.vllm_config,
+                                 virtual_engine):
+            hidden_states = self.model(*args, **kwargs)
+            hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+            hidden_states = hidden_states.index_select(0,
+                                                       selected_token_indices)
         return hidden_states
 
     def compute_logits(self, *args, **kwargs):
@@ -658,16 +669,16 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
             with HabanaMemoryProfiler() as m_wrap:
                 self.model = _maybe_wrap_in_hpu_graph(
-                    self.model,
-                    self.block_size,
-                    dtype=self.model_config.dtype,
-                    enforce_eager=self.enforce_eager)
+                    self.model, vllm_config=self.vllm_config)
             msg = f"Wrapping in HPU Graph took {m_wrap.get_summary_string()}"
             logger.info(msg)
 
         self.model_memory_usage = m.consumed_device_memory
         msg = f"Loading model weights took in total {m.get_summary_string()}"
         logger.info(msg)
+
+    def get_model(self) -> nn.Module:
+        return self.model
 
     def _use_graphs(self, batch_size, seq_len, is_prompt):
         if self.enforce_eager:
@@ -1286,6 +1297,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def profile_run(self) -> None:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
+        bind_kv_cache(
+            self.vllm_config.compilation_config.static_forward_context,
+            [kv_caches])
         max_seq_len = self.bucketing_global_state.prompt_seq_bucket_cfg[-1]
         max_batch_size = min(self.max_num_batched_tokens // max_seq_len,
                              self.scheduler_config.max_num_seqs)
@@ -1929,6 +1943,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             "attn_metadata": self.trim_attn_metadata(attn_metadata),
             "intermediate_tensors": intermediate_tensors,
             "lora_mask": lora_mask,
+            "virtual_engine": model_input.virtual_engine,
             **(model_input.multi_modal_kwargs or {}),
         }
         if htorch.utils.internal.is_lazy():

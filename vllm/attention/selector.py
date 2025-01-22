@@ -14,16 +14,18 @@ from vllm.utils import STR_BACKEND_ENV_VAR, resolve_obj_by_qualname
 logger = init_logger(__name__)
 
 
-def backend_name_to_enum(backend_name: str) -> _Backend:
+def backend_name_to_enum(backend_name: str) -> Optional[_Backend]:
+    """
+    Convert a string backend name to a _Backend enum value.
+
+    Returns:
+    * _Backend: enum value if backend_name is a valid in-tree type
+    * None: otherwise it's an invalid in-tree type or an out-of-tree platform is
+            loaded.
+    """
     assert backend_name is not None
-
-    backend_members = _Backend.__members__
-    if backend_name not in backend_members:
-        raise ValueError(f"Invalid attention backend '{backend_name}'. "
-                         f"Available backends: {', '.join(backend_members)} "
-                         "(case-sensitive).")
-
-    return _Backend[backend_name]
+    return _Backend[backend_name] if backend_name in _Backend.__members__ else \
+          None
 
 
 def get_env_variable_attn_backend() -> Optional[_Backend]:

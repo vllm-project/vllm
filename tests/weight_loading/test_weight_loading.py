@@ -20,12 +20,13 @@ def test_weight_loading(vllm_runner):
     """
     Test parameter weight loading with tp>1.
     """
-    with vllm_runner(model_name=MODEL_NAME,
-                     revision=REVISION,
-                     dtype=torch.half if QUANTIZATION == "gptq" else "auto",
-                     quantization=QUANTIZATION,
-                     max_model_len=MAX_MODEL_LEN,
-                     tensor_parallel_size=2) as model:
+    with vllm_runner(
+            model_name=MODEL_NAME,
+            revision=REVISION,
+            dtype=torch.half if QUANTIZATION == "gptq" else "auto",
+            quantization=None if QUANTIZATION == "None" else QUANTIZATION,
+            max_model_len=MAX_MODEL_LEN,
+            tensor_parallel_size=2) as model:
 
         output = model.generate_greedy("Hello world!", max_tokens=20)
         print(output)
