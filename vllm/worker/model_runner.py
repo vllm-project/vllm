@@ -1102,6 +1102,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 if self.parallel_config.pipeline_parallel_size == 1 else None
 
         if hasattr(self, "_builder_cls"):
+            # multi-step model runner does not have `_builder_cls`
             self.builder = self._builder_cls(weakref.proxy(self))
 
     def load_model(self) -> None:

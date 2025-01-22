@@ -484,6 +484,7 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
         if hasattr(self, "_builder_cls"):
+            # multi-step model runner does not have `_builder_cls`
             self.builder = self._builder_cls(weakref.proxy(self))
 
     def load_model(self) -> None:
