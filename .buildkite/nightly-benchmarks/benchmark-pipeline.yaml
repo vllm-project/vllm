@@ -2,12 +2,16 @@ steps:
   #- block: "Run H100 Benchmark"
     #key: block-h100
     #depends_on: ~
-
+  - label: "Clean H100"
+    key: clean-h100
+    depends_on: ~
+    command:
+    - docker system prune -af --volumes
   - label: "H100"
     # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
       queue: H100
-    depends_on: ~
+    depends_on: clean-h100
     plugins:
     - docker#v5.12.0:
         image: public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:222a9dc350d99e111ba09b29576113c9278e6a3e
