@@ -141,7 +141,8 @@ class MoeWNA16Config(QuantizationConfig):
             if (self.linear_quant_method, self.use_marlin) in method_map:
                 quant_config_cls, quant_method_cls = method_map[(
                     self.linear_quant_method, self.use_marlin)]
-                return quant_method_cls(quant_config_cls(self.full_config))
+                return quant_method_cls(
+                    quant_config_cls.from_config(self.full_config))
             else:
                 raise ValueError("moe_wna16 only support gptq and awq.")
         elif isinstance(layer, FusedMoE):
