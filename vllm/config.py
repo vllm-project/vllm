@@ -607,7 +607,7 @@ class ModelConfig:
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
 
-        MODEL_NOT_SUPPORT_CUDA_GRAPH = ['deepseek_v3', 'mllama']
+        MODEL_NOT_SUPPORT_CUDA_GRAPH = ['mllama']
         if (self.hf_config.model_type in MODEL_NOT_SUPPORT_CUDA_GRAPH
                 and not self.enforce_eager):
             logger.warning(
@@ -2785,6 +2785,7 @@ class CompilationConfig(BaseModel):
     compile_sizes: List[int] = PrivateAttr
     capture_sizes: List[int] = PrivateAttr
     max_capture_size: int = PrivateAttr
+    local_cache_dir: str = PrivateAttr  # local cache dir for each rank
     # optimization:
     # Intuitively, bs_to_padded_graph_size should be Dict[int, int].
     # since we know all keys are in a range [0, max_capture_size],
