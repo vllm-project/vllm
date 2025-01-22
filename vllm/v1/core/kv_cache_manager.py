@@ -285,6 +285,29 @@ class KVCacheManager:
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
 
+    def uncache_blocks(self, request: Request) -> int:
+        """Uncache the blocks that are no longer computed based on the
+        num_computed_tokens in the given request. This happens when
+        the blocks were full and cached due to speculative tokens, but the
+        speculative tokens are not accepted.
+
+        Args:
+            request: The request.
+
+        Returns:
+            The number of uncached blocks.
+        """
+        blocks = self.req_to_blocks[request.request_id]
+        num_computed_tokens = request.num_computed_tokens
+        num_full_blocks = num_computed_tokens // self.block_size
+        num_uncached_blocks = 0
+        for block in blocks[num_full_blocks:]:
+            # If the block is not cached, the following blocks are not cached.
+            if not self._maybe_evict_cached_block(block):
+                break
+            num_uncached_blocks += 1
+        return num_uncached_blocks
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalid prefix caching after the weights are updated,
@@ -386,7 +409,7 @@ class KVCacheManager:
 
             # If the block is cached, evict it.
             if self.enable_caching:
-                self._evict_cached_block(curr_block)
+                self._maybe_evict_cached_block(curr_block)
 
             curr_block.incr_ref()
             ret.append(curr_block)
@@ -394,13 +417,16 @@ class KVCacheManager:
 
         return ret
 
-    def _evict_cached_block(self, block: KVCacheBlock) -> None:
+    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """
         If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
         Args:
             block: The block to evict.
+
+        Returns:
+            True if the block is evicted, False otherwise.
         """
         block_hash = block.block_hash
         if block_hash and block_hash in self.cached_block_hash_to_block:
@@ -409,6 +435,9 @@ class KVCacheManager:
 
             if len(self.cached_block_hash_to_block[block_hash]) == 0:
                 del self.cached_block_hash_to_block[block_hash]
+
+            return True
+        return False
 
     def _get_cached_block(self,
                           block_hash: BlockHashType) -> Optional[KVCacheBlock]:
