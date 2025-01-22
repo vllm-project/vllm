@@ -258,8 +258,8 @@ def test_reshape_and_cache_flash(
     del key_caches
     del value_caches
 
-    k_scale = key.amax().item() / 256
-    v_scale = value.amax().item() / 256
+    k_scale = key.amax() / 256.0
+    v_scale = value.amax() / 256.0
 
     # Clone the KV caches.
     if kv_cache_dtype == "fp8":
