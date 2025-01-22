@@ -12,7 +12,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
@@ -205,17 +205,22 @@ class AsyncLLM(EngineClient):
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
-            while True:
+            finished = False
+            while not finished:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
-                out = q.get_nowait() if q.qsize() > 0 else await q.get()
+                out = q.get_nowait() if not q.empty() else await q.get()
+
+                # Coalesce any additional queued outputs
+                while not q.empty():
+                    if sampling_params.output_kind == RequestOutputKind.DELTA:
+                        out.add(q.get_nowait())
+                    else:
+                        out = q.get_nowait()
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
-                if out.finished:
-                    yield out
-                    break
-
+                finished = out.finished
                 yield out
 
         # If the request is disconnected by the client, the
