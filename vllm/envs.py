@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     K_SCALE_CONSTANT: int = 200
     V_SCALE_CONSTANT: int = 100
+    VLLM_SERVER_DEV_MODE: bool = False
 
 
 def get_default_cache_root():
@@ -476,6 +477,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: float(os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")),
     "VLLM_DISABLE_COMPILE_CACHE":
     lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
+
+    # If set, vllm will run in development mode, which will enable
+    # some additional endpoints for developing and debugging,
+    # e.g. `/reset_prefix_cache`
+    "VLLM_SERVER_DEV_MODE":
+    lambda: bool(int(os.getenv("VLLM_SERVER_DEV_MODE", "0"))),
 }
 
 # end-env-vars-definition
