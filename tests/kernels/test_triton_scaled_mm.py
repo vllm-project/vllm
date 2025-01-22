@@ -8,7 +8,6 @@ from typing import Optional, Type
 import pytest
 import torch
 
-from tests.models.utils import check_logprobs_close
 from vllm.platforms import current_platform
 
 device = "cuda"
