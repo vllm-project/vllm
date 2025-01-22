@@ -178,8 +178,9 @@ class CuMemAllocator:
             offload_tags = (CuMemAllocator.default_tag, )
         elif isinstance(offload_tags, str):
             offload_tags = (offload_tags, )
-        else:
-            assert isinstance(offload_tags, tuple)
+
+        assert isinstance(offload_tags, tuple)
+
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle
             if data.tag in offload_tags:
