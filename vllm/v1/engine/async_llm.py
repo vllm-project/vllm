@@ -244,9 +244,10 @@ class AsyncLLM(EngineClient):
                 # event loop for too long.
                 num_outputs = len(outputs.outputs)
                 if num_outputs <= OUTPUT_PROCESSING_CHUNK_SIZE:
-                    slices = (outputs.outputs,)
+                    slices = (outputs.outputs, )
                 else:
-                    slices = np.array_split(outputs.outputs,
+                    slices = np.array_split(
+                        outputs.outputs,
                         math.ceil(num_outputs / OUTPUT_PROCESSING_CHUNK_SIZE))
 
                 iteration_stats = None
