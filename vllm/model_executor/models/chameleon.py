@@ -122,8 +122,9 @@ class ChameleonMultiModalProcessor(
     ) -> list[int]:
         # HF processor adds sep token for chat mode
         tokenizer = self.info.get_tokenizer()
-        sep_token_id: int = \
-            tokenizer.vocab[tokenizer.sep_token]  # type: ignore
+        vocab = tokenizer.get_vocab()
+
+        sep_token_id = vocab[tokenizer.sep_token]  # type: ignore
 
         return prompt_tokens + [sep_token_id]
 
@@ -141,18 +142,22 @@ class ChameleonMultiModalProcessor(
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_tokens = processor.image_token * self.info.get_num_image_tokens()
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        image_start_id = vocab[processor.image_start_token]
+        image_token_id = vocab[processor.image_token]
+        image_end_id = vocab[processor.image_end_token]
+
+        num_image_tokens = self.info.get_num_image_tokens()
+        image_tokens = [image_token_id] * num_image_tokens
 
         return [
             PromptReplacement(
                 modality="image",
-                target="<image>",
+                target=[image_token_id],
                 replacement=PromptReplacementDetails(
-                    full="".join([
-                        processor.image_start_token,
-                        image_tokens,
-                        processor.image_end_token,
-                    ]),
+                    full=([image_start_id] + image_tokens + [image_end_id]),
                     features=image_tokens,
                 ),
             )
