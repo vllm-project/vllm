@@ -286,7 +286,7 @@ class KVCacheManager:
                 self.free_block_queue.append(block)
 
     def uncache_blocks(self, request: Request) -> int:
-        """Uncache the blocks that are no longer computed based on the
+        """Uncache the blocks that are no longer full based on the
         num_computed_tokens in the given request. This happens when
         the blocks were full and cached due to speculative tokens, but the
         speculative tokens are not accepted.
