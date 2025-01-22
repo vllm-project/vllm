@@ -137,14 +137,18 @@ class SimpleConnector(KVConnectorBase):
             "consumer buffer before calling select."
         return self.consumer_buffer.drop_select(input_tokens, roi)
 
-    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
-               key: torch.Tensor, value: torch.Tensor,
-               hidden: torch.Tensor) -> None:
+    def insert(self,
+               input_tokens: torch.Tensor,
+               roi: torch.Tensor,
+               key: torch.Tensor,
+               value: torch.Tensor,
+               hidden: torch.Tensor,
+               residual: torch.Tensor = None) -> None:
 
         assert self.producer_buffer is not None, "Please initialize the "\
             "producer buffer before calling insert."
-
-        self.producer_buffer.insert(input_tokens, roi, key, value, hidden)
+        self.producer_buffer.insert(input_tokens, roi, key, value, hidden,
+                                    residual)
 
     def send_kv_caches_and_hidden_states(
         self,
@@ -190,12 +194,20 @@ class SimpleConnector(KVConnectorBase):
 
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
-
-            self.insert(current_tokens,
-                        torch.ones_like(current_tokens,
-                                        dtype=bool), keys, values,
-                        hidden_or_intermediate_states[start_pos:end_pos])
-
+            if isinstance(hidden_or_intermediate_states, torch.Tensor):
+                self.insert(current_tokens,
+                            torch.ones_like(current_tokens,
+                                            dtype=bool), keys, values,
+                            hidden_or_intermediate_states[start_pos:end_pos])
+            elif isinstance(hidden_or_intermediate_states,
+                            IntermediateTensors):
+                self.insert(
+                    current_tokens, torch.ones_like(current_tokens,
+                                                    dtype=bool), keys, values,
+                    hidden_or_intermediate_states["hidden_states"]
+                    [start_pos:end_pos],
+                    hidden_or_intermediate_states["residual"]
+                    [start_pos:end_pos])
         logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
 
     def recv_kv_caches_and_hidden_states(
@@ -216,7 +228,7 @@ class SimpleConnector(KVConnectorBase):
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
 
         hidden_or_intermediate_states_for_one_req = []
-
+        pp_intermediate_tensors = IntermediateTensors({})
         input_tokens_list = []
         num_computed_tokens_list = []
         start_pos_list = []
@@ -246,6 +258,9 @@ class SimpleConnector(KVConnectorBase):
             keys: torch.Tensor = ret[2]
             values: torch.Tensor = ret[3]
             hidden: torch.Tensor = ret[4]
+            residual: torch.Tensor = None
+            if len(ret) > 5:
+                residual = ret[5]
 
             num_computed_tokens = roi.shape[0]
             num_computed_tokens_list.append(num_computed_tokens)
@@ -279,8 +294,22 @@ class SimpleConnector(KVConnectorBase):
                     layer.self_attn.attn._k_scale,
                     layer.self_attn.attn._v_scale,
                 )
-
-            hidden_or_intermediate_states_for_one_req.append(hidden)
+            if residual is None:
+                hidden_or_intermediate_states_for_one_req.append(hidden)
+            else:
+                if "hidden_states" not in pp_intermediate_tensors.tensors:
+                    pp_intermediate_tensors.tensors["hidden_states"] = hidden
+                    pp_intermediate_tensors.tensors["residual"] = residual
+                else:
+                    pp_intermediate_tensors.tensors[
+                        "hidden_states"] = torch.cat(
+                            (pp_intermediate_tensors.tensors["hidden_states"],
+                             hidden),
+                            dim=1)
+                    pp_intermediate_tensors.tensors["residual"] = torch.cat(
+                        (pp_intermediate_tensors.tensors["residual"],
+                         residual),
+                        dim=1)
 
         if not bypass_model_exec:
             # Some of the KV cache is not retrieved
@@ -296,8 +325,11 @@ class SimpleConnector(KVConnectorBase):
             logger.debug(
                 "[rank%d]: Successfully received all KVs and hidden "
                 "states, skip model forwarding.", torch.distributed.get_rank())
-            hidden_or_intermediate_states = torch.cat(
-                hidden_or_intermediate_states_for_one_req, dim=0)
+            if residual is None:
+                hidden_or_intermediate_states = torch.cat(
+                    hidden_or_intermediate_states_for_one_req, dim=0)
+            else:
+                hidden_or_intermediate_states = pp_intermediate_tensors
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 

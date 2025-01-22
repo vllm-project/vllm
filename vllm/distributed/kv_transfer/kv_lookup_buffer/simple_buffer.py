@@ -15,6 +15,7 @@ from typing import Deque, List, Optional, Union
 
 import torch
 
+from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
     KVLookupBufferBase)
 from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
@@ -99,9 +100,13 @@ class SimpleBuffer(KVLookupBufferBase):
 
         raise AssertionError(f"Unknown data type {type(data)}")
 
-    def _add_to_buffer(self, input_tokens: torch.Tensor, roi: torch.Tensor,
-                       key: torch.Tensor, value: torch.Tensor,
-                       hidden: torch.Tensor):
+    def _add_to_buffer(self,
+                       input_tokens: torch.Tensor,
+                       roi: torch.Tensor,
+                       key: torch.Tensor,
+                       value: torch.Tensor,
+                       hidden: torch.Tensor,
+                       residual: torch.Tensor = None):
 
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone()
@@ -113,8 +118,11 @@ class SimpleBuffer(KVLookupBufferBase):
             value = value.clone()
         if isinstance(hidden, torch.Tensor):
             hidden = hidden.clone()
-
-        buffer_item = [input_tokens, roi, key, value, hidden]
+        if residual is not None:
+            residual = residual.clone()
+            buffer_item = [input_tokens, roi, key, value, hidden, residual]
+        else:
+            buffer_item = [input_tokens, roi, key, value, hidden]
 
         with self.buffer_lock:
             for data in buffer_item:
@@ -204,15 +212,22 @@ class SimpleBuffer(KVLookupBufferBase):
         key = self.data_pipe.recv_tensor()
         value = self.data_pipe.recv_tensor()
         hidden = self.data_pipe.recv_tensor()
+        if get_pp_group().world_size > 1 and not get_pp_group().is_last_rank:
+            residual = self.data_pipe.recv_tensor()
+            return [input_tokens, roi, key, value, hidden, residual]
 
         return [input_tokens, roi, key, value, hidden]
 
     def full_handler(self):
         time.sleep(0.001)
 
-    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
-               key: torch.Tensor, value: torch.Tensor,
-               hidden: torch.Tensor) -> None:
+    def insert(self,
+               input_tokens: torch.Tensor,
+               roi: torch.Tensor,
+               key: torch.Tensor,
+               value: torch.Tensor,
+               hidden: torch.Tensor,
+               residual: torch.Tensor = None) -> None:
 
         if self.buffer_size > self.buffer_size_threshold:
             # log outside the while loop to avoid this message being logged
@@ -221,7 +236,7 @@ class SimpleBuffer(KVLookupBufferBase):
         while self.buffer_size > self.buffer_size_threshold:
             self.full_handler()
 
-        self._add_to_buffer(input_tokens, roi, key, value, hidden)
+        self._add_to_buffer(input_tokens, roi, key, value, hidden, residual)
 
         # when calling the insert, the current process is a sender
         # need to launch the request handler and start listening to request.
