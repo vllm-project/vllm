@@ -182,6 +182,31 @@ message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 #
 
 #
+# cumem_allocator extension
+#
+
+set(VLLM_CUMEM_EXT_SRC
+  "csrc/cumem_allocator.cpp")
+
+set_gencode_flags_for_srcs(
+  SRCS "${VLLM_CUMEM_EXT_SRC}"
+  CUDA_ARCHS "${CUDA_ARCHS}")
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  message(STATUS "Enabling cumem allocator extension.")
+  # link against cuda driver library
+  list(APPEND CUMEM_LIBS cuda)
+  define_gpu_extension_target(
+    cumem_allocator
+    DESTINATION vllm
+    LANGUAGE CXX
+    SOURCES ${VLLM_CUMEM_EXT_SRC}
+    LIBRARIES ${CUMEM_LIBS}
+    USE_SABI 3.8
+    WITH_SOABI)
+endif()
+
+#
 # _C extension
 #
 

@@ -1818,6 +1818,16 @@ class LLMEngine:
     def stop_profile(self) -> None:
         self.model_executor.stop_profile()
 
+    def sleep(self, level: int = 1) -> None:
+        assert self.vllm_config.model_config.enable_sleep_mode, (
+            "Sleep mode is not enabled in the model config")
+        self.model_executor.sleep(level=level)
+
+    def wake_up(self) -> None:
+        assert self.vllm_config.model_config.enable_sleep_mode, (
+            "Sleep mode is not enabled in the model config")
+        self.model_executor.wake_up()
+
     def check_health(self) -> None:
         if self.tokenizer:
             self.tokenizer.check_health()
