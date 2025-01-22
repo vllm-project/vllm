@@ -549,7 +549,7 @@ def get_requirements() -> List[str]:
         return resolved_requirements
 
     if _no_device():
-        requirements = _read_requirements("requirements-cuda.txt")
+        requirements = _read_requirements("requirements-cpu.txt")
     elif _is_cuda():
         requirements = _read_requirements("requirements-cuda.txt")
         cuda_major, cuda_minor = torch.version.cuda.split(".")
