@@ -3,11 +3,14 @@ from os import path
 from tempfile import TemporaryDirectory
 from typing import List, Tuple
 
+import torch
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer
 
 from vllm.lora.request import LoRARequest
+
+from ..models.utils import check_outputs_equal
 
 ULTRAVOX_MODEL_NAME = "fixie-ai/ultravox-v0_3"
 LLMA_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
@@ -62,6 +65,11 @@ def test_ultravox_lora(vllm_runner):
     """
     TODO: Train an Ultravox LoRA instead of using a Llama LoRA.
     """
+    # Workaround to prevent device mismatch in Whisper.
+    # Can be removed when it is fixed upstream in transformer
+    # https://github.com/huggingface/transformers/pull/35866
+    torch.set_default_device("cpu")
+
     llama3_1_8b_chess_lora = llama3_1_8b_chess_lora_path()
     with TemporaryDirectory() as temp_ultravox_lora_dir:
         llama3_1_8b_ultravox_chess_lora = mk_llama3_1_8b_ultravox_chess_lora(
@@ -69,12 +77,12 @@ def test_ultravox_lora(vllm_runner):
         with vllm_runner(
                 ULTRAVOX_MODEL_NAME,
                 enforce_eager=True,
-                max_num_seqs=128,
+                max_num_seqs=2,
                 enable_lora=True,
-                max_loras=4,
+                max_loras=1,
                 max_lora_rank=128,
                 dtype="bfloat16",
-                max_model_len=4096,
+                max_model_len=1024,
         ) as vllm_model:
             ultravox_outputs: List[Tuple[
                 List[int], str]] = vllm_model.generate_greedy(
@@ -91,21 +99,23 @@ def test_ultravox_lora(vllm_runner):
     with vllm_runner(
             LLMA_MODEL_NAME,
             enforce_eager=True,
-            max_num_seqs=128,
+            max_num_seqs=2,
             enable_lora=True,
-            max_loras=4,
+            max_loras=1,
             max_lora_rank=128,
             dtype="bfloat16",
-            max_model_len=4096,
+            max_model_len=1024,
     ) as vllm_model:
-        llama_outputs_no_lora: List[Tuple[List[int], str]] = (
+        llama_outputs: List[Tuple[List[int], str]] = (
             vllm_model.generate_greedy(
                 [_get_prompt(0, PROMPT, VLLM_PLACEHOLDER, LLMA_MODEL_NAME)],
                 256,
+                lora_request=LoRARequest(str(1), 1, llama3_1_8b_chess_lora),
             ))
 
-    _, llama_no_lora_str = llama_outputs_no_lora[0]
-    _, ultravox_str = ultravox_outputs[0]
-
-    # verify that text don't match with no lora
-    assert llama_no_lora_str != ultravox_str
+    check_outputs_equal(
+        outputs_0_lst=ultravox_outputs,
+        outputs_1_lst=llama_outputs,
+        name_0="ultravox",
+        name_1="llama",
+    )
