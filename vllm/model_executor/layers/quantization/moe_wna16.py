@@ -129,20 +129,20 @@ class MoeWNA16Config(QuantizationConfig):
         if is_layer_skipped_quant(prefix, self.modules_to_not_convert):
             return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
-            method_map = {
-                # key: (quant_method, use_marlin)
-                # value: (QuantizationConfig, QuantizationLinearMethod)
-                ("gptq", True): (GPTQMarlinConfig, GPTQMarlinLinearMethod),
-                ("gptq", False): (GPTQConfig, GPTQLinearMethod),
-                ("awq", True): (AWQMarlinConfig, AWQMarlinLinearMethod),
-                ("awq", False): (AWQConfig, AWQLinearMethod)
-            }
-
-            if (self.linear_quant_method, self.use_marlin) in method_map:
-                quant_config_cls, quant_method_cls = method_map[(
-                    self.linear_quant_method, self.use_marlin)]
-                return quant_method_cls(
-                    quant_config_cls.from_config(self.full_config))
+            if self.linear_quant_method == "gptq":
+                if self.use_marlin:
+                    return GPTQMarlinLinearMethod(
+                        GPTQMarlinConfig.from_config(self.full_config))
+                else:
+                    return GPTQLinearMethod(
+                        GPTQConfig.from_config(self.full_config))
+            elif self.linear_quant_method == "awq":
+                if self.use_marlin:
+                    return AWQMarlinLinearMethod(
+                        AWQMarlinConfig.from_config(self.full_config))
+                else:
+                    return AWQLinearMethod(
+                        AWQConfig.from_config(self.full_config))
             else:
                 raise ValueError("moe_wna16 only support gptq and awq.")
         elif isinstance(layer, FusedMoE):
