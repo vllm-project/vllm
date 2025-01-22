@@ -491,7 +491,7 @@ A dictionary containing placeholder ranges for each modality.
 """
 
 
-class MultiModalInputsV2(TypedDict):
+class MultiModalInputs(TypedDict):
     """
     Represents the outputs of
     :class:`vllm.multimodal.processing.BaseMultiModalProcessor`,
