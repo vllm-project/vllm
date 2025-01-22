@@ -475,15 +475,23 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        bos_token_id = tokenizer.bos_token_id
+        assert isinstance(bos_token_id, int)
+
+        image_token_id = vocab["image"]
         num_image_tokens = self.info.get_num_image_tokens()
+        image_tokens = [image_token_id] * num_image_tokens
 
         return [
             PromptReplacement(
                 modality="image",
                 target="</s>",
                 replacement=PromptReplacementDetails(
-                    full="<image>" * num_image_tokens + "</s>",
-                    features="<image>" * num_image_tokens,
+                    full=image_tokens + [bos_token_id],
+                    features=image_tokens,
                 ),
             )
         ]

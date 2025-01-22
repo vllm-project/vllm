@@ -953,12 +953,14 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(
             **hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
 
         # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
         # image_token and video_token registered
         placeholder = {
-            "image": hf_processor.image_token,
-            "video": hf_processor.video_token,
+            "image": vocab[hf_processor.image_token],
+            "video": vocab[hf_processor.video_token],
         }
 
         merge_length = image_processor.merge_size**2
@@ -967,13 +969,13 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
             grid_thw = out_mm_kwargs[f"{modality}_grid_thw"][item_idx]
             assert isinstance(grid_thw, torch.Tensor)
 
-            num_tokens = grid_thw.prod().item() // merge_length
-            return placeholder[modality] * num_tokens
+            num_tokens = int(grid_thw.prod()) // merge_length
+            return [placeholder[modality]] * num_tokens
 
         return [
             PromptReplacement(
                 modality=modality,
-                target=placeholder[modality],
+                target=[placeholder[modality]],
                 replacement=partial(get_replacement_qwen2vl,
                                     modality=modality),
             ) for modality in ("image", "video")
