@@ -12,13 +12,15 @@ from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
-from vllm.model_executor.layers.linear import ColumnParallelLinear, QKVParallelLinear
-from vllm.model_executor.utils import set_weight_attrs
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 logger = init_logger(__name__)
 
@@ -656,7 +658,9 @@ def cast_overflow_tensors(
     return tensors
 
 class QKVCrossParallelLinear(torch.nn.Module):
-    def __init__(self, hidden_size: int,
+
+    def __init__(self,
+                 hidden_size: int,
                  head_size: int,
                  total_num_heads: int,
                  total_num_kv_heads: Optional[int] = None,
@@ -667,19 +671,23 @@ class QKVCrossParallelLinear(torch.nn.Module):
                  prefix: str = ""):
         super().__init__()
         # Empty placeholders for loading as a single module.
-        self.weight = torch.nn.Parameter() 
-        self.bias = torch.nn.Parameter()
-
-        self.q_proj_decoder = ColumnParallelLinear(
+        self.weight = torch.nn.Parameter()
+        set_weight_attrs(self.weight, {
+            "weight_loader": self.weight_loader_weight,
+        })
+        # Use a dictionary to avoid submodules parameters auto-registration:
+        # drop-in replacement for a `QKVParallelLinear` module.
+        self.proj = dict()
+        self.proj["q_proj_decoder"] = ColumnParallelLinear(
             input_size=hidden_size,
-            output_size=total_num_heads*head_size,
+            output_size=total_num_heads * head_size,
             bias=bias,
             quant_config=quant_config,
             skip_bias_add=skip_bias_add,
-            params_dtype=params_dtype
-        )
-        self.kv_size = total_num_kv_heads*head_size
-        self.kv_proj_encoder = QKVParallelLinear(
+            params_dtype=params_dtype,
+            prefix=f"{prefix}.q_proj_decoder")
+        self.kv_size = total_num_kv_heads * head_size
+        self.proj["kv_proj_encoder"] = QKVParallelLinear(
             hidden_size=hidden_size,
             head_size=head_size,
             total_num_heads=0,
@@ -687,15 +695,22 @@ class QKVCrossParallelLinear(torch.nn.Module):
             bias=bias,
             quant_config=quant_config,
             skip_bias_add=skip_bias_add,
-            params_dtype=params_dtype
-        )
+            params_dtype=params_dtype,
+            prefix=f"{prefix}.kv_proj_encoder")
 
-        set_weight_attrs(self.weight, {
-            "weight_loader": self.weight_loader_weight,
-        })
-        set_weight_attrs(self.bias, {
-            "weight_loader": self.weight_loader_bias,
-        })
+        if bias:
+            self.bias = torch.nn.Parameter()
+            set_weight_attrs(self.bias, {
+                "weight_loader": self.weight_loader_bias,
+            })
+
+    @property
+    def q_proj_decoder(self):
+        return self.proj["q_proj_decoder"]
+
+    @property
+    def kv_proj_encoder(self):
+        return self.proj["kv_proj_encoder"]
 
     def forward(self, decoder_hidden_states, encoder_hidden_states):
         q, _ = self.q_proj_decoder(decoder_hidden_states)
@@ -710,15 +725,25 @@ class QKVCrossParallelLinear(torch.nn.Module):
             k, v = kv_enc.split(self.kv_size, dim=-1)
         return q, k, v
 
-    def weight_loader_weight(self, param: torch.nn.Parameter,
-                      loaded_weight: torch.Tensor,
-                      loaded_shard_id: Optional[str] = None):
-        # NOTE Use QKV/ColumnParallel weight_loader, ignore placeholder params.
-        param = self.q_proj_decoder.weight if loaded_shard_id == "q" else self.kv_proj_encoder.weight
-        param.weight_loader(param, loaded_weight) if loaded_shard_id == "q" else param.weight_loader(param, loaded_weight, loaded_shard_id)
+    def weight_loader_weight(self,
+                             param: torch.nn.Parameter,
+                             loaded_weight: torch.Tensor,
+                             loaded_shard_id: Optional[str] = None):
+        # NOTE Use QKV/ColumnParallel weight_loader, ignore placeholder param.
+        param = self.q_proj_decoder.weight if loaded_shard_id == "q" \
+            else self.kv_proj_encoder.weight
+        param.weight_loader(
+            param,
+            loaded_weight) if loaded_shard_id == "q" else param.weight_loader(
+                param, loaded_weight, loaded_shard_id)
 
-    def weight_loader_bias(self, param: torch.nn.Parameter,
-                      loaded_weight: torch.Tensor,
-                      loaded_shard_id: Optional[str] = None):
-        param = self.q_proj_decoder.bias if loaded_shard_id == "q" else self.kv_proj_encoder.bias
-        param.weight_loader(param, loaded_weight) if loaded_shard_id == "q" else param.weight_loader(param, loaded_weight, loaded_shard_id)
+    def weight_loader_bias(self,
+                           param: torch.nn.Parameter,
+                           loaded_weight: torch.Tensor,
+                           loaded_shard_id: Optional[str] = None):
+        param = self.q_proj_decoder.bias if loaded_shard_id == "q" \
+            else self.kv_proj_encoder.bias
+        param.weight_loader(
+            param,
+            loaded_weight) if loaded_shard_id == "q" else param.weight_loader(
+                param, loaded_weight, loaded_shard_id)
