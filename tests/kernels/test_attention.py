@@ -383,7 +383,6 @@ def ref_multi_query_kv_attention(
 @pytest.mark.parametrize("num_seqs", NUM_PREFILL_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("use_alibi", USE_ALIBI)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -394,10 +393,10 @@ def test_multi_query_kv_attention(
     num_seqs: int,
     num_heads: tuple[int, int],
     head_size: int,
-    use_alibi: bool,
     dtype: torch.dtype,
     seed: int,
     device: str,
+    use_alibi: bool = False,
 ) -> None:
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
@@ -473,3 +472,31 @@ def test_multi_query_kv_attention(
     atol = get_default_atol(output) if current_platform.is_rocm() else 1e-3
     rtol = get_default_rtol(output) if current_platform.is_rocm() else 1e-5
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("num_seqs", NUM_PREFILL_SEQS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [64])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="Xformers backend is not supported on ROCm.")
+@torch.inference_mode()
+def test_multi_query_kv_attention_with_alibi(
+    num_seqs: int,
+    num_heads: tuple[int, int],
+    head_size: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    return test_multi_query_kv_attention(
+        num_seqs,
+        num_heads,
+        head_size,
+        dtype,
+        seed,
+        device,
+        use_alibi=True,
+    )
