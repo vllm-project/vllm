@@ -101,6 +101,10 @@ def cpu_platform_plugin() -> Optional[str]:
     try:
         from importlib.metadata import version
         is_cpu = "cpu" in version("vllm")
+        if is_cpu == False:
+            import platform
+            is_cpu = platform.machine().lower().startswith("arm")
+
     except Exception:
         pass
 
