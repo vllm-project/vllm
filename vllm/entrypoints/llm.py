@@ -1034,7 +1034,7 @@ class LLM:
             generated scores in the same order as the input prompts.
         """
 
-        def _embedding_score(text_1: List[str],
+        def _embedding_score(tokenizer, text_1: List[str],
                              text_2: List[str]) -> List[ScoringRequestOutput]:
             encoded_output = self.encode(text_1 + text_2)
             encoded_output_1 = encoded_output[0:len(text_1)]
@@ -1072,8 +1072,9 @@ class LLM:
             return [ScoringRequestOutput.from_base(item) for item in items]
 
         def _cross_encoding_score(
-                text_1: List[str],
-                text_2: List[str]) -> List[ScoringRequestOutput]:
+            tokenizer, text_1: List[str | TextPrompt | TokensPrompt],
+            text_2: List[str | TextPrompt | TokensPrompt]
+        ) -> List[ScoringRequestOutput]:
             if isinstance(tokenizer, MistralTokenizer):
                 raise ValueError(
                     "MistralTokenizer not supported for cross-encoding")
@@ -1169,9 +1170,9 @@ class LLM:
             raise ValueError("At least one text_pair element must be given")
 
         if self.llm_engine.model_config.is_cross_encoder:
-            return _cross_encoding_score(text_1, text_2)
+            return _cross_encoding_score(tokenizer, text_1, text_2)
         else:
-            return _embedding_score(text_1, text_2)
+            return _embedding_score(tokenizer, text_1, text_2)
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()
