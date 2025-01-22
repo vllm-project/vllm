@@ -45,14 +45,12 @@ def custom_enc_hook(obj: Any) -> Any:
         # when serializing torch tensors.
         # https://gist.github.com/tlrmchlsmth/8067f1b24a82b6e2f90450e7764fa103 # noqa: E501
         return msgpack.Ext(CUSTOM_TYPE_CODE_PICKLE, pickle.dumps(obj.numpy()))
-    else:
-        raise NotImplementedError(
-            f"Objects of type {type(obj)} are not supported")
+
+    raise NotImplementedError(f"Objects of type {type(obj)} are not supported")
 
 
 def custom_ext_hook(code: int, data: memoryview) -> Any:
     if code == CUSTOM_TYPE_CODE_PICKLE:
         return torch.from_numpy(pickle.loads(data))
-    else:
-        raise NotImplementedError(
-            f"Extension type code {code} is not supported")
+
+    raise NotImplementedError(f"Extension type code {code} is not supported")
