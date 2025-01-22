@@ -43,7 +43,7 @@ class PromptReplacementDetails:
     """
 
     @staticmethod
-    def from_seq(seq: _PromptSeq):
+    def from_seq(seq: _PromptSeq) -> "PromptReplacementDetails":
         return PromptReplacementDetails(full=seq, features=seq)
 
 
@@ -132,7 +132,10 @@ class _BoundPromptSequence:
     _token_ids: Optional[list[int]]
 
     @staticmethod
-    def from_seq(tokenizer: AnyTokenizer, seq: _PromptSeq):
+    def from_seq(
+        tokenizer: AnyTokenizer,
+        seq: _PromptSeq,
+    ) -> "_BoundPromptSequence":
         return _BoundPromptSequence(
             tokenizer=tokenizer,
             _text=seq if isinstance(seq, str) else None,
