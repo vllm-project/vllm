@@ -1153,6 +1153,7 @@ class LLM:
             where previous model weights are not needed. It reduces CPU memory 
             pressure.
         """
+        self.reset_prefix_cache()
         self.llm_engine.sleep(level=level)
 
     def wake_up(self):
