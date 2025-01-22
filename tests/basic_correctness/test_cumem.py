@@ -87,6 +87,8 @@ def test_cumem_with_cudagraph():
 
 @fork_new_process_for_each_test
 def test_end_to_end():
+    free, total = torch.cuda.mem_get_info()
+    used_bytes_baseline = total - free  # in case other process is running
     llm = LLM("meta-llama/Llama-3.2-1B", enable_sleep_mode=True)
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
@@ -98,7 +100,7 @@ def test_end_to_end():
     llm.sleep(level=1)
 
     free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
-    used_bytes = total - free_gpu_bytes_after_sleep
+    used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
     # now the memory usage is mostly cudagraph memory pool,
     # and it should be less than the model weights (1B model, 2GiB weights)
     assert used_bytes < 2 * GiB_bytes
