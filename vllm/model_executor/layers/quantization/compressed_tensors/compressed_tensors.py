@@ -420,12 +420,15 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return None
             # Have a valid sparsity scheme
             # Validate layer is supported by Cutlass 2:4 Kernel
+            model_compression_config = (None if sparsity_scheme is None
+                                        or sparsity_scheme.format == "dense"
+                                        else self.config)
+
             scheme = CompressedTensors24(
                 quantized=weight_quant is not None or input_quant is not None,
                 weight_quant=weight_quant,
                 input_quant=input_quant,
-                model_compression_config=self._get_model_compression_config(
-                    sparsity_scheme),
+                model_compression_config=model_compression_config,
             )
         elif weight_quant is None:
             logger.warning_once("Acceleration for non-quantized schemes is "
@@ -526,19 +529,6 @@ class CompressedTensorsConfig(QuantizationConfig):
             return False
 
         return weight_quant.num_bits == input_quant.num_bits == 8
-
-    def _get_model_compression_config(
-            self, sparsity_scheme: Optional[SparsityCompressionConfig] = None):
-        """
-        Get the model compressor config from the sparsity scheme
-
-        :param sparsity_scheme: The sparsity scheme
-        :return: The model compressor config
-        """
-        if sparsity_scheme is None or sparsity_scheme.format == "dense":
-            return None
-
-        return self.config
 
 
 class CompressedTensorsLinearMethod(LinearMethodBase):

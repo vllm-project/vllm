@@ -17,7 +17,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise, sparse_cutlass_supported)
 from vllm.model_executor.parameter import (BasevLLMParameter,
-                                           BitMaskShapeParameter,
                                            ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
@@ -77,21 +76,21 @@ class CompressedTensors24(CompressedTensorsScheme):
                                       output_dim=0,
                                       weight_loader=weight_loader)
         if self.do_sparse_decompress:
-            assert all(
-                partition_size % 8 == 0
-                for partition_size in output_partition_sizes
-            ), "All partitions must be divisible by 8 for 2:4 compressed models"
+            assert all(partition_size % 8 == 0
+                       for partition_size in output_partition_sizes
+                       ), "All partitions must be divisible by 8 for "
+            "2:4 sparse compressed models"
 
-            shape = BitMaskShapeParameter(data=torch.empty(
-                2 * len(output_partition_sizes), 1, dtype=torch.uint64),
-                                          weight_loader=weight_loader)
-            compressed = ModelWeightParameter(data=torch.empty(
-                sum(output_partition_sizes),
-                input_size_per_partition // 2,
-                dtype=self.weights_dtype),
-                                              input_dim=1,
-                                              output_dim=0,
-                                              weight_loader=weight_loader)
+            shape = BasevLLMParameter(data=torch.empty(2, 1,
+                                                       dtype=torch.int64),
+                                      weight_loader=weight_loader)
+            compressed_weight = ModelWeightParameter(
+                data=torch.empty(sum(output_partition_sizes),
+                                 input_size_per_partition // 2,
+                                 dtype=self.weights_dtype),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader)
 
             bitmask = ModelWeightParameter(data=torch.empty(
                 sum(output_partition_sizes),
@@ -102,7 +101,7 @@ class CompressedTensors24(CompressedTensorsScheme):
                                            weight_loader=weight_loader)
 
             layer.register_parameter("shape", shape)
-            layer.register_parameter("compressed", compressed)
+            layer.register_parameter("compressed", compressed_weight)
             layer.register_parameter("bitmask", bitmask)
 
         # Check if quantized, not just 2:4 Sparse

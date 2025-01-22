@@ -13,8 +13,7 @@ from vllm.model_executor.utils import _make_synced_weight_loader
 __all__ = [
     "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
     "ModelWeightParameter", "ChannelQuantScaleParameter",
-    "GroupQuantScaleParameter", "PackedColumnParameter", "RowvLLMParameter",
-    "BitMaskShapeParameter"
+    "GroupQuantScaleParameter", "PackedColumnParameter", "RowvLLMParameter"
 ]
 
 logger = init_logger(__name__)
@@ -432,26 +431,3 @@ def _adjust_shard_indexes_for_packing(shard_size, shard_offset, packed_factor,
             shard_offset=shard_offset,
             marlin_tile_size=marlin_tile_size)
     return shard_size, shard_offset
-
-
-class BitMaskShapeParameter(PerTensorScaleParameter):
-    """
-    Parameter class for the shape of the bitmask tensor.
-    """
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    def _load_into_shard_id(self, loaded_weight: torch.Tensor,
-                            shard_id: Union[str, int], **kwargs):
-        """
-        Slice the parameter data based on the shard id for 
-        loading.
-
-        Note: Assumes the loaded weight is a 1D tensor
-        with 2 elements.
-        """
-        param_data = self.data
-        shard_id = self._shard_id_as_int(shard_id)
-        start_index = shard_id * 2
-        param_data[start_index:start_index + 2].copy_(loaded_weight)
