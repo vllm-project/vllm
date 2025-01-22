@@ -171,6 +171,7 @@ class CuMemAllocator:
         Args:
             offload_tags: The tags of the memory allocation that will be
             offloaded. The rest of the memory allocation will be discarded.
+
         """
         if offload_tags is None:
             # by default, allocated tensors are offloaded
@@ -222,6 +223,7 @@ class CuMemAllocator:
         Args:
             tag: The tag of the memory allocation. If None, the default tag 
             will be used.
+
         """
         if tag is None:
             tag = CuMemAllocator.default_tag
