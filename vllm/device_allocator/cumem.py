@@ -166,7 +166,12 @@ class CuMemAllocator:
         """
         Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be 
-        offloaded to CPU memory, and others will be discarded."""
+        offloaded to CPU memory, and others will be discarded.
+
+        Args:
+            offload_tags: The tags of the memory allocation that will be
+            offloaded. The rest of the memory allocation will be discarded.
+        """
         if offload_tags is None:
             # by default, allocated tensors are offloaded
             # when the allocator sleeps
