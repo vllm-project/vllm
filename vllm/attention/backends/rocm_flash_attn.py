@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_PARTITION_SIZE_ROCM = 512
+_PARTITION_SIZE_ROCM = 256
 _GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
 _ON_NAVI = "gfx1" in _GPU_ARCH
 _ON_MI250_MI300 = any(arch in _GPU_ARCH
@@ -422,6 +422,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
+        fp8_out_scale: torch.Tensor = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -597,6 +598,18 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     device=output.device,
                 )
                 max_logits = torch.empty_like(exp_sums)
+
+                cpa_fp8_out = False
+                if num_prefill_tokens > 0:
+                    out = output[num_prefill_tokens:]
+                else:
+                    if fp8_out_scale is not None:
+                        out = torch.empty_like(output,
+                                               dtype=torch.float8_e4m3fnuz)
+                        cpa_fp8_out = True
+                    else:
+                        out = output
+
                 ops.paged_attention_rocm(
                     output[num_prefill_tokens:],
                     exp_sums,
@@ -615,7 +628,12 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.kv_cache_dtype,
                     layer._k_scale,
                     layer._v_scale,
+                    fp8_out_scale if cpa_fp8_out else None,
+                    _PARTITION_SIZE_ROCM,
                 )
+
+                if cpa_fp8_out:
+                    return out.view(num_seqs, num_heads * head_size)
             else:
                 output[num_prefill_tokens:] = PagedAttention.forward_decode(
                     decode_query,

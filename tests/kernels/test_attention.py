@@ -23,6 +23,7 @@ MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 # Reduce NUM_BLOCKS when it happens.
 NUM_BLOCKS = 4321  # Arbitrary values for testing
 PARTITION_SIZE = 512
+PARTITION_SIZE_ROCM = 256
 # flshattF and tritonflashattF supported: {torch.float16, torch.bfloat16}
 DTYPES = [
     torch.half, torch.bfloat16, torch.float
@@ -34,6 +35,8 @@ NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 # This should be sync with get_supported_head_sizes() in
 # vllm.attention.ops.paged_attn.PagedAttention
 HEAD_SIZES = [32, 64, 80, 96, 112, 120, 128, 192, 256]
+if current_platform.is_rocm():
+    HEAD_SIZES = [128, 64]
 
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
@@ -212,7 +215,9 @@ def test_paged_attention(
                       and block_size == BLOCK_SIZES[0]))
 
     elif version in ("v2", "rocm"):
-        num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
+        if current_platform.is_rocm():
+            PARTITION_SIZE = PARTITION_SIZE_ROCM
+        num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)        
         assert PARTITION_SIZE % block_size == 0
         num_seqs, num_heads, head_size = output.shape
         tmp_output = torch.empty(
@@ -272,13 +277,15 @@ def test_paged_attention(
                 kv_cache_dtype,
                 k_scale,
                 v_scale,
+                None,
+                PARTITION_SIZE,
             )
 
             opcheck(torch.ops._rocm_C.paged_attention,
                     (output, exp_sums, max_logits, tmp_output, query,
                      key_cache, value_cache, num_kv_heads, scale, block_tables,
                      seq_lens, block_size, max_seq_len, alibi_slopes,
-                     kv_cache_dtype, k_scale, v_scale),
+                     kv_cache_dtype, k_scale, v_scale, None, PARTITION_SIZE),
                     cond=(head_size == HEAD_SIZES[0]
                           and block_size == BLOCK_SIZES[0]))
 
