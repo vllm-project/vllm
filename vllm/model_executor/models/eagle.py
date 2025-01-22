@@ -200,12 +200,19 @@ class EAGLE(nn.Module):
             else:
                 model_weights[f"model.{name}"] = loaded_weight
 
-        lm_head_weight = model_weights.pop("lm_head.weight")
+        if "lm_head.weight" in model_weights:
+            lm_head_weight = model_weights.pop("lm_head.weight")
 
-        if self.token_map is not None and\
-            lm_head_weight.shape[0] > self.token_map.shape[0]:
+            if self.token_map is not None and\
+                lm_head_weight.shape[0] > self.token_map.shape[0]:
 
-            lm_head_weight = lm_head_weight[self.token_map]
+                lm_head_weight = lm_head_weight[self.token_map]
+
+        else:
+            lm_head_weight = torch.tensor(
+                0,
+                dtype=torch.float32,
+            ).expand(self.lm_head.org_vocab_size, self.lm_head.embedding_dim)
 
         weight_loader = getattr(self.lm_head.weight, "weight_loader",
                                 default_weight_loader)
