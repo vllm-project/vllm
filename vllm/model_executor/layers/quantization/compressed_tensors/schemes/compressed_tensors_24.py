@@ -257,6 +257,18 @@ class CompressedTensors24(CompressedTensorsScheme):
     def _decompress_bitmask_compressed_weight(
             self, compressed: torch.Tensor, bitmask: torch.Tensor,
             layer: torch.nn.Module) -> torch.Tensor:
+        """
+        Decompress a compressed 2:4 sparse weight tensor 
+        using the bitmask and return the result.
+        
+        This function also supports sharded decompression.
+
+        :param compressed: The 2:4 sparse weight tensor 
+            compressed using the sparse-24-bitmask compressor.
+        :param bitmask: The 2:4 bitmask associated with the compressed weights.
+        :param layer: The layer whose weights need to be processed after loading.
+        :return: The decompressed 2:4 sparse weight tensor.
+        """
 
         sparsity_compressor = self.model_compressor.sparsity_compressor
 

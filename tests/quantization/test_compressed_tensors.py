@@ -243,7 +243,10 @@ def test_compressed_tensors_kv_cache(vllm_runner):
 
 @pytest.mark.skipif(not sparse_cutlass_supported(),
                     reason="Sparse FP8 is not yet supported on this GPU type.")
-def _test_2of4_quant_models(qkv_proj, weight_strategy, input_strategy):
+def _test_2of4_quant_models(qkv_proj,
+                            weight_strategy,
+                            input_strategy,
+                            format="dense"):
     assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
     assert isinstance(qkv_proj.scheme, CompressedTensors24)
 
@@ -252,7 +255,7 @@ def _test_2of4_quant_models(qkv_proj, weight_strategy, input_strategy):
     assert qkv_proj.scheme.quantized
     assert qkv_proj.quant_method.quantization_config.sparsity_scheme_map
     sparsity_map = qkv_proj.quant_method.quantization_config.sparsity_scheme_map  # noqa: E501
-    assert sparsity_map.get("Linear").format == "dense"
+    assert sparsity_map.get("Linear").format == format
     assert sparsity_map.get("Linear").sparsity_structure == "2:4"
 
 
@@ -278,6 +281,72 @@ def test_compressed_tensors_2of4_quant_fp8(vllm_runner, args_2of4):
             qkv_proj = layer.self_attn.qkv_proj
             assert qkv_proj.scheme.weights_dtype == torch.float8_e4m3fn
             _test_2of4_quant_models(qkv_proj, weight_strategy, input_strategy)
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        print(output)
+        assert output
+
+
+@pytest.mark.skipif(not current_platform.has_device_capability(90),
+                    reason="Sparse FP8 is not yet supported on this GPU type.")
+@pytest.mark.parametrize("args_2of4", [
+    ("nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-chnl_wts_per_tok_dyn_act_fp8-BitM",
+     "channel", "token"),
+    ("nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-chnl_wts_tensor_act_fp8-BitM",
+     "channel", "tensor"),
+    ("nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-tensor_wts_per_tok_dyn_act_fp8-BitM",
+     "tensor", "token"),
+    ("nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-tensor_wts_tensor_act_fp8-BitM",
+     "tensor", "tensor"),
+])
+def test_compressed_tensors_2of4_quant_fp8_compressed(vllm_runner, args_2of4):
+    model, weight_strategy, input_strategy = args_2of4
+    with vllm_runner(model) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+            assert qkv_proj.scheme.weights_dtype == torch.float8_e4m3fn
+            _test_2of4_quant_models(qkv_proj,
+                                    weight_strategy,
+                                    input_strategy,
+                                    format="sparse-24-bitmask")
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        print(output)
+        assert output
+
+
+@pytest.mark.skipif(not sparse_cutlass_supported(),
+                    reason="cutlass is not yet supported on this GPU type.")
+@pytest.mark.parametrize("args_2of4", [
+    ("nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-chnl_wts_per_tok_dyn_act_int8-BitM",
+     "channel", "token"),
+    ("nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-chnl_wts_tensor_act_int8-BitM",
+     "channel", "tensor"),
+    ("nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-tensor_wts_per_tok_dyn_act_int8-BitM",
+     "tensor", "token"),
+    ("nm-testing/TinyLlama-1.1B-Chat-v1.0-gsm8k-pruned.2of4-tensor_wts_tensor_act_int8-BitM",
+     "tensor", "tensor"),
+])
+def test_compressed_tensors_2of4_quant_int8_compressed(vllm_runner, args_2of4):
+    model, weight_strategy, input_strategy = args_2of4
+    with vllm_runner(model) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+            assert qkv_proj.scheme.weights_dtype == torch.int8
+            _test_2of4_quant_models(qkv_proj,
+                                    weight_strategy,
+                                    input_strategy,
+                                    format="sparse-24-bitmask")
 
         llm.apply_model(check_model)
 
