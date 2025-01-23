@@ -314,7 +314,13 @@ class BartCrossAttention(nn.Module):
         #     bias=bias,
         #     quant_config=quant_config,
         # )
-        self.qkv_proj = QKVCrossParallelLinear(self.d_model, self.d_model // self.total_num_heads, self.total_num_heads, self.total_num_kv_heads, bias, quant_config=quant_config)
+        self.qkv_proj = QKVCrossParallelLinear(self.d_model,
+                                               self.d_model //
+                                               self.total_num_heads,
+                                               self.total_num_heads,
+                                               self.total_num_kv_heads,
+                                               bias,
+                                               quant_config=quant_config)
 
         self.out_proj = RowParallelLinear(
             embed_dim,
