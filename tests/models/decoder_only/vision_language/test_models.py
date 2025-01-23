@@ -363,7 +363,7 @@ VLM_TEST_SETTINGS = {
         ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
     ),
-    "minicpmv_26o": VLMTestInfo(
+    "minicpmo_26": VLMTestInfo(
         models=["openbmb/MiniCPM-o-2_6"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501

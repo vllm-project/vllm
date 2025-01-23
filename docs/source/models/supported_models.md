@@ -691,7 +691,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - ✅︎
   - ✅︎
 * - `MiniCPMV`
-  - MiniCPM-V
+  - MiniCPM-V, MiniCPM-o
   - T + I<sup>E+</sup>
   - `openbmb/MiniCPM-V-2` (see note), `openbmb/MiniCPM-Llama3-V-2_5`, `openbmb/MiniCPM-V-2_6`, `openbmb/MiniCPM-o-2_6` etc.
   - ✅︎
