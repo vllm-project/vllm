@@ -97,8 +97,8 @@ def test_flash_attn_with_paged_kv(
     fa_version: int,
 ) -> None:
     torch.set_default_device("cuda")
-    if is_fa_version_supported(fa_version):
-        pytest.skip(f"Flash attention version {fa_version} not supported due  "
+    if not is_fa_version_supported(fa_version):
+        pytest.skip(f"Flash attention version {fa_version} not supported due "
                     f"to: \"{fa_version_unsupported_reason(fa_version)}\"")
 
     current_platform.seed_everything(0)
@@ -183,8 +183,8 @@ def test_varlen_with_paged_kv(
     fa_version: int,
 ) -> None:
     torch.set_default_device("cuda")
-    if is_fa_version_supported(fa_version):
-        pytest.skip(f"Flash attention version {fa_version} not supported due  "
+    if not is_fa_version_supported(fa_version):
+        pytest.skip(f"Flash attention version {fa_version} not supported due "
                     f"to: \"{fa_version_unsupported_reason(fa_version)}\"")
     current_platform.seed_everything(0)
     num_seqs = len(seq_lens)

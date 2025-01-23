@@ -93,9 +93,9 @@ def test_cascade(
     fa_version: int,
 ) -> None:
     torch.set_default_device("cuda")
-    if is_fa_version_supported(fa_version):
-        pytest.skip("Flash attention version not supported due to: " + \
-                    fa_version_unsupported_reason(fa_version))
+    if not is_fa_version_supported(fa_version):
+        pytest.skip(f"Flash attention version {fa_version} not supported due "
+                    f"to: \"{fa_version_unsupported_reason(fa_version)}\"")
 
     current_platform.seed_everything(0)
 
