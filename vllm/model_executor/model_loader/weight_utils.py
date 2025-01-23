@@ -6,8 +6,7 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import (Any, Callable, Dict, Generator, Iterable, List, Optional,
-                    Tuple, Union)
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import filelock
 import gguf
@@ -23,7 +22,6 @@ from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
-from vllm.model_executor.layers.quantization.schema import QuantParamSchema
 from vllm.platforms import current_platform
 from vllm.utils import PlaceholderModule
 
@@ -494,47 +492,6 @@ def gguf_quant_weights_iterator(
                 name = name.replace("weight", "qweight")
             param = torch.tensor(weight)
             yield name, param
-
-
-def kv_cache_scales_loader(
-        filename: str, tp_rank: int, tp_size: int, num_hidden_layers: int,
-        model_type: Optional[str]) -> Iterable[Tuple[int, float]]:
-    """
-    A simple utility to read in KV cache scaling factors that have been
-    previously serialized to disk. Used by the model to populate the appropriate
-    KV cache scaling factors. The serialization should represent a dictionary
-    whose keys are the TP ranks and values are another dictionary mapping layers
-    to their KV cache scaling factors.
-    Keep this function in sync with the output of
-    examples/other/fp8/extract_scales.py
-    """
-    try:
-        with open(filename) as f:
-            context = {
-                "model_type": model_type,
-                "num_hidden_layers": num_hidden_layers,
-                "tp_rank": tp_rank,
-                "tp_size": tp_size,
-            }
-            schema_dct = json.load(f)
-            schema = QuantParamSchema.model_validate(schema_dct,
-                                                     context=context)
-            layer_scales_map = schema.kv_cache.scaling_factor[tp_rank]
-            return layer_scales_map.items()
-
-    except FileNotFoundError:
-        logger.error("File or directory '%s' not found.", filename)
-    except json.JSONDecodeError:
-        logger.error("Error decoding JSON in file '%s'.", filename)
-    except Exception:
-        logger.exception("An error occurred while reading '%s'.", filename)
-    # This section is reached if and only if any of the excepts are hit
-    # Return an empty iterable (list) => no KV cache scales are loaded
-    # which ultimately defaults to 1.0 scales
-    logger.warning(
-        "Defaulting to KV cache scaling factors = 1.0 for all "
-        "layers in TP rank %d as an error occurred during loading.", tp_rank)
-    return []
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
