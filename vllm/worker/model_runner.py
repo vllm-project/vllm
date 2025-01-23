@@ -198,6 +198,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.mrope_input_positions = None  # type: ignore
             self.seq_lens[0] = 0  # type: ignore
             self.orig_seq_lens[0] = 0  # type: ignore
+            self.prompt_lens[0] = 0  # type: ignore
             self.query_lens[0] = 0  # type: ignore
             self.context_lens[0] = 0  # type: ignore
             self.curr_sliding_window_blocks[0] = 0  # type: ignore
@@ -229,6 +230,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # The original sequence length (before applying sliding window).
             # This is used to compute slot mapping.
             orig_seq_lens: Optional[List[int]] = None,
+            # This is used in the dual-chunk flash attention backend.
+            prompt_lens: Optional[List[int]] = None,
             # The query length.
             query_lens: Optional[List[int]] = None,
             # The number of tokens that are already computed.
@@ -307,6 +310,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                         for seq_id in range(len(self.seq_ids)):
                             self.orig_seq_lens[seq_id] = 0
 
+                    if prompt_lens:
+                        self.prompt_lens = prompt_lens
+                    else:
+                        for seq_id in range(len(self.seq_ids)):
+                            self.prompt_lens[seq_id] = 0
+
                     if query_lens:
                         self.query_lens = query_lens
                     else:
@@ -360,6 +369,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 self.mrope_input_positions = mrope_input_positions or None
                 self.seq_lens = seq_lens or []
                 self.orig_seq_lens = orig_seq_lens or []
+                self.prompt_lens = prompt_lens or []
                 self.query_lens = query_lens or []
                 self.context_lens = context_lens or []
                 self.curr_sliding_window_blocks = \
@@ -393,6 +403,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.mrope_input_positions = None
             self.seq_lens = [0] * self.n_seqs
             self.orig_seq_lens = [0] * self.n_seqs
+            self.prompt_lens = [0] * self.n_seqs
             self.query_lens = [0] * self.n_seqs
             self.context_lens = [0] * self.n_seqs
             self.curr_sliding_window_blocks = [0] * self.n_seqs
@@ -516,6 +527,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         inter_data.seq_lens[seq_idx] = seq_len
         inter_data.orig_seq_lens[seq_idx] = seq_len
+        inter_data.prompt_lens[seq_idx] = seq_data.get_prompt_len()
         inter_data.context_lens[seq_idx] = context_len
         inter_data.input_tokens[seq_idx].extend(tokens)
         inter_data.input_positions[seq_idx].extend(range(context_len, seq_len))
