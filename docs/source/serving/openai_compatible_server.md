@@ -50,6 +50,9 @@ In addition, we have the following custom APIs:
   - Applicable to all [pooling models](../models/pooling_models.md).
 - [Score API](#score-api) (`/score`)
   - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
+- [Re-rank API](#rerank-api) (`/rerank`, `/v1/rerank`)
+  - Implements [Jina AI's rerank API](https://jina.ai/reranker/) which is a common standard for re-rank APIs
+  - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
 
 (chat-template)=
 
@@ -472,4 +475,89 @@ The following extra parameters are supported:
 :language: python
 :start-after: begin-score-extra-params
 :end-before: end-score-extra-params
+```
+
+(rerank-api) =
+
+### Re-rank API
+
+Our Re-rank API applies a cross-encoder model to predict relevant scores between a single query, and
+each of a list of documents. Usually, the score for a sentence pair refers to the similarity between two sentences, on
+a scale of 0 to 1.
+
+You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
+
+Compatible with popular re-rank models such as `BAAI/bge-reranker-base`, the `/rerank` and `/v1/rerank`
+endpoints implement [Jina AI's re-rank API interface](https://jina.ai/reranker/) to ensure compatibility with
+popular open-source tools.
+
+Code example: <gh-file:examples/online_serving/jinaai_rerank_client.py>
+
+#### Example Request
+
+Note that the `top_n` request parameter is optional and will default to the length of the `documents` field.
+Result documents will be sorted by relevance, and the `index` property can be used to determine original order.
+
+Request:
+
+```bash
+curl -X 'POST' \
+  'http://127.0.0.1:8000/v1/rerank' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "BAAI/bge-reranker-base",
+  "query": "What is the capital of France?",
+  "documents": [
+    "The capital of Brazil is Brasilia.",
+    "The capital of France is Paris.",
+    "Horses and cows are both animals"
+  ]
+}'
+```
+
+Response:
+
+```bash
+{
+  "id": "rerank-fae51b2b664d4ed38f5969b612edff77",
+  "model": "BAAI/bge-reranker-base",
+  "usage": {
+    "total_tokens": 56
+  },
+  "results": [
+    {
+      "index": 1,
+      "document": {
+        "text": "The capital of France is Paris."
+      },
+      "relevance_score": 0.99853515625
+    },
+    {
+      "index": 0,
+      "document": {
+        "text": "The capital of Brazil is Brasilia."
+      },
+      "relevance_score": 0.0005860328674316406
+    }
+  ]
+}
+```
+
+#### Extra parameters
+
+The following [pooling parameters](#pooling-params) are supported.
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-rerank-pooling-params
+:end-before: end-rerank-pooling-params
+```
+
+The following extra parameters are supported:
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-rerank-extra-params
+:end-before: end-rerank-extra-params
 ```
