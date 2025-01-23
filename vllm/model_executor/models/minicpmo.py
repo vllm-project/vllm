@@ -20,19 +20,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
-import math
-import re
-from functools import cached_property, partial
-from itertools import accumulate
-from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
+from functools import partial
+from typing import (Any, Dict, Iterable, List, Literal, Mapping,
                     Optional, Set, Tuple, TypedDict, Union)
 
-import numpy as np
 import torch
 import torch.types
-from PIL import Image
 from torch import nn
-from transformers import BatchFeature, PretrainedConfig
 from transformers.cache_utils import DynamicCache, EncoderDecoderCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.whisper.modeling_whisper import (
@@ -40,29 +34,16 @@ from transformers.models.whisper.modeling_whisper import (
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.resampler import (BaseResampler, Resampler2,
-                                                  get_2d_sincos_pos_embed)
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
-from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, PlaceholderRange)
-from vllm.multimodal.parse import (ImageItem, ImageSize, ModalityData,
+from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.multimodal.parse import (ModalityData,
                                    ModalityDataItems, MultiModalDataItems,
                                    MultiModalDataParser, VideoItem)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+                                        PromptReplacement)
+from vllm.multimodal.profiling import ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .idefics2_vision_model import Idefics2VisionTransformer
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import AutoWeightsLoader, maybe_prefix
 from .minicpmv import (MiniCPMVEmbeddingItems, 
                        MiniCPMVMultiModalDataParser,

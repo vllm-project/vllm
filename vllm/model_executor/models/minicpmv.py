@@ -33,10 +33,6 @@ import torch.types
 from PIL import Image
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
-from transformers.cache_utils import DynamicCache, EncoderDecoderCache
-from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.models.whisper.modeling_whisper import (
-    ACT2FN, WHISPER_ATTENTION_CLASSES, WhisperConfig, WhisperEncoder)
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
