@@ -286,7 +286,7 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile
+# @support_torch_compile FIXME: torch.compile fails with V1 engine
 class LlamaModel(nn.Module):
 
     def __init__(self,

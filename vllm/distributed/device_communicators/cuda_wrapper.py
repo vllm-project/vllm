@@ -104,6 +104,12 @@ class CudaRTLibrary:
     def __init__(self, so_file: Optional[str] = None):
         if so_file is None:
             so_file = find_loaded_library("libcudart")
+            if so_file is None: 
+                # Temporary workaround for the issue that the libcudart.so is not loaded in the current process. T211676167
+                from vllm.fb.cuda_utils import get_cudart_lib_path
+                so_file = get_cudart_lib_path()
+                if so_file is not None:
+                    logger.info(f"Fallback to use the libcudart file under CUDA_HOME: {so_file}") 
             assert so_file is not None, \
                 "libcudart is not loaded in the current process"
         if so_file not in CudaRTLibrary.path_to_library_cache:
