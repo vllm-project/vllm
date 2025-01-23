@@ -2687,7 +2687,7 @@ class CompilationConfig(BaseModel):
             outside of compilation.
             TODO: move outside cudagraph logic into compilation.
             torch.compile will handle cudagraph capture logic in the future.
-        - capture_sizes: sizes to capture cudagraph.
+        - cudagraph_capture_sizes: sizes to capture cudagraph.
             - None (default): capture sizes are inferred from vllm config.
             - List[int]: capture sizes are specified as given.
         - cudagraph_num_of_warmups: number of warmup runs for cudagraph.
@@ -2741,7 +2741,7 @@ class CompilationConfig(BaseModel):
 
     use_cudagraph: bool = False
     cudagraph_num_of_warmups: int = 0
-    capture_sizes: Optional[List[int]] = None
+    cudagraph_capture_sizes: Optional[List[int]] = None
     cudagraph_copy_inputs: bool = False
 
     class PassConfig(BaseModel):
@@ -2913,12 +2913,12 @@ class CompilationConfig(BaseModel):
         """To complete the initialization of config,
         we need to know the cudagraph sizes."""
 
-        if self.capture_sizes is None:
-            self.capture_sizes = cudagraph_capture_sizes
+        if self.cudagraph_capture_sizes is None:
+            self.cudagraph_capture_sizes = cudagraph_capture_sizes
         else:
             logger.info(("cudagraph sizes specified by model runner"
                          " %s is overridden by config %s"),
-                        cudagraph_capture_sizes, self.capture_sizes)
+                        cudagraph_capture_sizes, self.cudagraph_capture_sizes)
 
         computed_compile_sizes = []
         if self.compile_sizes is not None:
@@ -2927,23 +2927,23 @@ class CompilationConfig(BaseModel):
                     assert x == "cudagraph", \
                     "Unrecognized size type in compile_sizes, " \
                     f"expect 'cudagraph', got {x}"
-                    computed_compile_sizes.extend(self.capture_sizes)
+                    computed_compile_sizes.extend(self.cudagraph_capture_sizes)
                 else:
                     assert isinstance(x, int)
                     computed_compile_sizes.append(x)
         self.compile_sizes = computed_compile_sizes
 
         # sort to make sure cudagraph capture sizes are in descending order
-        self.capture_sizes.sort(reverse=True)
-        self.max_capture_size = self.capture_sizes[
-            0] if self.capture_sizes else 0
+        self.cudagraph_capture_sizes.sort(reverse=True)
+        self.max_capture_size = self.cudagraph_capture_sizes[
+            0] if self.cudagraph_capture_sizes else 0
 
         # pre-compute the mapping from batch size to padded graph size
         self.bs_to_padded_graph_size = [
             0 for i in range(self.max_capture_size + 1)
         ]
-        for end, start in zip(self.capture_sizes,
-                              self.capture_sizes[1:] + [0]):
+        for end, start in zip(self.cudagraph_capture_sizes,
+                              self.cudagraph_capture_sizes[1:] + [0]):
             for bs in range(start, end):
                 if bs == start:
                     self.bs_to_padded_graph_size[bs] = start
@@ -3214,14 +3214,14 @@ class VllmConfig:
         However, if users specify the cudagraph capture sizes through
         compilation config, we will use the specified sizes instead.
 
-        In the end, `vllm_config.compilation_config.capture_sizes` will be the
-        final sizes to capture cudagraph (in descending order).
+        In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
+        will be the final sizes to capture cudagraph (in descending order).
 
         During runtime, if batchsize is larger than
-        `vllm_config.compilation_config.capture_sizes`,
+        `vllm_config.compilation_config.cudagraph_capture_sizes`,
         no cudagraph will be used.
         If the batch size is no larger than
-        `vllm_config.compilation_config.capture_sizes`,
+        `vllm_config.compilation_config.cudagraph_capture_sizes`,
         we can quickly find the padded graph size for a given batch size by
         looking up `vllm_config.compilation_config.bs_to_padded_graph_size`.
         """

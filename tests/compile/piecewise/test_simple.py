@@ -80,7 +80,7 @@ def test_simple_piecewise_compile():
         use_cudagraph=True,
         splitting_ops=["silly.attention"],
         cudagraph_copy_inputs=True,
-        capture_sizes=[1, 2],
+        cudagraph_capture_sizes=[1, 2],
     ))
     with set_current_vllm_config(vllm_config):
         model = SillyModel(vllm_config=vllm_config, prefix='')
