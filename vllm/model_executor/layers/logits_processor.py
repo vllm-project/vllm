@@ -13,6 +13,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 
+from concurrent.futures import ThreadPoolExecutor
+
+_logits_processor_threadpool : ThreadPoolExecutor | None = None
+if envs.VLLM_LOGITS_PROCESSOR_THREADS is not None:
+    _logits_processor_threadpool = ThreadPoolExecutor(envs.VLLM_LOGITS_PROCESSOR_THREADS)
+
 
 class LogitsProcessor(nn.Module):
     """Process logits and apply logits processors from sampling metadata.
@@ -130,6 +136,7 @@ def _apply_logits_processors(
 ) -> torch.Tensor:
     found_logits_processors = False
     logits_processed = 0
+    logits_row_ids_and_logits_row_futures = []
     for seq_group in sampling_metadata.seq_groups:
         seq_ids = seq_group.seq_ids
         sampling_params = seq_group.sampling_params
@@ -143,22 +150,30 @@ def _apply_logits_processors(
                 past_tokens_ids = seq_group.seq_data[seq_id].output_token_ids
                 prompt_tokens_ids = seq_group.seq_data[seq_id].prompt_token_ids
 
-                for logits_processor in logits_processors:
-                    parameters = inspect.signature(logits_processor).parameters
-                    if len(parameters) == 3:
-                        logits_row = logits_processor(prompt_tokens_ids,
-                                                      past_tokens_ids,
-                                                      logits_row)
-                    else:
-                        logits_row = logits_processor(past_tokens_ids,
-                                                      logits_row)
-
-                logits[logits_row_idx] = logits_row
+                if _logits_processor_threadpool is not None:
+                    logits_row_ids_and_logits_row_futures.append((logits_row_idx, _logits_processor_threadpool.submit(_apply_logics_processors_single_seq, logits_row, logits_processors, past_tokens_ids, prompt_tokens_ids)))
+                else:
+                    logits[logits_row_idx] = _apply_logics_processors_single_seq(logits_row, logits_processors, past_tokens_ids, prompt_tokens_ids)
 
         logits_processed += len(seq_group.sample_indices) + len(
             seq_group.prompt_logprob_indices)
+    
+    for logits_row_idx, logits_row_future in logits_row_ids_and_logits_row_futures:
+        logits[logits_row_idx] = logits_row_future.result()
 
     if found_logits_processors:
         # verifies that no rows in logits were missed unexpectedly
         assert logits_processed == logits.shape[0]
     return logits
+
+def _apply_logics_processors_single_seq(logits_row, logits_processors, past_tokens_ids, prompt_tokens_ids) -> torch.Tensor:
+    for logits_processor in logits_processors:
+        parameters = inspect.signature(logits_processor).parameters
+        if len(parameters) == 3:
+            logits_row = logits_processor(prompt_tokens_ids,
+                                            past_tokens_ids,
+                                            logits_row)
+        else:
+            logits_row = logits_processor(past_tokens_ids,
+                                            logits_row)
+    return logits_row
