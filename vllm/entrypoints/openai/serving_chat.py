@@ -192,7 +192,6 @@ class OpenAIServingChat(OpenAIServing):
                 # Build default sampling params
                 default_sampling_params = (
                     self.model_config.get_diff_sampling_param())
-
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
                         default_max_tokens, default_sampling_params)
