@@ -110,8 +110,7 @@ def test_llm_1_to_1_embedding(vllm_runner, hf_runner, emb_model_name,
                    is_sentence_transformer=True) as hf_model:
         hf_embeddings = hf_model.encode(text_pair)
         hf_outputs = [
-            F.cosine_similarity(*map(torch.tensor, hf_embeddings),
-                                 dim=0)
+            F.cosine_similarity(*map(torch.tensor, hf_embeddings), dim=0)
         ]
 
     with vllm_runner(emb_model_name,
@@ -141,8 +140,8 @@ def test_llm_1_to_N_embedding(vllm_runner, hf_runner, emb_model_name,
             hf_model.encode(text_pair) for text_pair in text_pairs
         ]
         hf_outputs = [
-            F.cosine_similarity(*map(torch.tensor, pair),
-                                dim=0) for pair in hf_embeddings
+            F.cosine_similarity(*map(torch.tensor, pair), dim=0)
+            for pair in hf_embeddings
         ]
 
     with vllm_runner(emb_model_name,
@@ -173,8 +172,8 @@ def test_llm_N_to_N_embedding(vllm_runner, hf_runner, emb_model_name,
             hf_model.encode(text_pair) for text_pair in text_pairs
         ]
         hf_outputs = [
-            F.cosine_similarity(*map(torch.tensor, pair),
-                                dim=0) for pair in hf_embeddings
+            F.cosine_similarity(*map(torch.tensor, pair), dim=0)
+            for pair in hf_embeddings
         ]
 
     with vllm_runner(emb_model_name,

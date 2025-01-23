@@ -997,8 +997,11 @@ class LLM:
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
 
-    def _embedding_score(self, tokenizer, text_1: List[str],
-                         text_2: List[str]) -> List[ScoringRequestOutput]:
+    def _embedding_score(self, tokenizer, truncate_prompt_tokens,
+                         text_1: List[str | TextPrompt | TokensPrompt],
+                         text_2: List[str | TextPrompt | TokensPrompt],
+                         use_tqdm, lora_request,
+                         prompt_adapter_request) -> List[ScoringRequestOutput]:
 
         encoded_output = self.encode(text_1 + text_2)
         encoded_output_1 = encoded_output[0:len(text_1)]
@@ -1178,7 +1181,9 @@ class LLM:
                                               text_2, use_tqdm, lora_request,
                                               prompt_adapter_request)
         else:
-            return self._embedding_score(tokenizer, text_1, text_2)
+            return self._embedding_score(tokenizer, truncate_prompt_tokens,
+                                         text_1, text_2, use_tqdm,
+                                         lora_request, prompt_adapter_request)
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()
