@@ -8,7 +8,8 @@ import cloudpickle
 import torch
 import torch.nn as nn
 
-from vllm.config import ObservabilityConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (ObservabilityConfig, VllmConfig,
+                         set_current_vllm_config)
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
