@@ -2936,7 +2936,7 @@ class CompilationConfig(BaseModel):
                 else:
                     assert isinstance(x, int)
                     computed_compile_sizes.append(x)
-        self.compile_sizes = computed_compile_sizes
+        self.compile_sizes = computed_compile_sizes  # type: ignore
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.cudagraph_capture_sizes.sort(reverse=True)
