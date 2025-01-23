@@ -997,11 +997,16 @@ class LLM:
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
 
-    def _embedding_score(self, tokenizer, truncate_prompt_tokens,
-                         text_1: List[Union[str, TextPrompt, TokensPrompt]],
-                         text_2: List[Union[str, TextPrompt, TokensPrompt]],
-                         use_tqdm, lora_request,
-                         prompt_adapter_request) -> List[ScoringRequestOutput]:
+    def _embedding_score(
+        self,
+        tokenizer: AnyTokenizer,
+        text_1: List[Union[str, TextPrompt, TokensPrompt]],
+        text_2: List[Union[str, TextPrompt, TokensPrompt]],
+        truncate_prompt_tokens: Optional[int] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> List[ScoringRequestOutput]:
 
         encoded_output = self.encode(
             text_1 + text_2,
@@ -1042,11 +1047,15 @@ class LLM:
         return [ScoringRequestOutput.from_base(item) for item in items]
 
     def _cross_encoding_score(
-            self, tokenizer, truncate_prompt_tokens,
-            text_1: List[Union[str, TextPrompt, TokensPrompt]],
-            text_2: List[Union[str, TextPrompt,
-                               TokensPrompt]], use_tqdm, lora_request,
-            prompt_adapter_request) -> List[ScoringRequestOutput]:
+        self,
+        tokenizer: AnyTokenizer,
+        text_1: List[Union[str, TextPrompt, TokensPrompt]],
+        text_2: List[Union[str, TextPrompt, TokensPrompt]],
+        truncate_prompt_tokens: Optional[int] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> List[ScoringRequestOutput]:
 
         if isinstance(tokenizer, MistralTokenizer):
             raise ValueError(
