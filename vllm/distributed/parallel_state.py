@@ -39,7 +39,8 @@ import vllm.distributed.kv_transfer.kv_transfer_agent as kv_transfer
 import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
-from vllm.utils import direct_register_custom_op, supports_custom_op
+from vllm.utils import (current_stream, direct_register_custom_op,
+                        supports_custom_op)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -365,7 +366,7 @@ class GroupCoordinator:
             return out
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
-        out = pynccl_comm.all_reduce(input_)
+        out = pynccl_comm.all_reduce(input_, stream=current_stream())
         if out is None:
             # fall back to the default all-reduce using PyTorch.
             # this usually happens during testing.
