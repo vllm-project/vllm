@@ -39,6 +39,23 @@ def get_8bit_types():
     return types
 
 
+# This test is to check regressions for int8 support on ROCm.
+@pytest.mark.parametrize("model_path", [
+    "neuralmagic/Llama-3.2-1B-quantized.w8a8",
+])
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("num_logprobs", [10])
+@pytest.mark.skipif(not current_platform.is_rocm(),
+                    reason="Should only run on ROCm")
+def test_rocm_compressed_tensors_w8a8(vllm_runner, example_prompts, model_path,
+                                      max_tokens, num_logprobs):
+    dtype = "bfloat16"
+
+    with vllm_runner(model_path, dtype=dtype) as vllm_model:
+        vllm_model.generate_greedy_logprobs(example_prompts, max_tokens,
+                                            num_logprobs)
+
+
 @pytest.mark.parametrize("M", [1, 33, 64, 512])
 @pytest.mark.parametrize("N", [256, 971, 20486])
 @pytest.mark.parametrize("K", [128, 496, 1024])
