@@ -98,7 +98,7 @@ class MiniCPMOAudioEmbeddingItems(MiniCPMOEmbeddingItems):
         super().__init__(data, "audio")
         audio_embeds = self.data.get("audio_embeds", None)
         if audio_embeds is None:
-            raise ValueError("In correct type of video_embeds",
+            raise ValueError("Incorrect type of video_embeds",
                              "Got type: None")
         self.data["audio_embeds"] = audio_embeds
 
