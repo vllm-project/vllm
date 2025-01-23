@@ -319,8 +319,11 @@ class ColumnParallelLinear(LinearBase):
                 self.weight_loader_v2 if self.quant_method.__class__.__name__
                 in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
         if bias:
+            # NOTE(Isotr0py): We intentionally use zeros to initialize the bias,
+            # so that it can be still compatible with the qkv_proj in model
+            # like whisper which has bias on q and v proj but not on k proj.
             self.bias = Parameter(
-                torch.empty(self.output_size_per_partition,
+                torch.zeros(self.output_size_per_partition,
                             dtype=params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
