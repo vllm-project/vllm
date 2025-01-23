@@ -365,3 +365,65 @@ def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model,
             num_logprobs=num_logprobs,
             tensor_parallel_size=1,
         )
+
+
+@large_gpu_test(min_gb=48)
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
+def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
+                    num_logprobs, attn_backend: _Backend) -> None:
+
+    stop_sign = image_assets[0].pil_image
+
+    with global_force_attn_backend_context_manager(attn_backend), vllm_runner(
+            model,
+            dtype=dtype,
+            max_model_len=4096,
+            max_num_seqs=2,
+            tensor_parallel_size=1,
+            enforce_eager=True,
+            limit_mm_per_prompt={"image":
+                                 _LIMIT_IMAGE_PER_PROMPT}) as vllm_model:
+
+        # Regression tests for https://github.com/vllm-project/vllm/issues/10648
+
+        # Number of image tags is greater than the number of images provided
+        prompt = "<|begin_of_text|><|image|><|image|> Compare the two images"  # noqa: E501
+        image = stop_sign
+        with pytest.raises(ValueError):
+            vllm_model.generate_greedy_logprobs([prompt],
+                                                max_tokens,
+                                                num_logprobs,
+                                                images=[image])
+
+        # Batch of a text-only and image request that requires cross-attention
+        prompts = [
+            "What is the capital of spain?",
+            "Text before the image...<|image|>What is in the image?",  # noqa: E501
+        ]
+        images = [
+            None,
+            [stop_sign],
+        ]
+        vllm_model.generate_greedy_logprobs(prompts,
+                                            max_tokens,
+                                            num_logprobs,
+                                            images=images)
+
+        # Test the reverse order too for good measure
+        prompts = [
+            "<|begin_of_text|>Text before the image...<|image|>What is in the image?",  # noqa: E501
+            "<|begin_of_text|>Hello!",
+        ]
+        images = [
+            [stop_sign],
+            None,
+        ]
+        vllm_model.generate_greedy_logprobs(prompts,
+                                            max_tokens,
+                                            num_logprobs,
+                                            images=images)
