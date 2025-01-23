@@ -320,13 +320,17 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
         else:
             # Decode
-            torch._dynamo.mark_dynamic(token_ids, 0)
-            torch._dynamo.mark_dynamic(position_ids, 0)
-            torch._dynamo.mark_dynamic(input_lens, 0)
+            if self.lora_config is not None:
+                torch._dynamo.config.capture_dynamic_output_shape_ops = True
+            else:
+                pass
+                torch._dynamo.mark_dynamic(token_ids, 0)
+                torch._dynamo.mark_dynamic(position_ids, 0)
+                torch._dynamo.mark_dynamic(input_lens, 0)
+                torch._dynamo.mark_dynamic(t, 0)
             torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
             torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
             torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
-            torch._dynamo.mark_dynamic(t, 0)
             torch._dynamo.mark_dynamic(p, 0)
         # Dummy run.
         with set_forward_context(attn_metadata, self.vllm_config, 0):
