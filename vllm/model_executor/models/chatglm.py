@@ -238,16 +238,16 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         self._pre_calculate()
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None}
+        return {"image": 1}
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
 
-        return {"image": self.image_tokens}
+        return {"image": self.image_token_num}
 
     def _pre_calculate(self):
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
-        self.image_tokens = (vision_config["image_size"] //
+        self.image_token_num = (vision_config["image_size"] //
                              vision_config["patch_size"] // 2)**2
         self.image_szie = vision_config["image_size"]
 
@@ -285,7 +285,7 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         }
         
         hf_config = self.info.get_hf_config()
-        image_placeholder_length=self.info.image_tokens
+        image_placeholder_length=self.info.image_token_num
         # image
         token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, [hf_config.boi_token_id] +
                         [0] * image_placeholder_length +
@@ -294,7 +294,7 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
                         [0] * (seq_len - image_placeholder_length - 2))
 
         return ProcessorInputs(
-            prompt_text="".join(token_ids[:num_images]),
+            prompt_text=VLLM_TOKEN_ID_ARRAY_TYPE,
             mm_data=mm_data,
         )
 
@@ -310,6 +310,72 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
             pixel_values=MultiModalFieldConfig.batched("image"),
             image_sizes=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
+        )
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+      
+        hf_config = self.info.get_hf_config()
+        vision_config = getattr(hf_config, "vision_config", None)
+
+        if vision_config is None:
+            return prompt
+
+
+        try:
+            
+            tokenizer = self.info.get_tokenizer()
+            raw_batch_data = tokenizer.apply_chat_template(
+                conversation=[
+                    {
+                        "role": "user",
+                        "image": mm_data.get("image",None),
+                        "content": prompt,
+                    }
+                ],
+                add_generation_prompt=True,
+                tokenize=True,
+                return_tensors="pt",
+                return_dict=True,
+            ).data
+        except Exception:
+            logger.error("Failed to process content (%s)", prompt)
+            raise
+        input_ids = raw_batch_data["input_ids"][0].tolist()
+
+        boi_token_id = hf_config.boi_token_id
+        eoi_token_id = hf_config.eoi_token_id
+        boi_positions = find_all_positions(input_ids, boi_token_id)
+        eoi_positions = find_all_positions(input_ids, eoi_token_id)
+
+        assert len(boi_positions) == len(eoi_positions)
+
+        new_input_ids = []
+        final_processed_position = 0
+
+        for boi_position, eoi_position in zip(boi_positions, eoi_positions):
+            assert boi_position < eoi_position
+            new_input_ids.extend(
+                input_ids[final_processed_position : boi_position + 1]
+            )
+            new_input_ids.extend(
+                [input_ids[boi_position + 1]] * self.info.image_token_num
+            )
+            final_processed_position = eoi_position
+
+        new_input_ids.extend(input_ids[final_processed_position:])
+
+        if prompt is None:
+            prompt = tokenizer.decode(new_input_ids)
+
+        return token_inputs(
+            prompt_token_ids=new_input_ids,
+            prompt=prompt,
+            multi_modal_data=mm_data,
         )
 
     def _get_prompt_replacements(
