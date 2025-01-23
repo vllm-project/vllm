@@ -19,7 +19,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only MiniCPM-3-O model compatible with HuggingFace weights."""
+"""Inference-only MiniCPM-V model compatible with HuggingFace weights."""
 import math
 import re
 from functools import cached_property, partial
