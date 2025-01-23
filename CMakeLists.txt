@@ -532,7 +532,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 # vllm-flash-attn currently only supported on CUDA
-if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda")
+if (NOT VLLM_GPU_LANG STREQUAL "CUDA")
   return()
 endif ()
 
