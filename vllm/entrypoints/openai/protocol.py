@@ -375,13 +375,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     def to_beam_search_params(
             self,
-            default_max_tokens: int,
+            server_max_tokens: int,
             default_sampling_params: Optional[dict] = None
     ) -> BeamSearchParams:
         # TODO(#9845): remove max_tokens when field is removed from OpenAI API
         max_tokens = self.max_completion_tokens or self.max_tokens
         if max_tokens is None:
-            max_tokens = default_max_tokens
+            max_tokens = server_max_tokens
+        # Don't allow user to exceed server limit. Should this notify user?
+        else:
+            max_tokens = min(max_tokens, server_max_tokens)
 
         if default_sampling_params is None:
             default_sampling_params = {}
@@ -401,13 +404,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     def to_sampling_params(
             self,
-            default_max_tokens: int,
+            server_max_tokens: int,
             logits_processor_pattern: Optional[str],
             default_sampling_params: Optional[dict] = None) -> SamplingParams:
         # TODO(#9845): remove max_tokens when field is removed from OpenAI API
         max_tokens = self.max_completion_tokens or self.max_tokens
         if max_tokens is None:
-            max_tokens = default_max_tokens
+            max_tokens = server_max_tokens
+        # Don't allow user to exceed server limit. Should this notify user?
+        else:
+            max_tokens = min(max_tokens, server_max_tokens)
 
         if default_sampling_params is None:
             default_sampling_params = {}
@@ -736,12 +742,15 @@ class CompletionRequest(OpenAIBaseModel):
 
     def to_beam_search_params(
             self,
-            default_max_tokens: int,
+            server_max_tokens: int,
             default_sampling_params: Optional[dict] = None
     ) -> BeamSearchParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
-            max_tokens = default_max_tokens
+            max_tokens = server_max_tokens
+        # Don't allow user to exceed server limit. Should this notify user?
+        else:
+            max_tokens = min(max_tokens, server_max_tokens)
 
         if default_sampling_params is None:
             default_sampling_params = {}
@@ -760,12 +769,15 @@ class CompletionRequest(OpenAIBaseModel):
 
     def to_sampling_params(
             self,
-            default_max_tokens: int,
+            server_max_tokens: int,
             logits_processor_pattern: Optional[str],
             default_sampling_params: Optional[dict] = None) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
-            max_tokens = default_max_tokens
+            max_tokens = server_max_tokens
+        # Don't allow user to exceed server limit. Should this notify user?
+        else:
+            max_tokens = min(max_tokens, server_max_tokens)
 
         if default_sampling_params is None:
             default_sampling_params = {}
