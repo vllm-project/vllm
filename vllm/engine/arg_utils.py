@@ -1285,7 +1285,7 @@ class EngineArgs:
         if "h100" in device_name or "h200" in device_name:
             # For H100 and H200, we use larger default values.
             default_max_num_batched_tokens = {
-                UsageContext.LLM_CLASS: 8192,
+                UsageContext.LLM_CLASS: 16384,
                 UsageContext.OPENAI_API_SERVER: 8192,
             }
         else:
