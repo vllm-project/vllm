@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import ExitStack
 from typing import List, Tuple
 
 import pytest
@@ -20,12 +21,13 @@ ENGINE_ARGS = AsyncEngineArgs(model="meta-llama/Llama-3.2-1B",
 async def generate(engine: AsyncLLM, request_id: str,
                    max_tokens: int) -> Tuple[int, str]:
     count = 0
-    async for _ in engine.generate(request_id=request_id,
-                                   prompt="Hello my name is Robert and",
-                                   sampling_params=SamplingParams(
-                                       max_tokens=max_tokens, temperature=0)):
+    async for out in engine.generate(
+            request_id=request_id,
+            prompt="Hello my name is Robert and",
+            sampling_params=SamplingParams(max_tokens=max_tokens,
+                                           temperature=0)):
 
-        count += 1
+        count += len(out.outputs[0].token_ids)
         await asyncio.sleep(0.)
 
     return count, request_id
@@ -36,10 +38,11 @@ async def test_load(monkeypatch):
     # TODO(rickyx): Remove monkeypatch once we have a better way to test V1
     # so that in the future when we switch, we don't have to change all the
     # tests.
-    with monkeypatch.context() as m:
+    with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
         engine = AsyncLLM.from_engine_args(ENGINE_ARGS)
+        after.callback(engine.shutdown)
 
         NUM_REQUESTS = 10000
         NUM_EXPECTED_TOKENS = 10
@@ -61,16 +64,16 @@ async def test_load(monkeypatch):
                 f"expected {NUM_EXPECTED_TOKENS}")
 
         assert not engine.output_processor.has_unfinished_requests()
-        engine.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_abort(monkeypatch):
 
-    with monkeypatch.context() as m:
+    with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
         engine = AsyncLLM.from_engine_args(ENGINE_ARGS)
+        after.callback(engine.shutdown)
 
         NUM_REQUESTS = 100
         NUM_EXPECTED_TOKENS = 100
@@ -112,5 +115,3 @@ async def test_abort(monkeypatch):
         num_generated_tokens, request_id = await task
         assert num_generated_tokens == NUM_EXPECTED_TOKENS
         assert not engine.output_processor.has_unfinished_requests()
-
-        engine.shutdown()
