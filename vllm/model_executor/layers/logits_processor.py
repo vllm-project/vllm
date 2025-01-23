@@ -1,5 +1,6 @@
 """A layer that compute logits from hidden_stats."""
 import inspect
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import torch
@@ -13,9 +14,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 
-from concurrent.futures import ThreadPoolExecutor
-
-_logits_processor_threadpool : ThreadPoolExecutor | None = None
+_logits_processor_threadpool: Optional[ThreadPoolExecutor] = None
 if envs.VLLM_LOGITS_PROCESSOR_THREADS is not None:
     _logits_processor_threadpool = ThreadPoolExecutor(
         envs.VLLM_LOGITS_PROCESSOR_THREADS)
@@ -166,23 +165,24 @@ def _apply_logits_processors(
 
         logits_processed += len(seq_group.sample_indices) + len(
             seq_group.prompt_logprob_indices)
-    
-    for logits_row_idx, logits_row_future in logits_row_ids_and_logits_row_futures:
-        logits[logits_row_idx] = logits_row_future.result()
+
+    for logits_row_idx, future in logits_row_ids_and_logits_row_futures:
+        logits[logits_row_idx] = future.result()
 
     if found_logits_processors:
         # verifies that no rows in logits were missed unexpectedly
         assert logits_processed == logits.shape[0]
     return logits
 
-def _apply_logics_processors_single_seq(logits_row, logits_processors, past_tokens_ids, prompt_tokens_ids) -> torch.Tensor:
+
+def _apply_logics_processors_single_seq(logits_row, logits_processors,
+                                        past_tokens_ids,
+                                        prompt_tokens_ids) -> torch.Tensor:
     for logits_processor in logits_processors:
         parameters = inspect.signature(logits_processor).parameters
         if len(parameters) == 3:
-            logits_row = logits_processor(prompt_tokens_ids,
-                                            past_tokens_ids,
-                                            logits_row)
+            logits_row = logits_processor(prompt_tokens_ids, past_tokens_ids,
+                                          logits_row)
         else:
-            logits_row = logits_processor(past_tokens_ids,
-                                            logits_row)
+            logits_row = logits_processor(past_tokens_ids, logits_row)
     return logits_row

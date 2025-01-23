@@ -260,10 +260,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_PREFIX":
     lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
 
-    # if set, vllm will call logits processors in a thread pool with this many threads.
+    # if set, vllm will call logits processors in a thread pool with this many
+    # threads.
     "VLLM_LOGITS_PROCESSOR_THREADS":
-    lambda: int(os.getenv("VLLM_LOGITS_PROCESSOR_THREADS", "0")) if
-                "VLLM_LOGITS_PROCESSOR_THREADS" in os.environ else None,
+    lambda: int(os.getenv("VLLM_LOGITS_PROCESSOR_THREADS", "0"))
+    if "VLLM_LOGITS_PROCESSOR_THREADS" in os.environ else None,
 
     # Trace function calls
     # If set to 1, vllm will trace function calls
