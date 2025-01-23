@@ -2706,7 +2706,7 @@ class CompilationConfig(BaseModel):
                 is compiled. In addition, compile for compile_sizes,
                 using configurations in inductor_compile_config.
         - compile_sizes: sizes to compile for inductor. In addition
-            to integers, it also supports "cudagraph" to
+            to integers, it also supports "cudagraph_capture_sizes" to
             specify the sizes for cudagraph capture.
         - inductor_compile_config: additional configurations for inductor.
             - None: use default configurations.
@@ -2924,9 +2924,9 @@ class CompilationConfig(BaseModel):
         if self.compile_sizes is not None:
             for x in self.compile_sizes:
                 if isinstance(x, str):
-                    assert x == "cudagraph", \
+                    assert x == "cudagraph_capture_sizes", \
                     "Unrecognized size type in compile_sizes, " \
-                    f"expect 'cudagraph', got {x}"
+                    f"expect 'cudagraph_capture_sizes', got {x}"
                     computed_compile_sizes.extend(self.cudagraph_capture_sizes)
                 else:
                     assert isinstance(x, int)
