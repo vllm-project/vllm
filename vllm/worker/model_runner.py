@@ -1256,13 +1256,19 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
+        max_num_batched_tokens = \
+            self.scheduler_config.max_num_batched_tokens
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        self._dummy_run(max_num_batched_tokens, max_num_seqs)
+
+    def _dummy_run(self,
+                   max_num_batched_tokens: int,
+                   max_num_seqs: int = 1) -> None:
         with self.set_in_profile_run():
             # Enable top-k sampling to reflect the accurate memory usage.
             sampling_params = \
                 SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
-            max_num_batched_tokens = \
-                self.scheduler_config.max_num_batched_tokens
-            max_num_seqs = self.scheduler_config.max_num_seqs
+
             # This represents the maximum number of different requests
             # that will have unique loras, an therefore the max amount of memory
             # consumption create dummy lora request copies from the lora request
@@ -1491,13 +1497,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             for virtual_engine in range(
                     self.parallel_config.pipeline_parallel_size):
                 # Only rank 0 should print progress bar during capture
-                capture_sizes = (
-                    tqdm(
-                        self.vllm_config.compilation_config.capture_sizes,
-                        desc="Capturing CUDA graph shapes",
-                    ) if get_tensor_model_parallel_rank() == 0 else
-                    self.vllm_config.compilation_config.capture_sizes)
-                for batch_size in capture_sizes:
+                cudagraph_capture_sizes = (tqdm(
+                    self.vllm_config.compilation_config.
+                    cudagraph_capture_sizes,
+                    desc="Capturing CUDA graph shapes",
+                ) if get_tensor_model_parallel_rank() == 0 else
+                                           self.vllm_config.compilation_config.
+                                           cudagraph_capture_sizes)
+                for batch_size in cudagraph_capture_sizes:
                     attn_metadata = (
                         self.attn_state.graph_capture_get_metadata_for_batch(
                             batch_size,
