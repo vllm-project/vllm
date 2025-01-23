@@ -47,9 +47,8 @@ class BasevLLMParameter:
         if current_platform.is_tpu():
             weight_loader = _make_synced_weight_loader(weight_loader)
 
-        self._weight_loader = weight_loader
         self.data = data
-        self.data.weight_loader = self.weight_loader
+        self.data.weight_loader = weight_loader
         self.data.load_column_parallel_weight = self.load_column_parallel_weight
         self.data.load_row_parallel_weight = self.load_row_parallel_weight
         self.data.load_merged_column_weight = self.load_merged_column_weight
@@ -57,7 +56,7 @@ class BasevLLMParameter:
 
     @property
     def weight_loader(self):
-        return self._weight_loader
+        return self.data.weight_loader
 
     def _is_1d_and_scalar(self, loaded_weight: torch.Tensor):
         cond1 = self.data.ndim == 1 and self.data.numel() == 1
@@ -94,13 +93,12 @@ class _ColumnvLLMParameter(BasevLLMParameter):
     """
 
     def __init__(self, output_dim: int, **kwargs):
-        self._output_dim = output_dim
         super().__init__(**kwargs)
-        self.data.output_dim = self.output_dim
+        self.data.output_dim = output_dim
 
     @property
     def output_dim(self):
-        return self._output_dim
+        return self.data.output_dim
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
@@ -166,13 +164,12 @@ class RowvLLMParameter(BasevLLMParameter):
     """
 
     def __init__(self, input_dim: int, **kwargs):
-        self._input_dim = input_dim
         super().__init__(**kwargs)
-        self.data.input_dim = self.input_dim
+        self.data.input_dim = input_dim
 
     @property
     def input_dim(self):
-        return self._input_dim
+        return self.data.input_dim
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
@@ -286,25 +283,22 @@ class PackedColumnParameter(_ColumnvLLMParameter):
                  packed_dim: int,
                  marlin_tile_size: Optional[int] = None,
                  **kwargs):
-        self._packed_factor = packed_factor
-        self._packed_dim = packed_dim
-        self._marlin_tile_size = marlin_tile_size
         super().__init__(**kwargs)
-        self.data.packed_dim = self.packed_dim
-        self.data.packed_factor = self.packed_factor
-        self.data.marlin_tile_size = self.marlin_tile_size
+        self.data.packed_dim = packed_dim
+        self.data.packed_factor = packed_factor
+        self.data.marlin_tile_size = marlin_tile_size
 
     @property
     def packed_dim(self):
-        return self._packed_dim
+        return self.data.packed_dim
 
     @property
     def packed_factor(self):
-        return self._packed_factor
+        return self.data.packed_factor
 
     @property
     def marlin_tile_size(self):
-        return self._marlin_tile_size
+        return self.data.marlin_tile_size
 
     def adjust_shard_indexes_for_packing(self, shard_size, shard_offset):
         return _adjust_shard_indexes_for_packing(
@@ -330,25 +324,22 @@ class PackedvLLMParameter(ModelWeightParameter):
                  packed_dim: int,
                  marlin_tile_size: Optional[int] = None,
                  **kwargs):
-        self._packed_factor = packed_factor
-        self._packed_dim = packed_dim
-        self._marlin_tile_size = marlin_tile_size
         super().__init__(**kwargs)
-        self.data.output_dim = self.output_dim
-        self.data.packed_dim = self.packed_dim
-        self.data.packed_factor = self.packed_factor
+        self.data.packed_dim = packed_dim
+        self.data.packed_factor = packed_factor
+        self.data.marlin_tile_size = marlin_tile_size
 
     @property
     def packed_dim(self):
-        return self._packed_dim
+        return self.data.packed_dim
 
     @property
     def packed_factor(self):
-        return self._packed_factor
+        return self.data.packed_factor
 
     @property
     def marlin_tile_size(self):
-        return self._marlin_tile_size
+        return self.data.marlin_tile_size
 
     def adjust_shard_indexes_for_packing(self, shard_size, shard_offset):
         return _adjust_shard_indexes_for_packing(
