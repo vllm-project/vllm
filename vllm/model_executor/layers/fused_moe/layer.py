@@ -178,9 +178,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                           'not supported on HPU')
         assert topk_group is None, 'topk_group is not supported on HPU'
         if layer is not None:
-            return layer.hpu_static_fused_moe(x, layer.w13_weight,
-                                              layer.w2_weight, router_logits,
-                                              top_k)
+            return layer.hpu_fused_moe(x, router_logits, top_k)
 
     def forward_cpu(
         self,
@@ -300,15 +298,11 @@ class FusedMoE(torch.nn.Module):
         self.topk_group = topk_group
         self.custom_routing_function = custom_routing_function
         if is_hpu:
-            from vllm_hpu_extension.ops import DynamicFusedMOE, StaticFusedMOE
+            from vllm_hpu_extension.ops import DynamicFusedMOE
+            self.hpu_fused_moe = DynamicFusedMOE(self.num_experts)
 
-            from vllm.model_executor.layers.quantization.inc import INCConfig
-            selected_fused_moe = (StaticFusedMOE if isinstance(
-                quant_config, INCConfig) else DynamicFusedMOE)
-            self.hpu_static_fused_moe = selected_fused_moe(self.num_experts)
         self.scoring_func = scoring_func
         self.e_score_correction_bias = e_score_correction_bias
-
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
@@ -404,10 +398,8 @@ class FusedMoE(torch.nn.Module):
         expert_data.copy_(loaded_weight)
 
         if is_hpu:
-            from vllm_hpu_extension.ops import StaticFusedMOE
-            if isinstance(self.hpu_static_fused_moe, StaticFusedMOE):
-                self.hpu_static_fused_moe.w13_list[expert_id].set_weight(
-                    orig_exp_data)
+            self.hpu_fused_moe.MoeOp.w13_list[expert_id].set_weight(
+                orig_exp_data)
 
     def _load_w2(self,
                  expert_data: torch.Tensor,
@@ -426,10 +418,7 @@ class FusedMoE(torch.nn.Module):
         # w2, down_proj: Load into only logical weight of w2.
         expert_data.copy_(loaded_weight)
         if is_hpu:
-            from vllm_hpu_extension.ops import StaticFusedMOE
-            if isinstance(self.hpu_static_fused_moe, StaticFusedMOE):
-                self.hpu_static_fused_moe.w2_list[expert_id].set_weight(
-                    expert_data)
+            self.hpu_fused_moe.MoeOp.w2_list[expert_id].set_weight(expert_data)
 
     def _load_single_value(self, param: torch.nn.Parameter,
                            loaded_weight: torch.Tensor, expert_id: int):
