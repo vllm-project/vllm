@@ -298,9 +298,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     self.lora_manager.add_dummy_lora(dummy_lora_request,
                                                      rank=LORA_WARMUP_RANK)
                     dummy_lora_requests.add(dummy_lora_request)
-                    dummy_lora_mapping = LoRAMapping(
-                        [lora_id] * seq_len, [lora_id], is_prefill=exec_mode.is_prefill()
-                    )
+                dummy_lora_mapping = LoRAMapping(
+                    [lora_id] * batch_size * seq_len, [lora_id] * batch_size, is_prefill=exec_mode.is_prefill()
+                )
             self.set_active_loras(dummy_lora_requests, dummy_lora_mapping)
 
         # NOTE(woosuk): There are two stages of compilation: torch.compile and
@@ -384,7 +384,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         # Decode
         start = time.time()
         seq_len = 1
-        batch_size = 8  # Must be in sync with _get_padded_batch_size()
+        batch_size = _get_padded_batch_size(1)
         while True:
             self._dummy_run(batch_size,
                             seq_len,
