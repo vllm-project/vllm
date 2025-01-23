@@ -193,11 +193,12 @@ class MultiHeadAttention(nn.Module):
                                         block_size=16,
                                         is_attention_free=False)
         backend = backend_name_to_enum(attn_backend.get_name())
-        if backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
-            backend = _Backend.XFORMERS
 
         self.attn_backend = backend if backend in {
-            _Backend.TORCH_SDPA, _Backend.XFORMERS
+            _Backend.TORCH_SDPA,
+            _Backend.XFORMERS,
+            _Backend.FLASH_ATTN,
+            _Backend.FLASH_ATTN_VLLM_V1,
         } else _Backend.TORCH_SDPA
 
     def forward(
@@ -207,7 +208,6 @@ class MultiHeadAttention(nn.Module):
         value: torch.Tensor,
     ) -> torch.Tensor:
         """Input shape: batch_size x seq_len x hidden_size"""
-        # TODO(Isotr0py): Use existing backend implementations and support FA2
         bsz, q_len, _ = query.size()
         kv_len = key.size(1)
 
@@ -215,7 +215,14 @@ class MultiHeadAttention(nn.Module):
         key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
         value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
 
-        if self.attn_backend == _Backend.XFORMERS:
+        if self.attn_backend in {
+                _Backend.FLASH_ATTN,
+                _Backend.FLASH_ATTN_VLLM_V1,
+        }:
+            from vllm.vllm_flash_attn import flash_attn_func
+
+            out = flash_attn_func(query, key, value, softmax_scale=self.scale)
+        elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
 
             out = xops.memory_efficient_attention_forward(query,
