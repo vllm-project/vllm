@@ -1028,12 +1028,13 @@ class LLM:
         for embed_1, embed_2 in output_pairs:
             pair_score = scorer(embed_1.outputs.data, embed_2.outputs.data)
 
-            if getattr(tokenizer, "pad_token", None) is None:
-                tokens = embed_1.prompt_token_ids + embed_2.prompt_token_ids
-            else:
+            if (pad_token_id := getattr(tokenizer, "pad_token_id",
+                                        None)) is not None:
                 tokens = embed_1.prompt_token_ids + [
-                    tokenizer.pad_token_type_id
+                    pad_token_id
                 ] + embed_2.prompt_token_ids
+            else:
+                tokens = embed_1.prompt_token_ids + embed_2.prompt_token_ids
 
             scores.append(
                 PoolingRequestOutput(
@@ -1048,7 +1049,7 @@ class LLM:
 
     def _cross_encoding_score(
         self,
-        tokenizer: AnyTokenizer,
+        tokenizer: Union[AnyTokenizer],
         text_1: List[Union[str, TextPrompt, TokensPrompt]],
         text_2: List[Union[str, TextPrompt, TokensPrompt]],
         truncate_prompt_tokens: Optional[int] = None,
@@ -1059,7 +1060,7 @@ class LLM:
 
         if isinstance(tokenizer, MistralTokenizer):
             raise ValueError(
-                "MistralTokenizer not supported for cross-encoding")
+                "Score API is only enabled for `--task embed or score`")
 
         if len(text_1) == 1:
             text_1 = text_1 * len(text_2)
@@ -1150,7 +1151,7 @@ class LLM:
 
         if self.llm_engine.model_config.task not in ("embed", "score"):
             raise ValueError(
-                "Score API is only enabled for `--task embed or score`")
+                "Score API is only enabled for `--task embed or --task score`")
 
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
