@@ -1157,6 +1157,9 @@ class LLM:
         self.llm_engine.sleep(level=level)
 
     def wake_up(self):
+        """
+        Wake up the engine from sleep mode. See the :meth:`sleep` method
+        for more details."""
         self.llm_engine.wake_up()
 
     # LEGACY
