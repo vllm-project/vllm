@@ -363,6 +363,19 @@ VLM_TEST_SETTINGS = {
         ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
     ),
+    "minicpmv_26o": VLMTestInfo(
+        models=["openbmb/MiniCPM-o-2_6"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
+        postprocess_inputs=model_utils.ignore_inputs_post_processor(
+            "image_sizes"
+        ),
+        hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
+    ),
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],
         test_type=(VLMTestType.IMAGE),
