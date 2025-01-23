@@ -3,7 +3,7 @@
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
 from array import array
-from typing import (Dict, Iterable, List, Mapping, Optional, Set, Tuple,
+from typing import (Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple,
                     TypedDict)
 
 import torch
@@ -35,6 +35,13 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ModalityData, MultiModalKwargs,
                                     NestedTensors)
+from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
+                                   ImageSize, MultiModalDataItems)
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo, BatchFeature,
+                                        MultiModalFieldConfig, ProcessorMixin,
+                                        PromptReplacement)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
@@ -221,6 +228,133 @@ def input_processor_for_glmv(ctx: InputContext, inputs: DecoderOnlyInputs):
         prompt=prompt,
         multi_modal_data=multi_modal_data,
     )
+
+
+class GLM4VProcessingInfo(BaseProcessingInfo):
+    pass
+
+    def __init__(self, ctx):
+        super().__init__(ctx)
+        self._pre_calculate()
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+
+        return {"image": self.image_tokens}
+
+    def _pre_calculate(self):
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        self.image_tokens = (vision_config["image_size"] //
+                             vision_config["patch_size"] // 2)**2
+        self.image_szie = vision_config["image_size"]
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        processor: Optional[ProcessorMixin],
+    ) -> int:
+        return self.image_tokens
+
+    def get_image_size(self) -> ImageSize:
+
+        return ImageSize(height=self.image_szie, width=self.image_szie)
+
+
+class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+        assert num_images == 1
+
+        target_width, target_height = self.info.get_image_size()
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
+        
+        hf_config = self.info.get_hf_config()
+        image_placeholder_length=self.info.image_tokens
+        # image
+        token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, [hf_config.boi_token_id] +
+                        [0] * image_placeholder_length +
+                        [hf_config.eoi_token_id])
+        token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                        [0] * (seq_len - image_placeholder_length - 2))
+
+        return ProcessorInputs(
+            prompt_text="".join(token_ids[:num_images]),
+            mm_data=mm_data,
+        )
+
+
+class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
+        )
+
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, Any],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> list[PromptReplacement]:
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
+
+        tokenizer = self.info.get_tokenizer()
+        bos_token_id = tokenizer.bos_token_id
+        assert isinstance(bos_token_id, int)
+
+        def get_replacement_phi3v(item_idx: int):
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems))
+
+            if isinstance(images, ImageEmbeddingItems):
+                num_image_tokens = images.get_feature_size(item_idx)
+            else:
+                image_size = images.get_image_size(item_idx)
+                num_image_tokens = self.info.get_num_image_tokens(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                    processor=hf_processor,
+                )
+
+            image_tokens = [_IMAGE_TOKEN_ID] * num_image_tokens
+
+            return PromptReplacementDetails(
+                full=image_tokens + [bos_token_id],
+                features=image_tokens,
+            )
+
+        num_images = mm_items.get_count("image", strict=False)
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=image_token,
+                replacement=get_replacement_phi3v,
+            ) for image_token in image_tokens[:num_images]
+        ]
 
 
 class GLMAttention(nn.Module):
@@ -756,10 +890,15 @@ class ChatGLMV(ChatGLMBaseModel, SupportsMultiModal):
             tower_model="transformer.vision.transformer")
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper(mm_input_mapper_for_glmv)
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_glmv_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_glmv)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_glmv)
+# @MULTIMODAL_REGISTRY.register_image_input_mapper(mm_input_mapper_for_glmv)
+# @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_glmv_image_tokens)
+# @INPUT_REGISTRY.register_dummy_data(dummy_data_for_glmv)
+# @INPUT_REGISTRY.register_input_processor(input_processor_for_glmv)
+
+
+@MULTIMODAL_REGISTRY.register_processor(GLM4VMultiModalProcessor,
+                                        info=GLM4VProcessingInfo,
+                                        dummy_inputs=GLM4VDummyInputsBuilder)
 class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
                          SupportsMultiModal):
     # Ensure that the LoRA support check passes when the class is not
