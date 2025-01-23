@@ -1024,18 +1024,6 @@ class RerankRequest(OpenAIBaseModel):
     def to_pooling_params(self):
         return PoolingParams(additional_data=self.additional_data)
 
-    @classmethod
-    def __get_validators__(cls):
-        yield cls.validate_top_n
-
-    # validator to set the top_n value to the length of the documents if not set
-    @classmethod
-    def validate_top_n(cls, values):
-        # the lambda sets the field to zero if it's not set
-        if values.get('top_n') == 0:
-            values['top_n'] = len(values.get('documents', []))
-        return values
-
 
 class RerankDocument(BaseModel):
     text: str

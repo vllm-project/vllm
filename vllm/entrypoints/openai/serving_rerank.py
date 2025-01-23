@@ -60,7 +60,7 @@ class JinaAIServingRerank(OpenAIServing):
         documents = request.documents
         request_prompts = []
         engine_prompts = []
-        top_n = request.top_n
+        top_n = request.top_n if request.top_n > 0 else len(documents)
 
         try:
             (
