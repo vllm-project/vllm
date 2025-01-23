@@ -182,6 +182,8 @@ class FlashInferState(AttentionState):
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
+        self.vllm_config = get_current_vllm_config()
+
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
             self._workspace_buffer = torch.empty(
@@ -290,7 +292,7 @@ class FlashInferState(AttentionState):
                                             dtype=torch.int32)
 
         global_params = infer_global_hyperparameters(
-            get_per_layer_parameters(get_current_vllm_config()))
+            get_per_layer_parameters(self.vllm_config))
 
         attn_metadata = self.runner.attn_backend.make_metadata(
             num_prefills=0,

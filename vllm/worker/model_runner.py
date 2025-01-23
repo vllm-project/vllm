@@ -20,7 +20,7 @@ import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
-from vllm.config import CompilationLevel, VllmConfig, set_current_vllm_config
+from vllm.config import CompilationLevel, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_kv_transfer_group, get_pp_group
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
@@ -1498,15 +1498,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     ) if get_tensor_model_parallel_rank() == 0 else
                     self.vllm_config.compilation_config.capture_sizes)
                 for batch_size in capture_sizes:
-                    with set_current_vllm_config(self.vllm_config):
-                        # To make vLLM config available during
-                        # worker initialization
-                        attn_metadata = (self.attn_state.
-                                         graph_capture_get_metadata_for_batch(
-                                             batch_size,
-                                             is_encoder_decoder_model=self.
-                                             model_config.is_encoder_decoder,
-                                         ))
+                    attn_metadata = (
+                        self.attn_state.graph_capture_get_metadata_for_batch(
+                            batch_size,
+                            is_encoder_decoder_model=self.model_config.
+                            is_encoder_decoder))
 
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
