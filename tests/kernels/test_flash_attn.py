@@ -95,6 +95,11 @@ def test_flash_attn_with_paged_kv(
     fa_version: int,
 ) -> None:
     torch.set_default_device("cuda")
+    if fa_version == 3 and (torch.cuda.get_device_capability() == (8, 6)
+                            or torch.cuda.get_device_capability() == (8, 9)):
+        pytest.skip("Flash attention version 3 fails on 8.6 and 8.9 due to "
+                    "insufficient shared memory for some shapes")
+
     current_platform.seed_everything(0)
     num_seqs = len(kv_lens)
     num_query_heads = num_heads[0]
@@ -177,6 +182,11 @@ def test_varlen_with_paged_kv(
     fa_version: int,
 ) -> None:
     torch.set_default_device("cuda")
+    if fa_version == 3 and (torch.cuda.get_device_capability() == (8, 6)
+                            or torch.cuda.get_device_capability() == (8, 9)):
+        pytest.skip("Flash attention version 3 fails on 8.6 and 8.9 due to "
+                    "insufficient shared memory for some shapes")
+
     current_platform.seed_everything(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
