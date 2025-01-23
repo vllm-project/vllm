@@ -197,6 +197,7 @@ class EngineArgs:
     kv_transfer_config: Optional[KVTransferConfig] = None
 
     generation_config: Optional[str] = None
+    enable_sleep_mode: bool = False
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -238,7 +239,7 @@ class EngineArgs:
             choices=get_args(TaskOption),
             help='The task to use the model for. Each vLLM instance only '
             'supports one task, even if the same model can be used for '
-            'multiple tasks. When the model only supports one task, "auto" '
+            'multiple tasks. When the model only supports one task, ``"auto"`` '
             'can be used to select it; otherwise, you must specify explicitly '
             'which task to use.')
         parser.add_argument(
@@ -250,7 +251,7 @@ class EngineArgs:
         parser.add_argument(
             '--skip-tokenizer-init',
             action='store_true',
-            help='Skip initialization of tokenizer and detokenizer')
+            help='Skip initialization of tokenizer and detokenizer.')
         parser.add_argument(
             '--revision',
             type=nullable_str,
@@ -388,7 +389,7 @@ class EngineArgs:
         # Parallel arguments
         parser.add_argument(
             '--distributed-executor-backend',
-            choices=['ray', 'mp'],
+            choices=['ray', 'mp', 'uni', 'external_launcher'],
             default=EngineArgs.distributed_executor_backend,
             help='Backend to use for distributed model '
             'workers, either "ray" or "mp" (multiprocessing). If the product '
@@ -396,12 +397,12 @@ class EngineArgs:
             'or equal to the number of GPUs available, "mp" will be used to '
             'keep processing on a single host. Otherwise, this will default '
             'to "ray" if Ray is installed and fail otherwise. Note that tpu '
-            'and hpu only support Ray for distributed inference.')
+            'only supports Ray for distributed inference.')
 
         parser.add_argument(
             '--worker-use-ray',
             action='store_true',
-            help='Deprecated, use --distributed-executor-backend=ray.')
+            help='Deprecated, use ``--distributed-executor-backend=ray``.')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,
@@ -430,7 +431,7 @@ class EngineArgs:
                             choices=[8, 16, 32, 64, 128],
                             help='Token block size for contiguous chunks of '
                             'tokens. This is ignored on neuron devices and '
-                            'set to max-model-len. On CUDA devices, '
+                            'set to ``--max-model-len``. On CUDA devices, '
                             'only block sizes up to 32 are supported. '
                             'On HPU devices, block size defaults to 128.')
 
@@ -439,12 +440,12 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             default=EngineArgs.enable_prefix_caching,
             help="Enables automatic prefix caching. "
-            "Use --no-enable-prefix-caching to disable explicitly.",
+            "Use ``--no-enable-prefix-caching`` to disable explicitly.",
         )
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
                             help='Disables sliding window, '
-                            'capping to sliding window size')
+                            'capping to sliding window size.')
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
                             default=True,
@@ -861,7 +862,7 @@ class EngineArgs:
             "of the provided names. The model name in the model "
             "field of a response will be the first name in this "
             "list. If not specified, the model name will be the "
-            "same as the `--model` argument. Noted that this name(s) "
+            "same as the ``--model`` argument. Noted that this name(s) "
             "will also be used in `model_name` tag content of "
             "prometheus metrics, if multiple names provided, metrics "
             "tag will take the first one.")
@@ -881,7 +882,7 @@ class EngineArgs:
             default=None,
             help="Valid choices are " +
             ",".join(ALLOWED_DETAILED_TRACE_MODULES) +
-            ". It makes sense to set this only if --otlp-traces-endpoint is"
+            ". It makes sense to set this only if ``--otlp-traces-endpoint`` is"
             " set. If set, it will collect detailed traces for the specified "
             "modules. This involves use of possibly costly and or blocking "
             "operations and hence might have a performance impact.")
@@ -955,6 +956,12 @@ class EngineArgs:
             "loaded from model. If set to a folder path, the generation config "
             "will be loaded from the specified folder path.")
 
+        parser.add_argument("--enable-sleep-mode",
+                            action="store_true",
+                            default=False,
+                            help="Enable sleep mode for the engine. "
+                            "(only cuda platform is supported)")
+
         return parser
 
     @classmethod
@@ -999,7 +1006,9 @@ class EngineArgs:
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
-            generation_config=self.generation_config)
+            generation_config=self.generation_config,
+            enable_sleep_mode=self.enable_sleep_mode,
+        )
 
     def create_load_config(self) -> LoadConfig:
         return LoadConfig(
