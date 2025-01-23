@@ -1,8 +1,9 @@
+import asyncio
 import os
 import signal
 import weakref
 from abc import ABC, abstractmethod
-from typing import List, Type
+from typing import List, Optional, Type
 
 import zmq
 import zmq.asyncio
@@ -254,10 +255,24 @@ class AsyncMPClient(MPClient):
             log_stats=True,
         )
 
-    async def get_output_async(self) -> EngineCoreOutputs:
+        self.outputs_queue: Optional[asyncio.Queue[bytes]] = None
+        self.queue_task: Optional[asyncio.Task] = None
 
-        frames = await self.output_socket.recv_multipart(copy=False)
-        return self.decoder.decode(frames[0].buffer)
+    async def get_output_async(self) -> EngineCoreOutputs:
+        if self.outputs_queue is None:
+            # Perform IO in separate task to parallelize as much as possible
+            self.outputs_queue = asyncio.Queue()
+
+            async def process_outputs_socket():
+                assert self.outputs_queue is not None
+                while True:
+                    (frame, ) = await self.output_socket.recv_multipart(
+                        copy=False)
+                    self.outputs_queue.put_nowait(frame.buffer)
+
+            self.queue_task = asyncio.create_task(process_outputs_socket())
+
+        return self.decoder.decode(await self.outputs_queue.get())
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: EngineCoreRequestUnion) -> None:
