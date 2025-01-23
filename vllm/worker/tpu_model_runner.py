@@ -656,8 +656,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
     ) -> List[SamplerOutput]:
         assert intermediate_tensors is None
         
-        print(f"\e[0;31m SELF LORA CONFIG {self.lora_config} \033[0m")
-        
         if self.lora_config:
             assert model_input.lora_requests is not None
             assert model_input.lora_mapping is not None
@@ -839,7 +837,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                          lora_mapping: LoRAMapping) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
-        print("\e[0;31mSetting active loras\033[0m")
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
