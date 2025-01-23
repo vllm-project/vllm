@@ -102,6 +102,10 @@ class WorkerBase(ABC):
     ) -> Optional[List[SamplerOutput]]:
         raise NotImplementedError
 
+    def shutdown(self) -> None:
+        """Shutdown the worker."""
+        return
+
     @abstractmethod
     def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
