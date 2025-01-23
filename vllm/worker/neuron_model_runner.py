@@ -8,6 +8,7 @@ from torch import nn
 from transformers_neuronx.config import GenerationConfig
 
 from vllm.config import VllmConfig
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -111,6 +112,9 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         else:
             raise NotImplementedError(
                 "Supports only Transformer-NeuronX based models.")
+
+    def get_model(self) -> nn.Module:
+        return self.model
 
     def _prepare_prompt(
         self,
@@ -314,13 +318,15 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             raise ValueError(
                 "NeuronModelRunner does not support multi-step execution.")
 
-        hidden_states = self.model(
-            input_ids=model_input.input_tokens,
-            positions=model_input.input_positions,
-            input_block_ids=model_input.input_block_ids,
-            **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
-                                         device=self.device),
-        )
+        with set_forward_context(None, self.vllm_config, 0):
+            hidden_states = self.model(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                input_block_ids=model_input.input_block_ids,
+                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
+                                             or {},
+                                             device=self.device),
+            )
 
         # Compute the logits only if the on-device sampling is turned off as
         # on-device sampling outputs the token ids.

@@ -48,6 +48,7 @@ If vLLM crashes and the error trace captures it somewhere around `self.graph.rep
 To identify the particular CUDA operation that causes the error, you can add `--enforce-eager` to the command line, or `enforce_eager=True` to the {class}`~vllm.LLM` class to disable the CUDAGraph optimization and isolate the exact CUDA operation that causes the error.
 
 (troubleshooting-incorrect-hardware-driver)=
+
 ## Incorrect hardware/driver
 
 If GPU/CPU communication cannot be established, you can use the following Python script and follow the instructions below to confirm whether the GPU/CPU communication is working correctly.
@@ -118,13 +119,13 @@ dist.destroy_process_group()
 If you are testing with a single node, adjust `--nproc-per-node` to the number of GPUs you want to use:
 
 ```console
-$ NCCL_DEBUG=TRACE torchrun --nproc-per-node=<number-of-GPUs> test.py
+NCCL_DEBUG=TRACE torchrun --nproc-per-node=<number-of-GPUs> test.py
 ```
 
 If you are testing with multi-nodes, adjust `--nproc-per-node` and `--nnodes` according to your setup and set `MASTER_ADDR` to the correct IP address of the master node, reachable from all nodes. Then, run:
 
 ```console
-$ NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR test.py
+NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR test.py
 ```
 
 If the script runs successfully, you should see the message `sanity check is successful!`.
@@ -141,6 +142,7 @@ Adjust `--nproc-per-node`, `--nnodes`, and `--node-rank` according to your setup
 ```
 
 (troubleshooting-python-multiprocessing)=
+
 ## Python multiprocessing
 
 ### `RuntimeError` Exception
@@ -194,6 +196,27 @@ if __name__ == '__main__':
 
     llm = vllm.LLM(...)
 ```
+
+## `torch.compile` Error
+
+vLLM heavily depends on `torch.compile` to optimize the model for better performance, which introduces the dependency on the `torch.compile` functionality and the `triton` library. By default, we use `torch.compile` to [optimize some functions](https://github.com/vllm-project/vllm/pull/10406) in the model. Before running vLLM, you can check if `torch.compile` is working as expected by running the following script:
+
+```python
+import torch
+
+@torch.compile
+def f(x):
+    # a simple function to test torch.compile
+    x = x + 1
+    x = x * 2
+    x = x.sin()
+    return x
+
+x = torch.randn(4, 4).cuda()
+print(f(x))
+```
+
+If it raises errors from `torch/_inductor` directory, usually it means you have a custom `triton` library that is not compatible with the version of PyTorch you are using. See [this issue](https://github.com/vllm-project/vllm/issues/12219) for example.
 
 ## Known Issues
 
