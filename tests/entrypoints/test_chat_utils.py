@@ -754,6 +754,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
      ("template_chatglm.jinja", "string"),
      ("template_chatglm2.jinja", "string"),
      ("template_chatml.jinja", "string"),
+     ("template_deepseek_vl2.jinja", "string"),
      ("template_falcon_180b.jinja", "string"),
      ("template_falcon.jinja", "string"),
      ("template_inkbot.jinja", "string"),

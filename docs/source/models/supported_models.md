@@ -470,6 +470,11 @@ of the whole prompt are extracted from the normalized hidden state corresponding
   - `Qwen/Qwen2.5-Math-RM-72B`, etc.
   - ✅︎
   - ✅︎
+* - `Qwen2ForProcessRewardModel`
+  - Qwen2-based
+  - `Qwen/Qwen2.5-Math-PRM-7B`, `Qwen/Qwen2.5-Math-PRM-72B`, etc.
+  - ✅︎
+  - ✅︎
 ```
 
 If your model is not in the above list, we will try to automatically convert the model using
@@ -618,7 +623,7 @@ See [this page](#generative-models) for more information on how to use generativ
 * - `DeepseekVLV2ForCausalLM`
   - DeepSeek-VL2
   - T + I<sup>+</sup>
-  - `deepseek-ai/deepseek-vl2-tiny`(WIP), `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2` etc. (see note)
+  - `deepseek-ai/deepseek-vl2-tiny`, `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2` etc. (see note)
   -
   - ✅︎
   - ✅︎
@@ -754,7 +759,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `Qwen/QVQ-72B-Preview`, `Qwen/Qwen2-VL-7B-Instruct`, `Qwen/Qwen2-VL-72B-Instruct`, etc.
   - ✅︎
   - ✅︎
-  -
+  - ✅︎
 * - `UltravoxModel`
   - Ultravox
   - T + A<sup>E+</sup>
@@ -767,16 +772,9 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
-````{note}
-The `deepseek-ai/deepseek-vl2-tiny` is not supported yet.
-
-To use `DeepSeek-VL2` series models, you need to install a fork version `deepseek_vl2` package:
-```shell
-pip install git+https://github.com/Isotr0py/DeepSeek-VL2.git
+```{note}
+To use `DeepSeek-VL2` series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
 ```
-
-Besides, to run `DeepSeek-VL2` series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
-````
 
 ```{note}
 To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.

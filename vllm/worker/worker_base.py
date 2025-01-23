@@ -4,7 +4,9 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
+import cloudpickle
 import torch
+import torch.nn as nn
 
 from vllm.config import ObservabilityConfig, VllmConfig
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
@@ -13,7 +15,8 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import (enable_trace_function_call_for_thread,
-                        resolve_obj_by_qualname, update_environment_variables)
+                        resolve_obj_by_qualname, run_method,
+                        update_environment_variables)
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
@@ -88,6 +91,11 @@ class WorkerBase(ABC):
                 if output is None:
                     return None
 
+    @abstractmethod
+    def get_model(self) -> nn.Module:
+        raise NotImplementedError
+
+    @abstractmethod
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
@@ -144,6 +152,9 @@ class DelegateWorkerBase(WorkerBase):
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+    def get_model(self) -> nn.Module:
+        return self.worker.get_model()
 
     def execute_model(
         self,
@@ -361,6 +372,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         else:
             return self._get_worker_input_from_broadcast()
 
+    def get_model(self) -> nn.Module:
+        return self.model_runner.get_model()
+
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
@@ -461,7 +475,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
 class WorkerWrapperBase:
     """
-    The whole point of this class is to lazily initialize the worker.
+    This class represents one process in an executor/engine. It is responsible
+    for lazily initializing the worker and handling the worker's lifecycle.
     We first instantiate the WorkerWrapper, which remembers the worker module
     and class name. Then, when we call `update_environment_variables`, and the
     real initialization happens in `init_worker`.
@@ -470,9 +485,19 @@ class WorkerWrapperBase:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        rank: int = 0,
+        rpc_rank: int = 0,
     ) -> None:
-        self.rank = rank
+        """
+        Initialize the worker wrapper with the given vllm_config and rpc_rank.
+        Note: rpc_rank is the rank of the worker in the executor. In most cases,
+        it is also the rank of the worker in the distributed group. However,
+        when multiple executors work together, they can be different.
+        e.g. in the case of SPMD-style offline inference with TP=2,
+        users can launch 2 engines/executors, each with only 1 worker.
+        All workers have rpc_rank=0, but they have different ranks in the TP
+        group.
+        """
+        self.rpc_rank = rpc_rank
         self.vllm_config = vllm_config
         self.worker: Optional[WorkerBase] = None
         if vllm_config.model_config is not None:
@@ -485,16 +510,16 @@ class WorkerWrapperBase:
 
     def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
         """
-        Adjust the rank based on the given mapping.
+        Adjust the rpc_rank based on the given mapping.
         It is only used during the initialization of the executor,
-        to adjust the rank of workers after we create all workers.
+        to adjust the rpc_rank of workers after we create all workers.
         """
-        if self.rank in rank_mapping:
-            self.rank = rank_mapping[self.rank]
+        if self.rpc_rank in rank_mapping:
+            self.rpc_rank = rank_mapping[self.rpc_rank]
 
     def update_environment_variables(self, envs_list: List[Dict[str,
                                                                 str]]) -> None:
-        envs = envs_list[self.rank]
+        envs = envs_list[self.rpc_rank]
         key = 'CUDA_VISIBLE_DEVICES'
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
@@ -507,31 +532,33 @@ class WorkerWrapperBase:
         Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
-        kwargs = all_kwargs[self.rank]
+        kwargs = all_kwargs[self.rpc_rank]
         enable_trace_function_call_for_thread(self.vllm_config)
-
-        # see https://github.com/NVIDIA/nccl/issues/1234
-        os.environ['NCCL_CUMEM_ENABLE'] = '0'
 
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
-        worker_class = resolve_obj_by_qualname(
-            self.vllm_config.parallel_config.worker_cls)
+        if isinstance(self.vllm_config.parallel_config.worker_cls, str):
+            worker_class = resolve_obj_by_qualname(
+                self.vllm_config.parallel_config.worker_cls)
+        else:
+            assert isinstance(self.vllm_config.parallel_config.worker_cls,
+                              bytes)
+            worker_class = cloudpickle.loads(
+                self.vllm_config.parallel_config.worker_cls)
         self.worker = worker_class(**kwargs)
         assert self.worker is not None
 
-    def execute_method(self, method: str, *args, **kwargs):
+    def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         try:
             target = self if self.worker is None else self.worker
-            executor = getattr(target, method)
-            return executor(*args, **kwargs)
+            return run_method(target, method, args, kwargs)
         except Exception as e:
             # if the driver worker also execute methods,
             # exceptions in the rest worker may cause deadlock in rpc like ray
             # see https://github.com/vllm-project/vllm/issues/3455
             # print the error and inform the user to solve the error
-            msg = (f"Error executing method {method}. "
+            msg = (f"Error executing method {method!r}. "
                    "This might cause deadlock in distributed execution.")
             logger.exception(msg)
             raise e

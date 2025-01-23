@@ -101,34 +101,44 @@ class OpenAIServingScores(OpenAIServing):
             if not self.model_config.is_cross_encoder:
                 raise ValueError("Model is not cross encoder.")
 
+            if truncate_prompt_tokens is not None and \
+                truncate_prompt_tokens > self.max_model_len:
+                raise ValueError(
+                    f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
+                    f"is greater than max_model_len ({self.max_model_len})."
+                    f" Please, select a smaller truncation size.")
+
+            input_pairs = make_pairs(request.text_1, request.text_2)
+            for q, t in input_pairs:
+                request_prompt = f"{q}{tokenizer.sep_token}{t}"
+
+                tokenization_kwargs: Dict[str, Any] = {}
+                if truncate_prompt_tokens is not None:
+                    tokenization_kwargs["truncation"] = True
+                    tokenization_kwargs["max_length"] = truncate_prompt_tokens
+
+                tokenize_async = make_async(tokenizer.__call__,
+                                            executor=self._tokenizer_executor)
+                prompt_inputs = await tokenize_async(text=q,
+                                                     text_pair=t,
+                                                     **tokenization_kwargs)
+
+                input_ids = prompt_inputs["input_ids"]
+                text_token_prompt = \
+                    self._validate_input(request, input_ids, request_prompt)
+                engine_prompt = TokensPrompt(
+                    prompt_token_ids=text_token_prompt["prompt_token_ids"],
+                    token_type_ids=prompt_inputs.get("token_type_ids"))
+
+                request_prompts.append(request_prompt)
+                engine_prompts.append(engine_prompt)
+
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
-
-        input_pairs = make_pairs(request.text_1, request.text_2)
-
-        for q, t in input_pairs:
-            request_prompt = f"{q}{tokenizer.sep_token}{t}"
-
-            tokenization_kwargs: Dict[str, Any] = {}
-            if truncate_prompt_tokens is not None:
-                tokenization_kwargs["truncation"] = True
-                tokenization_kwargs["max_length"] = truncate_prompt_tokens
-
-            tokenize_async = make_async(tokenizer.__call__,
-                                        executor=self._tokenizer_executor)
-            prompt_inputs = await tokenize_async(text=q,
-                                                 text_pair=t,
-                                                 **tokenization_kwargs)
-            engine_prompt = TokensPrompt(
-                prompt_token_ids=prompt_inputs["input_ids"],
-                token_type_ids=prompt_inputs.get("token_type_ids"))
-
-            request_prompts.append(request_prompt)
-            engine_prompts.append(engine_prompt)
 
         try:
             pooling_params = request.to_pooling_params()
