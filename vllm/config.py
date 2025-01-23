@@ -2916,12 +2916,17 @@ class CompilationConfig(BaseModel):
         if self.cudagraph_capture_sizes is None:
             self.cudagraph_capture_sizes = cudagraph_capture_sizes
         else:
+            # de-duplicate the sizes provided by the config
+            self.cudagraph_capture_sizes = list(
+                set(self.cudagraph_capture_sizes))
             logger.info(("cudagraph sizes specified by model runner"
                          " %s is overridden by config %s"),
                         cudagraph_capture_sizes, self.cudagraph_capture_sizes)
 
         computed_compile_sizes = []
         if self.compile_sizes is not None:
+            # de-duplicate the sizes provided by the config
+            self.compile_sizes = list(set(self.compile_sizes))
             for x in self.compile_sizes:
                 if isinstance(x, str):
                     assert x == "cudagraph_capture_sizes", \
