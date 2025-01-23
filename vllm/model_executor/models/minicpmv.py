@@ -113,40 +113,8 @@ class MiniCPMVImageEmbeddingInputs(TypedDict):
     """
 
 
-class MiniCPMVAudioFeatureInputs(TypedDict):
-    type: Literal["audio_features"]
-    data: List[torch.Tensor]
-    """
-    Shape: 
-    """
-
-    audio_feature_lens: torch.Tensor
-    """
-    Shape:
-    """
-
-    audio_bounds: torch.Tensor
-    """
-    Shape:
-    """
-
-
-class MiniCPMVAudioEmbeddingInputs(TypedDict):
-    type: Literal["audio_embeds"]
-    data: torch.Tensor
-    """
-    Shape:
-    """
-    audio_bounds: torch.Tensor
-    """
-    Shape:
-    """
-
-
 MiniCPMVImageInputs = Union[MiniCPMVImagePixelInputs,
                             MiniCPMVImageEmbeddingInputs]
-MiniCPMVAudioInputs = Union[MiniCPMVAudioFeatureInputs,
-                            MiniCPMVAudioEmbeddingInputs]
 
 
 class MiniCPMVEmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
@@ -233,20 +201,6 @@ class MiniCPMVVideoEmbeddingItems(MiniCPMVEmbeddingItems):
 
     def get_num_frames(self, index: int) -> int:
         return self.data["num_frames"][index]
-
-
-class MiniCPMVAudioEmbeddingItems(MiniCPMVEmbeddingItems):
-
-    def __init__(self, data: Dict) -> None:
-        super().__init__(data, "audio")
-        audio_embeds = self.data.get("audio_embeds", None)
-        if audio_embeds is None:
-            raise ValueError("In correct type of video_embeds",
-                             "Got type: None")
-        self.data["audio_embeds"] = audio_embeds
-
-    def get(self, index: int) -> object:
-        return self.data["audio_embeds"][index]
 
 
 DEFAULT_LN = partial(nn.LayerNorm, eps=1e-6)
@@ -354,8 +308,6 @@ def get_version_by_config(config: PretrainedConfig) -> Tuple[int, ...]:
         if config.hidden_size == 2304 and config.query_num == 64:
             return (2, 0)
         return (2, 5)
-    elif "MiniCPMO" in config.architectures:
-        return (2, "6O")
     version_str = str(version_float)
     return tuple(int(x) for x in version_str.split("."))
 
@@ -378,19 +330,10 @@ class MiniCPMVMultiModalDataParser(MultiModalDataParser):
             return MiniCPMVVideoEmbeddingItems(data)
         return super()._parse_video_data(data)
 
-    def _parse_audio_data(
-        self,
-        data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
-    ) -> ModalityDataItems[Any, Any]:
-        if isinstance(data, dict):
-            return MiniCPMVAudioEmbeddingItems(data)
-        return super()._parse_audio_data(data)
-
 
 class MiniCPMVProcessingInfo(BaseProcessingInfo):
     image_pattern = "(<image>./</image>)"
     video_pattern = "(<video>./</video>)"
-    audio_pattern = "(<audio>./</audio>)"
 
     def get_hf_config(self):
         return self.ctx.get_hf_config()
@@ -400,7 +343,6 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         **kwargs: object,
     ):
         hf_processor = self.ctx.get_hf_processor()
-        # image_processor = hf_processor.image_processor
         return hf_processor
 
     def get_image_processor(self, ):
@@ -412,16 +354,12 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         return get_version_by_config(self.get_hf_config())
 
     def get_supported_mm_modalities(self) -> List[str]:
-        if self.get_model_version() == (2, "6O"):
-            return ["image", "video", "audio"]
-        elif self.get_model_version() == (2, 6):
+        if self.get_model_version() == (2, 6):
             return ["image", "video"]
         else:
             return ["image"]
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        if self.get_model_version() == (2, "6O"):
-            return {"image": None, "video": None, "audio": None}
         if self.get_model_version() == (2, 6):
             return {"image": None, "video": None}
         else:
@@ -429,9 +367,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         mm_max_tokens = {"image": self.get_max_image_tokens()}
-        if self.get_model_version() == (2, "6O"):
-            mm_max_tokens["audio"] = self.get_max_audio_tokens()
-        if self.get_model_version() in [(2, 6), (2, "6O")]:
+        if self.get_model_version() == (2, 6):
             mm_max_tokens["video"] = self.get_max_video_tokens(seq_len)
         return mm_max_tokens
 
@@ -459,7 +395,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         return max_slice_num
 
     def get_sliced_grid(self, image_size, max_slice_num) -> Tuple[int, int]:
-        if self.get_model_version() in [(2, 6), (2, "6O")]:
+        if self.get_model_version() == (2, 6):
             slice_grid = self.get_image_processor().get_sliced_grid(
                 image_size, max_slice_num)
         else:
@@ -472,7 +408,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         num_tokens = self.get_slice_query_num(
         ) + 2  # <image>(<unk> * query_num)</image>
         if slice_grid is not None:
-            if self.get_model_version() in [(2, 6), (2, "6O")]:
+            if self.get_model_version() == (2, 6):
                 num_additional_tokens = 0
             else:
                 # <slice><image>(<unk> * query_num)</image></slice>
@@ -492,13 +428,13 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         # Result in the max possible feature size (h:w = 9:1)
-        return self.get_defaul_image_sizes(self.get_max_slice_num())
+        return self.get_default_image_sizes(self.get_max_slice_num())
 
     def get_video_max_slice_num(self) -> int:
         return 1
 
     def get_video_frame_size_with_most_features(self) -> ImageSize:
-        return self.get_defaul_image_sizes(self.get_video_max_slice_num())
+        return self.get_default_image_sizes(self.get_video_max_slice_num())
 
     def get_max_video_frames(self, max_tokens: int) -> int:
         num_frame_tokens = self.get_max_video_frame_tokens()
@@ -509,51 +445,22 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         mm_config = self.ctx.get_mm_config()
         max_images = mm_config.limit_per_prompt.get("image", 1)
         max_videos = mm_config.limit_per_prompt.get("video", 1)
-        max_audios = mm_config.limit_per_prompt.get("audio", 1)
 
         # count <image_idx></image_idx> tokens
         # which are not in get_max_image_tokens
         max_image_tokens = self.get_max_image_tokens(
         ) * max_images + 4 * max_images
-        seq_len = seq_len - max_image_tokens
-        if "audio" in self.get_supported_mm_modalities():
-            max_audio_tokens = self.get_max_audio_tokens(
-            ) * max_audios + 2 * max_audios
-            seq_len = seq_len - max_audio_tokens
-        max_total_frames = self.get_max_video_frames(seq_len)
+        max_total_frames = self.get_max_video_frames(
+            seq_len - max_image_tokens
+        )
 
         num_frames = max(max_total_frames // max(max_videos, 1), 1)
 
         return num_frames
 
-    def get_defaul_image_sizes(self, num_slices: int) -> ImageSize:
+    def get_default_image_sizes(self, num_slices: int) -> ImageSize:
         image_size = getattr(self.get_hf_config(), "image_size", 448)
         return ImageSize(width=image_size, height=image_size * num_slices)
-
-    def get_default_audio_pool_step(self):
-        return 2
-
-    def get_default_audio_sampling_rate(self):
-        return 16000
-
-    def get_chunk_length(self) -> int:
-        return self.get_hf_config().audio_chunk_length
-
-    def get_max_audio_tokens_per_chunk(self) -> int:
-        pool_step = self.get_default_audio_pool_step()
-        fbank_feat_in_chunk = 100
-        cnn_feat_in_chunk = (fbank_feat_in_chunk - 1) // 2 + 1
-        num_audio_tokens = (cnn_feat_in_chunk - pool_step) // pool_step + 1
-        return num_audio_tokens + 2  # <audio>(<unk>*N)</audio>
-
-    def get_max_audio_chunks_with_most_features(self) -> int:
-        return 30
-
-    def get_audio_len_by_num_chunks(self, num_chunks: int) -> int:
-        sampling_rate = self.get_default_audio_sampling_rate()
-        # exclude <audio> </audio>
-        num_tokens_per_chunk = self.get_max_audio_tokens_per_chunk() - 2
-        return int(num_chunks * sampling_rate / num_tokens_per_chunk) + 1
 
 
 class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[MiniCPMVProcessingInfo]
@@ -564,7 +471,6 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[MiniCPMVProcessingInfo]
                                                    int]) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
-        num_audios = mm_counts.get("audio", 0)
 
         image_width, image_height = \
             self.info.get_image_size_with_most_features()
@@ -572,9 +478,6 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[MiniCPMVProcessingInfo]
             self.info.get_video_frame_size_with_most_features()
         num_video_frames = \
             self.info.get_num_frames_with_most_features(seq_len)
-
-        audio_len = self.info.get_max_audio_chunks_with_most_features() * \
-            self.info.get_default_audio_sampling_rate()
 
         mm_data = {
             "image":
@@ -586,16 +489,13 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[MiniCPMVProcessingInfo]
                                        height=video_height,
                                        num_images=num_video_frames)
             ] * num_videos,
-            "audio":
-            self._get_dummy_audios(length=audio_len, num_audios=num_audios)
         }
 
         image_prompt_texts = self.info.image_pattern * num_images
         video_prompt_texts = self.info.video_pattern * num_videos
-        audio_prompt_texts = self.info.audio_pattern * num_audios
 
         return ProcessorInputs(prompt_text=image_prompt_texts +
-                               video_prompt_texts + audio_prompt_texts,
+                               video_prompt_texts,
                                mm_data=mm_data)
 
 
@@ -632,13 +532,6 @@ class MiniCPMVMultiModalProcessor(
         ])
         return prompt_texts
 
-    def get_audio_prompt_texts(self,
-                               audio_lens: int,
-                               chunk_input: bool = True,
-                               chunk_length: int = 1):
-        return self.info.get_hf_processor().get_audio_placeholder(
-            audio_lens, chunk_input, chunk_length)
-
     def get_special_tokens(self):
         tokenizer = self.info.get_tokenizer()
         special_tokens = {
@@ -650,11 +543,6 @@ class MiniCPMVMultiModalProcessor(
                 tokenizer.slice_start_id)
             special_tokens["slice_end_id"] = torch.tensor(
                 tokenizer.slice_end_id)
-        if hasattr(tokenizer, "audio_start_id"):
-            special_tokens["audio_start_id"] = torch.tensor(
-                tokenizer.audio_start_id)
-            special_tokens["audio_end_id"] = torch.tensor(
-                tokenizer.audio_end_id)
         return special_tokens
 
     @staticmethod
@@ -726,56 +614,63 @@ class MiniCPMVMultiModalProcessor(
             video_outputs = {}
         return video_outputs
 
-    def process_audios(self, mm_data: Mapping[str, object],
-                       mm_kwargs: Mapping[str, object]):
-        audios = mm_data.pop("audios", [])
-        audio_embeds = mm_data.pop("audio_embeds", [])
-        if isinstance(audios, (list, torch.Tensor)) and len(audios) > 0:
-            audio_outputs = {
-                "audio_lens": [],
-                "audio_features": [],
-                "audio_feature_lens": [],
-                "audio_num_segments": []
-            }
-            for audio in audios:
-                single_audio_outputs = super()._call_hf_processor(
-                    prompt=self.info.audio_pattern,
-                    mm_data={
-                        "audios": audio,
-                        "chunk_input": True
-                    },
-                    mm_kwargs=mm_kwargs)
-                audio_outputs["audio_lens"].append(len(audio))
-                audio_outputs["audio_features"].append(
-                    single_audio_outputs["audio_features"])
-                audio_outputs["audio_num_segments"].append(
-                    len(single_audio_outputs["audio_feature_lens"][0]))
-                audio_outputs["audio_feature_lens"] += \
-                    single_audio_outputs["audio_feature_lens"]
-            audio_outputs["audio_features"] = torch.cat(
-                audio_outputs["audio_features"])
-            audio_outputs["audio_feature_lens"] = torch.cat(
-                audio_outputs["audio_feature_lens"])
-        elif len(audio_embeds):
-            audio_outputs = {
-                "audio_lens": [
-                    self.info.get_audio_len_by_num_chunks(
-                        sum(chunk_embeds.shape[0]
-                            for chunk_embeds in single_audio_embeds))
-                    for single_audio_embeds in audio_embeds
-                ],
-                "audio_embeds": [
-                    chunk_embeds for single_audio_embeds in audio_embeds
-                    for chunk_embeds in single_audio_embeds
-                ],
-                "audio_num_segments": [
-                    len(single_audio_embeds)
-                    for single_audio_embeds in audio_embeds
-                ]
-            }
+    def get_placeholder_match_pattern(self) -> str:
+        return r"\(<(image|video)>./</\1>\)"
+    
+    def get_placeholder_split_pattern(self) -> str:
+        return r"\(<(?:image|video)>./</(?:image|video)>\)"
+
+    def process_mm_inputs(self, mm_data, mm_kwargs) -> object:
+        return {
+            "image": self.process_images(mm_data, mm_kwargs),
+            "video": self.process_videos(mm_data, mm_kwargs)
+        }
+
+    def get_num_slices_by_modality(self,
+                                   inputs: Dict[str, object], 
+                                   modality: str, 
+                                   index: int) -> int:
+        if modality == "image":
+            return self.info.get_image_slice_nums(
+                inputs["image"]["image_sizes"][index], 
+                self.info.get_max_slice_num()
+            )
+        elif modality == "video":
+            return self.info.get_image_slice_nums(
+                inputs["video"]["video_image_sizes"][index],
+                self.info.get_video_max_slice_num()
+            ) * inputs["video"]["num_frames"][index]
         else:
-            audio_outputs = {}
-        return audio_outputs
+            raise ValueError(f"UnExpected modality: {modality}")
+    
+    def get_prompt_texts_by_modality(self,
+                                     inputs: Dict[str, object], 
+                                     modality: str, 
+                                     index: int) -> str:
+        if modality == "image":
+            return self.get_image_prompt_texts(
+                inputs["image"]["image_sizes"][index],
+                index
+            )
+        elif modality == "video":
+            return self.get_video_prompt_texts(
+                inputs["video"]["video_image_sizes"][index], 
+                inputs["video"]["num_frames"][index]
+            )
+        else:
+            raise ValueError(f"UnExpected modality: {modality}")
+
+    def call_base_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs
+        )
 
     def _call_hf_processor(
         self,
@@ -786,46 +681,24 @@ class MiniCPMVMultiModalProcessor(
         # Do not support combination inputs of images and videos for now
         # Try to handle interleaved multimodal data
         tokenizer = self.info.get_tokenizer()
-        image_outputs = self.process_images(mm_data, mm_kwargs)
-        video_outputs = self.process_videos(mm_data, mm_kwargs)
-        audio_outputs = self.process_audios(mm_data, mm_kwargs)
-        counts = {"image": 0, "video": 0, "audio": 0}
-        num_image_slices = []
-        num_video_slices = []
-        num_audio_slices = []
-        video_orders_in_mm_data = []
-        image_orders_in_mm_data = []
-        audio_orders_in_mm_data = []
-        matches = re.findall(r"\(<(image|video|audio)>./</\1>\)", prompt)
+
+        supported_mm_modalities = self.info.get_supported_mm_modalities()
+        inputs = self.process_mm_inputs(mm_data, mm_kwargs)
+        counts = {modality: 0 for modality in supported_mm_modalities}
+        num_mm_slices = {modality: [] for modality in supported_mm_modalities}
+        orders_in_mm_data = {modality: [] for modality in supported_mm_modalities}
+        matches = re.findall(self.get_placeholder_match_pattern(), prompt)
         chunks = re.split(
-            r"\(<(?:image|video|audio)>./</(?:image|video|audio)>\)", prompt)
+            self.get_placeholder_split_pattern(), prompt)
         new_prompt = chunks[0]
         for idx, item in enumerate(matches):
-            if item == "image":
-                image_orders_in_mm_data.append(idx)
-                num_image_slices.append(
-                    self.info.get_image_slice_nums(
-                        image_outputs["image_sizes"][counts[item]],
-                        self.info.get_max_slice_num()))
-                new_prompt += self.get_image_prompt_texts(
-                    image_outputs["image_sizes"][counts[item]], counts[item])
-            elif item == "video":
-                video_orders_in_mm_data.append(idx)
-                num_video_slices.append(
-                    self.info.get_image_slice_nums(
-                        video_outputs["video_image_sizes"][counts[item]],
-                        self.info.get_video_max_slice_num()) *
-                    video_outputs["num_frames"][counts[item]])
-                new_prompt += self.get_video_prompt_texts(
-                    video_outputs["video_image_sizes"][counts[item]],
-                    video_outputs["num_frames"][counts[item]])
-            else:  # audio
-                audio_orders_in_mm_data.append(idx)
-                num_audio_slices.append(
-                    audio_outputs["audio_num_segments"][counts[item]])
-                new_prompt += self.get_audio_prompt_texts(
-                    audio_outputs["audio_lens"][counts[item]])
-
+            orders_in_mm_data[item].append(idx)
+            num_mm_slices[item].append(
+                self.get_num_slices_by_modality(inputs, item, counts[item])
+            )
+            new_prompt += self.get_prompt_texts_by_modality(
+                inputs, item, counts[item]
+            )
             counts[item] += 1
             new_prompt += chunks[idx + 1]
 
@@ -839,15 +712,19 @@ class MiniCPMVMultiModalProcessor(
 
         return {
             "input_ids": np.array([input_ids]),
-            **image_outputs,
-            **video_outputs,
-            **audio_outputs,
-            "image_orders_in_mm_data": image_orders_in_mm_data,
-            "image_slices": get_slices(num_image_slices),
-            "video_orders_in_mm_data": video_orders_in_mm_data,
-            "video_slices": get_slices(num_video_slices),
-            "audio_orders_in_mm_data": audio_orders_in_mm_data,
-            "audio_slices": get_slices(num_audio_slices),
+            **{
+                key: value
+                for modality in inputs
+                for key, value in inputs[modality].items()
+            },
+            **{
+                f"{modality}_orders_in_mm_data": orders_in_mm_data[modality]
+                for modality in orders_in_mm_data
+            },
+            **{
+                f"{modality}_slices": get_slices(num_mm_slices[modality])
+                for modality in num_mm_slices
+            }
         }
 
     def _get_prompt_replacements(
@@ -857,33 +734,21 @@ class MiniCPMVMultiModalProcessor(
         placeholder = {
             "image": self.info.image_pattern,
             "video": self.info.video_pattern,
-            "audio": self.info.audio_pattern
         }
-
         def get_replacement_minicpmv(item_idx: int, modality: str):
             if modality == "image":
                 return self.get_image_prompt_texts(
                     mm_items["image"].get_image_size(item_idx), item_idx)
-            elif modality == "video":
+            else: # video
                 return self.get_video_prompt_texts(
                     mm_items["video"].get_frame_size(item_idx),
                     mm_items["video"].get_num_frames(item_idx))
-            else:  # audio
-                if isinstance(mm_items["audio"], MiniCPMVAudioEmbeddingItems):
-                    single_audio_embeds = mm_items["audio"].get(item_idx)
-                    audio_len = self.info.get_audio_len_by_num_chunks(
-                        sum(chunk_embeds.shape[0]
-                            for chunk_embeds in single_audio_embeds))
-                    return self.get_audio_prompt_texts(audio_len)
-                return self.get_audio_prompt_texts(
-                    len(mm_items["audio"].get(item_idx)))
-
         return [
             PromptReplacement(modality=modality,
                               target=placeholder[modality],
                               replacement=partial(get_replacement_minicpmv,
                                                   modality=modality))
-            for modality in ("image", "video", "audio")
+            for modality in ("image", "video")
         ]
 
     def _get_mm_fields_config(
@@ -899,8 +764,6 @@ class MiniCPMVMultiModalProcessor(
             hf_inputs.get("image_slices", torch.empty(0, 2)))
         video_slices = get_slices(
             hf_inputs.get("video_slices", torch.empty(0, 2)))
-        audio_slices = get_slices(
-            hf_inputs.get("audio_slices", torch.empty(0, 2)))
         return dict(
             pixel_values=MultiModalFieldConfig.flat("image", image_slices),
             image_sizes=MultiModalFieldConfig.batched("image"),
@@ -914,13 +777,7 @@ class MiniCPMVMultiModalProcessor(
             video_tgt_sizes=MultiModalFieldConfig.flat("video", video_slices),
             video_orders_in_mm_data=MultiModalFieldConfig.batched("video"),
             video_embeds=MultiModalFieldConfig.flat("video", video_slices),
-            video_slices=MultiModalFieldConfig.batched("video"),
-            audio_features=MultiModalFieldConfig.flat("audio", audio_slices),
-            audio_feature_lens=MultiModalFieldConfig.flat(
-                "audio", audio_slices),
-            audio_slices=MultiModalFieldConfig.batched("audio"),
-            audio_orders_in_mm_data=MultiModalFieldConfig.batched("audio"),
-            audio_embeds=MultiModalFieldConfig.flat("audio", audio_slices))
+            video_slices=MultiModalFieldConfig.batched("video"))
 
     def apply(
         self,
@@ -932,7 +789,7 @@ class MiniCPMVMultiModalProcessor(
 
         # Exclude <image_id>x</image_id> from placeholders
         if "image" in result["mm_placeholders"] and \
-            self.info.get_model_version() in [(2, 6), (2, "6O")]:
+            self.info.get_model_version() == (2, 6):
             result["mm_placeholders"]["image"] = [
                 PlaceholderRange(offset=p["offset"] + 3 + idx // 10,
                                  length=p["length"] - 3 - idx // 10)
@@ -1020,45 +877,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         return vlm_embedding, vision_hidden_states
 
-    def get_embedding_with_audios(self, vlm_embedding: torch.Tensor,
-                                  audio_inputs: Optional[MiniCPMVAudioInputs],
-                                  chunk_length: int) -> torch.Tensor:
-        device, dtype = vlm_embedding.device, vlm_embedding.dtype
-        if audio_inputs["type"] == "audio_embeds":
-            audio_embeddings = audio_inputs["data"]
-            audio_embeddings = [
-                audio_embeddings[i].to(device=device, dtype=dtype)
-                for i in range(len(audio_embeddings))
-            ]
-        else:
-            audio_embeddings = self.get_audio_hidden_states(
-                audio_inputs, chunk_length)[0]
-        if audio_embeddings is None or len(audio_embeddings) == 0:
-            return vlm_embedding
-        audio_bounds = audio_inputs["audio_bounds"]
-        if self.config.chunk_input:
-            audio_embs = torch.cat(audio_embeddings, dim=0).to(device=device,
-                                                               dtype=dtype)
-            audio_start_pos = 0
-            for bound in audio_bounds:
-                audio_len = bound[1] - bound[0]
-                vlm_embedding[bound[0]:bound[1]] = audio_embs[
-                    audio_start_pos:audio_start_pos + audio_len, :]
-                audio_start_pos += audio_len
-        else:
-            for embs, bound in zip(audio_embeddings, audio_bounds):
-                audio_indices = torch.arange(bound[0],
-                                             bound[1],
-                                             dtype=torch.long).to(device)
-
-                if embs.shape[0] != len(audio_indices):
-                    raise ValueError(
-                        "Shape mismatch: Trying to assign embeddings "
-                        f"of shape {embs.shape} "
-                        f"to input indices of length {len(audio_indices)}")
-                vlm_embedding[audio_indices] = embs.to(dtype)
-        return vlm_embedding
-
     def _get_image_bounds(
             self,
             input_ids: torch.Tensor,
@@ -1085,18 +903,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         return torch.hstack([
             image_start_tokens[:valid_image_nums].unsqueeze(-1),
             image_end_tokens[:valid_image_nums].unsqueeze(-1),
-        ])
-
-    def _get_audio_bounds(self, input_ids: torch.Tensor,
-                          audio_start_id: torch.Tensor,
-                          audio_end_id: torch.Tensor) -> torch.Tensor:
-        audio_start_tokens, = torch.where(input_ids == audio_start_id[0])
-        audio_start_tokens += 1
-        audio_end_tokens, = torch.where(input_ids == audio_end_id[0])
-        valid_audio_nums = max(len(audio_start_tokens), len(audio_end_tokens))
-        return torch.hstack([
-            audio_start_tokens[:valid_audio_nums].unsqueeze(-1),
-            audio_end_tokens[:valid_audio_nums].unsqueeze(-1)
         ])
 
     def _parse_and_validate_image_inputs(
@@ -1218,46 +1024,10 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             type="pixel_values",
         )
 
-    def _parse_and_validate_audio_inputs(
-            self, input_ids: torch.Tensor,
-            **kwargs: object) -> Tuple[MiniCPMVImageInputs]:
-        audio_features = kwargs.pop("audio_features", [])
-        audio_feature_lens = kwargs.pop("audio_feature_lens", [])
-        audio_embeds = kwargs.pop("audio_embeds", None)
-        audio_start_id = kwargs.pop("audio_start_id", None)
-        audio_end_id = kwargs.pop("audio_end_id", None)
-        if audio_embeds is not None:
-            audio_embeds = [
-                audio_embeds[i][j] for i in range(len(audio_embeds))
-                for j in range(len(audio_embeds[i]))
-            ]
-            return MiniCPMVAudioEmbeddingInputs(
-                audio_bounds=self._get_audio_bounds(input_ids, audio_start_id,
-                                                    audio_end_id),
-                data=audio_embeds,
-                type="audio_embeds")
-        if len(audio_features) > 0:
-            audio_features = torch.cat([item for item in audio_features])
-            audio_feature_lens = torch.cat(
-                [item for item in audio_feature_lens])
-
-            return MiniCPMVAudioFeatureInputs(
-                audio_bounds=self._get_audio_bounds(input_ids, audio_start_id,
-                                                    audio_end_id),
-                data=audio_features,
-                audio_feature_lens=audio_feature_lens,
-                type="audio_features")
-        return None
-
     def _parse_and_validate_inputs(self, input_ids: torch.Tensor,
                                    **kwargs: object):
-        image_inputs = self._parse_and_validate_image_inputs(
+        return self._parse_and_validate_image_inputs(
             input_ids, **kwargs)
-        if not any("audio" in key for key in kwargs):
-            return image_inputs, None
-        audio_inputs = self._parse_and_validate_audio_inputs(
-            input_ids, **kwargs)
-        return image_inputs, audio_inputs
 
     def forward(
         self,
@@ -1271,15 +1041,10 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         if intermediate_tensors is not None:
             vlm_embeddings = None
         else:
-            image_inputs, audio_inputs = \
+            image_inputs = \
                 self._parse_and_validate_inputs(input_ids, **kwargs)
             vlm_embeddings, _ = self.get_embedding_with_vision(
                 input_ids, image_inputs)
-
-            if audio_inputs is not None:
-                vlm_embeddings = self.get_embedding_with_audios(
-                    vlm_embeddings, audio_inputs,
-                    self.config.audio_chunk_length)
 
         # always pass the input via `inputs_embeds`
         # to make sure the computation graph is consistent
@@ -1356,10 +1121,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def get_vision_hidden_states(self,
                                  data: MiniCPMVImageInputs) -> torch.Tensor:
-        raise NotImplementedError
-
-    def get_audio_hidden_states(self, data: MiniCPMVAudioInputs,
-                                chunk_length: int) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -1601,7 +1362,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        assert self.version in [(2, 6), (2, "6O")]
+        assert self.version == (2, 6)
 
     def init_llm(
         self,
@@ -1686,398 +1447,10 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         return self.resampler(vision_embedding, tgt_sizes)
 
 
-class MultiModalProjector(nn.Module):
-
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
-        self.linear1 = nn.Linear(in_features=in_dim,
-                                 out_features=out_dim,
-                                 bias=True)
-        self.relu = nn.ReLU()
-        self.linear2 = nn.Linear(in_features=out_dim,
-                                 out_features=out_dim,
-                                 bias=True)
-
-    def forward(self, audio_features):
-        hidden_states = self.relu(self.linear1(audio_features))
-        hidden_states = self.linear2(hidden_states)
-        return hidden_states
-
-
-class MiniCPMWhisperEncoderLayer(nn.Module):
-
-    def __init__(self, config: WhisperConfig, layer_idx: int = None):
-        super().__init__()
-        self.embed_dim = config.d_model
-        self.self_attn = WHISPER_ATTENTION_CLASSES[
-            config._attn_implementation](
-                embed_dim=self.embed_dim,
-                num_heads=config.encoder_attention_heads,
-                dropout=config.attention_dropout,
-                config=config,
-                layer_idx=layer_idx,
-            )
-        self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.dropout = config.dropout
-        self.activation_fn = ACT2FN[config.activation_function]
-        self.activation_dropout = config.activation_dropout
-        self.fc1 = nn.Linear(self.embed_dim, config.encoder_ffn_dim)
-        self.fc2 = nn.Linear(config.encoder_ffn_dim, self.embed_dim)
-        self.final_layer_norm = nn.LayerNorm(self.embed_dim)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
-        layer_head_mask: torch.Tensor,
-        output_attentions: bool = False,
-        past_key_values: Optional[EncoderDecoderCache] = None,
-        use_cache: Optional[bool] = False,
-    ) -> torch.Tensor:
-        residual = hidden_states
-        hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states, attn_weights, past_key_values = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            layer_head_mask=layer_head_mask,
-            output_attentions=output_attentions,
-            past_key_value=past_key_values,
-        )
-        hidden_states = nn.functional.dropout(hidden_states,
-                                              p=self.dropout,
-                                              training=self.training)
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.final_layer_norm(hidden_states)
-        hidden_states = self.activation_fn(self.fc1(hidden_states))
-        hidden_states = nn.functional.dropout(hidden_states,
-                                              p=self.activation_dropout,
-                                              training=self.training)
-        hidden_states = self.fc2(hidden_states)
-        hidden_states = nn.functional.dropout(hidden_states,
-                                              p=self.dropout,
-                                              training=self.training)
-        hidden_states = residual + hidden_states
-
-        if hidden_states.dtype == torch.float16 and (
-                torch.isinf(hidden_states).any()
-                or torch.isnan(hidden_states).any()):
-            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-            hidden_states = torch.clamp(hidden_states,
-                                        min=-clamp_value,
-                                        max=clamp_value)
-
-        outputs = (hidden_states, )
-
-        if output_attentions:
-            outputs += (attn_weights, )
-
-        if use_cache:
-            outputs += (past_key_values, )
-
-        return outputs
-
-
-class MiniCPMWhisperEncoder(WhisperEncoder):
-
-    def __init__(self, config: WhisperConfig):
-        super().__init__(config)
-        self.layers = nn.ModuleList([
-            MiniCPMWhisperEncoderLayer(config, layer_idx=i)
-            for i in range(config.encoder_layers)
-        ])
-
-    def forward(
-        self,
-        input_features,
-        attention_mask=None,
-        head_mask=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-        past_key_values: Optional[EncoderDecoderCache] = None,
-        use_cache: Optional[bool] = None,
-    ):
-        output_attentions = output_attentions if output_attentions is not None \
-            else self.config.output_attentions
-        output_hidden_states = (output_hidden_states
-                                if output_hidden_states is not None else
-                                self.config.output_hidden_states)
-        return_dict = return_dict if return_dict is not None \
-            else self.config.use_return_dict
-
-        # Ignore copy
-        input_features = input_features.to(dtype=self.conv1.weight.dtype,
-                                           device=self.conv1.weight.device)
-
-        inputs_embeds = nn.functional.gelu(self.conv1(input_features))
-        inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
-
-        inputs_embeds = inputs_embeds.permute(0, 2, 1)
-
-        embed_pos = self.embed_positions.weight
-        past_key_values_length = 0
-        if use_cache:
-            if past_key_values is None:
-                past_key_values = EncoderDecoderCache(DynamicCache(),
-                                                      DynamicCache())
-            elif isinstance(past_key_values, list):
-                past_key_values = EncoderDecoderCache(
-                    DynamicCache.from_legacy_cache(past_key_values),
-                    DynamicCache())
-            elif isinstance(past_key_values, DynamicCache):
-                past_key_values = EncoderDecoderCache(past_key_values,
-                                                      DynamicCache())
-            else:
-                pass
-            past_key_values_length = \
-                past_key_values.self_attention_cache.get_usable_length(
-                    inputs_embeds.shape[1]
-                )
-            if inputs_embeds.shape[
-                    1] + past_key_values_length > embed_pos.shape[0]:
-                embed_pos_front = embed_pos[past_key_values_length:, :]
-                embed_pos = torch.cat((
-                    embed_pos_front,
-                    torch.repeat_interleave(
-                        embed_pos[-1, :].unsqueeze(0),
-                        inputs_embeds.shape[1] - embed_pos.shape[0] +
-                        past_key_values_length,
-                        dim=0,
-                    ),
-                ))
-            else:
-                embed_pos = embed_pos[
-                    past_key_values_length:inputs_embeds.shape[1] +
-                    past_key_values_length, :]
-        else:
-            embed_pos = embed_pos[:inputs_embeds.shape[1], :]
-
-        hidden_states = inputs_embeds + embed_pos
-        hidden_states = nn.functional.dropout(hidden_states,
-                                              p=self.dropout,
-                                              training=self.training)
-
-        encoder_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-
-        if head_mask is not None:
-            assert head_mask.size()[0] == (
-                len(self.layers)
-            ), \
-            f"The head_mask should be specified for {len(self.layers)} layers, but it is for {head_mask.size()[0]}." # noqa
-
-        for idx, encoder_layer in enumerate(self.layers):
-            if output_hidden_states:
-                encoder_states = encoder_states + (hidden_states, )
-            to_drop = False
-            if self.training:
-                dropout_probability = torch.rand([])
-                if dropout_probability < self.layerdrop:  # skip the layer
-                    to_drop = True
-
-            # Ignore copy
-            if to_drop:
-                layer_outputs = (None, None)
-            else:
-                if self.gradient_checkpointing and self.training:
-                    layer_outputs = self._gradient_checkpointing_func(
-                        encoder_layer.__call__,
-                        hidden_states,
-                        attention_mask,
-                        (head_mask[idx] if head_mask is not None else None),
-                        output_attentions,
-                        past_key_values,
-                        use_cache,
-                    )
-                else:
-                    layer_outputs = encoder_layer(
-                        hidden_states,
-                        attention_mask,
-                        layer_head_mask=(head_mask[idx]
-                                         if head_mask is not None else None),
-                        output_attentions=output_attentions,
-                        past_key_values=past_key_values,
-                        use_cache=use_cache,
-                    )
-
-                hidden_states = layer_outputs[0]
-
-            if use_cache:
-                next_encoder_cache = layer_outputs[
-                    2 if output_attentions else 1]
-            else:
-                next_encoder_cache = None
-
-            if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[1], )
-
-        hidden_states = self.layer_norm(hidden_states)
-        if output_hidden_states:
-            encoder_states = encoder_states + (hidden_states, )
-
-        if not return_dict:
-            return tuple(
-                v for v in [hidden_states, encoder_states, all_attentions]
-                if v is not None)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            hidden_states=encoder_states,
-            attentions=all_attentions,
-            past_key_values=next_encoder_cache,
-        )
-
-
-class MiniCPMO2_6(MiniCPMV2_6):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.apm = self.init_audio_module(vllm_config=vllm_config,
-                                          prefix=maybe_prefix(prefix, "apm"))
-
-    def init_audio_module(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        # Do not use parameters temporarily
-        audio_config = self.config.audio_config
-        model = MiniCPMWhisperEncoder(audio_config)
-        audio_output_dim = int(audio_config.encoder_ffn_dim // 4)
-        self.audio_avg_pooler = \
-            nn.AvgPool1d(self.config.audio_pool_step,
-                         stride=self.config.audio_pool_step)
-        self.audio_projection_layer = \
-            MultiModalProjector(in_dim=audio_output_dim,out_dim=self.embed_dim)
-        self.audio_encoder_layer = -1
-        return model
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["tts"])
-        return loader.load_weights(weights)
-
-    def subsequent_chunk_mask(
-        self,
-        size: int,
-        chunk_size: int,
-        num_left_chunks: int = -1,
-        device: torch.device = CPU_DEVICE,
-        num_lookhead: int = 0,
-    ) -> torch.Tensor:
-        ret = torch.zeros(size, size, device=device, dtype=torch.bool)
-        for i in range(size):
-            if num_left_chunks < 0:
-                start = 0
-            else:
-                start = max((i // chunk_size - num_left_chunks) * chunk_size,
-                            0)
-            ending = min((i // chunk_size + 1) * chunk_size + num_lookhead,
-                         size)
-            ret[i, start:ending] = True
-        return ret
-
-    def _get_feat_extract_output_lengths(self,
-                                         input_lengths: torch.LongTensor):
-        input_lengths_after_cnn = (input_lengths - 1) // 2 + 1
-        input_lengths_after_pooling = (
-            input_lengths_after_cnn -
-            self.config.audio_pool_step) // self.config.audio_pool_step + 1
-        input_lengths_after_pooling = input_lengths_after_pooling.to(
-            dtype=torch.int32)
-
-        return input_lengths_after_cnn, input_lengths_after_pooling
-
-    # Copied from HF repo of MiniCPM-o-2_6,
-    # designed for batched inputs and outputs
-    def get_audio_hidden_states(self, data: MiniCPMVAudioInputs,
-                                chunk_length: int) -> torch.Tensor:
-        wavforms = data.get(
-            "data",
-            [])  # (bs, 80, frames) or [], multi audios need filled in advance
-        audio_feature_lens_raw = [data.get("audio_feature_lens",
-                                           [])]  # list, [[x1, x2], [y1], [z1]]
-
-        # exist audio
-        if len(wavforms) > 0:
-            audio_feature_lens = torch.hstack(audio_feature_lens_raw)
-            batch_size, _, max_mel_seq_len = wavforms.shape
-            max_seq_len = (max_mel_seq_len - 1) // 2 + 1
-
-            # Create a sequence tensor of shape (batch_size, max_seq_len)
-            seq_range = (torch.arange(
-                0,
-                max_seq_len,
-                dtype=audio_feature_lens.dtype,
-                device=audio_feature_lens.device).unsqueeze(0).expand(
-                    batch_size, max_seq_len))
-            lengths_expand = audio_feature_lens.unsqueeze(1).expand(
-                batch_size, max_seq_len)
-            # Create mask
-            padding_mask = seq_range >= lengths_expand  # 1 for padded values
-
-            audio_attention_mask_ = padding_mask.view(
-                batch_size, 1, 1, max_seq_len).expand(batch_size, 1,
-                                                      max_seq_len, max_seq_len)
-            audio_attention_mask = audio_attention_mask_.to(
-                dtype=self.apm.conv1.weight.dtype,
-                device=self.apm.conv1.weight.device)
-
-            if chunk_length > 0:
-                chunk_num_frame = int(chunk_length * 50)
-                chunk_mask = self.subsequent_chunk_mask(
-                    size=max_seq_len,
-                    chunk_size=chunk_num_frame,
-                    num_left_chunks=-1,
-                    device=audio_attention_mask_.device,
-                )
-                audio_attention_mask_ = torch.logical_or(
-                    audio_attention_mask_, torch.logical_not(chunk_mask))
-
-            audio_attention_mask[audio_attention_mask_] = float("-inf")
-            audio_states = self.apm(
-                wavforms,
-                output_hidden_states=True,
-                attention_mask=audio_attention_mask).hidden_states[
-                    self.audio_encoder_layer]
-            audio_embeds = self.audio_projection_layer(audio_states)
-
-            audio_embeds = audio_embeds.transpose(1, 2)
-            audio_embeds = self.audio_avg_pooler(audio_embeds)
-            audio_embeds = audio_embeds.transpose(1, 2)
-
-            _, feature_lens_after_pooling = \
-                self._get_feat_extract_output_lengths(audio_feature_lens)
-
-            num_audio_tokens = feature_lens_after_pooling
-
-            final_audio_embeds = []
-            idx = 0
-            for i in range(len(audio_feature_lens_raw)):
-                target_audio_embeds = []
-                for _ in range(len(audio_feature_lens_raw[i])):
-                    target_audio_embeds.append(
-                        audio_embeds[idx, :num_audio_tokens[idx], :])
-                    idx += 1
-                final_audio_embeds.append(target_audio_embeds)
-            return final_audio_embeds
-        else:
-            return []
-
-
 _SUPPORT_VERSION = {
     (2, 0): MiniCPMV2_0,
     (2, 5): MiniCPMV2_5,
     (2, 6): MiniCPMV2_6,
-    (2, "6O"): MiniCPMO2_6,
 }
 
 
@@ -2105,8 +1478,6 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
                 version = (2, 0)
             else:
                 version = (2, 5)
-        elif "MiniCPMO" in config.architectures:
-            version = (2, "6O")
         else:
             version = str(config.version).split(".")
             version = tuple([int(x) for x in version])
