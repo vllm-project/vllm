@@ -1,5 +1,4 @@
 import asyncio
-import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union, cast
 
 from fastapi import Request
@@ -56,12 +55,12 @@ class JinaAIServingRerank(OpenAIServing):
 
         model_name = request.model
         request_id = f"rerank-{self._base_request_id(raw_request)}"
-        created_time = int(time.time())
         truncate_prompt_tokens = request.truncate_prompt_tokens
         query = request.query
         documents = request.documents
         request_prompts = []
         engine_prompts = []
+        top_n = request.top_n
 
         try:
             (
@@ -164,8 +163,8 @@ class JinaAIServingRerank(OpenAIServing):
                                            final_res_batch)
 
             response = self.request_output_to_rerank_response(
-                final_res_batch_checked, request_id, created_time, model_name,
-                documents)
+                final_res_batch_checked, request_id, model_name, documents,
+                top_n)
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
@@ -176,7 +175,8 @@ class JinaAIServingRerank(OpenAIServing):
 
     def request_output_to_rerank_response(
             self, final_res_batch: List[PoolingRequestOutput], request_id: str,
-            model_name: str, documents: List[str]) -> RerankResponse:
+            model_name: str, documents: List[str],
+            top_n: int) -> RerankResponse:
         """
         Convert the output of do_rank to a RerankResponse
         """
@@ -193,6 +193,11 @@ class JinaAIServingRerank(OpenAIServing):
             results.append(result)
             prompt_token_ids = final_res.prompt_token_ids
             num_prompt_tokens += len(prompt_token_ids)
+
+        # sort by relevance, then return the top n if set
+        results.sort(key=lambda x: x.relevance_score, reverse=True)
+        if top_n < len(documents):
+            results = results[:top_n]
 
         return RerankResponse(
             id=request_id,
