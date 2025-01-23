@@ -1133,7 +1133,6 @@ class LLM:
             A list of ``ScoringRequestOutput`` objects containing the
             generated scores in the same order as the input prompts.
         """
-
         runner_type = self.llm_engine.model_config.runner_type
         if runner_type != "pooling":
             messages = ["LLM.score() is only supported for pooling models."]
@@ -1189,13 +1188,13 @@ class LLM:
             raise ValueError("At least one text_pair element must be given")
 
         if self.llm_engine.model_config.is_cross_encoder:
-            return self._cross_encoding_score(tokenizer,
-                                              truncate_prompt_tokens, text_1,
-                                              text_2, use_tqdm, lora_request,
+            return self._cross_encoding_score(tokenizer, text_1, text_2,
+                                              truncate_prompt_tokens, use_tqdm,
+                                              lora_request,
                                               prompt_adapter_request)
         else:
-            return self._embedding_score(tokenizer, truncate_prompt_tokens,
-                                         text_1, text_2, use_tqdm,
+            return self._embedding_score(tokenizer, text_1, text_2,
+                                         truncate_prompt_tokens, use_tqdm,
                                          lora_request, prompt_adapter_request)
 
     def start_profile(self) -> None:
