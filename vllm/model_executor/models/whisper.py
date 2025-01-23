@@ -728,13 +728,11 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
+        loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
+        mapper = WeightsMapper({".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."})
         # add fake zeros bias for k_proj to state_dict
         weights = _create_fake_bias_for_k_proj(weights)
-        loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
-        loaded_weights = [(name, loaded_weight)
-                          for name, loaded_weight in weights]
-        mapper = WeightsMapper({".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."})
-        return loader.load_weights(loaded_weights, mapper=mapper)
+        return loader.load_weights(weights, mapper=mapper)
 
 
 def _create_fake_bias_for_k_proj(
