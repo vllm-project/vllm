@@ -289,8 +289,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             r = lora_b_stacked[0].size(-1)
             # We set the buffer to be float32 by default, consistent with the
             # triton op
+            batch_size, seq_len, _ = x.shape
             buffer = torch.zeros(
-                (len(output_slices), x.size(1), r),
+                (len(output_slices), batch_size * seq_len, r),
                 dtype=torch.float32,
                 device=x.device,
             )
