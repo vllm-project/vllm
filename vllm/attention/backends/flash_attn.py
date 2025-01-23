@@ -22,15 +22,14 @@ from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
-                                          ModelInputForGPUWithSamplingMetadata)
-
 from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
                                   flash_attn_varlen_func,
                                   flash_attn_with_kvcache,
                                   is_fa_version_supported)
+
+if TYPE_CHECKING:
+    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
+                                          ModelInputForGPUWithSamplingMetadata)
 
 logger = init_logger(__name__)
 
