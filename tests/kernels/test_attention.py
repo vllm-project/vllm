@@ -35,8 +35,6 @@ NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 # This should be sync with get_supported_head_sizes() in
 # vllm.attention.ops.paged_attn.PagedAttention
 HEAD_SIZES = [32, 64, 80, 96, 112, 120, 128, 192, 256]
-if current_platform.is_rocm():
-    HEAD_SIZES = [128, 64]
 
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
