@@ -197,6 +197,7 @@ class EngineArgs:
     kv_transfer_config: Optional[KVTransferConfig] = None
 
     generation_config: Optional[str] = None
+    enable_sleep_mode: bool = False
     model_impl: str = "auto"
 
     def __post_init__(self):
@@ -409,7 +410,7 @@ class EngineArgs:
             'or equal to the number of GPUs available, "mp" will be used to '
             'keep processing on a single host. Otherwise, this will default '
             'to "ray" if Ray is installed and fail otherwise. Note that tpu '
-            'and hpu only support Ray for distributed inference.')
+            'only supports Ray for distributed inference.')
 
         parser.add_argument(
             '--worker-use-ray',
@@ -968,6 +969,12 @@ class EngineArgs:
             "loaded from model. If set to a folder path, the generation config "
             "will be loaded from the specified folder path.")
 
+        parser.add_argument("--enable-sleep-mode",
+                            action="store_true",
+                            default=False,
+                            help="Enable sleep mode for the engine. "
+                            "(only cuda platform is supported)")
+
         return parser
 
     @classmethod
@@ -1013,7 +1020,9 @@ class EngineArgs:
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,
-            model_impl=self.model_impl)
+            enable_sleep_mode=self.enable_sleep_mode,
+            model_impl=self.model_impl,
+        )
 
     def create_load_config(self) -> LoadConfig:
         return LoadConfig(

@@ -261,7 +261,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                        trust_remote_code=True),
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-Audio-7B-Instruct"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
-    "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_3"),
+    "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_3",
+                                     trust_remote_code=True),
     # [Encoder-decoder]
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
@@ -300,6 +301,11 @@ class HfExampleModels:
     def find_hf_info(self, model_id: str) -> _HfExamplesInfo:
         for info in self.hf_models.values():
             if info.default == model_id:
+                return info
+
+        # Fallback to extras
+        for info in self.hf_models.values():
+            if any(extra == model_id for extra in info.extras.values()):
                 return info
 
         raise ValueError(f"No example model defined for {model_id}")
