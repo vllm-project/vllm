@@ -22,9 +22,9 @@ It'd be better to store the model in a local disk. Additionally, have a look at 
 To isolate the model downloading and loading issue, you can use the `--load-format dummy` argument to skip loading the model weights. This way, you can check if the model downloading and loading is the bottleneck.
 ```
 
-## Model is too large
+## Out of memory
 
-If the model is too large to fit in a single GPU, you might want to [consider tensor parallelism](#distributed-serving) to split the model across multiple GPUs. In that case, every process will read the whole model and split it into chunks, which makes the disk reading time even longer (proportional to the size of tensor parallelism). You can convert the model checkpoint to a sharded checkpoint using <gh-file:examples/offline_inference/save_sharded_state.py>. The conversion process might take some time, but later you can load the sharded checkpoint much faster. The model loading time should remain constant regardless of the size of tensor parallelism.
+If the model is too large to fit in a single GPU, you will get an out-of-memory (OOM) error. Consider [using tensor parallelism](#distributed-serving) to split the model across multiple GPUs. In that case, every process will read the whole model and split it into chunks, which makes the disk reading time even longer (proportional to the size of tensor parallelism). You can convert the model checkpoint to a sharded checkpoint using <gh-file:examples/offline_inference/save_sharded_state.py>. The conversion process might take some time, but later you can load the sharded checkpoint much faster. The model loading time should remain constant regardless of the size of tensor parallelism.
 
 ## Enable more logging
 
@@ -217,6 +217,42 @@ print(f(x))
 ```
 
 If it raises errors from `torch/_inductor` directory, usually it means you have a custom `triton` library that is not compatible with the version of PyTorch you are using. See [this issue](https://github.com/vllm-project/vllm/issues/12219) for example.
+
+## Model failed to be inspected
+
+If you see an error like:
+
+```text
+  File "vllm/model_executor/models/registry.py", line xxx, in _raise_for_unsupported
+    raise ValueError(
+ValueError: Model architectures ['<arch>'] failed to be inspected. Please check the logs for more details.
+```
+
+It means that vLLM failed to import the model file.
+Usually, it is related to missing dependencies or outdated binaries in the vLLM build.
+Please read the logs carefully to determine the root cause of the error.
+
+## Model not supported
+
+If you see an error like:
+
+```text
+Traceback (most recent call last):
+...
+  File "vllm/model_executor/models/registry.py", line xxx, in inspect_model_cls
+    for arch in architectures:
+TypeError: 'NoneType' object is not iterable
+```
+
+or:
+
+```text
+  File "vllm/model_executor/models/registry.py", line xxx, in _raise_for_unsupported
+    raise ValueError(
+ValueError: Model architectures ['<arch>'] are not supported for now. Supported architectures: [...]
+```
+
+But you are sure that the model is in the [list of supported models](#supported-models), there may be some issue with vLLM's model resolution. In that case, please follow [these steps](#model-resolution) to explicitly specify the vLLM implementation for the model.
 
 ## Known Issues
 
