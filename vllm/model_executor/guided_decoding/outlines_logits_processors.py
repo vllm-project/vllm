@@ -91,6 +91,10 @@ class BaseLogitsProcessor:
             allowed_tokens < scores.shape[-1])
         mask.index_fill_(0, allowed_tokens, 0)
         if current_platform.is_hpu():
+            # Workaround for HPU bug where add_() raise RuntimeError: 
+            # synNodeCreateWithId failed for node: strided_insert 
+            # with synStatus 1 [Invalid argument], hopefully it will
+            # be fixed in the future releases of the HPU runtime.
             scores = scores.add(mask)
         else:
             scores.add_(mask)
