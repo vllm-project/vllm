@@ -41,6 +41,7 @@ Otherwise, please refer to [Adding a New Model](#new-model) for instructions on 
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
 ### Transformers fallback
+
 After the merge of <gh-pr:11330>, `vllm` can fallback to models that are avaialble in `transformers`. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
 
 To check if the backend is `transformers`, you can simply do this: 
