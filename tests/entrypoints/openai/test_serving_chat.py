@@ -107,7 +107,7 @@ def test_serving_chat_should_set_correct_max_tokens():
     # lower than context_window - prompt_tokens
     mock_model_config = MockModelConfig()
     mock_model_config.diff_sampling_param = {
-        "max_tokens": 10 # Setting server-side max_tokens limit
+        "max_tokens": 10  # Setting server-side max_tokens limit
     }
 
     # Reinitialize the engine with new settings
@@ -162,7 +162,7 @@ def test_serving_chat_should_set_correct_max_tokens():
     # higher than context_window - prompt_tokens
     mock_model_config = MockModelConfig()
     mock_model_config.diff_sampling_param = {
-        "max_tokens": 200 # Setting server-side max_tokens limit
+        "max_tokens": 200  # Setting server-side max_tokens limit
     }
 
     # Reinitialize the engine with new settings

@@ -187,24 +187,18 @@ class OpenAIServingChat(OpenAIServing):
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
-                server_max_tokens = self.max_model_len - len(
+                default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
                 # Build default sampling params
                 default_sampling_params = (
                     self.model_config.get_diff_sampling_param())
 
-                # Limit set by architecture or value in generation_config.json
-                if "max_tokens" in default_sampling_params:
-                    server_max_tokens = min(
-                        server_max_tokens,
-                        default_sampling_params["max_tokens"])
-
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        server_max_tokens, default_sampling_params)
+                        default_max_tokens, default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
-                        server_max_tokens,
+                        default_max_tokens,
                         self.model_config.logits_processor_pattern,
                         default_sampling_params)
 
