@@ -114,12 +114,6 @@ class AriaProjectorMLP(nn.Module):
         self.linear_out = RowParallelLinear(hidden_features,
                                             output_dim,
                                             bias=False)
-        self.linear_in = ColumnParallelLinear(in_features,
-                                              hidden_features,
-                                              bias=False)
-        self.linear_out = RowParallelLinear(hidden_features,
-                                            output_dim,
-                                            bias=False)
         self.act = get_act_fn("gelu_new")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -160,24 +154,12 @@ class AriaProjector(nn.Module):
         self.hidden_features = config.text_config.hidden_size
         self.output_dim = config.text_config.hidden_size
 
-        self.patch_to_query_dict = config.projector_patch_to_query_dict
-        self.in_features = config.vision_config.hidden_size
-        self.num_heads = config.vision_config.num_attention_heads
-        self.kv_dim = config.vision_config.hidden_size
-        self.hidden_features = config.text_config.hidden_size
-        self.output_dim = config.text_config.hidden_size
-
         self.query = nn.Parameter(
             torch.empty(config.max_value_projector_patch_to_query_dict,
                         self.in_features))
 
         self.cross_attn = AriaCrossAttention(config)
-        self.cross_attn = AriaCrossAttention(config)
 
-        self.layer_norm = nn.LayerNorm(self.in_features)
-        self.feed_forward = AriaProjectorMLP(self.in_features,
-                                             self.hidden_features,
-                                             self.output_dim)
         self.layer_norm = nn.LayerNorm(self.in_features)
         self.feed_forward = AriaProjectorMLP(self.in_features,
                                              self.hidden_features,
@@ -198,16 +180,6 @@ class AriaProjector(nn.Module):
         query_num = self.patch_to_query_dict[num_patches]
 
         queries = self.query[:query_num].unsqueeze(0).repeat(batch_size, 1, 1)
-        batch_size, num_patches = x.shape[0], x.shape[1]
-
-        if num_patches not in self.patch_to_query_dict:
-            raise KeyError(f"Number of patches {num_patches} not found in "
-                           "patch_to_query_dict amongst possible values "
-                           f"{self.patch_to_query_dict.keys()}.")
-
-        query_num = self.patch_to_query_dict[num_patches]
-
-        queries = self.query[:query_num].unsqueeze(0).repeat(batch_size, 1, 1)
 
         if attn_mask is not None:
             attn_mask = attn_mask.repeat_interleave(self.num_heads, 0)
@@ -215,7 +187,6 @@ class AriaProjector(nn.Module):
 
         attention_out = self.cross_attn(x, queries, attn_mask=attn_mask)
 
-        out = self.feed_forward(self.layer_norm(attention_out))
         out = self.feed_forward(self.layer_norm(attention_out))
 
         return out
@@ -285,7 +256,6 @@ class AriaTextMoELayer(nn.Module):
         self.shared_experts = LlamaMLP(
             config.hidden_size,
             config.intermediate_size * config.moe_num_shared_experts,
-            config.intermediate_size * config.moe_num_shared_experts,
             "silu",
             quant_config=quant_config,
             bias=config.mlp_bias,
@@ -329,7 +299,6 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
         prefix: str = "",
     ) -> None:
         super().__init__(config, cache_config, quant_config, prefix)
-        self.mlp = AriaTextMoELayer(config, quant_config=quant_config)
         self.mlp = AriaTextMoELayer(config, quant_config=quant_config)
 
 
@@ -417,7 +386,6 @@ class AriaTextModel(LlamaModel):
 class AriaProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self):
-        return self.ctx.get_hf_config(AriaConfig)
         return self.ctx.get_hf_config(AriaConfig)
 
     def get_vision_config(self):
@@ -601,22 +569,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         )
         return (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
 
-    def _create_patch_attention_mask(
-            self, pixel_mask: Optional[torch.Tensor]) -> torch.Tensor:
-        if pixel_mask is None:
-            return None
-
-        patches_subgrid = pixel_mask.unfold(
-            dimension=1,
-            size=self.vision_tower.config.patch_size,
-            step=self.vision_tower.config.patch_size,
-        ).unfold(
-            dimension=2,
-            size=self.vision_tower.config.patch_size,
-            step=self.vision_tower.config.patch_size,
-        )
-        return (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
-
     def _process_image_input(
         self, image_input: AriaImagePixelInputs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -625,18 +577,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         pixel_values = image_input['pixel_values']
         pixel_mask = image_input['pixel_mask']
 
-        patch_attention_mask = self._create_patch_attention_mask(pixel_mask)
-
-        image_outputs = self.vision_tower(
-            pixel_values=pixel_values,
-            patch_attention_mask=patch_attention_mask,
-        )
-        image_attn_mask = None
-        if patch_attention_mask is not None:
-            flattened_mask = patch_attention_mask.flatten(1)
-            image_attn_mask = torch.logical_not(flattened_mask)
-
-        return self.multi_modal_projector(image_outputs, image_attn_mask)
         patch_attention_mask = self._create_patch_attention_mask(pixel_mask)
 
         image_outputs = self.vision_tower(
