@@ -245,11 +245,12 @@ async def async_request_openai_completions(
             "max_tokens": request_func_input.output_len,
             "logprobs": request_func_input.logprobs,
             "stream": True,
-            "ignore_eos": request_func_input.ignore_eos,
             "stream_options": {
                 "include_usage": True,
             },
         }
+        if request_func_input.ignore_eos:
+            payload["ignore_eos"] = request_func_input.ignore_eos
         if request_func_input.extra_body:
             payload.update(request_func_input.extra_body)
         headers = {
@@ -297,7 +298,7 @@ async def async_request_openai_completions(
                                                       most_recent_timestamp)
 
                                 most_recent_timestamp = timestamp
-                                generated_text += text
+                                generated_text += text or ""
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get(
                                     "completion_tokens")
@@ -348,11 +349,12 @@ async def async_request_openai_chat_completions(
             "temperature": 0.0,
             "max_completion_tokens": request_func_input.output_len,
             "stream": True,
-            "ignore_eos": request_func_input.ignore_eos,
             "stream_options": {
                 "include_usage": True,
             },
         }
+        if request_func_input.ignore_eos:
+            payload["ignore_eos"] = request_func_input.ignore_eos
         if request_func_input.extra_body:
             payload.update(request_func_input.extra_body)
         headers = {
@@ -394,7 +396,7 @@ async def async_request_openai_chat_completions(
                                     output.itl.append(timestamp -
                                                       most_recent_timestamp)
 
-                                generated_text += content
+                                generated_text += content or ""
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get(
                                     "completion_tokens")
