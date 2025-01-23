@@ -4,6 +4,7 @@ import torch
 
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 
@@ -91,13 +92,12 @@ class IPEXAttentionImpl(AttentionImpl):
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: IPEXAttentionBackend,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with IPEXAttention.
@@ -117,7 +117,7 @@ class IPEXAttentionImpl(AttentionImpl):
             return output
 
         # NOTE(woosuk): IPEXAttention does not support FP8 KV cache.
-        assert k_scale == 1.0 and v_scale == 1.0, (
+        assert layer._k_scale == 1.0 and layer._v_scale == 1.0, (
             "key/v_scale is not supported in IPEXAttention.")
 
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -138,8 +138,8 @@ class IPEXAttentionImpl(AttentionImpl):
             value_cache,
             attn_metadata.slot_mapping,
             self.kv_cache_dtype,
-            k_scale,
-            v_scale,
+            layer._k_scale,
+            layer._v_scale,
         )
 
         ipex_ops.chunked_prefill(

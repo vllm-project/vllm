@@ -10,7 +10,9 @@ import torch
 
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadataBuilder, AttentionType)
+                                              AttentionLayer,
+                                              AttentionMetadataBuilder,
+                                              AttentionType)
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.backends.utils import (
@@ -110,6 +112,20 @@ class IpexAttnMetadataBuilder(
         self.sliding_window = input_builder.sliding_window
         self.block_size = input_builder.block_size
 
+    def prepare(self):
+        self.slot_mapping: List[int] = []
+        self.prefill_seq_lens: List[int] = []
+        self.context_lens: List[int] = []
+        self.block_tables: List[List[int]] = []
+        self.curr_seq_lens: List[int] = []
+        self.multimodal_placeholder_maps: Dict[
+            str,
+            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
+        self.num_prefills = 0
+        self.num_prefill_tokens = 0
+        self.num_decode_tokens = 0
+        self.has_prefix_cache_hit = False
+        
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
             chunked_prefill_enabled: bool, prefix_cache_hit: bool):
@@ -340,7 +356,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
             shape = [num_tokens, num_heads * head_size]
         """
         # NOTE(woosuk): IPEXAttention does not support FP8 KV cache.
-        assert k_scale == 1.0 and v_scale == 1.0, (
+        assert layer._k_scale == 1.0 and layer._v_scale == 1.0, (
             "key/v_scale is not supported in IPEXAttention.")
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None or attn_metadata.seq_start_loc is None:
@@ -396,8 +412,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     value_cache,
                     updated_slot_mapping.flatten(),  # type: ignore[union-attr]
                     kv_cache_dtype,
-                    k_scale,
-                    v_scale,
+                    layer._k_scale,
+                    layer._v_scale,
                 )
         else :
             return output
