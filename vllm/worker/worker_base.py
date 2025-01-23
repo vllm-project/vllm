@@ -8,7 +8,7 @@ import cloudpickle
 import torch
 import torch.nn as nn
 
-from vllm.config import ObservabilityConfig, VllmConfig
+from vllm.config import ObservabilityConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -546,8 +546,10 @@ class WorkerWrapperBase:
                               bytes)
             worker_class = cloudpickle.loads(
                 self.vllm_config.parallel_config.worker_cls)
-        self.worker = worker_class(**kwargs)
-        assert self.worker is not None
+        with set_current_vllm_config(self.vllm_config):
+            # To make vLLM config available during worker initialization
+            self.worker = worker_class(**kwargs)
+            assert self.worker is not None
 
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         try:

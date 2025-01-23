@@ -22,7 +22,6 @@ except ImportError:
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 import torch
-from torch import nn
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -36,6 +35,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            is_block_tables_empty)
 from vllm.attention.layer import Attention
 from vllm.attention.ops.paged_attn import PagedAttention
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
 
@@ -105,68 +105,69 @@ class FlashInferBackend(AttentionBackend):
 
 
 @dataclass
-class GlobalHyperparameters:
-    '''
+class PerLayerParameters:
+    """
     Currently, FlashInfer backend only support models in which all layers share
     the same values for the following hyperparameters.
-    '''
+    """
+
     window_left: int
     logits_soft_cap: Optional[float]
     sm_scale: float
 
 
-def infer_global_hyperparameters(model: nn.Module) -> GlobalHyperparameters:
+def get_per_layer_parameters(
+        vllm_config: VllmConfig) -> Dict[str, PerLayerParameters]:
     """
-    Scan all attention layers in the model and determine some hyperparameters
+    Scan all attention layers and determine some hyperparameters
     to use during `plan`.
+    """
 
+    layers = vllm_config.compilation_config.static_forward_context
+    per_layer_params: Dict[str, PerLayerParameters] = {}
+
+    for key, layer in layers.items():
+        assert isinstance(layer, Attention)
+
+        impl = layer.impl
+        assert isinstance(impl, FlashInferImpl)
+
+        # Infer hyperparameters from the attention layer
+        window_size = impl.sliding_window
+        window_left = window_size[0] if window_size is not None else -1
+        logits_soft_cap = impl.logits_soft_cap
+        sm_scale = impl.scale
+
+        per_layer_params[key] = PerLayerParameters(window_left,
+                                                   logits_soft_cap, sm_scale)
+
+    return per_layer_params
+
+
+def infer_global_hyperparameters(
+        per_layer_params: Dict[str, PerLayerParameters]) -> PerLayerParameters:
+    """
     Currently, FlashInfer backend only support models in which all layers share
     the same values for the following hyperparameters:
     - `window_left`
     - `logits_soft_cap`
     - `sm_scale`
+
+    So this function asserts that all layers share the same values for these
+    hyperparameters and returns the global values.
     """
 
-    if getattr(model, "global_hyperparameters", None) is not None:
-        return model.global_hyperparameters
+    assert len(per_layer_params) > 0, "No attention layers found in the model."
 
-    params_inferred = False
-    global_window_left: Optional[int] = None
-    global_logits_soft_cap: Optional[float] = None
-    global_sm_scale: Optional[float] = None
+    param_sets = list(per_layer_params.values())
+    global_params = param_sets[0]
+    for params in param_sets:
+        assert params == global_params, (
+            "FlashInfer backend currently only supports models in which all"
+            "layers share the same values for the following hyperparameters:"
+            "`window_left`, `logits_soft_cap`, `sm_scale`.")
 
-    for module in model.modules():
-        if isinstance(module, Attention):
-            impl = module.impl
-            assert isinstance(impl, FlashInferImpl)
-
-            # Infer hyperparameters from the attention layer
-            window_size = impl.sliding_window
-            window_left = window_size[0] if window_size is not None else -1
-            logits_soft_cap = impl.logits_soft_cap
-            sm_scale = impl.scale
-
-            if params_inferred:
-                MSG_PREFIX = "All attention layers must share the same "
-                if global_window_left != window_left:
-                    raise ValueError(MSG_PREFIX + "`window_left`.")
-                if global_logits_soft_cap != logits_soft_cap:
-                    raise ValueError(MSG_PREFIX + "`logits_soft_cap`.")
-                if global_sm_scale != sm_scale:
-                    raise ValueError(MSG_PREFIX + "`sm_scale`.")
-
-            params_inferred = True
-            global_window_left = window_left
-            global_logits_soft_cap = logits_soft_cap
-            global_sm_scale = sm_scale
-
-    assert params_inferred
-    assert global_window_left is not None
-    assert global_sm_scale is not None
-
-    model.global_hyperparameters = GlobalHyperparameters(
-        global_window_left, global_logits_soft_cap, global_sm_scale)
-    return model.global_hyperparameters
+    return global_params
 
 
 class FlashInferState(AttentionState):
@@ -177,6 +178,9 @@ class FlashInferState(AttentionState):
         self._workspace_buffer = None
         self._decode_wrapper = None
         self._prefill_wrapper = None
+
+        # Global hyperparameters shared by all attention layers
+        self.global_hyperparameters: Optional[PerLayerParameters] = None
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
@@ -285,7 +289,8 @@ class FlashInferState(AttentionState):
                                             batch_size + 1,
                                             dtype=torch.int32)
 
-        global_params = infer_global_hyperparameters(self.runner.model)
+        global_params = infer_global_hyperparameters(
+            get_per_layer_parameters(get_current_vllm_config()))
 
         attn_metadata = self.runner.attn_backend.make_metadata(
             num_prefills=0,
@@ -597,7 +602,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.sliding_window = input_builder.sliding_window
         self.block_size = input_builder.block_size
 
-        self.global_hyperparameters: Optional[GlobalHyperparameters] = None
+        # Global hyperparameters shared by all attention layers
+        self.global_hyperparameters: Optional[PerLayerParameters] = None
+
+        self.vllm_config = get_current_vllm_config()
 
     def prepare(self):
         self.slot_mapping: List[int] = []
@@ -638,8 +646,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # - `window_left`
             # - `logits_soft_cap`
             # - `sm_scale`
-            model = self.runner.model
-            inferred_params = infer_global_hyperparameters(model)
+            inferred_params = infer_global_hyperparameters(
+                get_per_layer_parameters(self.vllm_config))
             self.global_hyperparameters = inferred_params
             self.window_left = inferred_params.window_left
             self.logits_soft_cap = inferred_params.logits_soft_cap
