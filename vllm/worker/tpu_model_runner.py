@@ -65,8 +65,7 @@ class ModelInputForTPU(ModelRunnerInputBase):
     num_samples: int
     n: List[int]
     seq_groups: List[List[int]]
-    lora_mapping: Optional["LoRAMapping"] = None
-    lora_requests: Optional[Set[LoRARequest]] = None
+    lora_inputs: List[Tuple[Set[LoRARequest], LoRAMapping]]
     is_first_multi_step: bool = True
     is_last_step: bool = True
     virtual_engine: int = 0
@@ -77,8 +76,7 @@ class ModelInputForTPU(ModelRunnerInputBase):
         tensor_dict = {
             "token_ids": self.token_ids,
             "position_ids": self.position_ids,
-            "lora_requests": self.lora_requests,
-            "lora_mapping": self.lora_mapping,
+            "lora_inputs": self.lora_inputs,
             "input_lens": self.input_lens,
             "t": self.t,
             "p": self.p,
@@ -641,8 +639,81 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             list(metadata.seq_data.keys())
             for metadata in seq_group_metadata_list
         ]
-        return ModelInputForTPU(input_tokens, input_positions, attn_metadata,
-                                input_lens, t, p, num_samples, n, seq_groups)
+        
+        lora_inputs = []
+        if self.load_config is not None:
+            lora_inputs = self._prepare_lora_input(seq_group_metadata_list, is_prompt, padded_batch_size)
+        
+        return ModelInputForTPU(
+            token_ids=input_tokens,
+            position_ids=input_positions,
+            attn_metadata=attn_metadata,
+            input_lens=input_lens,
+            t=t,
+            p=p,
+            num_samples=num_samples,
+            n=n,
+            seq_groups=seq_groups,
+            lora_inputs=lora_inputs
+        )
+        
+    def _prepare_lora_input(
+            self, seq_group_metadata_list: List[SequenceGroupMetadata],
+            is_prefill: bool,
+            padded_batch_size: int) -> List[Tuple[Set[LoRARequest], LoRAMapping]]:
+        """
+        Prepares a list of LoRA inputs. If we're decoding then the list will only have 1 item,
+        otherwise there'll be an item for each sequence
+        """
+        
+        lora_input = []
+        if is_prefill:
+            for seq in seq_group_metadata_list:
+                lora_id = seq.lora_int_id
+                query_len = seq.token_chunk_size
+                padded_query_len = _get_padded_prefill_len(query_len)
+                
+                index_mapping = [lora_id] * padded_query_len
+                prompt_mapping = [lora_id]
+                
+                lora_request = set()
+                if seq.lora_request is not None:
+                    lora_request.add(seq.lora_request)
+                
+                lora_input.append((
+                    lora_request, 
+                    LoRAMapping(
+                        index_mapping=tuple(index_mapping),
+                        prompt_mapping=tuple(prompt_mapping),
+                        is_prefill=True
+                    )
+                ))
+        else:
+            lora_request = set()
+            index_mapping = []
+            prompt_mapping = []
+            for seq in seq_group_metadata_list:
+                lora_id = seq.lora_int_id
+
+                index_mapping += [lora_id]
+                prompt_mapping += [lora_id]
+                    
+                if seq.lora_request is not None:
+                    lora_request.add(seq.lora_request)
+                    
+            index_mapping += [0] * (padded_batch_size - len(seq_group_metadata_list))
+            prompt_mapping += [0] * (padded_batch_size - len(seq_group_metadata_list))
+            
+            lora_input.append((
+                lora_request, 
+                LoRAMapping(
+                    index_mapping=tuple(index_mapping),
+                    prompt_mapping=tuple(prompt_mapping),
+                    is_prefill=False
+                )
+            ))
+                
+        return lora_input
 
     def make_model_input_from_broadcasted_tensor_dict(
             self, tensor_dict: Dict[str, Any]) -> ModelInputForTPU:
@@ -659,12 +730,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         num_steps: int = 1,
     ) -> List[SamplerOutput]:
         assert intermediate_tensors is None
-        
-        if self.lora_config:
-            assert model_input.lora_requests is not None
-            assert model_input.lora_mapping is not None
-            self.set_active_loras(model_input.lora_requests,
-                                  model_input.lora_mapping)
         
         if not model_input.is_first_multi_step:
             if not model_input.is_last_step:
@@ -741,6 +806,12 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 input_lens = model_input.input_lens[i:i + 1].to(self.device)
                 t = model_input.t[i:i + 1].to(self.device)
                 p = model_input.p[i:i + 1].to(self.device)
+                
+                if self.lora_config is not None:
+                    assert len(model_input.lora_inputs) == batch_size
+                    lora_requests, lora_mapping = model_input.lora_inputs[i]
+                    self.set_active_loras(lora_requests, lora_mapping)
+                
                 with set_forward_context(model_input.attn_metadata,
                                          self.vllm_config,
                                          model_input.virtual_engine):
@@ -790,6 +861,12 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             t = model_input.t.to(self.device)
             p = model_input.p.to(self.device)
             input_lens = model_input.input_lens.to(self.device)
+            
+            if self.lora_config is not None:
+                assert len(model_input.lora_inputs) == 1
+                lora_requests, lora_mapping = model_input.lora_inputs[0]
+                self.set_active_loras(lora_requests, lora_mapping)
+            
             for i in range(num_steps):
                 slot_mapping = attn_metadata.slot_mapping
                 with set_forward_context(model_input.attn_metadata,
