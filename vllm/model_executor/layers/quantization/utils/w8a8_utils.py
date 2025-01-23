@@ -13,6 +13,7 @@ if current_platform.is_hpu():
     from vllm_hpu_extension.ops import scaled_fp8_quant
     ops.scaled_fp8_quant = scaled_fp8_quant
 
+
 def sparse_cutlass_supported() -> bool:
     if not current_platform.is_cuda():
         return False
