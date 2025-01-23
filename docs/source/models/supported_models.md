@@ -772,17 +772,6 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
-````{note}
-The `deepseek-ai/deepseek-vl2-tiny` is not supported yet.
-
-To use `DeepSeek-VL2` series models, you need to install a fork version `deepseek_vl2` package:
-```shell
-pip install git+https://github.com/Isotr0py/DeepSeek-VL2.git
-```
-
-Besides, to run `DeepSeek-VL2` series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
-````
-
 ```{note}
 To use `DeepSeek-VL2` series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
 ```

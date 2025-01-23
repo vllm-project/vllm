@@ -1,9 +1,7 @@
 from unittest.mock import patch
 
 import pytest
-from packaging.version import Version
 from transformers import PretrainedConfig
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm import LLM
 

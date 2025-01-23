@@ -1254,14 +1254,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         finally:
             self.in_profile_run = False
 
-    @contextmanager
-    def set_in_profile_run(self):
-        self.in_profile_run = True
-        try:
-            yield
-        finally:
-            self.in_profile_run = False
-
     @torch.inference_mode()
     def profile_run(self) -> None:
         with self.set_in_profile_run():

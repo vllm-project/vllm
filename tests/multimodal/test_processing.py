@@ -16,6 +16,7 @@ from vllm.multimodal.processing import (PlaceholderFeaturesInfo,
                                         iter_token_matches,
                                         replace_text_matches,
                                         replace_token_matches)
+# yapf: enable
 from vllm.multimodal.profiling import MultiModalProfiler
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -451,14 +452,6 @@ def test_find_replace_tokens(
                         tokens=[32000],
                     ),
                 ],
-                "pattern_4": [
-                    PlaceholderInfo(
-                        modality="pattern_4",
-                        item_idx=0,
-                        start_idx=3,
-                        replacement=[32000],
-                    ),
-                ],
             }
 
         ),
@@ -513,14 +506,6 @@ def test_find_replace_tokens(
                         item_idx=0,
                         start_idx=5,
                         tokens=[32000],
-                    ),
-                ],
-                "pattern_4": [
-                    PlaceholderInfo(
-                        modality="pattern_4",
-                        item_idx=0,
-                        start_idx=5,
-                        replacement=[32000],
                     ),
                 ],
                 "pattern_3": [

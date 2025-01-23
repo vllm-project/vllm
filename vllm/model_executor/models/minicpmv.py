@@ -52,7 +52,7 @@ from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputsV2, PlaceholderRange)
+                                    MultiModalInputs, PlaceholderRange)
 from vllm.multimodal.parse import (ImageItem, ImageSize, ModalityData,
                                    ModalityDataItems, MultiModalDataItems,
                                    MultiModalDataParser, VideoItem)
@@ -927,7 +927,7 @@ class MiniCPMVMultiModalProcessor(
         prompt: Union[str, List[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> MultiModalInputsV2:
+    ) -> MultiModalInputs:
         result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
 
         # Exclude <image_id>x</image_id> from placeholders
