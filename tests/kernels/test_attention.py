@@ -217,7 +217,7 @@ def test_paged_attention(
     elif version in ("v2", "rocm"):
         if current_platform.is_rocm():
             PARTITION_SIZE = PARTITION_SIZE_ROCM
-        num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)        
+        num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
         assert PARTITION_SIZE % block_size == 0
         num_seqs, num_heads, head_size = output.shape
         tmp_output = torch.empty(
