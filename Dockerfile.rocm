@@ -104,6 +104,9 @@ ENV TOKENIZERS_PARALLELISM=false
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
 
+# Enable Aiter. Make sure this only exists on the aiter branch.
+ENV VLLM_USE_AITER=1
+
 # install development dependencies (for testing)
 RUN cd ${COMMON_WORKDIR}/vllm \
     && python3 -m pip install -e tests/vllm_test_utils
