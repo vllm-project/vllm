@@ -196,6 +196,7 @@ class EngineArgs:
     kv_transfer_config: Optional[KVTransferConfig] = None
 
     generation_config: Optional[str] = None
+    override_generation_config: Optional[Dict[str, Any]] = None
     enable_sleep_mode: bool = False
 
     calculate_kv_scales: Optional[bool] = None
@@ -945,6 +946,13 @@ class EngineArgs:
             "If set to 'auto', the generation config will be automatically "
             "loaded from model. If set to a folder path, the generation config "
             "will be loaded from the specified folder path.")
+        parser.add_argument(
+            "--override-generation-config",
+            type=json.loads,
+            default=None,
+            help="Override or set generation config. "
+            "Defaults to None, will use for the default generation config. "
+            "e.g. ``{\"temperature\": 0.5, \"top_k\": 50}``.")
 
         parser.add_argument("--enable-sleep-mode",
                             action="store_true",
@@ -1005,6 +1013,7 @@ class EngineArgs:
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,
+            override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
         )
 
