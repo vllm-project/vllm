@@ -30,6 +30,8 @@ from collections import OrderedDict, UserDict, defaultdict
 from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache, partial, wraps
+from random import choices
+from string import ascii_letters, digits
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     Dict, Generator, Generic, Iterator, List, Literal,
                     NamedTuple, Optional, Tuple, Type, TypeVar, Union,
@@ -51,9 +53,6 @@ from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
-
-from random import choices
-from string import ascii_letters, digits
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
