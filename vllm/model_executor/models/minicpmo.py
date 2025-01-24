@@ -466,9 +466,9 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
 
     def forward(
         self,
-        input_features,
-        attention_mask=None,
-    ):
+        input_features: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> BaseModelOutputWithPast:
         # Ignore copy
         input_features = input_features.to(dtype=self.conv1.weight.dtype,
                                            device=self.conv1.weight.device)
