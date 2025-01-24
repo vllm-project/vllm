@@ -15,7 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
@@ -213,6 +213,14 @@ class AsyncLLM(EngineClient):
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
                 out = q.get_nowait() if not q.empty() else await q.get()
+
+                # Coalesce any additional queued outputs
+                while not q.empty():
+                    next_out = q.get_nowait()
+                    if sampling_params.output_kind == RequestOutputKind.DELTA:
+                        out.add(next_out)
+                    else:
+                        out = next_out
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
