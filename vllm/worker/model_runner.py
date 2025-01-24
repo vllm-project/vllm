@@ -3,7 +3,6 @@ import gc
 import inspect
 import itertools
 import time
-import warnings
 import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -41,7 +40,6 @@ from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
                              MultiModalRegistry)
-from vllm.platforms import current_platform
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
@@ -1151,34 +1149,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.prompt_adapter_manager.create_prompt_adapter_manager(
                     self.model))
 
-        if self.kv_cache_dtype == "fp8" and (current_platform.is_rocm()
-                                             or current_platform.is_cuda()):
-            # Currently only ROCm accepts kv-cache scaling factors
-            # via quantization_param_path and this will be deprecated
-            # in the future.
-            if self.model_config.quantization_param_path is not None:
-                if callable(getattr(self.model, "load_kv_cache_scales", None)):
-                    warnings.warn(
-                        "Loading kv cache scaling factor from JSON is "
-                        "deprecated and will be removed. Please include "
-                        "kv cache scaling factors in the model checkpoint.",
-                        FutureWarning,
-                        stacklevel=2)
-                    self.model.load_kv_cache_scales(
-                        self.model_config.quantization_param_path)
-                    logger.info("Loaded KV cache scaling factors from %s",
-                                self.model_config.quantization_param_path)
-                else:
-                    raise RuntimeError(
-                        "Using FP8 KV cache and scaling factors provided but "
-                        "model %s does not support loading scaling factors.",
-                        self.model.__class__)
-            else:
-                logger.warning(
-                    "Using FP8 KV cache but no scaling factors "
-                    "provided. Defaulting to scaling factors of 1.0. "
-                    "This may lead to less accurate results!")
-
         if self.vllm_config.compilation_config.level ==\
             CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
             backend = self.vllm_config.compilation_config.init_backend(
@@ -1256,13 +1226,19 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
+        max_num_batched_tokens = \
+            self.scheduler_config.max_num_batched_tokens
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        self._dummy_run(max_num_batched_tokens, max_num_seqs)
+
+    def _dummy_run(self,
+                   max_num_batched_tokens: int,
+                   max_num_seqs: int = 1) -> None:
         with self.set_in_profile_run():
             # Enable top-k sampling to reflect the accurate memory usage.
             sampling_params = \
                 SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
-            max_num_batched_tokens = \
-                self.scheduler_config.max_num_batched_tokens
-            max_num_seqs = self.scheduler_config.max_num_seqs
+
             # This represents the maximum number of different requests
             # that will have unique loras, an therefore the max amount of memory
             # consumption create dummy lora request copies from the lora request
@@ -1359,6 +1335,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     batch_size=batch_size,
                     dtype=self.model_config.dtype,
                     device=self.device)
+
+            # Disable KV Scale Calculation for dummy data during profile run
+            if model_input.attn_metadata is not None:
+                model_input.attn_metadata.enable_kv_scales_calculation = False
 
             self.execute_model(model_input, kv_caches, intermediate_tensors)
             torch.cuda.synchronize()
@@ -1491,19 +1471,21 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             for virtual_engine in range(
                     self.parallel_config.pipeline_parallel_size):
                 # Only rank 0 should print progress bar during capture
-                capture_sizes = (
-                    tqdm(
-                        self.vllm_config.compilation_config.capture_sizes,
-                        desc="Capturing CUDA graph shapes",
-                    ) if get_tensor_model_parallel_rank() == 0 else
-                    self.vllm_config.compilation_config.capture_sizes)
-                for batch_size in capture_sizes:
+                cudagraph_capture_sizes = (tqdm(
+                    self.vllm_config.compilation_config.
+                    cudagraph_capture_sizes,
+                    desc="Capturing CUDA graph shapes",
+                ) if get_tensor_model_parallel_rank() == 0 else
+                                           self.vllm_config.compilation_config.
+                                           cudagraph_capture_sizes)
+                for batch_size in cudagraph_capture_sizes:
                     attn_metadata = (
                         self.attn_state.graph_capture_get_metadata_for_batch(
                             batch_size,
                             is_encoder_decoder_model=self.model_config.
                             is_encoder_decoder))
-
+                    # Disable KV Scale Calculation for graph capture
+                    attn_metadata.enable_kv_scales_calculation = False
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
                             **dict(index_mapping=[0] * batch_size,
