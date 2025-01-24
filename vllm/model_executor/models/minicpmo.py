@@ -27,7 +27,6 @@ from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
 import torch
 import torch.types
 from torch import nn
-from transformers.cache_utils import DynamicCache, EncoderDecoderCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.whisper.modeling_whisper import (
     ACT2FN, WHISPER_ATTENTION_CLASSES, WhisperConfig, WhisperEncoder)
@@ -488,7 +487,7 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
                                               p=self.dropout,
                                               training=self.training)
 
-        encoder_states = () 
+        encoder_states = ()
 
         for idx, encoder_layer in enumerate(self.layers):
             encoder_states = encoder_states + (hidden_states, )
@@ -637,8 +636,7 @@ class MiniCPMO(MiniCPMV2_6):
 
             audio_attention_mask[audio_attention_mask_] = float("-inf")
             audio_states = self.apm(
-                wavforms,
-                attention_mask=audio_attention_mask).hidden_states[
+                wavforms, attention_mask=audio_attention_mask).hidden_states[
                     self.audio_encoder_layer]
             audio_embeds = self.audio_projection_layer(audio_states)
 
