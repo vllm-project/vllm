@@ -7,7 +7,7 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import is_navi
-import ater
+import aiter
 
 if HAS_TRITON:
     from vllm.attention.ops.prefix_prefill import context_attention_fwd
@@ -86,7 +86,7 @@ class PagedAttention:
         kvCacheDtype = dtypeDict[kv_cache_dtype]
         if key_cache.dtype.itemsize == 1:
             # print('reshape_and_cache_with_pertoken_quant')
-            ater.reshape_and_cache_with_pertoken_quant(
+            aiter.reshape_and_cache_with_pertoken_quant(
                 key,
                 value,
                 key_cache.view(kvCacheDtype),
@@ -97,7 +97,7 @@ class PagedAttention:
                 True
             )
         else:
-            ater.reshape_and_cache(
+            aiter.reshape_and_cache(
                 key,
                 value,
                 key_cache,
@@ -153,7 +153,7 @@ class PagedAttention:
         max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
         if kv_cache_dtype not in ['int8', 'fp8', 'fp8', 'fp8_e5m2', 'fp8_e4m3']:
             k_scale, v_scale = (None, None)
-        return ater.pa_fwd_asm(query, key_cache, value_cache, block_tables, seq_lens, max_num_blocks_per_seq, k_scale, v_scale)
+        return aiter.pa_fwd_asm(query, key_cache, value_cache, block_tables, seq_lens, max_num_blocks_per_seq, k_scale, v_scale)
 
     @staticmethod
     def forward_prefix(

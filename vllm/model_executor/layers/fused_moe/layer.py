@@ -17,9 +17,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
-from aiter.fused_moe_bf16_asm import asm_moe
-from aiter.ops.shuffle import shuffle_weight
-
 if current_platform.is_cuda_alike():
     from .fused_moe import fused_experts
 else:
@@ -167,19 +164,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        # return fused_experts(hidden_states=x,
-        #                      w1=layer.w13_weight,
-        #                      w2=layer.w2_weight,
-        #                      topk_weights=topk_weights,
-        #                      topk_ids=topk_ids,
-        #                      inplace=True)
+        return fused_experts(hidden_states=x,
+                             w1=layer.w13_weight,
+                             w2=layer.w2_weight,
+                             topk_weights=topk_weights,
+                             topk_ids=topk_ids,
+                             inplace=True)
         
-        return asm_moe(hidden_states=x,
-                         w1=layer.w13_weight,
-                         w2=layer.w2_weight,
-                         topk_weight=topk_weights,
-                         topk_ids=topk_ids)
-
     def forward_cpu(
         self,
         layer: torch.nn.Module,

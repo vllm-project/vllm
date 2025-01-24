@@ -31,8 +31,9 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import is_navi
 
-from aiter.fused_moe_bf16_asm import asm_moe
-from aiter.ops.shuffle import shuffle_weight
+if envs.VLLM_USE_AITER:
+    from aiter.fused_moe_bf16_asm import asm_moe
+    from aiter.ops.shuffle import shuffle_weight
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -649,14 +650,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
 
-            max_w13_scales = max_w13_scales.unsqueeze(-1).unsqueeze(-1).expand((-1, layer.w13_weight.shape[1], -1))
-            w2_scales = layer.w2_weight_scale.data.unsqueeze(-1).unsqueeze(-1).expand((-1, layer.w2_weight.shape[1], -1))
+            if envs.VLLM_USE_AITER:
+                max_w13_scales = max_w13_scales.unsqueeze(-1).unsqueeze(-1).expand((-1, layer.w13_weight.shape[1], -1))
+                w2_scales = layer.w2_weight_scale.data.unsqueeze(-1).unsqueeze(-1).expand((-1, layer.w2_weight.shape[1], -1))
+                layer.w2_weight_scale = torch.nn.Parameter(w2_scales.contiguous(),
+                                                            requires_grad=False)
+                layer.w13_weight = torch.nn.Parameter(shuffle_weight(layer.w13_weight), requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffle_weight(layer.w2_weight), requires_grad=False)
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales.contiguous(),
                                                         requires_grad=False)
-            layer.w2_weight_scale = torch.nn.Parameter(w2_scales.contiguous(),
-                                                        requires_grad=False)
-            layer.w13_weight = torch.nn.Parameter(shuffle_weight(layer.w13_weight), requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(shuffle_weight(layer.w2_weight), requires_grad=False)
             return
 
     def apply(
@@ -688,34 +690,34 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        # return fused_experts(
-        #     x,
-        #     layer.w13_weight,
-        #     layer.w2_weight,
-        #     topk_weights=topk_weights,
-        #     topk_ids=topk_ids,
-        #     inplace=True,
-        #     use_fp8_w8a8=True,
-        #     w1_scale=(layer.w13_weight_scale_inv
-        #               if self.block_quant else layer.w13_weight_scale),
-        #     w2_scale=(layer.w2_weight_scale_inv
-        #               if self.block_quant else layer.w2_weight_scale),
-        #     a1_scale=layer.w13_input_scale,
-        #     a2_scale=layer.w2_input_scale,
-        #     block_shape=self.quant_config.weight_block_size,
-        # )
-        # print(x.dtype) 
-        # print(x.shape, layer.w13_weight.shape, layer.w2_weight.shape, topk_weights.shape, topk_ids.shape, layer.w13_weight_scale.shape, layer.w2_weight_scale.shape)
-        return asm_moe(hidden_states=x, 
-                       w1=layer.w13_weight,
-                       w2=layer.w2_weight,
-                       topk_weight=topk_weights,
-                       topk_ids=topk_ids,
-                       fc1_scale=layer.w13_weight_scale,
-                       fc2_scale=layer.w2_weight_scale,
-                       fc1_smooth_scale=None,
-                       fc2_smooth_scale=None,
-                       a16=False)
+        if envs.VLLM_USE_AITER:
+            return asm_moe(hidden_states=x, 
+                           w1=layer.w13_weight,
+                           w2=layer.w2_weight,
+                           topk_weight=topk_weights,
+                           topk_ids=topk_ids,
+                           fc1_scale=layer.w13_weight_scale,
+                           fc2_scale=layer.w2_weight_scale,
+                           fc1_smooth_scale=None,
+                           fc2_smooth_scale=None,
+                           a16=False)
+
+        return fused_experts(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            inplace=True,
+            use_fp8_w8a8=True,
+            w1_scale=(layer.w13_weight_scale_inv
+                      if self.block_quant else layer.w13_weight_scale),
+            w2_scale=(layer.w2_weight_scale_inv
+                      if self.block_quant else layer.w2_weight_scale),
+            a1_scale=layer.w13_input_scale,
+            a2_scale=layer.w2_input_scale,
+            block_shape=self.quant_config.weight_block_size,
+        )
         
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
