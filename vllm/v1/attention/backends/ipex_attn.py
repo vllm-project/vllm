@@ -152,7 +152,7 @@ class IPEXAttentionImpl(AttentionImpl):
             value_cache,
             output[:num_actual_tokens],
             attn_metadata.query_start_loc,
-            attn_metadata.seq_lens,
+            attn_metadata.seq_start_loc,
             None,
             attn_metadata.block_table,
             self.alibi_slopes,
