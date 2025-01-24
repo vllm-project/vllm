@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
@@ -8,6 +9,9 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 
+@dataclass
+class IPEXAttentionMetadata(FlashAttentionMetadata):
+    seq_start_loc: torch.Tensor = torch.tensor([0], dtype=torch.int64)
 
 class IPEXAttentionBackend(AttentionBackend):
 
@@ -27,7 +31,7 @@ class IPEXAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
-        return FlashAttentionMetadata
+        return IPEXAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
