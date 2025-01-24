@@ -399,7 +399,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             # FIXME(tlrmchlsmth): layers using W16A16 CUTLASS 2:4 sparse kernels
             # currently produce bad output in some cases
             if weight_quant is None:
-                logger.warning(
+                logger.warning_once(
                     "CompressedTensors24 scheme is disabled for the w16a16 "
                     "case. Falling back to UnquantizedLinearMethod")
                 return None
