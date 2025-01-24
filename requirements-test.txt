@@ -573,7 +573,10 @@ torch==2.5.1
     #   sentence-transformers
     #   tensorizer
     #   timm
+    #   torchaudio
     #   torchvision
+torchaudio==2.5.1
+    # via -r requirements-test.in
 torchvision==0.20.1
     # via timm
 tqdm==4.66.6
@@ -584,6 +587,7 @@ tqdm==4.66.6
     #   lm-eval
     #   nltk
     #   peft
+    #   pqdm
     #   sentence-transformers
     #   tqdm-multiprocess
     #   transformers
@@ -615,6 +619,7 @@ typing-extensions==4.12.2
     #   huggingface-hub
     #   librosa
     #   mistral-common
+    #   pqdm
     #   pydantic
     #   pydantic-core
     #   torch
