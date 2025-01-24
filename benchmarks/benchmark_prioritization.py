@@ -13,6 +13,11 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 
+#Select a equi-probable random priority
+def get_random_flag():
+    return 0 if random.random() < 0.5 else 1
+
+
 def sample_requests(
     dataset_path: str,
     num_requests: int,
@@ -55,8 +60,7 @@ def sample_requests(
             # Prune too long sequences.
             continue
 
-        #Select a equi-probable random priority
-        priority = 0 if random.random() < 0.5 else 1
+        priority = get_random_flag()
 
         filtered_dataset.append((prompt, prompt_len, output_len, priority))
 
@@ -109,8 +113,8 @@ def main(args: argparse.Namespace):
     if args.dataset is None:
         # Synthesize a prompt with the given input length.
         prompt = "hi" * (args.input_len - 1)
-        requests = [(prompt, args.input_len, args.output_len)
-                    for _ in range(args.num_prompts)]
+        requests = [(prompt, args.input_len, args.output_len,
+                     get_random_flag()) for _ in range(args.num_prompts)]
     else:
         requests = sample_requests(args.dataset, args.num_prompts, tokenizer,
                                    args.output_len)
