@@ -1279,11 +1279,22 @@ class EngineArgs:
         self.enable_chunked_prefill = True
         # When no user override, set the default values based on the usage
         # context.
-        # TODO(woosuk): Tune the default values for different hardware.
-        default_max_num_batched_tokens = {
-            UsageContext.LLM_CLASS: 8192,
-            UsageContext.OPENAI_API_SERVER: 2048,
-        }
+        # Use different default values for different hardware.
+        from vllm.platforms import current_platform
+        device_name = current_platform.get_device_name().lower()
+        if "h100" in device_name or "h200" in device_name:
+            # For H100 and H200, we use larger default values.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 8192,
+            }
+        else:
+            # TODO(woosuk): Tune the default values for other hardware.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 8192,
+                UsageContext.OPENAI_API_SERVER: 2048,
+            }
+
         if (self.max_num_batched_tokens is None
                 and usage_context in default_max_num_batched_tokens):
             self.max_num_batched_tokens = default_max_num_batched_tokens[
