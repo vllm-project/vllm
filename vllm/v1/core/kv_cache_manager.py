@@ -164,15 +164,10 @@ class KVCacheManager:
         num_computed_full_blocks = (request.num_computed_tokens //
                                     self.block_size)
 
-        # NOTE(rickyx): We are assuming the `num_tokens` are actual
-        # tokens rather than lookahead slots (e.g. for speculative decoding).
-        # TODO(rickyx): When supporting speculative decoding, we will need to
-        # differentiate between them so that we can know how many blocks are
-        # full after appending the actual tokens.
-
-        # Does not include speculative tokens.
-        # FIXME: The logic is not correct because
-        #         we never count speculative tokens that are accepted.
+        # When calculating new full blocks, we exclude speculative tokens.
+        # We only cache blocks where token_ids are valid. KV cache of
+        # speculative tokens will be valid once these tokens are accepted
+        # (tracked by num_computed_tokens).
         num_cached_tokens = request.num_computed_tokens + num_tokens - len(
             request.spec_token_ids)
         num_full_blocks_after_append = num_cached_tokens // self.block_size

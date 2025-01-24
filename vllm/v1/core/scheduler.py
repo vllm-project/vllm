@@ -435,11 +435,6 @@ class Scheduler:
             request.num_computed_tokens += num_scheduled_tokens[req_id] - (
                 len(request.spec_token_ids) + 1 - len(token_ids))
 
-            # When the request's num_computed_tokens catches up its num_tokens,
-            # the request generates output tokens. Otherwise, we ignore the
-            # sampler output for the request.
-            assert request.num_computed_tokens <= request.num_tokens
-
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
             for input_id in list(cached_encoder_input_ids):
@@ -455,6 +450,7 @@ class Scheduler:
                 request.append_output_token_ids(token_ids)
                 num_new_tokens = len(token_ids)
                 # TODO: Update the KV cache manager for prefix caching.
+                # self.kv_cache_manager.uncache_blocks(request)
 
                 # Check for stop and update request state.
                 # This must be called before me make the EngineCoreOutput.

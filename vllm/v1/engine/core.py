@@ -25,6 +25,7 @@ from vllm.v1.engine.mm_input_mapper import MMInputMapperServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -66,6 +67,12 @@ class EngineCore:
 
         self.mm_input_mapper_server = MMInputMapperServer(
             vllm_config.model_config)
+
+        # TODO: find a better way to check if we are using ngram.
+        if self.scheduler.speculative_config:
+            assert self.scheduler.speculative_config.ngram_prompt_lookup_min \
+                    , "Only ngram spec decode is supported in V1."
+            self.proposer = NgramProposer()
 
     def _initialize_kv_caches(self,
                               vllm_config: VllmConfig) -> Tuple[int, int]:
@@ -120,16 +127,22 @@ class EngineCore:
 
     def propose_tokens(self):
         assert self.scheduler.speculative_config is not None
-        # Append tokens to requests directly
-        # to mimic ngram proposal.
-        # Only change requests in the decoding phase.
-        # We don't handle spec decode kv cache for now.
         for req in self.scheduler.running:
             # Ignore requests that are doing chunked prefill.
-            if req.num_computed_tokens >= req.num_tokens:
-                req.append_spec_token_ids(
-                    [1] *
-                    self.scheduler.speculative_config.num_speculative_tokens)
+            if req.num_computed_tokens < req.num_tokens - 1:
+                print("**", req.num_computed_tokens, req.num_tokens)
+                continue
+            # Ignore requests that already have spec tokens.
+            if len(req.spec_token_ids) > 0:
+                continue
+            spec_tokens = self.proposer.propose(
+                req.all_token_ids,
+                self.scheduler.speculative_config.ngram_prompt_lookup_min,
+                self.scheduler.speculative_config.num_speculative_tokens,
+            )
+            print(f"Proposed tokens: {spec_tokens}")
+            if spec_tokens:
+                req.append_spec_token_ids(spec_tokens)
 
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
