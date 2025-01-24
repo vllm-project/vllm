@@ -243,8 +243,8 @@ class ModelConfig:
         logits_processor_pattern: Optional[str] = None,
         generation_config: Optional[str] = None,
         enable_sleep_mode: bool = False,
-        model_impl: Union[str, ModelImpl] = ModelImpl.AUTO) -> None:
-    ) -> None:
+        model_impl: Union[str, ModelImpl] = ModelImpl.AUTO
+        ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
