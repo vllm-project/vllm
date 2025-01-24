@@ -5,6 +5,7 @@ from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from unittest.mock import patch
 
+import torch
 import torch.fx as fx
 
 from vllm.config import VllmConfig
@@ -185,13 +186,28 @@ class Inductor25Adaptor(CompilerInterface):
         hash_str, file_path = None, None
         from torch._inductor.codecache import (FxGraphCache,
                                                compiled_fx_graph_hash)
-        original_load = FxGraphCache.load
 
-        def hijack_load(*args, **kwargs):
-            inductor_compiled_graph = original_load(*args, **kwargs)
-            nonlocal file_path
-            file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
-            return inductor_compiled_graph
+        if torch.__version__.startswith("2.5"):
+            original_load = FxGraphCache.load
+            original_load_name = "torch._inductor.codecache.FxGraphCache.load"
+
+            def hijack_load(*args, **kwargs):
+                inductor_compiled_graph = original_load(*args, **kwargs)
+                nonlocal file_path
+                file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
+                return inductor_compiled_graph
+        elif torch.__version__.startswith("2.6"):
+            # function renamed in 2.6
+            original_load = FxGraphCache.load_with_key
+            original_load_name = ("torch._inductor.codecache"
+                                  ".FxGraphCache.load_with_key")
+
+            def hijack_load(*args, **kwargs):
+                # it returns a tuple, we only need the first element
+                inductor_compiled_graph, _ = original_load(*args, **kwargs)
+                nonlocal file_path
+                file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
+                return inductor_compiled_graph, _
 
         def hijack_compiled_fx_graph_hash(*args, **kwargs):
             out = compiled_fx_graph_hash(*args, **kwargs)
@@ -213,9 +229,7 @@ class Inductor25Adaptor(CompilerInterface):
 
         with ExitStack() as stack:
             # hijack to get the compiled graph itself
-            stack.enter_context(
-                patch("torch._inductor.codecache.FxGraphCache.load",
-                      hijack_load))
+            stack.enter_context(patch(original_load_name, hijack_load))
 
             # for hijacking the hash of the compiled graph
             stack.enter_context(
