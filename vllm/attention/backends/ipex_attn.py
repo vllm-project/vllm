@@ -253,6 +253,7 @@ class IpexAttnMetadataBuilder(
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
+            enable_kv_scales_calculation=True,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
             max_decode_query_len=max_decode_query_len,
