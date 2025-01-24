@@ -1,6 +1,7 @@
 """
 Example of using the OpenAI entrypoint's rerank API which is compatible with
-Jina and Cohere
+Jina and Cohere https://jina.ai/reranker
+
 run: vllm serve --model BAAI/bge-reranker-base
 """
 import json
@@ -21,7 +22,6 @@ data = {
         "The capital of France is Paris.", "Horses and cows are both animals"
     ]
 }
-
 response = requests.post(url, headers=headers, json=data)
 
 # Check the response
