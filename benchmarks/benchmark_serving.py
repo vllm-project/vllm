@@ -200,7 +200,7 @@ def sample_sonnet_requests(
     return sampled_requests
 
 
-def sample_mmmu_pro_vision_requests(
+def sample_vision_arena_requests(
     dataset,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
@@ -212,13 +212,7 @@ def sample_mmmu_pro_vision_requests(
         if len(sampled_requests) == num_requests:
             break
 
-        # MMMU-Pro vision direct prompt
-        # Ref: https://github.com/MMMU-Benchmark/MMMU/blob/6ce42f4d8f70c1841c67867152648974415b5cac/mmmu-pro/prompts.yaml#L5
-        prompt = (
-            "Answer with the option letter from the given choices directly. "
-            "The last line of your response should be of the following "
-            "format: 'Answer: $LETTER' (without quotes) where LETTER is one of "
-            "options.")
+        prompt = data["turns"][0][0]['content']
 
         prompt_token_ids = tokenizer(prompt).input_ids
         if fixed_output_len is None:
@@ -230,10 +224,10 @@ def sample_mmmu_pro_vision_requests(
         output_len = fixed_output_len
 
         assert isinstance(
-            data["image"],
+            data["images"][0],
             Image), ("Input image format must be `PIL.Image.Image`, "
                      f"given {type(data['image'])}.")
-        image: Image = data["image"]
+        image: Image = data["images"][0]
         image = image.convert("RGB")
         image_data = io.BytesIO()
         image.save(image_data, format='JPEG')
@@ -252,7 +246,7 @@ def sample_mmmu_pro_vision_requests(
 
 def sample_hf_requests(
     dataset_path: str,
-    dataset_subset: str,
+    dataset_subset: Optional[str],
     dataset_split: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
@@ -260,19 +254,17 @@ def sample_hf_requests(
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
 
-    # Special case for MMMU-Pro vision dataset
-    if dataset_path == 'MMMU/MMMU_Pro' and dataset_subset == 'vision':
-        assert dataset_split == "test"
+    # Special case for vision_arena dataset
+    if dataset_path == 'lmarena-ai/vision-arena-bench-v0.1' \
+        and dataset_subset is None:
+        assert dataset_split == "train"
         dataset = load_dataset(dataset_path,
                                name=dataset_subset,
                                split=dataset_split,
                                streaming=True)
-        assert "image" in dataset.features, (
-            "MMMU/MMMU_Pro vision dataset must have 'image' column.")
-        filter_func = lambda x: isinstance(x["image"], Image)
-        dataset = dataset.shuffle(seed=random_seed).filter(filter_func)
-        return sample_mmmu_pro_vision_requests(dataset, num_requests,
-                                               tokenizer, fixed_output_len)
+        dataset = dataset.shuffle(seed=random_seed)
+        return sample_vision_arena_requests(dataset, num_requests, tokenizer,
+                                            fixed_output_len)
 
     dataset = load_dataset(dataset_path,
                            name=dataset_subset,
