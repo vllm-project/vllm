@@ -298,7 +298,6 @@ class SimpleConnector(KVConnectorBase):
                 # Some of the KV cache of this request is not retrieved
                 # Here we will fall back to normal model forwarding
                 logger.debug(
-<<<<<<< HEAD
                     "[rank%d]: Failed to receive request %d's"
                     " KVs and hidden states, "
                     "redo model forwarding.", torch.distributed.get_rank(),
@@ -306,10 +305,6 @@ class SimpleConnector(KVConnectorBase):
 
                 hidden_or_intermediate_states = torch.cat(
                     hidden_or_intermediate_states_for_one_req, dim=0)
-=======
-                    f"[rank{torch.distributed.get_rank()}]: Failed to receive request {idx}'s KVs and hidden states, redo model forwarding.")
-                hidden_or_intermediate_states = torch.cat(hidden_or_intermediate_states_for_one_req, dim=0)
->>>>>>> 4d9d7f8d (Fix request id typo)
                 all_bypass_flag = False
         if all_bypass_flag:
             logger.debug(
