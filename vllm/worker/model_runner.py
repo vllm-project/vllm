@@ -1693,11 +1693,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                         model_input,
                         kv_caches=kv_caches
                     )
-            logger.info("Received states shape: %s",
-                        recv_hidden_or_intermediate_states.shape)
+            logger.debug("Received states shape: %s",
+                         recv_hidden_or_intermediate_states.shape)
             for i in range(recv_hidden_or_intermediate_states.shape[0]):
-                logger.info("Received states[%d]'s mean value: %s", i,
-                            recv_hidden_or_intermediate_states[i].mean())
+                logger.debug("Received states[%d]'s mean value: %s", i,
+                             recv_hidden_or_intermediate_states[i].mean())
             bypass_model_exec = all(bypass_model_exec_per_request)
             need_rebuild_states = not all(
                 not value for value in bypass_model_exec_per_request)
@@ -1742,11 +1742,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     **seqlen_agnostic_kwargs)
 
                 if need_recv_kv_flag:
-                    logger.info("Computed states shape: %s",
-                                hidden_or_intermediate_states.shape)
+                    logger.debug("Computed states shape: %s",
+                                 hidden_or_intermediate_states.shape)
                     for i in range(hidden_or_intermediate_states.shape[0]):
-                        logger.info("Computed states[%d]'s mean value: %s", i,
-                                    hidden_or_intermediate_states[i].mean())
+                        logger.debug("Computed states[%d]'s mean value: %s", i,
+                                     hidden_or_intermediate_states[i].mean())
 
                 # Since we use the original sampling metadata,
                 # we need to combine
@@ -1787,11 +1787,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     hidden_or_intermediate_states = torch.cat(rebuilt_states,
                                                               dim=0)
 
-                    logger.info("Rebuilt states shape: %s",
-                                hidden_or_intermediate_states.shape)
+                    logger.debug("Rebuilt states shape: %s",
+                                 hidden_or_intermediate_states.shape)
                     for i in range(hidden_or_intermediate_states.shape[0]):
-                        logger.info("Rebuilt states[%d]'s mean value: %s", i,
-                                    hidden_or_intermediate_states[i].mean())
+                        logger.debug("Rebuilt states[%d]'s mean value: %s", i,
+                                     hidden_or_intermediate_states[i].mean())
 
         else:
             hidden_or_intermediate_states = recv_hidden_or_intermediate_states
