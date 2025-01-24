@@ -310,14 +310,15 @@ class ModelConfig:
             (self.hf_text_config.model_type in ["gemma2", "cohere2"]))
 
         if (not self.disable_sliding_window and has_interleaved_attention):
-            if envs.VLLM_ATTENTION_BACKEND == "XFORMERS":
+            if (backend :=
+                    envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER"):
                 sliding_window_len_min = get_min_sliding_window(
                     self.hf_text_config.sliding_window)
 
                 logger.warning_once(
                     f"{self.hf_text_config.model_type} has interleaved "
                     "attention, which is currently not supported by the "
-                    "XFORMERS backend. Disabling sliding window and capping "
+                    f"{backend} backend. Disabling sliding window and capping "
                     "the max length to the sliding window size "
                     f"({sliding_window_len_min}).")
                 self.disable_sliding_window = True
