@@ -479,13 +479,19 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
     out_tensors = []
     baseline_tensors = []
 
+    expert_offsets = torch.zeros((num_groups + 1),
+                                 device=device,
+                                 dtype=torch.int32)
+
     alignment = 16  # 128 // 8
     # For variation, each group has dimensions
     # (m_g = m/(g+1), n_g = n/(g+1), k_g = k/(g+1))
-    for _ in range(num_groups):
+    n_g = alignment * random.randint(1, 64)
+    k_g = alignment * random.randint(1, 64)
+    for g in range(num_groups):
         m_g = alignment * random.randint(1, 64)
-        n_g = alignment * random.randint(1, 64)
-        k_g = alignment * random.randint(1, 64)
+
+        expert_offsets[g + 1] = expert_offsets[g] + m_g
 
         m_a_scales = m_g if per_act_token else 1
         n_b_scales = n_g if per_out_ch else 1
@@ -515,8 +521,16 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
                                         None)
         baseline_tensors.append(baseline_g)
 
-    torch.ops._C.cutlass_grouped_mm(out_tensors, a_tensors, b_tensors,
-                                    a_scales_tensors, b_scales_tensors)
+    a_tensors_stacked = torch.empty((expert_offsets[num_groups], k_g),
+                                    device=device,
+                                    dtype=torch.float8_e4m3fn)
+    for g in range(num_groups):
+        a_tensors_stacked[expert_offsets[g]:expert_offsets[g +
+                                                           1]] = a_tensors[g]
+
+    torch.ops._C.cutlass_grouped_mm(out_tensors, a_tensors_stacked, b_tensors,
+                                    a_scales_tensors, b_scales_tensors,
+                                    expert_offsets)
 
     # Validate each group's result against the baseline
     for c_g, baseline_g in zip(out_tensors, baseline_tensors):

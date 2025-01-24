@@ -870,6 +870,7 @@ def fused_moe(
                          a2_scale=a2_scale,
                          block_shape=block_shape)
 
+
 # TODO handle scores
 def cutlass_moe(
     a_q: torch.Tensor,
@@ -960,4 +961,3 @@ def cutlass_moe(
     out = (intermediate3.reshape(m, topk, k) *
            topk_weights.view(m, topk, 1).half()).sum(dim=1)
     return out
-

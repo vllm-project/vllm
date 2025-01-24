@@ -10,15 +10,15 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (fused_topk,
                                                             cutlass_moe,
                                                             fused_experts)
 
-DEFAULT_MODELS = ["nm-testing/Mixtral-8x7B-Instruct-v0.1",
-                  "nm-testing/deepseekv2-lite",
-                  "ibm-granite/granite-3.0-1b-a400m",
-                  "ibm-granite/granite-3.0-3b-a800m"]
+DEFAULT_MODELS = [
+    "nm-testing/Mixtral-8x7B-Instruct-v0.1", "nm-testing/deepseekv2-lite",
+    "ibm-granite/granite-3.0-1b-a400m", "ibm-granite/granite-3.0-3b-a800m"
+]
 DEFAULT_BATCH_SIZES = [16, 32, 64, 128, 256, 512]
 
-NUM_GROUPS_OPTS = [8] #[8, 64]
-PER_ACT_TOKEN_OPTS = [False] #[False, True]
-PER_OUT_CH_OPTS = [False] #[False, True]
+NUM_GROUPS_OPTS = [8]  #[8, 64]
+PER_ACT_TOKEN_OPTS = [False]  #[False, True]
+PER_OUT_CH_OPTS = [False]  #[False, True]
 TOPKS = [2, 6]
 
 
@@ -45,6 +45,7 @@ def baseline_gemm(num_groups: int, a_tensors: List[torch.Tensor],
         b = b_tensors[g]
         out = torch.mm(a, b)
         out_tensors[g] = out
+
 
 # TODO marlin baseline
 def bench_run(results: List[benchmark.Measurement], model: str,
@@ -125,11 +126,11 @@ def bench_run(results: List[benchmark.Measurement], model: str,
             sub_label=sub_label,
             description="baseline_gemm",
         ).blocked_autorange(min_run_time=min_run_time))
-    
+
     # Warmup pytorch
     for _ in range(num_warmup):
-       cutlass_moe(a_q, a_scale, w1_qs, w2_qs, w1_scales, w2_scales,
-                   topk_weights, topk_ids, m, n, k)
+        cutlass_moe(a_q, a_scale, w1_qs, w2_qs, w1_scales, w2_scales,
+                    topk_weights, topk_ids, m, n, k)
 
     results.append(
         benchmark.Timer(
@@ -140,6 +141,7 @@ def bench_run(results: List[benchmark.Measurement], model: str,
             sub_label=sub_label,
             description="grouped_gemm",
         ).blocked_autorange(min_run_time=min_run_time))
+
 
 def main(args):
     print("Benchmarking models:")
@@ -166,7 +168,7 @@ def main(args):
                         for size_m in DEFAULT_BATCH_SIZES:
                             mkn = (size_m, size_k, size_n)
                             bench_run(results, model, num_experts, topk,
-                                        per_act_token, per_out_ch, mkn)
+                                      per_act_token, per_out_ch, mkn)
 
     compare = benchmark.Compare(results)
     compare.print()

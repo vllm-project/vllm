@@ -127,14 +127,15 @@ cutlass::platform::unique_ptr<T, ItemDeleter<T>> make_device_ptr(
 
 template <typename Gemm>
 void cutlass_group_gemm_caller(c10::List<at::Tensor> const& out_tensors,
-                               c10::List<at::Tensor> const& a_tensors,
+                               torch::Tensor const& a_tensors,
                                c10::List<at::Tensor> const& b_tensors,
                                c10::List<at::Tensor> const& a_scales,
-                               c10::List<at::Tensor> const& b_scales) {
+                               c10::List<at::Tensor> const& b_scales,
+                               torch::Tensor const& expert_offsets) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementC = typename Gemm::ElementC;
 
-  int groups = (int)a_tensors.size();
+  int groups = (int)expert_offsets.size(0) - 1;
   TORCH_CHECK((int)b_tensors.size() == groups,
               "Number of B tensors must match number of groups.");
   TORCH_CHECK((int)out_tensors.size() == groups,
@@ -150,9 +151,14 @@ void cutlass_group_gemm_caller(c10::List<at::Tensor> const& out_tensors,
   std::vector<typename ProblemShape::UnderlyingProblemShape> problem_sizes_host;
   problem_sizes_host.reserve(groups);
 
+  auto options_int =
+      torch::TensorOptions().dtype(torch::kInt64).device(a_tensors.device());
+  torch::Tensor a_ptrs_base = torch::full({groups + 1},
+                                     (int64_t)a_tensors.data_ptr(),
+                                     options_int);
+  torch::Tensor a_ptrs = a_ptrs_base.add(expert_offsets, a_tensors.size(1));
+
   for (int g = 0; g < groups; ++g) {
-    a_ptrs_host[g] =
-        reinterpret_cast<const ElementAB*>(a_tensors[g].data_ptr());
     b_ptrs_host[g] =
         reinterpret_cast<const ElementAB*>(b_tensors[g].data_ptr());
     c_ptrs_host[g] =
@@ -165,8 +171,8 @@ void cutlass_group_gemm_caller(c10::List<at::Tensor> const& out_tensors,
 
     // printf("%p %p %p %p %p %p %p\n", a_ptrs_host[g], b_ptrs_host[g],
     //        c_ptrs_host[g], d_ptrs_host[g],)
-    int64_t m = a_tensors[g].size(0);
-    int64_t k = a_tensors[g].size(1);
+    int64_t m = out_tensors[g].size(0);
+    int64_t k = a_tensors.size(1);
 
     int64_t k_b = b_tensors[g].size(0);
     int64_t n = b_tensors[g].size(1);
@@ -192,7 +198,7 @@ void cutlass_group_gemm_caller(c10::List<at::Tensor> const& out_tensors,
   std::vector<StrideC> c_stride_host(groups);
 
   for (int32_t g = 0; g < groups; ++g) {
-    int64_t lda = a_tensors[g].stride(0);    // row-major (m x k)
+    int64_t lda = a_tensors.stride(0);    // row-major (m x k)
     int64_t ldb = b_tensors[g].stride(1);    // column-major (k x n)
     int64_t ldc = out_tensors[g].stride(0);  // row-major (m x n)
 
@@ -211,7 +217,7 @@ void cutlass_group_gemm_caller(c10::List<at::Tensor> const& out_tensors,
   ProblemShape prob_shape{groups, problem_sizes_ptr.get(),
                           problem_sizes_host.data()};
 
-  auto a_ptrs_ptr = make_device_ptr(a_ptrs_host);
+  // auto a_ptrs_ptr = make_device_ptr(a_ptrs_host);
   auto b_ptrs_ptr = make_device_ptr(b_ptrs_host);
   auto c_ptrs_ptr = make_device_ptr(c_ptrs_host);
   auto d_ptrs_ptr = make_device_ptr(d_ptrs_host);
@@ -224,7 +230,7 @@ void cutlass_group_gemm_caller(c10::List<at::Tensor> const& out_tensors,
   auto c_stride_ptr = make_device_ptr(c_stride_host);
 
   typename GemmKernel::MainloopArguments mainloop_args{
-      a_ptrs_ptr.get(), a_stride_ptr.get(), b_ptrs_ptr.get(),
+      (const ElementAB_Type**)a_ptrs.data_ptr(), a_stride_ptr.get(), b_ptrs_ptr.get(),
       b_stride_ptr.get()};
   // Currently, we are only able to do broadcast on either all or none a_scales
   // and on either all or none b_scales
@@ -245,10 +251,10 @@ void cutlass_group_gemm_caller(c10::List<at::Tensor> const& out_tensors,
 
   size_t workspace_size = gemm_op.get_workspace_size(args);
   auto const workspace_options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(a_tensors[0].device());
+      torch::TensorOptions().dtype(torch::kUInt8).device(a_tensors.device());
   auto workspace = torch::empty(workspace_size, workspace_options);
 
-  auto stream = at::cuda::getCurrentCUDAStream(a_tensors[0].device().index());
+  auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
   cutlass::Status status = gemm_op.run(args, workspace.data_ptr(), stream);
   CUTLASS_CHECK(status);
 }
@@ -303,16 +309,18 @@ struct sm90_fp8_config_M64 {
 
 }  // namespace
 
+// TODO
 void cutlass_grouped_mm_sm90(c10::List<at::Tensor> const& out_tensors,
-                             c10::List<at::Tensor> const& a_tensors,
+                             torch::Tensor const& a_tensors,
                              c10::List<at::Tensor> const& b_tensors,
                              c10::List<at::Tensor> const& a_scales,
-                             c10::List<at::Tensor> const& b_scales) {
-  TORCH_CHECK(a_tensors.size() > 0, "No input A tensors provided.");
+                             c10::List<at::Tensor> const& b_scales,
+                             torch::Tensor const& expert_offsets) {
+  TORCH_CHECK(a_tensors.size(0) > 0, "No input A tensors provided.");
   TORCH_CHECK(b_tensors.size() > 0, "No input B tensors provided.");
   TORCH_CHECK(out_tensors.size() > 0, "No output tensors provided.");
 
-  TORCH_CHECK(a_tensors[0].dtype() == torch::kFloat8_e4m3fn,
+  TORCH_CHECK(a_tensors.dtype() == torch::kFloat8_e4m3fn,
               "A tensors must be of type float8_e4m3fn.");
   TORCH_CHECK(b_tensors[0].dtype() == torch::kFloat8_e4m3fn,
               "B tensors must be of type float8_e4m3fn.");
@@ -321,7 +329,7 @@ void cutlass_grouped_mm_sm90(c10::List<at::Tensor> const& out_tensors,
       ElementAB_Type, ElementC_Type,
       vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
   cutlass_group_gemm_caller<Cutlass3xGemmDefault>(
-      out_tensors, a_tensors, b_tensors, a_scales, b_scales);
+      out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets);
 }
 
 __global__ void get_a_expert_offsets(cutlass::float_e4m3_t** trg_a_ptrs,

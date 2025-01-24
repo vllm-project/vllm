@@ -10,6 +10,7 @@ from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 NUM_EXPERTS = [8, 64]
 TOP_KS = [2, 6]
 
+
 @pytest.mark.parametrize("m", [16, 32, 64, 224])
 @pytest.mark.parametrize("n", [128, 2048])
 @pytest.mark.parametrize("k", [128, 1024])
@@ -62,7 +63,8 @@ def test_cutlass_moe(
                             w2_scales[expert]).half()
         torch_output = torch_moe(a_d, w1_d, w2_d, score, topk)
         cutlass_output = cutlass_moe(a_q, a_scale, w1_qs, w2_qs, w1_scales,
-                                     w2_scales, topk_weights, topk_ids, m, n, k)
+                                     w2_scales, topk_weights, topk_ids, m, n,
+                                     k)
 
         # print(torch_output)
         # print(cutlass_output)

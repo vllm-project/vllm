@@ -156,10 +156,11 @@ void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        std::optional<torch::Tensor> const& bias);
 
 void cutlass_grouped_mm(c10::List<at::Tensor> const& out_tensors,
-                        c10::List<at::Tensor> const& a_tensors,
+                        torch::Tensor const& a_tensors,
                         c10::List<at::Tensor> const& b_tensors,
                         c10::List<at::Tensor> const& a_scales,
-                        c10::List<at::Tensor> const& b_scales);
+                        c10::List<at::Tensor> const& b_scales,
+                        torch::Tensor const& expert_offsets);
 
 void compute_expert_offsets(torch::Tensor& trg_a_ptrs,
                                    torch::Tensor& a,
