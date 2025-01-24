@@ -1,13 +1,10 @@
 import ast
-import copy
 import dataclasses
 import os
 import pprint
 import time
-from collections import defaultdict
 from contextlib import ExitStack
-from typing import (Any, Callable, Dict, List, Optional, Sequence, Set, Tuple,
-                    Type)
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
 
 import torch
@@ -18,20 +15,13 @@ from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
-from .compiler_interface import (CompilerInterface, EagerAdaptor,
-                                 InductorAdaptor)
+from .compiler_interface import EagerAdaptor, InductorAdaptor
 from .counter import compilation_counter
 from .inductor_pass import InductorPass
 from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
-
-
-@dataclasses.dataclass
-class InductorArtifact:
-    hash_str: str = ""
-    file_path: str = ""
 
 
 class CompilerManager:
@@ -43,18 +33,19 @@ class CompilerManager:
     support int as key.
     """
 
-    def __init__(self, cache_dir: str, compilers: List[Type[CompilerInterface]], disabled: bool = False):
+    def __init__(self,
+                 cache_dir: str,
+                 use_inductor: bool,
+                 disabled: bool = False):
         self.cache: Dict[Tuple[Optional[int], int, str], Any] = dict()
-        self.compilers = compilers
+        self.compiler = InductorAdaptor() if use_inductor else EagerAdaptor()
         self.disabled = disabled
         self.cache_dir = cache_dir
-        self.cache_file_path = os.path.join(cache_dir,
-                                            "compiler_manager.py")
+        self.cache_file_path = os.path.join(cache_dir, "compiler_manager.py")
         if disabled:
             return
 
-        for compiler in self.compilers:
-            compiler.init_with_cache_dir(cache_dir)
+        self.compiler.init_with_cache_dir(cache_dir)
 
         if os.path.exists(self.cache_file_path):
             with open(self.cache_file_path) as f:
@@ -67,6 +58,7 @@ class CompilerManager:
         self.cache = ast.literal_eval(data)
 
     def serialize(self) -> str:
+        printer = pprint.PrettyPrinter(indent=4)
         return printer.pformat(self.cache)
 
     def save_to_file(self):
@@ -75,36 +67,32 @@ class CompilerManager:
         with open(self.cache_file_path, "w") as f:
             f.write(self.serialize())
 
-    def __contains__(self, key: Tuple[Optional[int], int]) -> bool:
-        if self.disabled:
-            return False
-        for compiler in self.compilers:
-            if (key[0], key[1], compiler.name) in self.cache:
-                return True
-        return False
+    def load(self,
+             graph: fx.GraphModule,
+             example_inputs: List[Any],
+             graph_index: int,
+             runtime_shape: Optional[int] = None) -> Callable:
+        if (runtime_shape, graph_index, self.compiler.name) not in self.cache:
+            return None
+        handle = self.cache[(runtime_shape, graph_index, self.compiler.name)]
+        compiled_graph = self.compiler.load(handle, graph, example_inputs,
+                                            graph_index, runtime_shape)
+        logger.debug(
+            "Directly load the %s-th graph for shape %s from %s via "
+            "handle %s", graph_index, str(runtime_shape), self.compiler.name,
+            handle)
+        return compiled_graph
 
-    def __getitem__(self, key: Tuple[Optional[int], int]) -> Any:
-        if self.disabled:
-            raise KeyError("cannot read from disabled cache")
-        runtime_shape, graph_index = key
-        return self.cache[runtime_shape][graph_index]
-
-    def __setitem__(self, key: Tuple[Optional[int], int],
-                    value: InductorArtifact):
-        # setitem for disabled cache is fine, because we
-        # don't actually write to the disk
-        runtime_shape, graph_index = key
-        self.cache[runtime_shape][graph_index] = value
-
-    def compile(self, graph: fx.GraphModule,
-                    example_inputs,
-                    additional_inductor_config,
-                    compilation_config: CompilationConfig,
-                    vllm_backend: "VllmBackend",
-                    graph_index: int = 0,
-                    num_graphs: int = 1,
-                    runtime_shape: Optional[int] = None,
-                    use_inductor: bool = True) -> Any:
+    def compile(self,
+                graph: fx.GraphModule,
+                example_inputs,
+                additional_inductor_config,
+                compilation_config: CompilationConfig,
+                vllm_backend: "VllmBackend",
+                graph_index: int = 0,
+                num_graphs: int = 1,
+                runtime_shape: Optional[int] = None,
+                use_inductor: bool = True) -> Any:
         if graph_index == 0:
             # before compiling the first graph, record the start time
             global compilation_start_time
@@ -118,50 +106,32 @@ class CompilerManager:
         compiled_graph = None
 
         if not self.disabled:
-            for compiler in self.compilers:
-                if compiled_graph is not None:
-                    break
-                if (runtime_shape, graph_index, compiler.name) in self.cache:
-                    try:
-                        handle = self.cache[(runtime_shape, graph_index, compiler.name)]
-                        compiled_graph = compiler.load(handle)
-                        if graph_index == 0:
-                            # adds some info logging for the first graph
-                            logger.info(
-                                "Directly load the compiled graph for shape %s from the cache",
-                                str(runtime_shape))  # noqa
-                        logger.debug(
-                            "Directly load the %s-th graph for shape %s from %s via handle %s",
-                            graph_index, str(runtime_shape), compiler.name, handle)
-                    except Exception as e:
-                        logger.warning(
-                            "Failed to load the compiled graph from the cache. "
-                            "Error: %s", str(e)
-                        )
+            compiled_graph = self.load(graph, example_inputs, graph_index,
+                                       runtime_shape)
+            if compiled_graph is not None:
+                if graph_index == 0:
+                    # adds some info logging for the first graph
+                    logger.info(
+                        "Directly load the compiled graph for shape %s "
+                        "from the cache", str(runtime_shape))  # noqa
+                return compiled_graph
 
         # no compiler cached the graph, or the cache is disabled,
         # we need to compile it
-        for compiler in self.compilers:
-            if compiled_graph is not None:
-                break
-            try:
-                compiled_graph, handle = compiler.compile(graph, example_inputs,
-                                                  additional_inductor_config,
-                                                  runtime_shape)
-                # store the inductor_artifact in the cache
-                self.cache[(runtime_shape, graph_index, compiler.name)] = handle
-                if graph_index == 0:
-                    # adds some info logging for the first graph
-                    logger.info("Cache the graph of shape %s for later use",
-                                str(runtime_shape))
-                logger.debug(
-                    "store the %s-th graph for shape %s from %s via handle %s",
-                    graph_index, str(runtime_shape), compiler.name, handle)
-            except Exception as e:
-                logger.warning(
-                    "Failed to compile the graph. Error: %s", str(e))
-        
+        compiled_graph, handle = self.compiler.compile(
+            graph, example_inputs, additional_inductor_config, runtime_shape)
+
         assert compiled_graph is not None, "Failed to compile the graph"
+
+        # store the artifact in the cache
+        self.cache[(runtime_shape, graph_index, self.compiler.name)] = handle
+        if graph_index == 0:
+            # adds some info logging for the first graph
+            logger.info("Cache the graph of shape %s for later use",
+                        str(runtime_shape))
+        logger.debug(
+            "store the %s-th graph for shape %s from %s via handle %s",
+            graph_index, str(runtime_shape), self.compiler.name, handle)
 
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
@@ -285,7 +255,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
             global compilation_start_time
-            compiled_graph_for_general_shape = self.vllm_backend.compiler_manager.compile(
+            compiled_graph_for_general_shape = self.vllm_backend.\
+                compiler_manager.compile(
                 submod,
                 args,
                 self.compilation_config.inductor_compile_config,
@@ -420,9 +391,10 @@ class VllmBackend:
         self.compilation_config.local_cache_dir = local_cache_dir
 
         disabled = envs.VLLM_DISABLE_COMPILE_CACHE
-        compilers = [InductorAdaptor] if self.compilation_config.use_inductor else [EagerAdaptor]
         self.compiler_manager: CompilerManager = CompilerManager(
-            local_cache_dir, compilers, disabled=disabled)
+            local_cache_dir,
+            self.compilation_config.use_inductor,
+            disabled=disabled)
         if disabled:
             logger.info("vLLM's torch.compile cache is disabled.")
         else:
