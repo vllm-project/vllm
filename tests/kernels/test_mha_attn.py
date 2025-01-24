@@ -28,6 +28,7 @@ def test_mha_attn_platform(device: str):
     """
     Test that the attention selector between different platform and device.
     """
+    torch.set_default_dtype(torch.float16)
 
     if device == "cpu":
         with patch("vllm.attention.selector.current_platform", CpuPlatform()):
@@ -95,9 +96,11 @@ def test_mha_attn_forward(
 ):
     current_platform.seed_everything(0)
     torch.set_default_device(device)
-    q = torch.randn(batch_size, seq_len, num_heads * head_size, dtype=dtype)
-    k = torch.randn(batch_size, seq_len, num_kv_heads * head_size, dtype=dtype)
-    v = torch.randn(batch_size, seq_len, num_kv_heads * head_size, dtype=dtype)
+    torch.set_default_dtype(dtype)
+
+    q = torch.randn(batch_size, seq_len, num_heads * head_size)
+    k = torch.randn(batch_size, seq_len, num_kv_heads * head_size)
+    v = torch.randn(batch_size, seq_len, num_kv_heads * head_size)
     scale = 1.0 / head_size**0.5
     attn = MultiHeadAttention(num_heads,
                               head_size,
