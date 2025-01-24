@@ -19,9 +19,9 @@ class PlaceHolder:
 
 
 if torch.__version__ < "2.6":
-    Parent = PlaceHolder
+    Parent = PlaceHolder  # type: ignore
 else:
-    Parent = torch._inductor.custom_graph_pass.CustomGraphPass
+    Parent = torch._inductor.custom_graph_pass.CustomGraphPass  # type: ignore
 
 
 class PostGradPassManager(Parent):
