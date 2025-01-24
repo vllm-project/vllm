@@ -10,7 +10,7 @@ MODEL_NAME = "BAAI/bge-reranker-base"
 
 @pytest.fixture(scope="module")
 def server():
-    args = ['--enforce-eager', '--max-model-len 100']
+    args = ["--enforce-eager", "--max-model-len", "100"]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
