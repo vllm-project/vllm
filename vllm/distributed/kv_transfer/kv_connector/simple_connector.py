@@ -390,8 +390,7 @@ class SimpleConnector(KVConnectorBase):
             rebuilt_slot_mapping.append(new_slot_mapping)
             rebuilt_max_query_len = max(q_len, rebuilt_max_query_len)
             last_query_start_loc += q_len
-            rebuilt_query_start_loc.append(
-                last_query_start_loc)  # start with 0
+            rebuilt_query_start_loc.append(last_query_start_loc)
             rebuilt_context_lens_tensor.append(num_computed_token)
 
             # recover `block_table`
