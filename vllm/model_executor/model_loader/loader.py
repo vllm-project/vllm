@@ -784,7 +784,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             iterator = pt_weights_iterator(hf_weights_files)
         for name, param in iterator:
             # mapping weight names from transformers to vllm.
-            yield self.weight_mapper(name), param
+
+            yield name, self.weight_mapper(name), param
 
     def _get_quantized_weights_iterator(
         self,
@@ -845,7 +846,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def _quantized_8bit_generator(self, hf_weights_files, use_safetensors,
                                   quant_state_dict) -> Generator:
-        for weight_name, weight_tensor in self._hf_weight_iter(
+        for org_weight_name, weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
             if not weight_name.lower().endswith(".scb"):
                 continue
@@ -853,16 +854,16 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             weight_key = weight_name.lower().replace(".scb", ".weight")
             quant_state_dict[weight_key] = weight_tensor
 
-        for weight_name, weight_tensor in self._hf_weight_iter(
+        for org_weight_name, weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
             if self._is_8bit_weight_name(weight_name):
                 continue
 
             if weight_name in quant_state_dict:
                 set_weight_attrs(weight_tensor, {"load_in_8bit": True})
-                yield weight_name, weight_tensor
+                yield org_weight_name, weight_tensor
             else:
-                yield weight_name, weight_tensor
+                yield org_weight_name, weight_tensor
 
     def _quantized_4bit_generator(self, hf_weights_files, use_safetensors,
                                   quant_state_dict) -> Generator:
@@ -872,7 +873,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         weight_iterator = self._hf_weight_iter(hf_weights_files,
                                                use_safetensors)
         temp_state_dict = {}
-        for weight_name, weight_tensor in weight_iterator:
+        for org_weight_name, weight_name, weight_tensor in weight_iterator:
             if not self._is_4bit_weight_name(weight_name):
                 continue
             # bitsandbytes library requires
@@ -894,7 +895,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         # Second iterate over all prequant and normal weights
         # pre quantized weights would have a quant_state
-        for weight_name, weight_tensor in self._hf_weight_iter(
+        for org_weight_name, weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
             if self._is_4bit_weight_name(weight_name):
                 continue
@@ -905,9 +906,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         in temp_state_dict):
                 quant_state = _parse_quant_state(weight_name, temp_state_dict)
                 quant_state_dict[weight_name] = quant_state
-                yield weight_name, weight_tensor
+                yield org_weight_name, weight_tensor
             else:
-                yield weight_name, weight_tensor
+                yield org_weight_name, weight_tensor
 
     def _unquantized_generator(self, hf_weights_files, use_safetensors,
                                quant_state_dict) -> Generator:
@@ -916,7 +917,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
 
-        for weight_name, weight_tensor in self._hf_weight_iter(
+        for org_weight_name, weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
             if any(target_module in weight_name for target_module in
                    self.target_modules) and weight_name.endswith(".weight"):
@@ -990,8 +991,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 quant_state_dict[weight_name] = quant_state
             else:
                 processed_weight = weight_tensor
-
-            yield weight_name, processed_weight
+            yield org_weight_name, processed_weight
 
     def _get_bnb_target_modules(self, model: nn.Module) -> None:
 

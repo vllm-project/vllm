@@ -637,6 +637,16 @@ def input_mapper_for_whisper(
     "audio", get_max_whisper_audio_tokens)
 class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
 
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "kv_proj": ["k_proj", "v_proj"]
+    }
+
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={
+        ".fc1.": ".mlp.fc1.",
+        ".fc2.": ".mlp.fc2."
+    })
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -729,7 +739,5 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
-        loaded_weights = [(name, loaded_weight)
-                          for name, loaded_weight in weights]
-        mapper = WeightsMapper({".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."})
-        return loader.load_weights(loaded_weights, mapper=mapper)
+
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
