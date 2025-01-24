@@ -140,7 +140,6 @@ class EngineCore:
                 self.scheduler.speculative_config.ngram_prompt_lookup_min,
                 self.scheduler.speculative_config.num_speculative_tokens,
             )
-            print(f"Proposed tokens: {spec_tokens}")
             if spec_tokens:
                 req.append_spec_token_ids(spec_tokens)
 

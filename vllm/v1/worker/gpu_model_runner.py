@@ -449,7 +449,6 @@ class GPUModelRunner:
         # Copy the tensors to the GPU.
         self.input_ids[:total_num_scheduled_tokens].copy_(
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
-        print("input_ids", self.input_ids[:total_num_scheduled_tokens])
         if self.model_config.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
@@ -814,8 +813,6 @@ class GPUModelRunner:
             seq_len = req_state.num_computed_tokens + \
                 scheduler_output.num_scheduled_tokens[req_id]
             if seq_len >= req_state.num_tokens:
-                print(req_state.req_id, "output_token_ids",
-                      sampled_token_ids[i], req_state.num_computed_tokens)
                 # We don't rewind the generator state for requests now
                 # because spec decode only supports greedy decoding for now.
                 token_ids = sampled_token_ids[i]

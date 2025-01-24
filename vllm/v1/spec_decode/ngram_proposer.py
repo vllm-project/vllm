@@ -1,13 +1,17 @@
 from typing import List, Optional
+
 from vllm.v1.utils import ConstantList
 
-class NgramProposer():
+
+class NgramProposer:
+
     def __init__(self):
         pass
-    
+
     def _kmp_lps_array(self, pattern: List[int]) -> List[int]:
         """
-        Build the lps (longest proper prefix which is also suffix) array for the pattern.
+        Build the lps (longest proper prefix which is also suffix) 
+        array for the pattern.
         """
         lps = [0] * len(pattern)
         prev_lps = 0  # length of the previous longest prefix suffix
@@ -27,9 +31,7 @@ class NgramProposer():
 
         return lps
 
-    def _find_subarray_kmp(self, 
-                           X: List[int], 
-                           Y: List[int], 
+    def _find_subarray_kmp(self, X: List[int], Y: List[int],
                            K: int) -> Optional[List[int]]:
         """
         Returns the subarray starting at the first occurrence of Y in X,
@@ -39,7 +41,7 @@ class NgramProposer():
         M = len(Y)
 
         if M == 0:
-            # If Y is empty, 
+            # If Y is empty,
             # let's define that it matches at index 0
             return X[:K]
 
@@ -57,8 +59,8 @@ class NgramProposer():
                 # If we have matched the entire Y
                 if j == M:
                     # Found Y in X, gather the next K elements
-                    start_index = i - M # Where the match started
-                    return X[start_index : start_index + M + K]
+                    start_index = i - M  # Where the match started
+                    return X[start_index:start_index + M + K]
             else:
                 # Mismatch
                 if j != 0:
@@ -66,17 +68,15 @@ class NgramProposer():
                     j = lps[j - 1]
                 else:
                     i += 1
-        
+
         # Y not found
         return None
-        
-    def propose(self, 
-                context_token_ids: ConstantList[int],
-                n: int, k: int) -> Optional[List[int]]:
+
+    def propose(self, context_token_ids: ConstantList[int], n: int,
+                k: int) -> Optional[List[int]]:
         ngrams = context_token_ids[-n:]
         lookup_tokens = context_token_ids[:-n]
-        match_tokens = self._find_subarray_kmp(lookup_tokens,
-                                ngrams, k)
+        match_tokens = self._find_subarray_kmp(lookup_tokens, ngrams, k)
         if match_tokens is None:
             return None
         return match_tokens[n:]

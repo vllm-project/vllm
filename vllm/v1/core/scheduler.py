@@ -447,14 +447,14 @@ class Scheduler:
 
             if request.num_computed_tokens >= request.num_tokens:
                 request.clear_spec_tokens()
+                num_tokens_before_step = request.num_tokens
                 request.append_output_token_ids(token_ids)
-                num_new_tokens = len(token_ids)
                 # TODO: Update the KV cache manager for prefix caching.
-                # self.kv_cache_manager.uncache_blocks(request)
 
                 # Check for stop and update request state.
                 # This must be called before me make the EngineCoreOutput.
                 stopped = self._check_stop(request)
+                num_new_tokens = request.num_tokens - num_tokens_before_step
 
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
@@ -497,7 +497,7 @@ class Scheduler:
             num_total_token = min(
                 self.max_model_len, request.num_tokens,
                 request.max_tokens + request.num_prompt_tokens,
-                request.num_output_tokens + request.num_output_tokens)
+                request.num_output_tokens + request.num_prompt_tokens)
             self._crop_request(request, num_total_token)
             self._free_request(request)
             return True
