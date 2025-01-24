@@ -45,14 +45,14 @@ class OpenAIBaseModel(BaseModel):
     # Cache class field names
     field_names: ClassVar[Optional[Set[str]]] = None
 
-    @model_validator(mode="before")
+    @model_validator(mode="wrap")
     @classmethod
-    def __log_extra_fields__(cls, data):
-
+    def __log_extra_fields__(cls, data, handler):
+        result = handler(data)
         field_names = cls.field_names
         if field_names is None:
             if not isinstance(data, dict):
-                return data
+                return result
             # Get all class field names and their potential aliases
             field_names = set()
             for field_name, field in cls.model_fields.items():
@@ -67,7 +67,7 @@ class OpenAIBaseModel(BaseModel):
                 "The following fields were present in the request "
                 "but ignored: %s",
                 data.keys() - field_names)
-        return data
+        return result
 
 
 class ErrorResponse(OpenAIBaseModel):
