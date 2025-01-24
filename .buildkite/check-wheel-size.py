@@ -2,7 +2,9 @@ import os
 import sys
 import zipfile
 
-# Read the VLLM_MAX_SIZE_MB environment variable, defaulting to 300 MB
+# Read the VLLM_MAX_SIZE_MB environment variable, defaulting to 300 MiB
+# Note that we have 400 MiB quota, please use it wisely.
+# See https://github.com/pypi/support/issues/3792 .
 VLLM_MAX_SIZE_MB = int(os.environ.get('VLLM_MAX_SIZE_MB', 300))
 
 
