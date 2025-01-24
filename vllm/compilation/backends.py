@@ -26,8 +26,14 @@ logger = init_logger(__name__)
 
 class CompilerManager:
     """
-    A dict mapping `(runtime_shape, graph_index, backend_name)`
-    to `any_data`.
+    A manager to manage the compilation process, including
+    caching the compiled graph, loading the compiled graph,
+    and compiling the graph.
+
+    The cache is a dict mapping
+    `(runtime_shape, graph_index, backend_name)`
+    to `any_data` returned from the compiler.
+
     When serializing the cache, we save it to a Python file
     for readability. We don't use json here because json doesn't
     support int as key.
@@ -38,40 +44,36 @@ class CompilerManager:
                  use_inductor: bool,
                  disable_cache: bool = False):
         self.cache: Dict[Tuple[Optional[int], int, str], Any] = dict()
-        self.compiler = InductorAdaptor() if use_inductor else EagerAdaptor()
+        self.compiler = InductorAdaptor(
+            cache_dir=cache_dir,
+            disable_cache=disable_cache) if use_inductor else EagerAdaptor(
+                cache_dir=cache_dir, disable_cache=disable_cache)
         self.disable_cache = disable_cache
         self.cache_dir = cache_dir
-        self.cache_file_path = os.path.join(cache_dir, "compiler_manager.py")
+        self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
         if disable_cache:
             return
 
-        self.compiler.init_with_cache_dir(cache_dir)
-
         if os.path.exists(self.cache_file_path):
             with open(self.cache_file_path) as f:
-                self.deserialize(f.read())
-
-    def deserialize(self, data: str):
-        # we use ast.literal_eval to parse the data
-        # because it is a safe way to parse Python literals.
-        # do not use eval(), it is unsafe.
-        self.cache = ast.literal_eval(data)
-
-    def serialize(self) -> str:
-        printer = pprint.PrettyPrinter(indent=4)
-        return printer.pformat(self.cache)
+                # we use ast.literal_eval to parse the data
+                # because it is a safe way to parse Python literals.
+                # do not use eval(), it is unsafe.
+                self.cache = ast.literal_eval(f.read())
 
     def save_to_file(self):
         if self.disable_cache:
             return
         with open(self.cache_file_path, "w") as f:
-            f.write(self.serialize())
+            printer = pprint.PrettyPrinter(indent=4)
+            data = printer.pformat(self.cache)
+            f.write(data)
 
     def load(self,
              graph: fx.GraphModule,
              example_inputs: List[Any],
              graph_index: int,
-             runtime_shape: Optional[int] = None) -> Callable:
+             runtime_shape: Optional[int] = None) -> Optional[Callable]:
         if (runtime_shape, graph_index, self.compiler.name) not in self.cache:
             return None
         handle = self.cache[(runtime_shape, graph_index, self.compiler.name)]
@@ -101,16 +103,15 @@ class CompilerManager:
 
         compiled_graph = None
 
-        if not self.disable_cache:
-            compiled_graph = self.load(graph, example_inputs, graph_index,
-                                       runtime_shape)
-            if compiled_graph is not None:
-                if graph_index == 0:
-                    # adds some info logging for the first graph
-                    logger.info(
-                        "Directly load the compiled graph for shape %s "
-                        "from the cache", str(runtime_shape))  # noqa
-                return compiled_graph
+        # try to load from the cache
+        compiled_graph = self.load(graph, example_inputs, graph_index,
+                                   runtime_shape)
+        if compiled_graph is not None:
+            if graph_index == 0:
+                # adds some info logging for the first graph
+                logger.info("Directly load the compiled graph for shape %s "
+                            "from the cache", str(runtime_shape))  # noqa
+            return compiled_graph
 
         # no compiler cached the graph, or the cache is disabled,
         # we need to compile it
@@ -120,14 +121,16 @@ class CompilerManager:
         assert compiled_graph is not None, "Failed to compile the graph"
 
         # store the artifact in the cache
-        self.cache[(runtime_shape, graph_index, self.compiler.name)] = handle
-        if graph_index == 0:
-            # adds some info logging for the first graph
-            logger.info("Cache the graph of shape %s for later use",
-                        str(runtime_shape))
-        logger.debug(
-            "store the %s-th graph for shape %s from %s via handle %s",
-            graph_index, str(runtime_shape), self.compiler.name, handle)
+        if handle is not None:
+            self.cache[(runtime_shape, graph_index,
+                        self.compiler.name)] = handle
+            if graph_index == 0:
+                # adds some info logging for the first graph
+                logger.info("Cache the graph of shape %s for later use",
+                            str(runtime_shape))
+            logger.debug(
+                "store the %s-th graph for shape %s from %s via handle %s",
+                graph_index, str(runtime_shape), self.compiler.name, handle)
 
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:

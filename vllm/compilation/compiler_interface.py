@@ -18,6 +18,9 @@ class CompilerInterface:
     # This is a class-level attribute.
     name: str
 
+    def __init__(self, cache_dir: str, disable_cache: bool = False):
+        pass
+
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         """
         Gather all the relevant information from the VLLM config,
@@ -37,11 +40,13 @@ class CompilerInterface:
         """
         pass
 
-    def compile(self,
-                graph: fx.GraphModule,
-                example_inputs: List[Any],
-                compiler_config: Dict[str, Any],
-                runtime_shape: Optional[int] = None) -> Tuple[Callable, Any]:
+    def compile(
+        self,
+        graph: fx.GraphModule,
+        example_inputs: List[Any],
+        compiler_config: Dict[str, Any],
+        runtime_shape: Optional[int] = None
+    ) -> Tuple[Optional[Callable], Optional[Any]]:
         """
         Compile the graph with the given example inputs and compiler config,
         with a runtime shape. If the `runtime_shape` is None, it means
@@ -57,6 +62,10 @@ class CompilerInterface:
 
         The handle should be a plain Python object, preferably a string or a
         file path for readability.
+
+        If the compiler doesn't support caching, it should return None for the
+        handle. If the compiler fails to compile the graph, it should return
+        None for the compiled function as well.
         """
         pass
 
@@ -131,7 +140,9 @@ class InductorAdaptor(CompilerInterface):
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()[:10]
         return hash_str
 
-    def init_with_cache_dir(self, cache_dir: str) -> None:
+    def __init__(self, cache_dir: str, disable_cache: bool = False):
+        if disable_cache:
+            return
         # redirect the cache directory to a sub-directory
         # set flags so that Inductor and Triton store their cache
         # in the cache_dir, then users only need to copy the cache_dir
@@ -143,11 +154,13 @@ class InductorAdaptor(CompilerInterface):
         os.makedirs(triton_cache, exist_ok=True)
         os.environ["TRITON_CACHE_DIR"] = triton_cache
 
-    def compile(self,
-                graph: fx.GraphModule,
-                example_inputs: List[Any],
-                compiler_config: Dict[str, Any],
-                runtime_shape: Optional[int] = None) -> Tuple[Callable, Any]:
+    def compile(
+        self,
+        graph: fx.GraphModule,
+        example_inputs: List[Any],
+        compiler_config: Dict[str, Any],
+        runtime_shape: Optional[int] = None
+    ) -> Tuple[Optional[Callable], Optional[Any]]:
         from torch._inductor import config
         current_config = config.get_config_copy()
         from torch._inductor.compile_fx import compile_fx
@@ -283,12 +296,15 @@ class EagerAdaptor(CompilerInterface):
         which just runs the graph directly."""
         return ""
 
-    def compile(self,
-                graph: fx.GraphModule,
-                example_inputs: List[Any],
-                compiler_config: Dict[str, Any],
-                runtime_shape: Optional[int] = None) -> Tuple[Callable, Any]:
-        # we don't need to compile the graph, just return the graph itself
+    def compile(
+        self,
+        graph: fx.GraphModule,
+        example_inputs: List[Any],
+        compiler_config: Dict[str, Any],
+        runtime_shape: Optional[int] = None
+    ) -> Tuple[Optional[Callable], Optional[Any]]:
+        # we don't need to compile the graph, just return the graph itself.
+        # It does not support caching, return None for the handle.
         return graph, None
 
     def load(self,
@@ -299,4 +315,4 @@ class EagerAdaptor(CompilerInterface):
              runtime_shape: Optional[int] = None) -> Callable:
         # handle is None, we don't need to load anything
         raise NotImplementedError(
-            "Eager compiler doesn't need compilation cache")
+            "Eager compiler doesn't support compilation cache")
