@@ -8,19 +8,10 @@ import torch
 from torch import fx
 
 
-class PlaceHolder:
-    pass
-
-
-if torch.__version__ < "2.6":
-    parent = PlaceHolder
-else:
-    parent = torch._inductor.custom_graph_pass.CustomGraphPass
-
-
-class InductorPass(ABC, parent):
+class InductorPass(ABC):
     """
     General custom inductor pass interface.
+    TODO(torch==2.6) use torch._inductor.custom_graph_pass.CustomGraphPass
     """
 
     @abstractmethod
