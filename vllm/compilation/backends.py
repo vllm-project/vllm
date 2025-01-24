@@ -100,8 +100,7 @@ class CompilerManager:
             global compilation_start_time
             compilation_start_time = time.time()
 
-        # TODO: rename to num_backend_compilations
-        compilation_counter.num_inductor_compilations += 1
+        compilation_counter.num_backend_compilations += 1
 
         compiled_graph = None
 
