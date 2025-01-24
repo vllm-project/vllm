@@ -196,7 +196,7 @@ class Inductor25Adaptor(CompilerInterface):
                 nonlocal file_path
                 file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
                 return inductor_compiled_graph
-        elif torch.__version__.startswith("2.6"):
+        elif torch.__version__ >= "2.6":
             # function renamed in 2.6
             original_load = FxGraphCache.load_with_key
             original_load_name = ("torch._inductor.codecache"
