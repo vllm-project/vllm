@@ -157,8 +157,10 @@ def detokenize_incrementally(
     is_first_iter = prev_tokens is None
     if is_first_iter:
         (prev_tokens, prefix_offset,
-         read_offset) = convert_prompt_ids_to_tokens(tokenizer,
-                                                     all_input_ids[:-1])
+         read_offset) = convert_prompt_ids_to_tokens(
+             tokenizer,
+             all_input_ids[:-1],
+             skip_special_tokens=skip_special_tokens)
     assert prev_tokens is not None
 
     # If the new token id is out of bounds, return an empty string.
