@@ -307,7 +307,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ?
      - ?
-     - ✅
+     - [✗](gh-issue:11484)
      - ✅
      - ✗
      - ?
