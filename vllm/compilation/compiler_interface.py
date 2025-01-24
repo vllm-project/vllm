@@ -273,12 +273,23 @@ class Inductor25Adaptor(CompilerInterface):
         from torch._inductor.codecache import FxGraphCache
         with patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
                    lambda *args, **kwargs: AlwaysHitShapeEnv()):
-            inductor_compiled_graph = FxGraphCache._lookup_graph(
-                hash_str, example_inputs, True, False)
-            assert inductor_compiled_graph is not None, (
-                "Inductor cache lookup failed. Please remove"
-                f"the cache directory and try again."  # noqa
-            )
+            if torch.__version__.startswith("2.5"):
+                inductor_compiled_graph = FxGraphCache._lookup_graph(
+                    hash_str, example_inputs, True, False)
+                assert inductor_compiled_graph is not None, (
+                    "Inductor cache lookup failed. Please remove"
+                    f"the cache directory and try again."  # noqa
+                )
+            elif torch.__version__ >= "2.6":
+                from torch._inductor.output_code import (
+                    CompiledFxGraphConstantsWithGm)
+                constants = CompiledFxGraphConstantsWithGm(graph)
+                inductor_compiled_graph, _ = FxGraphCache._lookup_graph(
+                    hash_str, example_inputs, True, None, constants)
+                assert inductor_compiled_graph is not None, (
+                    "Inductor cache lookup failed. Please remove"
+                    f"the cache directory and try again."  # noqa
+                )
 
         # Inductor calling convention (function signature):
         # f(list) -> tuple
