@@ -266,7 +266,6 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
 
 
 class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
-
     def get_dummy_processor_inputs(
         self,
         seq_len: int,
@@ -278,23 +277,30 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         target_width, target_height = self.info.get_image_size()
 
         mm_data = {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images)
+            "image": self._get_dummy_images(
+                width=target_width, height=target_height, num_images=num_images
+            )
         }
-        
+
         hf_config = self.info.get_hf_config()
-        image_placeholder_length=self.info.image_token_num
-        # image
-        token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, [hf_config.boi_token_id] +
-                        [0] * image_placeholder_length +
-                        [hf_config.eoi_token_id])
-        token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                        [0] * (seq_len - image_placeholder_length - 2))
+        image_placeholder_length = self.info.image_token_num
+
+        token_ids = array(
+            VLLM_TOKEN_ID_ARRAY_TYPE,
+            [hf_config.boi_token_id]
+            + [0] * image_placeholder_length
+            + [hf_config.eoi_token_id],
+        )
+        token_ids += array(
+            VLLM_TOKEN_ID_ARRAY_TYPE,
+            [0] * (seq_len - image_placeholder_length - 2),
+        )
+
+        tokenizer = self.info.get_tokenizer()
+        text = tokenizer.decode(token_ids)
 
         return ProcessorInputs(
-            prompt_text=VLLM_TOKEN_ID_ARRAY_TYPE,
+            prompt_text=text,
             mm_data=mm_data,
         )
 
