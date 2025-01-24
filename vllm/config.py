@@ -120,11 +120,6 @@ class ModelConfig:
             decoding draft models.
         quantization: Quantization method that was used to quantize the model
             weights. If None, we assume the model weights are not quantized.
-        quantization_param_path: Path to JSON file containing scaling factors.
-            Used to load KV cache scaling factors into the model when KV cache
-            type is FP8_E4M3 on ROCm (AMD GPU). In the future these will also
-            be used to load activation and weight scaling factors when the
-            model dtype is FP8_E4M3 on ROCm.
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
@@ -187,7 +182,6 @@ class ModelConfig:
         factors.append(self.model)
         factors.append(self.dtype)
         factors.append(self.quantization)
-        factors.append(self.quantization_param_path)
         factors.append(self.revision)
         factors.append(self.code_revision)
         factors.append(self.trust_remote_code)
@@ -195,40 +189,42 @@ class ModelConfig:
         factors.append(self.rope_theta)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
-    def __init__(self,
-                 model: str,
-                 task: Union[TaskOption, Literal["draft"]],
-                 tokenizer: str,
-                 tokenizer_mode: str,
-                 trust_remote_code: bool,
-                 dtype: Union[str, torch.dtype],
-                 seed: int,
-                 allowed_local_media_path: str = "",
-                 revision: Optional[str] = None,
-                 code_revision: Optional[str] = None,
-                 rope_scaling: Optional[Dict[str, Any]] = None,
-                 rope_theta: Optional[float] = None,
-                 tokenizer_revision: Optional[str] = None,
-                 max_model_len: Optional[int] = None,
-                 spec_target_max_model_len: Optional[int] = None,
-                 quantization: Optional[str] = None,
-                 quantization_param_path: Optional[str] = None,
-                 enforce_eager: Optional[bool] = None,
-                 max_seq_len_to_capture: Optional[int] = None,
-                 max_logprobs: int = 20,
-                 disable_sliding_window: bool = False,
-                 skip_tokenizer_init: bool = False,
-                 served_model_name: Optional[Union[str, List[str]]] = None,
-                 limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-                 use_async_output_proc: bool = True,
-                 config_format: ConfigFormat = ConfigFormat.AUTO,
-                 hf_overrides: Optional[HfOverrides] = None,
-                 mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-                 disable_mm_preprocessor_cache: bool = False,
-                 override_neuron_config: Optional[Dict[str, Any]] = None,
-                 override_pooler_config: Optional["PoolerConfig"] = None,
-                 logits_processor_pattern: Optional[str] = None,
-                 generation_config: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        task: Union[TaskOption, Literal["draft"]],
+        tokenizer: str,
+        tokenizer_mode: str,
+        trust_remote_code: bool,
+        dtype: Union[str, torch.dtype],
+        seed: int,
+        allowed_local_media_path: str = "",
+        revision: Optional[str] = None,
+        code_revision: Optional[str] = None,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_theta: Optional[float] = None,
+        tokenizer_revision: Optional[str] = None,
+        max_model_len: Optional[int] = None,
+        spec_target_max_model_len: Optional[int] = None,
+        quantization: Optional[str] = None,
+        enforce_eager: Optional[bool] = None,
+        max_seq_len_to_capture: Optional[int] = None,
+        max_logprobs: int = 20,
+        disable_sliding_window: bool = False,
+        skip_tokenizer_init: bool = False,
+        served_model_name: Optional[Union[str, List[str]]] = None,
+        limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+        use_async_output_proc: bool = True,
+        config_format: ConfigFormat = ConfigFormat.AUTO,
+        hf_overrides: Optional[HfOverrides] = None,
+        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        disable_mm_preprocessor_cache: bool = False,
+        override_neuron_config: Optional[Dict[str, Any]] = None,
+        override_pooler_config: Optional["PoolerConfig"] = None,
+        logits_processor_pattern: Optional[str] = None,
+        generation_config: Optional[str] = None,
+        enable_sleep_mode: bool = False,
+    ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -271,12 +267,17 @@ class ModelConfig:
         else:
             self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
-        self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
         self.max_seq_len_to_capture = max_seq_len_to_capture
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
+        self.enable_sleep_mode = enable_sleep_mode
+
+        from vllm.platforms import current_platform
+
+        if self.enable_sleep_mode and not current_platform.is_cuda():
+            raise ValueError("Sleep mode is only supported on CUDA devices.")
 
         hf_config = get_config(self.model, trust_remote_code, revision,
                                code_revision, config_format)
@@ -348,7 +349,6 @@ class ModelConfig:
         self.is_hybrid = self._init_is_hybrid()
         self.has_inner_state = self._init_has_inner_state()
 
-        from vllm.platforms import current_platform
         if current_platform.is_neuron():
             self.override_neuron_config = override_neuron_config
         else:
@@ -357,6 +357,10 @@ class ModelConfig:
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
         self.task: Final = task
+        if self.task in ("draft", "generate"):
+            self.truncation_side = "left"
+        else:
+            self.truncation_side = "right"
 
         self.pooler_config = self._init_pooler_config(override_pooler_config)
         self.logits_processor_pattern = logits_processor_pattern
@@ -553,7 +557,7 @@ class ModelConfig:
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
-            "compressed-tensors", "experts_int8"
+            "compressed-tensors", "experts_int8", "quark"
         ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
@@ -603,10 +607,12 @@ class ModelConfig:
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
 
-        if (self.hf_config.model_type == 'deepseek_v3'
+        MODEL_NOT_SUPPORT_CUDA_GRAPH = ['mllama']
+        if (self.hf_config.model_type in MODEL_NOT_SUPPORT_CUDA_GRAPH
                 and not self.enforce_eager):
-            logger.warning("CUDA graph is not supported for Deepseek V3 yet, "
-                           "fallback to the eager mode.")
+            logger.warning(
+                "CUDA graph is not supported for %s yet, fallback to the eager "
+                "mode.", self.hf_config.model_type)
             self.enforce_eager = True
 
     def _verify_bnb_config(self) -> None:
@@ -729,9 +735,12 @@ class ModelConfig:
         if hasattr(self.hf_text_config,
                    "model_type") and (self.hf_text_config.model_type
                                       in ('deepseek_v2', 'deepseek_v3')):
-            # FlashAttention supports only head_size 32, 64, 128, 256,
-            # we need to pad head_size 192 to 256
-            return 256
+            qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim",
+                                       0)
+            qk_nope_head_dim = getattr(self.hf_text_config, "qk_nope_head_dim",
+                                       0)
+            if qk_rope_head_dim and qk_nope_head_dim:
+                return qk_rope_head_dim + qk_nope_head_dim
 
         if self.is_attention_free:
             return 0
@@ -985,6 +994,7 @@ class CacheConfig:
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
         cpu_offload_gb: float = 0,
+        calculate_kv_scales: Optional[bool] = None,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -995,7 +1005,7 @@ class CacheConfig:
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
         self.cpu_offload_gb = cpu_offload_gb
-
+        self.calculate_kv_scales = calculate_kv_scales
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -1003,6 +1013,10 @@ class CacheConfig:
         # Will be set after profiling.
         self.num_gpu_blocks: Optional[int] = None
         self.num_cpu_blocks: Optional[int] = None
+
+        # Set calculate_kv_scales to False if the value is unset.
+        if self.calculate_kv_scales is None:
+            self.calculate_kv_scales = False
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
@@ -1276,7 +1290,7 @@ class ParallelConfig:
                 raise ValueError(f"worker-use-ray can't be used with "
                                  f"distributed executor backend "
                                  f"'{self.distributed_executor_backend}'.")
-        ray_only_devices = ["tpu", "hpu"]
+        ray_only_devices = ["tpu"]
         from vllm.platforms import current_platform
         if (current_platform.device_type in ray_only_devices
                 and self.world_size > 1):
@@ -1331,14 +1345,15 @@ class ParallelConfig:
         from vllm.executor.executor_base import ExecutorBase
         from vllm.platforms import current_platform
         if self.distributed_executor_backend not in (
-                "ray", "mp", "uni", None) and not (isinstance(
+                "ray", "mp", "uni",
+                "external_launcher", None) and not (isinstance(
                     self.distributed_executor_backend, type) and issubclass(
                         self.distributed_executor_backend, ExecutorBase)):
             raise ValueError(
                 "Unrecognized distributed executor backend "
                 f"{self.distributed_executor_backend}. Supported "
-                "values are 'ray', 'mp' 'uni', or custom ExecutorBase"
-                " subclass.")
+                "values are 'ray', 'mp' 'uni', 'external_launcher' or"
+                " custom ExecutorBase subclass.")
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
@@ -1383,13 +1398,15 @@ class SchedulerConfig:
 
     is_multimodal_model: bool = False
 
-    # FIXME(woosuk & ywang96): Below are placeholder values. We need to
-    # calculate the actual values from the configurations.
-    # Multimodal encoder run compute budget, only used in V1
-    max_num_encoder_input_tokens = 16384
+    # NOTE: The following multimodal encoder budget will be initialized to
+    # max_num_batched_tokens and overridden in case max multimodal embedding
+    # size is larger.
+    # TODO (ywang96): Make these configurable.
+    # Multimodal encoder compute budget, only used in V1
+    max_num_encoder_input_tokens: int = field(default=None)  # type: ignore
 
     # Multimodal encoder cache size, only used in V1
-    encoder_cache_size = 16384
+    encoder_cache_size: int = field(default=None)  # type: ignore
 
     # Whether to perform preemption by swapping or
     # recomputation. If not specified, we determine the mode as follows:
@@ -1462,6 +1479,9 @@ class SchedulerConfig:
                     self.max_num_batched_tokens,
                     _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
+
+        self.max_num_encoder_input_tokens = self.max_num_batched_tokens
+        self.encoder_cache_size = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
             logger.info(
@@ -2688,10 +2708,11 @@ class CompilationConfig(BaseModel):
         - use_inductor: whether to use inductor compilation.
             - False: inductor compilation is not used. graph runs in eager.
             - True: inductor compilation is used. one graph for symbolic shape
-                is compiled. In addition, compile for cudagraph sizes that are
-                in candidate_compile_sizes, using configurations
-                in inductor_compile_config.
-        - candidate_compile_sizes: sizes to compile for inductor.
+                is compiled. In addition, compile for compile_sizes,
+                using configurations in inductor_compile_config.
+        - compile_sizes: sizes to compile for inductor. In addition
+            to integers, it also supports "cudagraph_capture_sizes" to
+            specify the sizes for cudagraph capture.
         - inductor_compile_config: additional configurations for inductor.
             - None: use default configurations.
         - inductor_passes: additional passes for inductor. It is a dictionary
@@ -2719,7 +2740,7 @@ class CompilationConfig(BaseModel):
     splitting_ops: List[str] = Field(default=None)  # type: ignore
 
     use_inductor: bool = True
-    candidate_compile_sizes: Optional[List[int]] = Field(default=None)
+    compile_sizes: Optional[List[Union[int, str]]] = Field(default=None)
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
 
@@ -2767,9 +2788,8 @@ class CompilationConfig(BaseModel):
     pass_config: PassConfig = Field(default_factory=PassConfig)
 
     # not configurable, computed after init
-    compile_sizes: List[int] = PrivateAttr
-    capture_sizes: List[int] = PrivateAttr
     max_capture_size: int = PrivateAttr
+    local_cache_dir: str = PrivateAttr  # local cache dir for each rank
     # optimization:
     # Intuitively, bs_to_padded_graph_size should be Dict[int, int].
     # since we know all keys are in a range [0, max_capture_size],
@@ -2847,17 +2867,8 @@ class CompilationConfig(BaseModel):
                     "vllm.unified_attention_with_output",
                 ]
             else:
-                # v0 can use full graph compilation without splitting,
-                # splitting is optional.
-                # right now we still need it. kv cache shape
-                # will be included in the graph if we don't split
-                # the graph.
-                # TODO: hide kv cache in static forward context
-                # so that inductor does not see it.
-                self.splitting_ops = [
-                    "vllm.unified_attention",
-                    "vllm.unified_attention_with_output",
-                ]
+                # v0 uses full graph compilation
+                self.splitting_ops = []
 
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
@@ -2903,43 +2914,47 @@ class CompilationConfig(BaseModel):
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)
 
-    def init_with_cudagraph_sizes(self, sizes_to_specialize: List[int]):
+    def init_with_cudagraph_sizes(self,
+                                  cudagraph_capture_sizes: List[int]) -> None:
         """To complete the initialization of config,
         we need to know the cudagraph sizes."""
 
         if self.cudagraph_capture_sizes is None:
-            self.capture_sizes = sizes_to_specialize
+            self.cudagraph_capture_sizes = cudagraph_capture_sizes
         else:
-            self.capture_sizes = self.cudagraph_capture_sizes
+            # de-duplicate the sizes provided by the config
+            self.cudagraph_capture_sizes = list(
+                set(self.cudagraph_capture_sizes))
             logger.info(("cudagraph sizes specified by model runner"
                          " %s is overridden by config %s"),
-                        sizes_to_specialize, self.cudagraph_capture_sizes)
+                        cudagraph_capture_sizes, self.cudagraph_capture_sizes)
 
-        if self.candidate_compile_sizes is None:
-            self.candidate_compile_sizes = []
-        self.compile_sizes = [
-            x for x in self.candidate_compile_sizes if x in self.capture_sizes
-        ]
-        ignored_sizes = [
-            x for x in self.candidate_compile_sizes
-            if x not in self.capture_sizes
-        ]
-        if ignored_sizes:
-            logger.warning(("candidate_compile_sizes %s are ignored "
-                            "because they are not cudagraph capture sizes."),
-                           ignored_sizes)
+        computed_compile_sizes = []
+        if self.compile_sizes is not None:
+            # de-duplicate the sizes provided by the config
+            self.compile_sizes = list(set(self.compile_sizes))
+            for x in self.compile_sizes:
+                if isinstance(x, str):
+                    assert x == "cudagraph_capture_sizes", \
+                    "Unrecognized size type in compile_sizes, " \
+                    f"expect 'cudagraph_capture_sizes', got {x}"
+                    computed_compile_sizes.extend(self.cudagraph_capture_sizes)
+                else:
+                    assert isinstance(x, int)
+                    computed_compile_sizes.append(x)
+        self.compile_sizes = computed_compile_sizes  # type: ignore
 
         # sort to make sure cudagraph capture sizes are in descending order
-        self.capture_sizes.sort(reverse=True)
-        self.max_capture_size = self.capture_sizes[
-            0] if self.capture_sizes else 0
+        self.cudagraph_capture_sizes.sort(reverse=True)
+        self.max_capture_size = self.cudagraph_capture_sizes[
+            0] if self.cudagraph_capture_sizes else 0
 
         # pre-compute the mapping from batch size to padded graph size
         self.bs_to_padded_graph_size = [
             0 for i in range(self.max_capture_size + 1)
         ]
-        for end, start in zip(self.capture_sizes,
-                              self.capture_sizes[1:] + [0]):
+        for end, start in zip(self.cudagraph_capture_sizes,
+                              self.cudagraph_capture_sizes[1:] + [0]):
             for bs in range(start, end):
                 if bs == start:
                     self.bs_to_padded_graph_size[bs] = start
@@ -3159,7 +3174,8 @@ class VllmConfig:
 
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
-        if envs.VLLM_USE_V1 and not self.model_config.enforce_eager:
+        if envs.VLLM_USE_V1 and self.model_config is not None and \
+            not self.model_config.enforce_eager:
             # NOTE(woosuk): Currently, we use inductor because the piecewise
             # CUDA graphs do not work properly with the custom CUDA kernels.
             # FIXME(woosuk): Disable inductor to reduce the compilation time
@@ -3209,14 +3225,14 @@ class VllmConfig:
         However, if users specify the cudagraph capture sizes through
         compilation config, we will use the specified sizes instead.
 
-        In the end, `vllm_config.compilation_config.capture_sizes` will be the
-        final sizes to capture cudagraph (in descending order).
+        In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
+        will be the final sizes to capture cudagraph (in descending order).
 
         During runtime, if batchsize is larger than
-        `vllm_config.compilation_config.capture_sizes`,
+        `vllm_config.compilation_config.cudagraph_capture_sizes`,
         no cudagraph will be used.
         If the batch size is no larger than
-        `vllm_config.compilation_config.capture_sizes`,
+        `vllm_config.compilation_config.cudagraph_capture_sizes`,
         we can quickly find the padded graph size for a given batch size by
         looking up `vllm_config.compilation_config.bs_to_padded_graph_size`.
         """
@@ -3278,7 +3294,6 @@ class VllmConfig:
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
-            f"quantization_param_path={self.model_config.quantization_param_path},"
             f" device_config={self.device_config.device}, "
             f"decoding_config={self.decoding_config!r}, "
             f"observability_config={self.observability_config!r}, "

@@ -228,8 +228,11 @@ class cmake_build_ext(build_ext):
 
             # CMake appends the extension prefix to the install path,
             # and outdir already contains that prefix, so we need to remove it.
+            # We assume only the final component of extension prefix is added by
+            # CMake, this is currently true for current extensions but may not
+            # always be the case.
             prefix = outdir
-            for i in range(ext.name.count('.')):
+            if '.' in ext.name:
                 prefix = prefix.parent
 
             # prefix here should actually be the same for all components
@@ -298,9 +301,11 @@ class repackage_wheel(build_ext):
             files_to_copy = [
                 "vllm/_C.abi3.so",
                 "vllm/_moe_C.abi3.so",
-                "vllm/vllm_flash_attn/vllm_flash_attn_c.abi3.so",
+                "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
+                "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                 "vllm/vllm_flash_attn/flash_attn_interface.py",
                 "vllm/vllm_flash_attn/__init__.py",
+                "vllm/cumem_allocator.abi3.so",
                 # "vllm/_version.py", # not available in nightly wheels yet
             ]
             file_members = filter(lambda x: x.filename in files_to_copy,
@@ -472,13 +477,9 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
-    # TODO: Revisit this temporary approach: https://github.com/vllm-project/vllm/issues/9182#issuecomment-2404860236
-    try:
-        version = get_version(
-            write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
-        )
-    except LookupError:
-        version = "0.0.0"
+    version = get_version(
+        write_to="vllm/_version.py",  # TODO: move this to pyproject.toml
+    )
 
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
@@ -553,7 +554,7 @@ def get_requirements() -> List[str]:
         return resolved_requirements
 
     if _no_device():
-        requirements = _read_requirements("requirements-cuda.txt")
+        requirements = _read_requirements("requirements-cpu.txt")
     elif _is_cuda():
         requirements = _read_requirements("requirements-cuda.txt")
         cuda_major, cuda_minor = torch.version.cuda.split(".")
@@ -596,8 +597,9 @@ if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
 
 if _is_cuda():
-    ext_modules.append(
-        CMakeExtension(name="vllm.vllm_flash_attn.vllm_flash_attn_c"))
+    ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
+    ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+    ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
