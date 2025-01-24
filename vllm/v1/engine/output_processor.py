@@ -2,11 +2,11 @@ import asyncio
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from sampling_params import RequestOutputKind
+
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
-from vllm.v1.engine.detokenizer import DetokenizerOutput
-from vllm.v1.engine.logprobs import LogprobsOutput
 from vllm.v1.engine.output_processor_utils import RequestState
 from vllm.v1.metrics.stats import IterationStats
 
@@ -84,13 +84,8 @@ class OutputProcessor:
         batch to ensure system overheads are minimized. This is the 
         only function that should loop over EngineCoreOutputs.
 
-        If you need to touch every element of the batch, implement a
-        method called XXXClass.update_from_output() to be called
-        within the loop below. For examples, see:
-            * IterationStats.update_from_output()
-            * Detokenizer.update_from_output()
-        
-        TODO(rob): add Protocol makes update_from_output explicit.
+        If you need to touch every element of the batch, do it from
+        within the loop below.
         
         **********************************************************
         """
@@ -112,21 +107,22 @@ class OutputProcessor:
                                                req_state.prompt_len)
             req_state.is_prefilling = False
 
-            # 2) Detokenize the token ids into text.
-            if detokenizer_output := req_state.detokenizer.update_from_output(
-                    engine_core_output):
-                # Detect if detokenizer updated `finish_reason`
-                engine_core_output.finish_reason = (
-                    detokenizer_output.finish_reason)
+            new_token_ids = engine_core_output.new_token_ids
+            finish_reason = engine_core_output.finish_reason
+
+            # 2) Detokenize the token ids into text and check for stop
+            #    strings.
+            stop_reason = req_state.detokenizer.update(new_token_ids)
+            if stop_reason:
+                finish_reason = "stop"
 
             # 3) Compute sample and prompt logprobs for request,
             #    if required.
-            logprobs_output = req_state.logprobs_processor.update_from_output(
-                engine_core_output)
+            req_state.logprobs_processor.update_from_output(engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
             if request_output := self._make_request_output(
-                    req_state, logprobs_output, detokenizer_output):
+                    req_state, new_token_ids, finish_reason, stop_reason):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put_nowait(request_output)
@@ -151,30 +147,40 @@ class OutputProcessor:
     @staticmethod
     def _make_request_output(
         request_state: RequestState,
-        logprobs_output: Optional[LogprobsOutput],
-        detokenizer_output: Optional[DetokenizerOutput],
+        new_token_ids: List[int],
+        finish_reason: Optional[str],
+        stop_reason: Optional[str],
     ) -> Optional[RequestOutput]:
 
-        if detokenizer_output is None:
-            # Only happens with FINAL request output kind when
-            # we are not on the final step
+        output_kind = request_state.output_kind
+        finished = bool(finish_reason)
+        if output_kind == RequestOutputKind.FINAL_ONLY \
+                and not finished:
+            # Only the final output is required in FINAL_ONLY mode.
             return None
-        assert logprobs_output is not None
+
+        detokenizer = request_state.detokenizer
+        logprobs_processor = request_state.logprobs_processor
+
+        delta = output_kind == RequestOutputKind.DELTA
+        logprobs = logprobs_processor.logprobs
+        if logprobs and delta:
+            logprobs = logprobs[-len(new_token_ids):]
 
         request_output = RequestOutput.new(
-            request_state.request_id,
-            request_state.prompt,
-            request_state.prompt_token_ids,
-            detokenizer_output.output_text,
-            detokenizer_output.token_ids,
-            logprobs_output.logprobs,
-            logprobs_output.prompt_logprobs,
-            logprobs_output.cumulative_logprob,
-            detokenizer_output.finished,
+            request_id=request_state.request_id,
+            prompt=request_state.prompt,
+            prompt_token_ids=request_state.prompt_token_ids,
+            text=detokenizer.get_next_output_text(finished, delta),
+            token_ids=new_token_ids if delta else detokenizer.output_token_ids,
+            logprobs=logprobs,
+            prompt_logprobs=logprobs_processor.prompt_logprobs,
+            cumulative_logprob=logprobs_processor.cumulative_logprob,
+            finished=finished,
         )
-        if detokenizer_output.finished:
+        if finished:
             completion_output = request_output.outputs[0]
-            completion_output.finish_reason = detokenizer_output.finish_reason
-            completion_output.stop_reason = detokenizer_output.stop_reason
+            completion_output.finish_reason = finish_reason
+            completion_output.stop_reason = stop_reason
 
         return request_output

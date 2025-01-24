@@ -4,7 +4,6 @@ from typing import Dict, List, Optional, Tuple
 import torch
 
 from vllm.logger import init_logger
-from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_id_to_token, convert_ids_tensor_to_tokens)
@@ -14,20 +13,10 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class LogprobsOutput:
-    logprobs: Optional[SampleLogprobs]
-    prompt_logprobs: Optional[PromptLogprobs]
-    cumulative_logprob: Optional[float]
-
-
-@dataclass
 class LogprobsProcessor:
 
     # Tokenizer for this request
     tokenizer: AnyTokenizer
-
-    # Request output kind
-    output_kind: RequestOutputKind
 
     # Prompt tokens
     prompt_token_ids: List[int]
@@ -49,7 +38,6 @@ class LogprobsProcessor:
         num_prompt_logprobs = request.sampling_params.prompt_logprobs
         return cls(
             tokenizer=tokenizer,
-            output_kind=request.sampling_params.output_kind,
             prompt_token_ids=request.prompt_token_ids,
             cumulative_logprob=(0. if num_logprobs else None),
             logprobs=([] if num_logprobs else None),
@@ -63,7 +51,7 @@ class LogprobsProcessor:
         sampled_token_ids: List[int],
         token_ids_lst: List[torch.Tensor],
         sample_logprobs_lst: List[torch.Tensor],
-    ) -> Optional[SampleLogprobs]:
+    ) -> None:
         """Incorporate sample logprobs from this step, if they exist.
 
         Lists are only of length >1 if EngineCore made
@@ -81,7 +69,7 @@ class LogprobsProcessor:
         """
         if self.num_logprobs == 0:
             # Sample logprobs disabled for this request
-            return None
+            return
         assert self.logprobs is not None
 
         for sampled_token_id, logprobs, token_ids in zip(
@@ -121,10 +109,6 @@ class LogprobsProcessor:
 
             self.logprobs.append(pos_logprobs_dict)
             self.cumulative_logprob += sampled_token_logprob
-
-        # Return just the newly generated sample logprobs.
-        num_new_tokens = len(sampled_token_ids)
-        return self.logprobs[-num_new_tokens:]
 
     def _update_prompt_logprobs(
         self,
@@ -279,42 +263,19 @@ class LogprobsProcessor:
 
         return logprobs_dict
 
-    def update_from_output(
-        self,
-        output: EngineCoreOutput,
-    ) -> Optional[LogprobsOutput]:
+    def update_from_output(self, output: EngineCoreOutput) -> None:
         """
-        Update RequestState for the request_id by:
+        Update Logprobs from the engine output.
         """
-        new_token_ids = output.new_token_ids
-        new_logprobs_token_ids = output.new_logprobs_token_ids
-        new_logprobs = output.new_logprobs
-        new_prompt_logprobs_token_ids = output.new_prompt_logprobs_token_ids
-        new_prompt_logprobs = output.new_prompt_logprobs
 
-        # 1) Make Sample Logprobs, if requested
-        logprobs = self._update_sample_logprobs(
-            new_token_ids,
-            new_logprobs_token_ids,
-            new_logprobs,
+        # 1) Make Sample Logprobs, if requested.
+        self._update_sample_logprobs(
+            output.new_token_ids,
+            output.new_logprobs_token_ids,
+            output.new_logprobs,
         )
 
         # 4) Make Prompt Logprobs.
-        prompt_logprobs = self._update_prompt_logprobs(
-            new_prompt_logprobs_token_ids, new_prompt_logprobs,
-            self.prompt_token_ids)
-
-        # 5) Makes the LogprobsOutput object with the new text.
-        finished = bool(output.finish_reason)
-        if self.output_kind == RequestOutputKind.FINAL_ONLY \
-            and not finished:
-            return None
-        delta = self.output_kind == RequestOutputKind.DELTA
-        logprobs = logprobs if delta else self.logprobs
-        prompt_logprobs = prompt_logprobs if delta else self.prompt_logprobs
-
-        return LogprobsOutput(
-            logprobs=logprobs,
-            prompt_logprobs=prompt_logprobs,
-            cumulative_logprob=self.cumulative_logprob,
-        )
+        self._update_prompt_logprobs(output.new_prompt_logprobs_token_ids,
+                                     output.new_prompt_logprobs,
+                                     self.prompt_token_ids)
