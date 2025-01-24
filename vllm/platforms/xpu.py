@@ -67,13 +67,12 @@ class XPUPlatform(Platform):
         model_config = vllm_config.model_config
         if model_config.dtype == torch.bfloat16:
             bf16_supported = cls.device_support_bf16()
-            device_name = cls.get_device_name()
             if not bf16_supported:
                 logger.warning(
                     "bfloat16 is only supported on Intel Data Center GPU, "
                     "Intel Arc GPU is not supported yet. Your device is %s,"
                     "which is not supported. will fallback to float16",
-                    device_name)
+                    cls.get_device_name())
                 model_config.dtype = torch.float16
         if not model_config.enforce_eager:
             logger.warning(
