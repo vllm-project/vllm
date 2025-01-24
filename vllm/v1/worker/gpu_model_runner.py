@@ -256,7 +256,7 @@ class GPUModelRunner:
 
             # Remove from prompt logprobs once out of prefill phase.
             if (req_id in self.input_batch.num_prompt_logprobs
-                    and req_id not in scheduler_output.partial_req_ids):
+                    and req_id != scheduler_output.partial_req_id):
                 del self.input_batch.num_prompt_logprobs[req_id]
 
         req_ids_to_add: List[str] = []
@@ -393,8 +393,7 @@ class GPUModelRunner:
         num_copy_tokens = total_num_scheduled_tokens
         flat_token_ids_cpu_tensor = (
             self.input_batch.token_ids_cpu_tensor.flatten())
-        if (len(scheduler_output.partial_req_ids) > 0
-                and scheduler_output.partial_req_ids[0]
+        if (scheduler_output.partial_req_id and scheduler_output.partial_req_id
                 in self.input_batch.num_prompt_logprobs):
             # To facilitate computing prompt logprobs of the last token
             # in a partial prefill chunk, inject the first token of the next
@@ -563,7 +562,7 @@ class GPUModelRunner:
         # token from the partial request.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
-        return attn_metadata, logits_indices, req_indices
+        return attn_metadata, logits_indices
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0
@@ -746,7 +745,7 @@ class GPUModelRunner:
             encoder_outputs = []
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices, req_indices = (
+        attn_metadata, logits_indices = (
             self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
@@ -820,7 +819,7 @@ class GPUModelRunner:
             # Compute the positions of the prompt tokens
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 request_id]
-            is_partial_req = request_id in scheduler_output.partial_req_ids
+            is_partial_req = request_id == scheduler_output.partial_req_id
             req_idx = self.input_batch.req_id_to_index[request_id]
             # Index of this request's first scheduled prompt token within
             # model input token vector
