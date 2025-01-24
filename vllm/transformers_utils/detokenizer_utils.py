@@ -88,7 +88,7 @@ def convert_id_to_token(
       String representation of single input token.
     """
     token_str_lst = tokenizer.convert_ids_to_tokens([token_id])
-    replace_none_with_empty(token_str_lst)
+    replace_none_with_empty(token_str_lst)  # type: ignore
     return token_str_lst[0]
 
 
@@ -112,7 +112,7 @@ def convert_ids_tensor_to_tokens(
     flat_token_ids = token_ids.reshape(-1,
                                        1).squeeze().to(torch.int32).tolist()
     token_str_lst = tokenizer.convert_ids_to_tokens(flat_token_ids)
-    replace_none_with_empty(token_str_lst)
+    replace_none_with_empty(token_str_lst)  # type: ignore
     return token_str_lst
 
 
