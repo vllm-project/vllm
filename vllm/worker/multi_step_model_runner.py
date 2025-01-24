@@ -14,7 +14,7 @@ from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
                                                 get_pythonized_sample_results)
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
-from vllm.utils import PyObjectCache, async_tensor_h2d
+from vllm.utils import PyObjectCache, async_tensor_h2d, current_stream
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
@@ -32,7 +32,7 @@ logger = init_logger(__name__)
 MULTI_STEP_ATTENTION_BACKENDS = [
     "FLASH_ATTN", "ROCM_FLASH", "FLASHINFER", "NO_ATTENTION"
 ]
-MULTI_STEP_CHUNKED_PREFILL_ATTENTION_BACKENDS = ["FLASH_ATTN"]
+MULTI_STEP_CHUNKED_PREFILL_ATTENTION_BACKENDS = ["FLASH_ATTN", "FLASHINFER"]
 
 def _get_supported_attention_backends(chunked_prefill_enabled: bool) \
     -> List[str]:
@@ -498,7 +498,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         #   appended sampler output from last iteration
         #   - also maybe pythonize if CPU is ahead of GPU
 
-        current_stream = torch.cuda.current_stream()
+        stream = current_stream()
         if not model_input.is_first_multi_step:
             # Explicitly block on the previous step's forward to make sure we
             # don't clobber any GPU tensors still in use.
@@ -541,7 +541,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                                                        num_steps=1)
 
         # record the event for the current step so that the next step can sync
-        model_input.record_step_event(current_stream)
+        model_input.record_step_event(stream)
 
         if get_pp_group().is_last_rank and self.is_driver_worker:
             assert isinstance(output, list)
@@ -552,7 +552,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             # event for the pythonization so that we only pythonize if the
             # tensors are ready. May be able to be combined with the step event
             output_ready_event = torch.cuda.Event()
-            output_ready_event.record(current_stream)
+            output_ready_event.record(stream)
             if self.parallel_config.pipeline_parallel_size > 1:
                 output[0].sampled_token_ids_cpu = output[
                     0].sampled_token_ids.cpu()
@@ -822,7 +822,7 @@ def _pythonize_sampler_output(
 
     for sgdx, (seq_group,
                sample_result) in enumerate(zip(seq_groups, samples_list)):
-        # Reminder: Please update docs/source/usage/compatibility_matrix.md
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         # (Check for Guided Decoding)
         if seq_group.sampling_params.logits_processors:

@@ -6,9 +6,12 @@ import time
 import weakref
 from dataclasses import dataclass
 from enum import Enum, auto
+from functools import partial
 from multiprocessing.process import BaseProcess
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+import cloudpickle
+import psutil
 import zmq
 
 from vllm.config import VllmConfig
@@ -22,7 +25,6 @@ from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_mp_context,
                         get_open_port, get_open_zmq_ipc_path, zmq_socket_ctx)
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -33,13 +35,23 @@ POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
 
 class MultiprocExecutor(Executor):
 
-    def __init__(self, vllm_config: VllmConfig) -> None:
+    def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
 
-        self.vllm_config = vllm_config
-        self.parallel_config = vllm_config.parallel_config
+        # The child processes will send SIGUSR1 when unrecoverable
+        # errors happen.
+        def sigusr1_handler(signum, frame):
+            logger.fatal(
+                "MulitprocExecutor got fatal signal from worker processes, "
+                "shutting down. See stack trace above for root cause issue.")
+            # Propagate error up to parent process.
+            parent_process = psutil.Process().parent()
+            parent_process.send_signal(signal.SIGUSR1)
+            self.shutdown()
+
+        signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -65,7 +77,8 @@ class MultiprocExecutor(Executor):
         # Create workers
         self.workers: List[WorkerProcHandle] = []
         for rank in range(self.world_size):
-            worker = WorkerProc.make_worker_process(vllm_config, rank, rank,
+            worker = WorkerProc.make_worker_process(self.vllm_config, rank,
+                                                    rank,
                                                     distributed_init_method,
                                                     scheduler_output_handle)
             self.workers.append(worker)
@@ -76,52 +89,24 @@ class MultiprocExecutor(Executor):
         for w in self.workers:
             w.worker_response_mq.wait_until_ready()
 
-    def initialize(self, num_gpu_blocks: int) -> None:
-        """
-        Initialize the KV caches and begin the model execution loop of the
-        underlying workers.
-        """
-        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, ))
-        self.collective_rpc("compile_or_warm_up_model")
-
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        """
-        Determine the number of available KV blocks by invoking the
-        underlying worker.
-        """
-        num_blocks = self.collective_rpc("determine_num_available_blocks")
-
-        # Since we use a shared centralized controller, we take the minimum
-        # number of blocks across all workers to make sure all the memory
-        # operators can be applied to all workers.
-        num_gpu_blocks = min(b[0] for b in num_blocks)
-        num_cpu_blocks = min(b[1] for b in num_blocks)
-
-        return num_gpu_blocks, num_cpu_blocks
-
     def collective_rpc(self,
-                       method: str,
+                       method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
-        """
-        Execute an RPC call on workers.
-        
-        Args:
-            method: Name of the worker method to execute
-            timeout: Maximum time in seconds to wait for execution. Rases a
-                     TimeoutError on timeout. None means wait indefinitely.
-            args: Positional arguments to pass to the worker method
-            kwargs: Keyword arguments to pass to the worker method
-
-        Returns:
-            List of results from each worker
-        """
         start_time = time.monotonic()
         kwargs = kwargs or {}
 
+        # NOTE: If the args are heterogeneous, then we pack them into a list,
+        # and unpack them in the method of every worker, because every worker
+        # knows their own rank.
         try:
-            self.rpc_broadcast_mq.enqueue((method, args, kwargs))
+            if isinstance(method, str):
+                send_method = method
+            else:
+                send_method = cloudpickle.dumps(
+                    method, protocol=pickle.HIGHEST_PROTOCOL)
+            self.rpc_broadcast_mq.enqueue((send_method, args, kwargs))
 
             responses = [None] * self.world_size
             for w in self.workers:
@@ -144,18 +129,6 @@ class MultiprocExecutor(Executor):
         except Exception as e:
             # Re-raise any other exceptions
             raise e
-
-    def execute_model(
-        self,
-        scheduler_output,
-    ) -> ModelRunnerOutput:
-        model_output = self.collective_rpc("execute_model",
-                                           args=(scheduler_output, ))[0]
-        return model_output
-
-    def profile(self, is_start: bool = True):
-        self.collective_rpc("profile", args=(is_start, ))
-        return
 
     def _ensure_worker_termination(self):
         """Ensure that all worker processes are terminated. Assumes workers have
@@ -231,9 +204,18 @@ class WorkerProc:
         ready_path: str,
     ):
         self.rank = rank
-        wrapper = WorkerWrapperBase(vllm_config=vllm_config)
-        wrapper.init_worker(vllm_config, local_rank, rank,
-                            distributed_init_method)
+        wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
+        # TODO: move `init_worker` to executor level as a collective rpc call
+        all_kwargs: List[Dict] = [
+            {} for _ in range(vllm_config.parallel_config.world_size)
+        ]
+        all_kwargs[rank] = {
+            "vllm_config": vllm_config,
+            "local_rank": local_rank,
+            "rank": rank,
+            "distributed_init_method": distributed_init_method,
+        }
+        wrapper.init_worker(all_kwargs)
         self.worker = wrapper.worker
 
         pid = os.getpid()
@@ -255,7 +237,7 @@ class WorkerProc:
             ready_socket.send_string(WorkerProc.READY_STR)
             ready_socket.send(payload)
 
-        self.worker.initialize()
+        self.worker.init_device()
         self.worker.load_model()
 
     @staticmethod
@@ -335,8 +317,11 @@ class WorkerProc:
         except SystemExit:
             logger.debug("Worker interrupted.")
 
-        except BaseException as e:
-            logger.exception(e)
+        except Exception:
+            # worker_busy_loop sends exceptions exceptons to Executor
+            # for shutdown, but if there is an error in startup or an
+            # error with IPC itself, we need to alert the parent.
+            psutil.Process().parent().send_signal(signal.SIGUSR1)
             raise
 
         finally:
@@ -376,10 +361,15 @@ class WorkerProc:
             method, args, kwargs = self.rpc_broadcast_mq.dequeue()
 
             try:
-                output = getattr(self.worker, method)(*args, **kwargs)
-            except BaseException as e:
+                if isinstance(method, str):
+                    func = getattr(self.worker, method)
+                elif isinstance(method, bytes):
+                    func = partial(cloudpickle.loads(method), self.worker)
+                output = func(*args, **kwargs)
+            except Exception as e:
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.FAILURE, e))
+                logger.exception("WorkerProc hit an exception: %s", exc_info=e)
                 continue
 
             self.worker_response_mq.enqueue(

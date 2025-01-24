@@ -2,7 +2,7 @@
 
 ## Debugging
 
-Please see the [Debugging Tips](#debugging-python-multiprocessing)
+Please see the [Troubleshooting](#troubleshooting-python-multiprocessing)
 page for information on known issues and how to solve them.
 
 ## Introduction
@@ -21,7 +21,7 @@ This document describes how vLLM deals with these challenges.
 
 ## Multiprocessing Methods
 
-[Python multiprocessing methods](https://docs.python.org/3/library/multiprocessing.html.md#contexts-and-start-methods) include:
+[Python multiprocessing methods](https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods) include:
 
 - `spawn` - spawn a new Python process. This will be the default as of Python
   3.14.

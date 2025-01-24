@@ -37,7 +37,7 @@ audioread==3.0.1
     # via librosa
 awscli==1.35.23
     # via -r requirements-test.in
-bitsandbytes>=0.45.0
+bitsandbytes==0.45.0
     # via -r requirements-test.in
 black==24.10.0
     # via datamodel-code-generator
@@ -48,6 +48,8 @@ botocore==1.35.57
     #   awscli
     #   boto3
     #   s3transfer
+bounded-pool-executor==0.0.3
+    # via pqdm
 buildkite-test-collector==0.1.9
     # via -r requirements-test.in
 certifi==2024.8.30
@@ -73,6 +75,8 @@ colorama==0.4.6
     #   tqdm-multiprocess
 contourpy==1.3.0
     # via matplotlib
+cramjam==2.9.0
+    # via fastparquet
 cupy-cuda12x==13.3.0
     # via ray
 cycler==0.12.1
@@ -107,6 +111,8 @@ email-validator==2.2.0
     # via pydantic
 evaluate==0.4.3
     # via lm-eval
+fastparquet==2024.11.0
+    # via genai-perf
 fastrlock==0.8.2
     # via cupy-cuda12x
 filelock==3.16.1
@@ -128,8 +134,11 @@ fsspec[http]==2024.9.0
     # via
     #   datasets
     #   evaluate
+    #   fastparquet
     #   huggingface-hub
     #   torch
+genai-perf==0.0.8
+    # via -r requirements-test.in
 genson==1.3.0
     # via datamodel-code-generator
 h11==0.14.0
@@ -184,6 +193,8 @@ jsonschema==4.23.0
     #   ray
 jsonschema-specifications==2024.10.1
     # via jsonschema
+kaleido==0.2.1
+    # via genai-perf
 kiwisolver==1.4.7
     # via matplotlib
 lazy-loader==0.4
@@ -198,6 +209,8 @@ lm-eval[api]==0.4.4
     # via -r requirements-test.in
 lxml==5.3.0
     # via sacrebleu
+markdown-it-py==3.0.0
+    # via rich
 markupsafe==3.0.2
     # via jinja2
 matplotlib==3.9.2
@@ -207,6 +220,8 @@ mbstrdecoder==1.1.3
     #   dataproperty
     #   pytablewriter
     #   typepy
+mdurl==0.1.2
+    # via markdown-it-py
 mistral-common[opencv]==1.5.1
     # via
     #   -r requirements-test.in
@@ -247,6 +262,8 @@ numpy==1.26.4
     #   datasets
     #   decord
     #   evaluate
+    #   fastparquet
+    #   genai-perf
     #   librosa
     #   matplotlib
     #   mistral-common
@@ -254,15 +271,18 @@ numpy==1.26.4
     #   numexpr
     #   opencv-python-headless
     #   pandas
+    #   patsy
     #   peft
     #   rouge-score
     #   sacrebleu
     #   scikit-learn
     #   scipy
     #   soxr
+    #   statsmodels
     #   tensorizer
     #   torchvision
     #   transformers
+    #   tritonclient
 nvidia-cublas-cu12==12.4.5.8
     # via
     #   nvidia-cudnn-cu12
@@ -304,30 +324,39 @@ packaging==24.1
     #   datamodel-code-generator
     #   datasets
     #   evaluate
+    #   fastparquet
     #   huggingface-hub
     #   lazy-loader
     #   matplotlib
     #   peft
+    #   plotly
     #   pooch
     #   pytest
     #   pytest-rerunfailures
     #   ray
+    #   statsmodels
     #   transformers
     #   typepy
 pandas==2.2.3
     # via
     #   datasets
     #   evaluate
+    #   fastparquet
+    #   genai-perf
+    #   statsmodels
 pathspec==0.12.1
     # via black
 pathvalidate==3.2.1
     # via pytablewriter
+patsy==1.0.1
+    # via statsmodels
 peft==0.13.2
     # via
     #   -r requirements-test.in
     #   lm-eval
 pillow==10.4.0
     # via
+    #   genai-perf
     #   matplotlib
     #   mistral-common
     #   sentence-transformers
@@ -336,12 +365,16 @@ platformdirs==4.3.6
     # via
     #   black
     #   pooch
+plotly==5.24.1
+    # via genai-perf
 pluggy==1.5.0
     # via pytest
 pooch==1.8.2
     # via librosa
 portalocker==2.10.1
     # via sacrebleu
+pqdm==0.2.0
+    # via -r requirements-test.in
 propcache==0.2.0
     # via yarl
 protobuf==5.28.3
@@ -356,7 +389,9 @@ psutil==6.1.0
 py==1.11.0
     # via pytest-forked
 pyarrow==18.0.0
-    # via datasets
+    # via
+    #   datasets
+    #   genai-perf
 pyasn1==0.6.1
     # via rsa
 pybind11==2.13.6
@@ -369,6 +404,8 @@ pydantic[email]==2.9.2
     #   mistral-common
 pydantic-core==2.23.4
     # via pydantic
+pygments==2.18.0
+    # via rich
 pyparsing==3.2.0
     # via matplotlib
 pytablewriter==1.2.0
@@ -377,14 +414,18 @@ pytest==8.3.3
     # via
     #   -r requirements-test.in
     #   buildkite-test-collector
+    #   genai-perf
     #   pytest-asyncio
     #   pytest-forked
+    #   pytest-mock
     #   pytest-rerunfailures
     #   pytest-shard
 pytest-asyncio==0.24.0
     # via -r requirements-test.in
 pytest-forked==1.6.0
     # via -r requirements-test.in
+pytest-mock==3.14.0
+    # via genai-perf
 pytest-rerunfailures==14.0
     # via -r requirements-test.in
 pytest-shard==0.1.2
@@ -395,6 +436,8 @@ python-dateutil==2.9.0.post0
     #   matplotlib
     #   pandas
     #   typepy
+python-rapidjson==1.20
+    # via tritonclient
 pytz==2024.2
     # via
     #   pandas
@@ -405,9 +448,11 @@ pyyaml==6.0.2
     #   awscli
     #   datamodel-code-generator
     #   datasets
+    #   genai-perf
     #   huggingface-hub
     #   peft
     #   ray
+    #   responses
     #   timm
     #   transformers
 ray[adag]==2.40.0
@@ -434,8 +479,13 @@ requests==2.32.3
     #   mistral-common
     #   pooch
     #   ray
+    #   responses
     #   tiktoken
     #   transformers
+responses==0.25.3
+    # via genai-perf
+rich==13.9.4
+    # via genai-perf
 rouge-score==0.1.2
     # via lm-eval
 rpds-py==0.20.1
@@ -466,6 +516,7 @@ scipy==1.13.1
     #   librosa
     #   scikit-learn
     #   sentence-transformers
+    #   statsmodels
 sentence-transformers==3.2.1
     # via -r requirements-test.in
 sentencepiece==0.2.0
@@ -486,6 +537,8 @@ soxr==0.5.0.post1
     # via librosa
 sqlitedict==2.1.0
     # via lm-eval
+statsmodels==0.14.4
+    # via genai-perf
 sympy==1.13.1
     # via torch
 tabledata==1.3.3
@@ -495,7 +548,9 @@ tabulate==0.9.0
 tcolorpy==0.1.6
     # via pytablewriter
 tenacity==9.0.0
-    # via lm-eval
+    # via
+    #   lm-eval
+    #   plotly
 tensorizer==2.9.0
     # via -r requirements-test.in
 threadpoolctl==3.5.0
@@ -536,6 +591,7 @@ tqdm-multiprocess==0.0.11
     # via lm-eval
 transformers==4.47.0
     # via
+    #   genai-perf
     #   lm-eval
     #   peft
     #   sentence-transformers
@@ -544,6 +600,10 @@ transformers-stream-generator==0.0.5
     # via -r requirements-test.in
 triton==3.1.0
     # via torch
+tritonclient==2.51.0
+    # via
+    #   -r requirements-test.in
+    #   genai-perf
 typepy[datetime]==1.3.2
     # via
     #   dataproperty
@@ -551,6 +611,7 @@ typepy[datetime]==1.3.2
     #   tabledata
 typing-extensions==4.12.2
     # via
+    #   bitsandbytes
     #   huggingface-hub
     #   librosa
     #   mistral-common
@@ -559,10 +620,12 @@ typing-extensions==4.12.2
     #   torch
 tzdata==2024.2
     # via pandas
-urllib3==1.26.20
+urllib3==2.2.3
     # via
     #   botocore
     #   requests
+    #   responses
+    #   tritonclient
 word2number==1.1
     # via lm-eval
 xxhash==3.5.0

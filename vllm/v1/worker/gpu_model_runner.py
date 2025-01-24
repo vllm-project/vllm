@@ -7,21 +7,29 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
-from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
+from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
+from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -82,15 +90,17 @@ class GPUModelRunner:
         self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
 
-        # NOTE: mm_input_mapper_client and mm_hasher are only used for memory
-        # profiling.
-        self.mm_input_mapper_client = MMInputMapperClient(self.model_config)
-        self.mm_hasher = MMHasher()
-        self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
-            cache_config.enable_prefix_caching
+        # NOTE: Initialized input mapper is only used for processing dummy
+        # multimodal data into multimodal kwargs for GPU memory profiling.
+        self.mm_input_mapper_profiling = MMInputMapperClient(self.model_config)
+        self.mm_input_mapper_profiling.use_cache = False
 
-        self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  # noqa: E501
-        self.encoder_cache_size = self.scheduler_config.encoder_cache_size
+        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
+            model_config=model_config,
+            scheduler_config=scheduler_config,
+        )
+        self.max_num_encoder_input_tokens = encoder_compute_budget
+        self.encoder_cache_size = encoder_cache_size
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
@@ -119,7 +129,8 @@ class GPUModelRunner:
         # self.cudagraph_batch_sizes sorts in ascending order.
         # The batch sizes in the config are in descending order.
         self.cudagraph_batch_sizes = list(
-            reversed(self.vllm_config.compilation_config.capture_sizes))
+            reversed(
+                self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # Cache the device properties.
         self.device_properties = torch.cuda.get_device_properties(self.device)
@@ -132,6 +143,28 @@ class GPUModelRunner:
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
+
+        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+        if self.model_config.uses_mrope:
+            # NOTE: `mrope_positions` is implemented with one additional dummy
+            # position on purpose to make it non-contiguous so that it can work
+            # with torch compile.
+            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+
+            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
+            # the modality of inputs. For text-only inputs, each dimension has
+            # identical position IDs, making M-RoPE functionally equivalent to
+            # 1D-RoPE.
+            # See page 5 of https://arxiv.org/abs/2409.12191
+            self.mrope_positions = torch.zeros((3, self.max_num_tokens + 1),
+                                               dtype=torch.int64,
+                                               device=self.device)
+            self.mrope_positions_cpu = torch.zeros(
+                (3, self.max_num_tokens + 1),
+                dtype=torch.int64,
+                device="cpu",
+                pin_memory=self.pin_memory)
+
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
@@ -141,9 +174,9 @@ class GPUModelRunner:
         self.query_start_loc = torch.zeros(self.max_num_reqs + 1,
                                            dtype=torch.int32,
                                            device=self.device)
-        self.seq_start_loc = torch.zeros(self.max_num_reqs + 1,
-                                         dtype=torch.int32,
-                                         device=self.device)
+        self.seq_lens = torch.zeros(self.max_num_reqs,
+                                    dtype=torch.int32,
+                                    device=self.device)
         self.slot_mapping = torch.zeros(
             self.max_num_tokens,
             # CPU slot_mapping is int32, but
@@ -179,11 +212,11 @@ class GPUModelRunner:
                                                device="cpu",
                                                pin_memory=self.pin_memory)
         self.query_start_loc_np = self.query_start_loc_cpu.numpy()
-        self.seq_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
-                                             dtype=torch.int32,
-                                             device="cpu",
-                                             pin_memory=self.pin_memory)
-        self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
+        self.seq_lens_cpu = torch.zeros(self.max_num_reqs,
+                                        dtype=torch.int32,
+                                        device="cpu",
+                                        pin_memory=self.pin_memory)
+        self.seq_lens_np = self.seq_lens_cpu.numpy()
 
         self.tokenshape_cpu = torch.zeros(4, dtype=torch.int32,
                                             device="cpu",
@@ -231,10 +264,9 @@ class GPUModelRunner:
             if num_new_blocks == 0:
                 continue
             start_index = len(req_state.block_ids)
-            end_index = start_index + num_new_blocks
             req_state.block_ids.extend(req_data.new_block_ids)
-            self.input_batch.block_table_cpu[
-                req_index, start_index:end_index] = req_data.new_block_ids
+            self.input_batch.block_table.append_row(req_index, start_index,
+                                                    req_data.new_block_ids)
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
@@ -259,6 +291,35 @@ class GPUModelRunner:
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
             )
+
+            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+            if self.model_config.uses_mrope:
+                image_grid_thw = []
+                video_grid_thw = []
+                for mm_input in self.requests[req_id].mm_inputs:
+                    if mm_input.get("image_grid_thw") is not None:
+                        image_grid_thw.extend(
+                            mm_input["image_grid_thw"].tolist())
+                    if mm_input.get("video_grid_thw") is not None:
+                        video_grid_thw.extend(
+                            mm_input["video_grid_thw"].tolist())
+
+                hf_config = self.model_config.hf_config
+
+                self.requests[req_id].mrope_positions, \
+                    self.requests[req_id].mrope_position_delta = \
+                    MRotaryEmbedding.get_input_positions_tensor(
+                        self.requests[req_id].prompt_token_ids,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        image_token_id=hf_config.image_token_id,
+                        video_token_id=hf_config.video_token_id,
+                        vision_start_token_id=hf_config.vision_start_token_id,
+                        vision_end_token_id=hf_config.vision_end_token_id,
+                        spatial_merge_size=hf_config.vision_config.
+                        spatial_merge_size,
+                    )
+
             req_ids_to_add.append(req_id)
 
         # Update the cached states of the resumed requests.
@@ -295,9 +356,7 @@ class GPUModelRunner:
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table[:num_reqs].copy_(
-            self.input_batch.block_table_cpu_tensor[:num_reqs],
-            non_blocking=True)
+        self.input_batch.block_table.commit(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
@@ -328,6 +387,11 @@ class GPUModelRunner:
                arange,
                out=positions_np)
 
+        # Calculate M-RoPE positions.
+        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+        if self.model_config.uses_mrope:
+            self._calc_mrope_positions(scheduler_output)
+
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
@@ -353,8 +417,8 @@ class GPUModelRunner:
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
-        block_numbers = (self.input_batch.block_table_cpu_tensor.flatten()
-                         [block_table_indices].numpy())
+        block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
+        block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
         block_offsets = positions_np % self.block_size
         np.add(block_numbers * self.block_size,
                block_offsets,
@@ -365,22 +429,29 @@ class GPUModelRunner:
         np.cumsum(num_scheduled_tokens,
                   out=self.query_start_loc_np[1:num_reqs + 1])
 
-        seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-                    num_scheduled_tokens)
-        max_seq_len = seq_lens.max()
-        self.seq_start_loc_np[0] = 0
-        np.cumsum(seq_lens, out=self.seq_start_loc_np[1:num_reqs + 1])
+        self.seq_lens_np[:num_reqs] = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+            num_scheduled_tokens)
+        max_seq_len = self.seq_lens_np[:num_reqs].max()
 
         # Copy the tensors to the GPU.
         self.input_ids[:total_num_scheduled_tokens].copy_(
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
-        self.positions[:total_num_scheduled_tokens].copy_(
-            self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        if self.model_config.uses_mrope:
+            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+            self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
+                self.mrope_positions_cpu[:, :total_num_scheduled_tokens],
+                non_blocking=True)
+        else:
+            # Common case (1D positions)
+            self.positions[:total_num_scheduled_tokens].copy_(
+                self.positions_cpu[:total_num_scheduled_tokens],
+                non_blocking=True)
 
         self.query_start_loc[:num_reqs + 1].copy_(
             self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
-        self.seq_start_loc[:num_reqs + 1].copy_(
-            self.seq_start_loc_cpu[:num_reqs + 1], non_blocking=True)
+        self.seq_lens[:num_reqs].copy(self.seq_lens_cpu[:num_reqs],
+                                      non_blocking=True)
         self.slot_mapping[:total_num_scheduled_tokens].copy_(
             self.slot_mapping_cpu[:total_num_scheduled_tokens],
             non_blocking=True)
@@ -459,34 +530,32 @@ class GPUModelRunner:
                 [0, total_num_scheduled_tokens],
                 dtype=torch.int32,
                 device=self.device)
-            cu_prefix_kv_lens = torch.tensor([0, common_prefix_len],
-                                             dtype=torch.int32,
-                                             device=self.device)
-            cu_suffix_kv_lens = (
-                self.seq_start_loc_np[:num_reqs + 1] -
-                self.arange_np[:num_reqs + 1] * common_prefix_len)
-            cu_suffix_kv_lens = torch.from_numpy(cu_suffix_kv_lens).to(
-                self.device)
+            prefix_kv_lens = torch.tensor([common_prefix_len],
+                                          dtype=torch.int32,
+                                          device=self.device)
+            suffix_kv_lens = (self.seq_lens_np[:num_reqs] - common_prefix_len)
+            suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(self.device)
         else:
             cu_prefix_query_lens = None
-            cu_prefix_kv_lens = None
-            cu_suffix_kv_lens = None
+            prefix_kv_lens = None
+            suffix_kv_lens = None
 
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
             query_start_loc=self.query_start_loc,
             max_seq_len=max_seq_len,
-            seq_start_loc=self.seq_start_loc,
-            block_table=self.input_batch.block_table[:num_reqs],
+            seq_lens=self.seq_lens,
+            block_table=(
+                self.input_batch.block_table.get_device_tensor()[:num_reqs]),
             slot_mapping=self.slot_mapping,
             tokenshape=self.tokenshape,
             # Cascade stuff
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             cu_prefix_query_lens=cu_prefix_query_lens,
-            cu_prefix_kv_lens=cu_prefix_kv_lens,
-            cu_suffix_kv_lens=cu_suffix_kv_lens,
+            prefix_kv_lens=prefix_kv_lens,
+            suffix_kv_lens=suffix_kv_lens,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -495,6 +564,61 @@ class GPUModelRunner:
         # TODO: Support prompt logprobs.
         logits_indices = self.query_start_loc[1:num_reqs + 1] - 1
         return attn_metadata, logits_indices
+
+    def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
+        mrope_pos_ptr = 0
+        num_reqs = self.input_batch.num_reqs
+        for index, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            assert req_id is not None
+
+            req = self.requests[req_id]
+            assert req.mrope_positions is not None
+
+            num_computed_tokens = \
+                self.input_batch.num_computed_tokens_cpu[index]
+            num_scheduled_tokens = \
+                scheduler_output.num_scheduled_tokens[req_id]
+            num_prompt_tokens = len(req.prompt_token_ids)
+
+            if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
+                prompt_part_len = max(0,
+                                      num_prompt_tokens - num_computed_tokens)
+                completion_part_len = max(
+                    0, num_scheduled_tokens - prompt_part_len)
+            else:
+                prompt_part_len = num_scheduled_tokens
+                completion_part_len = 0
+
+            assert num_scheduled_tokens == prompt_part_len + completion_part_len
+
+            if prompt_part_len > 0:
+                # prompt's mrope_positions are pre-computed
+                dst_start = mrope_pos_ptr
+                dst_end = mrope_pos_ptr + prompt_part_len
+                src_start = num_computed_tokens
+                src_end = num_computed_tokens + prompt_part_len
+
+                self.mrope_positions_cpu[:, dst_start:dst_end] = \
+                    req.mrope_positions[:,src_start:src_end]
+
+                mrope_pos_ptr += prompt_part_len
+
+            if completion_part_len > 0:
+                # compute completion's mrope_positions on-the-fly
+                dst_start = mrope_pos_ptr
+                dst_end = mrope_pos_ptr + completion_part_len
+
+                self.mrope_positions_cpu[:, dst_start:dst_end] = \
+                    MRotaryEmbedding.get_next_input_positions_tensor(
+                        req.mrope_position_delta,
+                        context_len=num_computed_tokens +
+                        prompt_part_len,
+                        seq_len=num_computed_tokens +
+                        prompt_part_len +
+                        completion_part_len,
+                    )
+
+                mrope_pos_ptr += completion_part_len
 
     def _prepare_sampling(
         self,
@@ -529,19 +653,34 @@ class GPUModelRunner:
             for input_id in encoder_input_ids:
                 mm_inputs.append(req_state.mm_inputs[input_id])
                 req_input_ids.append((req_id, input_id))
-        batched_mm_inputs = MultiModalKwargs.batch(mm_inputs)
-        batched_mm_inputs = MultiModalKwargs.as_kwargs(batched_mm_inputs,
-                                                       device=self.device)
 
-        # Run the encoder.
-        # `encoder_outputs` is either of the following:
-        # 1. A tensor of shape [num_images, feature_size, hidden_size]
-        # in case when feature_size is fixed across all images.
-        # 2. A list (length: num_images) of tensors, each of shape
-        # [feature_size, hidden_size] in case when the feature size is
-        # dynamic depending on input images.
-        encoder_outputs = self.model.get_multimodal_embeddings(
-            **batched_mm_inputs)
+        # Batch mm inputs as much as we can: if a request in the batch has
+        # multiple modalities or a different modality than the previous one,
+        # we process it separately to preserve item order.
+        # FIXME(ywang96): This is a hacky way to deal with multiple modalities
+        # in the same batch while still being able to benefit from batching
+        # multimodal inputs. The proper solution should be reordering the
+        # encoder outputs.
+        grouped_mm_inputs_list = group_mm_inputs_by_modality(mm_inputs)
+
+        encoder_outputs = []
+        for grouped_mm_inputs in grouped_mm_inputs_list:
+            batched_mm_inputs = MultiModalKwargs.batch(grouped_mm_inputs)
+            batched_mm_inputs = MultiModalKwargs.as_kwargs(batched_mm_inputs,
+                                                           device=self.device)
+
+            # Run the encoder.
+            # `curr_group_outputs` is either of the following:
+            # 1. A tensor of shape (num_items, feature_size, hidden_size)
+            # in case feature_size is fixed across all multimodal items.
+            # 2. A list or tuple (length: num_items) of tensors, each of shape
+            # (feature_size, hidden_size) in case the feature size is dynamic
+            # depending on the input multimodal items.
+            curr_group_outputs = self.model.get_multimodal_embeddings(
+                **batched_mm_inputs)
+
+            for output in curr_group_outputs:
+                encoder_outputs.append(output)
 
         # Cache the encoder outputs.
         for (req_id, input_id), output in zip(req_input_ids, encoder_outputs):
@@ -588,6 +727,9 @@ class GPUModelRunner:
                 encoder_output = self.encoder_cache[req_id][i]
                 encoder_outputs.append(encoder_output[start_idx:end_idx])
         return encoder_outputs
+
+    def get_model(self) -> nn.Module:
+        return self.model
 
     @torch.inference_mode()
     def execute_model(
@@ -642,9 +784,12 @@ class GPUModelRunner:
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata, self.vllm_config):
+            positions = self.mrope_positions[:, :num_input_tokens] \
+                if self.model_config.uses_mrope \
+                else self.positions[:num_input_tokens]
             hidden_states = self.model(
                 input_ids=input_ids,
-                positions=self.positions[:num_input_tokens],
+                positions=positions,
                 kv_caches=self.kv_caches,
                 attn_metadata=None,
                 inputs_embeds=inputs_embeds,
@@ -720,11 +865,13 @@ class GPUModelRunner:
     @torch.inference_mode()
     def _dummy_run(
         self,
-        model: nn.Module,
         num_tokens: int,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: Optional[FlashAttentionMetadata],
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        attn_metadata: Optional[FlashAttentionMetadata] = None,
     ) -> torch.Tensor:
+        model = self.model
+        if kv_caches is None:
+            kv_caches = self.kv_caches
         if self.is_multimodal_model:
             input_ids = None
             inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -732,9 +879,12 @@ class GPUModelRunner:
             input_ids = self.input_ids[:num_tokens]
             inputs_embeds = None
         with set_forward_context(attn_metadata, self.vllm_config):
+            positions = self.mrope_positions[:, :num_tokens] \
+                if self.model_config.uses_mrope \
+                else self.positions[:num_tokens]
             hidden_states = model(
                 input_ids=input_ids,
-                positions=self.positions[:num_tokens],
+                positions=positions,
                 kv_caches=kv_caches,
                 attn_metadata=None,
                 inputs_embeds=inputs_embeds,
@@ -777,31 +927,30 @@ class GPUModelRunner:
         ]
 
         # Profile with multimodal encoder & encoder cache.
-        # TODO (ywang96): generalize this beyond image modality since
-        # mm_input_mapper only supports image inputs.
-        if self.is_multimodal_model:
-
-            # Create dummy batch of multimodal inputs.
-            dummy_request_data = self.input_registry.dummy_data_for_profiling(
-                model_config=self.model_config,
-                seq_len=self.max_num_tokens,
-                mm_registry=self.mm_registry,
-            )
-            dummy_mm_data = dummy_request_data.multi_modal_data
+        # TODO: handle encoder-decoder models once we support them.
+        if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
+                and self.encoder_cache_size > 0):
 
             # NOTE: Currently model is profiled with a single non-text
-            # modality even when it supports multiple.
-            max_tokens_per_mm_item = max(
-                self.mm_registry.get_max_tokens_per_item_by_modality(
-                    self.model_config).values())
+            # modality with the max possible input tokens even when
+            # it supports multiple.
+            max_tokens_by_modality_dict = MULTIMODAL_REGISTRY.get_max_tokens_per_item_by_nonzero_modality(  # noqa: E501
+                self.model_config)
+            dummy_data_modality, max_tokens_per_mm_item = max(
+                max_tokens_by_modality_dict.items(), key=lambda item: item[1])
 
-            max_num_mm_items_encoder_budget = min(
-                self.max_num_encoder_input_tokens,
-                self.encoder_cache_size) // max_tokens_per_mm_item
+            # Check how many items of this modality can be supported by
+            # the encoder budget.
+            encoder_budget = min(self.max_num_encoder_input_tokens,
+                                 self.encoder_cache_size)
 
-            max_mm_items_per_req = max(
-                self.mm_registry.get_mm_limits_per_prompt(
-                    self.model_config).values())
+            max_num_mm_items_encoder_budget = cdiv(encoder_budget,
+                                                   max_tokens_per_mm_item)
+
+            # Check how many items of this modality can be supported by
+            # the decoder budget.
+            max_mm_items_per_req = self.mm_registry.get_mm_limits_per_prompt(
+                self.model_config)[dummy_data_modality]
 
             # NOTE: We do not consider max_num_batched_tokens on purpose
             # because the multimodal embeddings can be generated in advance
@@ -812,39 +961,43 @@ class GPUModelRunner:
             max_num_mm_items = min(max_num_mm_items_encoder_budget,
                                    max_num_mm_items_decoder_budget)
 
+            logger.info(
+                "Encoder cache will be initialized with a budget of %s tokens,"
+                " and profiled with %s %s items of the maximum feature size.",
+                encoder_budget, max_num_mm_items, dummy_data_modality)
+
+            # Create dummy batch of multimodal inputs.
+            dummy_request_data = self.input_registry.dummy_data_for_profiling(
+                model_config=self.model_config,
+                seq_len=self.max_num_tokens,
+                mm_registry=self.mm_registry,
+            )
+            dummy_mm_data = dummy_request_data.multi_modal_data
+
             # Dummy data definition in V0 may contain multiple multimodal items
             # (e.g, multiple images) for a single request, therefore here we
             # always replicate first item by max_num_mm_items times since in V1
             # they are scheduled to be processed separately.
 
             # Case when models have a merged processor, their dummy data is
-            # already batched `MultiModalKwargs`, therefore we need to "unbatch"
-            # and take the first item in each batched tensor.
-            # TODO (ywang96): This is somewhat hacky. Refactor this to be
-            # consistent with the other case.
+            # already batched `MultiModalKwargs`, therefore we take the first
+            # `MultiModalKwargsItem` from the desired modality to profile on.
             if isinstance(dummy_mm_data, MultiModalKwargs):
-                dummy_mm_kwargs = {
-                    k: v[0].unsqueeze(0)
-                    for k, v in dummy_mm_data.items()
-                }
+                dummy_mm_item = dummy_mm_data.get_item(
+                    modality=dummy_data_modality, item_index=0)
+                dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
 
             # Case when models have dummy data explicitly defined as
             # `MultiModalDataDict`, so they need to be processed through input
             # mapper.
+            # TODO (ywang96): deprecate this path once merged processor is
+            # supported on all models.
             else:
-                # Compute MM hashes (if enabled)
-                mm_hashes = None
-                if self.use_hash:
-                    mm_hashes = self.mm_hasher.hash_dummy_mm_data(
-                        dummy_mm_data)
-
-                mm_kwargs_list = self.mm_input_mapper_client.process_inputs(
+                mm_kwargs_list = self.mm_input_mapper_profiling.process_inputs(
                     mm_data=dummy_mm_data,
-                    mm_hashes=mm_hashes,
+                    mm_hashes=None,
                     mm_processor_kwargs=None,
                     precomputed_mm_inputs=None)
-
-                # Take the first `MultiModalKwargs`
                 dummy_mm_kwargs = mm_kwargs_list[0]
 
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
@@ -866,8 +1019,7 @@ class GPUModelRunner:
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.model, self.max_num_tokens,
-                                        dummy_kv_caches, None)
+        hidden_states = self._dummy_run(self.max_num_tokens, dummy_kv_caches)
         logits = self.model.compute_logits(hidden_states, None)
         logits = logits[:self.max_num_tokens]
         # TODO(woosuk): Consider the memory usage of the sampler.
@@ -883,13 +1035,13 @@ class GPUModelRunner:
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
-        with graph_capture():
+        with graph_capture(device=self.device):
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 attn_metadata = self.metadata_for_dummy_run(num_tokens)
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(self.model, num_tokens, self.kv_caches, attn_metadata)
-                self._dummy_run(self.model, num_tokens, self.kv_caches, attn_metadata)
+                    self._dummy_run(self.model, num_tokens, attn_metadata=attn_metadata)
+                self._dummy_run(self.model, num_tokens, attn_metadata=attn_metadata)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -899,12 +1051,71 @@ class GPUModelRunner:
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 
-    def initialize_kv_cache(self, num_blocks: int) -> None:
-        assert len(self.kv_caches) == 0
-        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size)
-        for _ in range(self.num_attn_layers):
-            self.kv_caches.append(
-                torch.zeros(kv_cache_shape,
-                            dtype=self.kv_cache_dtype,
-                            device=self.device))
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Initialize KV cache based on `kv_cache_config`.
+        Args:
+            kv_cache_config: Configuration for the KV cache, including the KV 
+            cache size of each layer
+        """
+        if len(kv_cache_config.groups) > 1:
+            raise NotImplementedError(
+                "Hybrid models with more than one KV cache type are not "
+                "supported yet.")
+
+        kv_caches: Dict[str, torch.Tensor] = {}
+
+        for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
+            tensor_config = kv_cache_config.tensors[layer_name]
+            assert tensor_config.size % layer_spec.page_size_bytes == 0
+            num_blocks = tensor_config.size // layer_spec.page_size_bytes
+            if isinstance(layer_spec, FullAttentionSpec):
+                kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+                    num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
+                    layer_spec.head_size)
+                dtype = layer_spec.dtype
+                kv_caches[layer_name] = torch.zeros(kv_cache_shape,
+                                                    dtype=dtype,
+                                                    device=self.device)
+            else:
+                raise NotImplementedError
+
+        bind_kv_cache(
+            kv_caches,
+            self.vllm_config.compilation_config.static_forward_context,
+            self.kv_caches)
+
+    def get_kv_cache_spec(self) -> KVCacheSpec:
+        """
+        Generates the KVCacheSpec by parsing the kv cache format from each 
+        Attention module in the static forward context.
+        Returns:
+            KVCacheSpec: A dictionary mapping layer names to their KV cache 
+            format. Layers that do not need KV cache are not included.
+        """
+
+        forward_ctx = self.vllm_config.compilation_config.static_forward_context
+        block_size = self.vllm_config.cache_config.block_size
+        kv_cache_spec: KVCacheSpec = {}
+        for layer_name, attn_module in forward_ctx.items():
+            # TODO: Support other attention modules, e.g., sliding window,
+            # cross-attention, MLA.
+            assert isinstance(attn_module, Attention)
+            if attn_module.attn_type == AttentionType.DECODER:
+                kv_cache_spec[layer_name] = FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=attn_module.num_kv_heads,
+                    head_size=attn_module.head_size,
+                    dtype=attn_module.dtype,
+                )
+            elif attn_module.attn_type in (AttentionType.ENCODER,
+                                           AttentionType.ENCODER_ONLY):
+                # encoder-only attention does not need KV cache.
+                continue
+            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
+                raise NotImplementedError
+            else:
+                raise ValueError(
+                    f"Unknown attention type: {attn_module.attn_type}")
+
+        return kv_cache_spec

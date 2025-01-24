@@ -155,7 +155,7 @@ class TensorizerArgs:
       encryption_keyfile: File path to a binary file containing a  
           binary key to use for decryption. `None` (the default) means 
           no decryption. See the example script in 
-          examples/tensorize_vllm_model.py. 
+          examples/other/tensorize_vllm_model.py. 
       s3_access_key_id: The access key for the S3 bucket. Can also be set via
           the S3_ACCESS_KEY_ID environment variable.
       s3_secret_access_key: The secret access key for the S3 bucket. Can also
@@ -363,12 +363,12 @@ class TensorizerAgent:
 def tensorizer_weights_iterator(
     tensorizer_args: "TensorizerArgs"
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
-    logger.warning(
-        "Deserializing HuggingFace models is not optimized for "
-        "loading on vLLM, as tensorizer is forced to load to CPU. "
-        "Consider deserializing a vLLM model instead for faster "
-        "load times. See the examples/tensorize_vllm_model.py example "
-        "script for serializing vLLM models.")
+    logger.warning("Deserializing HuggingFace models is not optimized for "
+                   "loading on vLLM, as tensorizer is forced to load to CPU. "
+                   "Consider deserializing a vLLM model instead for faster "
+                   "load times. See the "
+                   "examples/other/tensorize_vllm_model.py example script "
+                   "for serializing vLLM models.")
 
     deserializer_args = tensorizer_args.deserializer_params
     stream_params = tensorizer_args.stream_params
@@ -459,16 +459,7 @@ def tensorize_vllm_model(engine_args: EngineArgs,
             stream.write(encryption_params.key)
 
     engine = LLMEngine.from_engine_args(engine_args)
-    if tensorizer_config._is_sharded:
-        # if the engine is a distributed engine (for tensor parallel) then each
-        # worker shard needs to serialize its part of the model.
-        engine.model_executor._run_workers(
-            "save_tensorized_model",
-            tensorizer_config=tensorizer_config,
-        )
-    else:
-        # with a single worker, we can get to the underlying model directly
-        serialize_vllm_model(
-            engine.model_executor.driver_worker.model_runner.model,
-            tensorizer_config,
-        )
+    engine.model_executor.collective_rpc(
+        "save_tensorized_model",
+        kwargs=dict(tensorizer_config=tensorizer_config),
+    )

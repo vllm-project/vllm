@@ -9,6 +9,7 @@ import torch
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import PlaceholderRange
@@ -28,6 +29,9 @@ class CachedRequestState:
     block_ids: List[int]
     num_computed_tokens: int
     output_token_ids: List[int]
+
+    mrope_positions: Optional[torch.Tensor] = None
+    mrope_position_delta: Optional[int] = None
 
     @property
     def num_tokens(self) -> int:
@@ -70,19 +74,14 @@ class InputBatch:
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
 
-        # Attention-related.
-        self.block_table = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req),
-            device=self.device,
-            dtype=torch.int32,
-        )
-        self.block_table_cpu_tensor = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req),
-            device="cpu",
-            dtype=torch.int32,
+        # Block table.
+        self.block_table = BlockTable(
+            max_num_reqs=max_num_reqs,
+            max_model_len=max_model_len,
+            max_num_blocks_per_req=max_num_blocks_per_req,
             pin_memory=pin_memory,
+            device=device,
         )
-        self.block_table_cpu = self.block_table_cpu_tensor.numpy()
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ),
@@ -193,8 +192,7 @@ class InputBatch:
         self.num_tokens[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
-        num_blocks = len(request.block_ids)
-        self.block_table_cpu[req_index, :num_blocks] = request.block_ids
+        self.block_table.add_row(req_index, request.block_ids)
 
         sampling_params = request.sampling_params
         self.temperature_cpu[req_index] = sampling_params.temperature
@@ -300,9 +298,7 @@ class InputBatch:
                 self.num_prompt_tokens[last_req_index]
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
-            # TODO(woosuk): Optimize the copy of block_table_cpu.
-            self.block_table_cpu[empty_index] = self.block_table_cpu[
-                last_req_index]
+            self.block_table.move_row(last_req_index, empty_index)
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]

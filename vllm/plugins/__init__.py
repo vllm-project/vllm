@@ -50,39 +50,30 @@ def load_general_plugins():
     processes. They should be designed in a way that they can be loaded
     multiple times without causing issues.
     """
+    global plugins_loaded
+    if plugins_loaded:
+        return
+    plugins_loaded = True
 
-    # all processes created by vllm will load plugins,
-    # and here we can inject some common environment variables
-    # for all processes.
-
-    # see https://github.com/vllm-project/vllm/issues/10480
-    os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
-    # see https://github.com/vllm-project/vllm/issues/10619
-    torch._inductor.config.compile_threads = 1
-
+    # some platform-specific configurations
     from vllm.platforms import current_platform
 
     if current_platform.is_xpu():
-        # see https://github.com/pytorch/pytorch/blob/8cada5cbe5450e17c26fb8b358116785324537b2/torch/_dynamo/config.py#L158  # noqa
-        os.environ['TORCH_COMPILE_DISABLE'] = 'True'
-    if current_platform.is_hpu():
+        # see https://github.com/pytorch/pytorch/blob/43c5f59/torch/_dynamo/config.py#L158
+        torch._dynamo.config.disable = True
+    elif current_platform.is_hpu():
         # NOTE(kzawora): PT HPU lazy backend (PT_HPU_LAZY_MODE = 1)
         # does not support torch.compile
         # Eager backend (PT_HPU_LAZY_MODE = 0) must be selected for
         # torch.compile support
         is_lazy = os.environ.get('PT_HPU_LAZY_MODE', '1') == '1'
         if is_lazy:
-            # see https://github.com/pytorch/pytorch/blob/43c5f59/torch/_dynamo/config.py#L158
             torch._dynamo.config.disable = True
             # NOTE(kzawora) multi-HPU inference with HPUGraphs (lazy-only)
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html # noqa: E501
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
 
-    global plugins_loaded
-    if plugins_loaded:
-        return
-    plugins_loaded = True
     plugins = load_plugins_by_group(group='vllm.general_plugins')
     # general plugins, we only need to execute the loaded functions
     for func in plugins.values():

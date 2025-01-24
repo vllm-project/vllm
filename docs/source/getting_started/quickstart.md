@@ -2,34 +2,45 @@
 
 # Quickstart
 
-This guide will help you quickly get started with vLLM to:
+This guide will help you quickly get started with vLLM to perform:
 
-- [Run offline batched inference](#offline-batched-inference)
-- [Run OpenAI-compatible inference](#openai-compatible-server)
+- [Offline batched inference](#quickstart-offline)
+- [Online serving using OpenAI-compatible server](#quickstart-online)
 
 ## Prerequisites
 
 - OS: Linux
 - Python: 3.9 -- 3.12
-- GPU: compute capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
 
 ## Installation
 
-You can install vLLM using pip. It's recommended to use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments.
+If you are using NVIDIA GPUs, you can install vLLM using [pip](https://pypi.org/project/vllm/) directly.
+
+It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
 
 ```console
-$ conda create -n myenv python=3.10 -y
-$ conda activate myenv
-$ pip install vllm
+uv venv myenv --python 3.12 --seed
+source myenv/bin/activate
+uv pip install vllm
 ```
 
-Please refer to the {ref}`installation documentation <installation>` for more details on installing vLLM.
+You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments.
 
-(offline-batched-inference)=
+```console
+conda create -n myenv python=3.12 -y
+conda activate myenv
+pip install vllm
+```
+
+```{note}
+For non-CUDA platforms, please refer [here](#installation-index) for specific instructions on how to install vLLM.
+```
+
+(quickstart-offline)=
 
 ## Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference.py>
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference/basic.py>
 
 The first line of this example imports the classes {class}`~vllm.LLM` and {class}`~vllm.SamplingParams`:
 
@@ -40,7 +51,7 @@ The first line of this example imports the classes {class}`~vllm.LLM` and {class
 from vllm import LLM, SamplingParams
 ```
 
-The next section defines a list of input prompts and sampling parameters for text generation. The [sampling temperature](https://arxiv.org/html/2402.05201v1) is set to `0.8` and the [nucleus sampling probability](https://en.wikipedia.org/wiki/Top-p_sampling) is set to `0.95`. You can find more information about the sampling parameters [here](https://docs.vllm.ai/en/stable/dev/sampling_params.html).
+The next section defines a list of input prompts and sampling parameters for text generation. The [sampling temperature](https://arxiv.org/html/2402.05201v1) is set to `0.8` and the [nucleus sampling probability](https://en.wikipedia.org/wiki/Top-p_sampling) is set to `0.95`. You can find more information about the sampling parameters [here](#sampling-params).
 
 ```python
 prompts = [
@@ -73,7 +84,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-(openai-compatible-server)=
+(quickstart-online)=
 
 ## OpenAI-Compatible Server
 
@@ -83,7 +94,7 @@ By default, it starts the server at `http://localhost:8000`. You can specify the
 Run the following command to start the vLLM server with the [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) model:
 
 ```console
-$ vllm serve Qwen/Qwen2.5-1.5B-Instruct
+vllm serve Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 ```{note}
@@ -94,7 +105,7 @@ You can learn about overriding it [here](#chat-template).
 This server can be queried in the same format as OpenAI API. For example, to list the models:
 
 ```console
-$ curl http://localhost:8000/v1/models
+curl http://localhost:8000/v1/models
 ```
 
 You can pass in the argument `--api-key` or environment variable `VLLM_API_KEY` to enable the server to check for API key in the header.
@@ -104,14 +115,14 @@ You can pass in the argument `--api-key` or environment variable `VLLM_API_KEY` 
 Once your server is started, you can query the model with input prompts:
 
 ```console
-$ curl http://localhost:8000/v1/completions \
-$     -H "Content-Type: application/json" \
-$     -d '{
-$         "model": "Qwen/Qwen2.5-1.5B-Instruct",
-$         "prompt": "San Francisco is a",
-$         "max_tokens": 7,
-$         "temperature": 0
-$     }'
+curl http://localhost:8000/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "prompt": "San Francisco is a",
+        "max_tokens": 7,
+        "temperature": 0
+    }'
 ```
 
 Since this server is compatible with OpenAI API, you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the `openai` Python package:
@@ -131,7 +142,7 @@ completion = client.completions.create(model="Qwen/Qwen2.5-1.5B-Instruct",
 print("Completion result:", completion)
 ```
 
-A more detailed client example can be found here: <gh-file:examples/openai_completion_client.py>
+A more detailed client example can be found here: <gh-file:examples/online_serving/openai_completion_client.py>
 
 ### OpenAI Chat Completions API with vLLM
 
@@ -140,15 +151,15 @@ vLLM is designed to also support the OpenAI Chat Completions API. The chat inter
 You can use the [create chat completion](https://platform.openai.com/docs/api-reference/chat/completions/create) endpoint to interact with the model:
 
 ```console
-$ curl http://localhost:8000/v1/chat/completions \
-$     -H "Content-Type: application/json" \
-$     -d '{
-$         "model": "Qwen/Qwen2.5-1.5B-Instruct",
-$         "messages": [
-$             {"role": "system", "content": "You are a helpful assistant."},
-$             {"role": "user", "content": "Who won the world series in 2020?"}
-$         ]
-$     }'
+curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "Qwen/Qwen2.5-1.5B-Instruct",
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Who won the world series in 2020?"}
+        ]
+    }'
 ```
 
 Alternatively, you can use the `openai` Python package:

@@ -106,6 +106,7 @@ class WhisperAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            attn_type=self.attn_type,
         )
 
     def _init_qkv(
@@ -134,12 +135,7 @@ class WhisperAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        attn_output = self.attn(q,
-                                k,
-                                v,
-                                kv_cache,
-                                attn_metadata,
-                                attn_type=self.attn_type)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
 
         output, _ = self.out_proj(attn_output)
 
@@ -164,6 +160,7 @@ class WhisperCrossAttention(WhisperAttention):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=prefix,
+            attn_type=AttentionType.ENCODER_DECODER,
         )
 
     def _init_qkv(
@@ -207,12 +204,13 @@ class WhisperCrossAttention(WhisperAttention):
         else:
             k = v = None
 
-        attn_output = self.attn(q,
-                                k,
-                                v,
-                                kv_cache,
-                                attn_metadata,
-                                attn_type=AttentionType.ENCODER_DECODER)
+        attn_output = self.attn(
+            q,
+            k,
+            v,
+            kv_cache,
+            attn_metadata,
+        )
 
         output, _ = self.out_proj(attn_output)
 
@@ -731,7 +729,22 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
-        loaded_weights = [(name, loaded_weight)
-                          for name, loaded_weight in weights]
         mapper = WeightsMapper({".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."})
-        return loader.load_weights(loaded_weights, mapper=mapper)
+        # add fake zeros bias for k_proj to state_dict
+        weights = _create_fake_bias_for_k_proj(weights)
+        return loader.load_weights(weights, mapper=mapper)
+
+
+def _create_fake_bias_for_k_proj(
+    weights: Iterable[Tuple[str, torch.Tensor]]
+) -> Iterable[Tuple[str, torch.Tensor]]:
+    """
+    Create full zeros bias for k_proj weight in self-attention layers.
+    So that the bias for k_proj in qkv_proj can be initialized with zeros.
+    """
+    for name, weight in weights:
+        if ".self_attn.k_proj.weight" in name:
+            bias = torch.zeros(weight.size(0))
+            bias_name = name.replace("weight", "bias")
+            yield from [(name, weight), (bias_name, bias)]
+        yield name, weight
