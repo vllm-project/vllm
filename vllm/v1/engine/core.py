@@ -59,7 +59,9 @@ class EngineCore:
             scheduler_config=vllm_config.scheduler_config,
             model_config=vllm_config.model_config,
             cache_config=vllm_config.cache_config,
+            parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config,
+            decoding_config=vllm_config.decoding_config,
         )
 
         self.mm_input_mapper_server = MMInputMapperServer(

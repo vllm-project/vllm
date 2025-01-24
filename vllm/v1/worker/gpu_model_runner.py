@@ -248,6 +248,19 @@ class GPUModelRunner:
             self.input_batch.block_table.append_row(req_index, start_index,
                                                     req_data.new_block_ids)
 
+            # we should advance the FSM here
+            if req_id in scheduler_output.guided_decoding_bitmasks and req_state.grammar is not None:
+                token_idx = scheduler_output.num_scheduled_tokens[req_id] - 1
+                token_id = self.input_batch.token_ids_cpu[req_index, token_idx]
+                # Advance the FSM state
+                if not req_state.grammar.accept_token(token_id):
+                    # This shouldn't happen since we masked the logits, but handle gracefully
+                    logger.error(
+                        f"Grammar rejected token {token_id} for request {req_id}"
+                    )
+                    req_state.status = RequestStatus.FINISHED_ABORTED
+                    continue
+
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -768,6 +781,11 @@ class GPUModelRunner:
         hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(hidden_states, None)
 
+        # We will need to apply the logits inplace from here
+        # so the scheduler_output should contains both the grammar
+        # of the running request to advance as well as the specific bitmask
+        # broadcasted from the scheduler.schedule()
+
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self._prepare_sampling(scheduler_output)
         sampler_output = self.model.sample(
@@ -1007,7 +1025,7 @@ class GPUModelRunner:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
-            kv_cache_config: Configuration for the KV cache, including the KV 
+            kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
         if len(kv_cache_config.groups) > 1:
@@ -1039,10 +1057,10 @@ class GPUModelRunner:
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
-        Generates the KVCacheSpec by parsing the kv cache format from each 
+        Generates the KVCacheSpec by parsing the kv cache format from each
         Attention module in the static forward context.
         Returns:
-            KVCacheSpec: A dictionary mapping layer names to their KV cache 
+            KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
 
