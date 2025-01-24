@@ -2,7 +2,7 @@ import os
 import sys
 import zipfile
 
-# Read the VLLM_MAX_SIZE_MB environment variable, defaulting to 250 MB
+# Read the VLLM_MAX_SIZE_MB environment variable, defaulting to 300 MB
 VLLM_MAX_SIZE_MB = int(os.environ.get('VLLM_MAX_SIZE_MB', 300))
 
 
