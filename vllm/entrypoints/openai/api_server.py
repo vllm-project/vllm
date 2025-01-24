@@ -545,9 +545,6 @@ TASK_HANDLERS: Dict[str, Dict[str, tuple]] = {
         "default": (EmbeddingCompletionRequest, create_embedding),
     },
     "score": {
-        "default": (ScoreRequest, create_score),
-    },
-    "rerank": {
         "default": (RerankRequest, do_rerank)
     },
     "reward": {
