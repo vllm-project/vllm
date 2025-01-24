@@ -380,7 +380,13 @@ class _ModelRegistry:
         if not architectures:
             logger.warning("No model architectures are specified")
 
-        return architectures
+        normalized_arch = []
+        for model in architectures:
+            model = self.models.get(model)
+            if model is None:
+                model = self.models[next(iter(_FALLBACK_MODEL))]
+            normalized_arch.append(model)
+        return normalized_arch 
 
     def inspect_model_cls(
         self,

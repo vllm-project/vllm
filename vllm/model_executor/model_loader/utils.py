@@ -26,7 +26,12 @@ def set_default_torch_dtype(dtype: torch.dtype):
 
 
 def is_transformers_impl_compatible(arch: str) -> bool:
-    return getattr(transformers, arch)._supports_flex_attn
+    arch = getattr(transformers, arch)
+    if hasattr(arch, "supports_backend"):
+        return arch.is_backend_compatible()
+    else:
+        return arch._supports_flex_attn
+
 
 
 def get_model_architecture(
