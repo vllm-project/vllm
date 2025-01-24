@@ -476,7 +476,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 finished_requests_ids: Optional[List[str]] = None) -> None:
         self.finished_requests_ids = finished_requests_ids
 
-        # if the current batch is decode-only
+        # if the current batch is decode-only.
+        # will be set to False if there is any non-decode request.
         self.decode_only = True
 
         # Intermediate data (data in CPU before going to GPU) for
