@@ -38,8 +38,8 @@ __global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
       (cnts_byte_offset + sizeof(int32_t) - 1) / sizeof(int32_t);
 
   extern __shared__ int32_t shared_mem[];
-  token_cnts_t* tokens_cnts = (token_cnts_t*)
-      shared_mem;  // 2d tensor with shape (blockDim.x + 1, num_experts)
+  token_cnts_t* tokens_cnts = reinterpret_cast<token_cnts_t*>(
+      shared_mem);  // 2d tensor with shape (blockDim.x + 1, num_experts)
   int32_t* cumsum =
       shared_mem + aligned_offset;  // 1d tensor with shape (num_experts + 1)
 
