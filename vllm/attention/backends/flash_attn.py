@@ -18,17 +18,20 @@ from vllm.attention.backends.utils import (
     get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
     is_all_encoder_attn_metadata_set, is_block_tables_empty)
 from vllm.envs import VLLM_FLASH_ATTN_VERSION
+from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
+                                  flash_attn_varlen_func,
+                                  flash_attn_with_kvcache,
+                                  is_fa_version_supported)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
                                           ModelInputForGPUWithSamplingMetadata)
 
-from vllm.vllm_flash_attn import (flash_attn_varlen_func,
-                                  flash_attn_with_kvcache,
-                                  is_fa_version_supported)
+logger = init_logger(__name__)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -651,6 +654,11 @@ class FlashAttentionImpl(AttentionImpl):
         if VLLM_FLASH_ATTN_VERSION is not None:
             assert VLLM_FLASH_ATTN_VERSION in [2, 3]
             self.fa_version = VLLM_FLASH_ATTN_VERSION
+
+        if not is_fa_version_supported(self.fa_version):
+            logger.error("Cannot use FA version %d is not supported due to %s",
+                         self.fa_version,
+                         fa_version_unsupported_reason(self.fa_version))
 
         assert is_fa_version_supported(self.fa_version)
 
