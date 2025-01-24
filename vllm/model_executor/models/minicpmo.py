@@ -21,8 +21,8 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 from functools import partial
-from typing import (Any, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Set, Tuple, TypedDict, Union)
+from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
+                    Tuple, TypedDict, Union)
 
 import torch
 import torch.types
@@ -36,24 +36,20 @@ from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import MultiModalFieldConfig
-from vllm.multimodal.parse import (ModalityData,
-                                   ModalityDataItems, MultiModalDataItems,
-                                   MultiModalDataParser, VideoItem)
+from vllm.multimodal.parse import (ModalityData, ModalityDataItems,
+                                   MultiModalDataItems, MultiModalDataParser,
+                                   VideoItem)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement)
 from vllm.multimodal.profiling import ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
+from .minicpmv import (MiniCPMV2_6, MiniCPMVDummyInputsBuilder,
+                       MiniCPMVEmbeddingItems, MiniCPMVMultiModalDataParser,
+                       MiniCPMVMultiModalProcessor, MiniCPMVProcessingInfo)
 from .utils import AutoWeightsLoader, maybe_prefix
-from .minicpmv import (MiniCPMVEmbeddingItems, 
-                       MiniCPMVMultiModalDataParser,
-                       MiniCPMVProcessingInfo,
-                       MiniCPMVDummyInputsBuilder,
-                       MiniCPMVMultiModalProcessor,
-                       MiniCPMV2_6)
 
 CPU_DEVICE = torch.device("cpu")
-
 
 MiniCPMOEmbeddingItems = MiniCPMVEmbeddingItems
 
@@ -63,7 +59,7 @@ class MiniCPMOAudioFeatureInputs(TypedDict):
     data: torch.Tensor
     """
     Shape: `(batch_size * num_audios * num_slices, num_channels, length)`
-    Slice here means chunk. Audio that is too long will be splited into slices,
+    Slice here means chunk. Audio that is too long will be split into slices,
     which is the same as image.
     Padding is used therefore `data` is `torch.Tensor`.
     """
@@ -136,10 +132,10 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
 
     def get_supported_mm_modalities(self) -> List[str]:
         return ["image", "video", "audio"]
-    
+
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None, "audio": None}
-    
+
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
         return {
             "image": self.get_max_image_tokens(),
@@ -184,9 +180,9 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         ) * max_images + 4 * max_images
         max_audio_tokens = self.get_max_audio_tokens(
         ) * max_audios + 2 * max_audios
-        max_total_frames = self.get_max_video_frames(
-            seq_len - max_image_tokens - max_audio_tokens
-        )
+        max_total_frames = self.get_max_video_frames(seq_len -
+                                                     max_image_tokens -
+                                                     max_audio_tokens)
 
         num_frames = max(max_total_frames // max(max_videos, 1), 1)
 
@@ -202,10 +198,13 @@ class MiniCPMODummyInputsBuilder(MiniCPMVDummyInputsBuilder):
         audio_len = self.info.get_max_audio_chunks_with_most_features() * \
             self.info.get_default_audio_sampling_rate()
 
-        processor_inputs = super().get_dummy_processor_inputs(seq_len, mm_counts)
+        processor_inputs = super().get_dummy_processor_inputs(
+            seq_len, mm_counts)
         mm_data = {
-            "image": processor_inputs.mm_data["image"],
-            "video": processor_inputs.mm_data["video"],
+            "image":
+            processor_inputs.mm_data["image"],
+            "video":
+            processor_inputs.mm_data["video"],
             "audio":
             self._get_dummy_audios(length=audio_len, num_audios=num_audios)
         }
@@ -217,9 +216,10 @@ class MiniCPMODummyInputsBuilder(MiniCPMVDummyInputsBuilder):
                                mm_data=mm_data)
 
 
-class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor,
+class MiniCPMOMultiModalProcessor(
+        MiniCPMVMultiModalProcessor,
         BaseMultiModalProcessor[MiniCPMOProcessingInfo]):
-    
+
     def _get_data_parser(self) -> MultiModalDataParser:
         return MiniCPMOMultiModalDataParser()
 
@@ -293,7 +293,7 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor,
 
     def get_placeholder_match_pattern(self) -> str:
         return r"\(<(image|video|audio)>./</\1>\)"
-    
+
     def get_placeholder_split_pattern(self) -> str:
         return r"\(<(?:image|video|audio)>./</(?:image|video|audio)>\)"
 
@@ -304,27 +304,18 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor,
             "audio": self.process_audios(mm_data, mm_kwargs)
         }
 
-    def get_num_slices_by_modality(self,
-                                   inputs: Dict[str, object], 
-                                   modality: str, 
-                                   index: int) -> int:
+    def get_num_slices_by_modality(self, inputs: Dict[str, object],
+                                   modality: str, index: int) -> int:
         if modality == "audio":
             return inputs["audio"]["audio_num_segments"][index]
-        return super().get_num_slices_by_modality(inputs,
-                                                  modality,
-                                                  index)
+        return super().get_num_slices_by_modality(inputs, modality, index)
 
-    def get_prompt_texts_by_modality(self,
-                                     inputs: Dict[str, object], 
-                                     modality: str, 
-                                     index: int) -> str:
+    def get_prompt_texts_by_modality(self, inputs: Dict[str, object],
+                                     modality: str, index: int) -> str:
         if modality == "audio":
             return self.get_audio_prompt_texts(
-                inputs["audio"]["audio_lens"][index]
-            )
-        return super().get_prompt_texts_by_modality(inputs,
-                                                    modality,
-                                                    index)
+                inputs["audio"]["audio_lens"][index])
+        return super().get_prompt_texts_by_modality(inputs, modality, index)
 
     def _get_prompt_replacements(
             self, mm_items: MultiModalDataItems,
@@ -901,4 +892,3 @@ class MiniCPMO(MiniCPMV2_6):
             inputs_embeds=vlm_embeddings,
         )
         return output
-

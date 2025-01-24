@@ -95,7 +95,8 @@ class MiniCPMVImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
     """
-    Shape: `(batch_size * num_images * num_slices, image_feature_size, hidden_size)`
+    Shape: `(batch_size * num_images * num_slices, 
+             image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     instead of a batched tensor.
@@ -446,9 +447,8 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         # which are not in get_max_image_tokens
         max_image_tokens = self.get_max_image_tokens(
         ) * max_images + 4 * max_images
-        max_total_frames = self.get_max_video_frames(
-            seq_len - max_image_tokens
-        )
+        max_total_frames = self.get_max_video_frames(seq_len -
+                                                     max_image_tokens)
 
         num_frames = max(max_total_frames // max(max_videos, 1), 1)
 
@@ -612,7 +612,7 @@ class MiniCPMVMultiModalProcessor(
 
     def get_placeholder_match_pattern(self) -> str:
         return r"\(<(image|video)>./</\1>\)"
-    
+
     def get_placeholder_split_pattern(self) -> str:
         return r"\(<(?:image|video)>./</(?:image|video)>\)"
 
@@ -622,15 +622,12 @@ class MiniCPMVMultiModalProcessor(
             "video": self.process_videos(mm_data, mm_kwargs)
         }
 
-    def get_num_slices_by_modality(self,
-                                   inputs: Dict[str, object], 
-                                   modality: str, 
-                                   index: int) -> int:
+    def get_num_slices_by_modality(self, inputs: Dict[str, object],
+                                   modality: str, index: int) -> int:
         if modality == "image":
             return self.info.get_image_slice_nums(
-                inputs["image"]["image_sizes"][index], 
-                self.info.get_max_slice_num()
-            )
+                inputs["image"]["image_sizes"][index],
+                self.info.get_max_slice_num())
         elif modality == "video":
             return self.info.get_image_slice_nums(
                 inputs["video"]["video_image_sizes"][index],
@@ -638,21 +635,16 @@ class MiniCPMVMultiModalProcessor(
             ) * inputs["video"]["num_frames"][index]
         else:
             raise ValueError(f"UnExpected modality: {modality}")
-    
-    def get_prompt_texts_by_modality(self,
-                                     inputs: Dict[str, object], 
-                                     modality: str, 
-                                     index: int) -> str:
+
+    def get_prompt_texts_by_modality(self, inputs: Dict[str, object],
+                                     modality: str, index: int) -> str:
         if modality == "image":
             return self.get_image_prompt_texts(
-                inputs["image"]["image_sizes"][index],
-                index
-            )
+                inputs["image"]["image_sizes"][index], index)
         elif modality == "video":
             return self.get_video_prompt_texts(
-                inputs["video"]["video_image_sizes"][index], 
-                inputs["video"]["num_frames"][index]
-            )
+                inputs["video"]["video_image_sizes"][index],
+                inputs["video"]["num_frames"][index])
         else:
             raise ValueError(f"UnExpected modality: {modality}")
 
@@ -662,11 +654,9 @@ class MiniCPMVMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs
-        )
+        return super()._call_hf_processor(prompt=prompt,
+                                          mm_data=mm_data,
+                                          mm_kwargs=mm_kwargs)
 
     def _call_hf_processor(
         self,
@@ -682,19 +672,19 @@ class MiniCPMVMultiModalProcessor(
         inputs = self.process_mm_inputs(mm_data, mm_kwargs)
         counts = {modality: 0 for modality in supported_mm_modalities}
         num_mm_slices = {modality: [] for modality in supported_mm_modalities}
-        orders_in_mm_data = {modality: [] for modality in supported_mm_modalities}
+        orders_in_mm_data = {
+            modality: []
+            for modality in supported_mm_modalities
+        }
         matches = re.findall(self.get_placeholder_match_pattern(), prompt)
-        chunks = re.split(
-            self.get_placeholder_split_pattern(), prompt)
+        chunks = re.split(self.get_placeholder_split_pattern(), prompt)
         new_prompt = chunks[0]
         for idx, item in enumerate(matches):
             orders_in_mm_data[item].append(idx)
             num_mm_slices[item].append(
-                self.get_num_slices_by_modality(inputs, item, counts[item])
-            )
+                self.get_num_slices_by_modality(inputs, item, counts[item]))
             new_prompt += self.get_prompt_texts_by_modality(
-                inputs, item, counts[item]
-            )
+                inputs, item, counts[item])
             counts[item] += 1
             new_prompt += chunks[idx + 1]
 
@@ -710,8 +700,8 @@ class MiniCPMVMultiModalProcessor(
             "input_ids": np.array([input_ids]),
             **{
                 key: value
-                for modality in inputs
-                for key, value in inputs[modality].items()
+                for modality in inputs for key, value in inputs[modality].items(
+                )
             },
             **{
                 f"{modality}_orders_in_mm_data": orders_in_mm_data[modality]
@@ -731,14 +721,16 @@ class MiniCPMVMultiModalProcessor(
             "image": self.info.image_pattern,
             "video": self.info.video_pattern,
         }
+
         def get_replacement_minicpmv(item_idx: int, modality: str):
             if modality == "image":
                 return self.get_image_prompt_texts(
                     mm_items["image"].get_image_size(item_idx), item_idx)
-            else: # video
+            else:  # video
                 return self.get_video_prompt_texts(
                     mm_items["video"].get_frame_size(item_idx),
                     mm_items["video"].get_num_frames(item_idx))
+
         return [
             PromptReplacement(modality=modality,
                               target=placeholder[modality],
@@ -1022,8 +1014,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _parse_and_validate_inputs(self, input_ids: torch.Tensor,
                                    **kwargs: object):
-        return self._parse_and_validate_image_inputs(
-            input_ids, **kwargs)
+        return self._parse_and_validate_image_inputs(input_ids, **kwargs)
 
     def forward(
         self,
