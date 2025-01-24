@@ -66,7 +66,7 @@ def test_chunked_prefill_recompute(
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=enable_chunked_prefill,
             max_num_seqs=max_num_seqs,
-            worker_use_ray=worker_use_ray,
+            distributed_executor_backend="ray" if worker_use_ray else "mp",
             disable_log_stats=False,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -104,7 +104,7 @@ def test_preemption(
             model,
             dtype=dtype,
             disable_log_stats=False,
-            worker_use_ray=worker_use_ray,
+            distributed_executor_backend="ray" if worker_use_ray else "mp",
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
@@ -159,7 +159,7 @@ def test_preemption_infeasible(
             # ignored instead of hanging forever.
             num_gpu_blocks_override=prefill_blocks + decode_blocks // 2,
             max_model_len=((prefill_blocks + decode_blocks // 2) * BLOCK_SIZE),
-            worker_use_ray=worker_use_ray,
+            distributed_executor_backend="ray" if worker_use_ray else "mp",
     ) as vllm_model:
         sampling_params = SamplingParams(max_tokens=max_tokens,
                                          ignore_eos=True)
