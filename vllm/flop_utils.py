@@ -10,12 +10,6 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 aten = torch.ops.aten
 
-def prod(x):
-    res = 1
-    for i in x:
-        res *= i
-    return res
-
 def matmul_flop(inputs: List[Any], outputs: List[Any]) -> Number:
     """
     Count flops for matmul.
@@ -24,6 +18,11 @@ def matmul_flop(inputs: List[Any], outputs: List[Any]) -> Number:
     input_shapes = [v.shape for v in inputs]
     assert len(input_shapes) == 2, input_shapes
     assert input_shapes[0][-1] == input_shapes[1][-2], input_shapes
+    def prod(x):
+        res = 1
+        for i in x:
+            res *= i
+        return res
     flop = prod(input_shapes[0]) * input_shapes[-1][-1]
     return flop
  
