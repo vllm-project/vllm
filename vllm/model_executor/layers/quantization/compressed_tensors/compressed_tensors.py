@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict, List, Literal, Optional, cast
 
 import torch
@@ -26,6 +27,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import current_platform
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["CompressedTensorsLinearMethod"]
 
@@ -355,7 +358,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             which can be a full layer_name, a regex for a layer_name, or
             an nn.Module name.
 
-        This function detects whether a layer_name is found in any target and
+        Detect whether a layer_name is found in any target and
         use the quantization scheme corresponding to the matched target
         to select the CompressedTensorsScheme used for infernece.
         """
@@ -396,6 +399,9 @@ class CompressedTensorsConfig(QuantizationConfig):
             # FIXME(tlrmchlsmth): layers using W16A16 CUTLASS 2:4 sparse kernels
             # currently produce bad output in some cases
             if weight_quant is None:
+                logger.warning(
+                    "CompressedTensors24 scheme is disabled for the w16a16 "
+                    "case. Falling back to UnquantizedLinearMethod")
                 return None
             # Have a valid sparsity scheme
             # Validate layer is supported by Cutlass 2:4 Kernel
