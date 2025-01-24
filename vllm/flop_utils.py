@@ -1,11 +1,14 @@
 import torch
+
+import torch
+import torch.nn as nn
 from torch.utils._pytree import tree_map, tree_flatten
 from typing import List, Any
 from numbers import Number
 from collections import defaultdict
- 
+from torch.utils._python_dispatch import TorchDispatchMode
+
 aten = torch.ops.aten
-iters = 0
 
 def prod(x):
     res = 1
@@ -76,97 +79,54 @@ flop_mapping = {
 
 }
 
-######### FLOP Counting Util Functions #########
-flop_counts = defaultdict(lambda: defaultdict(int))
-funcs = set()
-parents = ['Global']
+class FlopContextManager(TorchDispatchMode):
+    def __init__(self, mod = None):
+        self.flop_counts = defaultdict(lambda: defaultdict(int))
+        self.funcs = set()
+        self.parents = ['Global']
+        if mod is not None:
+            for name, module in dict(mod.named_children()).items():
+                module.register_forward_pre_hook(self.enter_module(name))
+                module.register_forward_hook(self.exit_module(name))
 
-def start_counting():
-    global parents, flop_counts
-    parents = ['Global']
-    flop_counts.clear()
+    def enter_module(self, name):
+        def f(module, inputs):
+            self.parents.append(name)
+            return inputs
 
-def enter_module(name):
-    def f(module, inputs):
-        global parents
-        parents.append(name)
-        return inputs
- 
-    return f
- 
-def exit_module(name):
-    def f(module, inputs, outputs):
-        global parents
-        assert(parents[-1] == name)
-        parents.pop()
-        return outputs
-    return f
-     
-def instrument_module(mod):
-    for name, module in dict(mod.named_children()).items():
-        module.register_forward_pre_hook(enter_module(name))
-        module.register_forward_hook(exit_module(name))
- 
+        return f
 
-def display_flops():
-    global iters
-    iters += 1
-    print(f"Iteration: {iters}")
-    for mod in flop_counts.keys():
-        print(f"Module: ", mod)
-        for k,v in flop_counts[mod].items():
-            print(k, v/1e9)
+    def exit_module(self, name):
+        def f(module, inputs, outputs):
+            assert(self.parents[-1] == name)
+            self.parents.pop()
+            return outputs
+        return f
 
-######### FLOPTensor Wrapper Class #########
+    def __enter__(self):
+        self.flop_counts.clear()
+        super().__enter__()
 
-class FlopTensor(torch.Tensor):
-    elem: torch.Tensor
- 
-    __slots__ = ['elem']
- 
-    @staticmethod
-    def __new__(cls, elem):
-        # The wrapping tensor (FlopTensor) shouldn't hold any
-        # memory for the class in question, but it should still
-        # advertise the same device as before
-        r = torch.Tensor._make_wrapper_subclass(  # type: ignore[attr-defined]
-            cls, elem.size(),
-            strides=elem.stride(), storage_offset=elem.storage_offset(),
-            # TODO: clone storage aliasing
-            dtype=elem.dtype, layout=elem.layout,
-            device=elem.device, requires_grad=elem.requires_grad
-        )
-        # ...the real tensor is held as an element on the tensor.
-        r.elem = elem
-        return r
- 
-    def __repr__(self):
-        if self.grad_fn:
-            return f"FlopTensor({self.elem}, grad_fn={self.grad_fn})"
-        return f"FlopTensor({self.elem})"
-    
-    def tolist(self):
-        return self.elem.tolist()
-    
-    @classmethod
-    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
-        def unwrap(e):
-            return e.elem if isinstance(e, FlopTensor) else e
- 
-        rs = func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
-        outs = rs if isinstance(rs, tuple) else (rs, )
-        if func in flop_mapping:
-            global flop_counts
-            flop_count = flop_mapping[func](args, outs)
-            for par in parents:
-                flop_counts[par][func.__name__] += flop_count
-        else:
-            funcs.add(func.__name__)
-        def wrap(e):
-            return FlopTensor(e) if isinstance(e, torch.Tensor) else e
- 
-        rs = tree_map(wrap, rs)
-        return rs
+    def __exit__(self, *args):
+        print(f"Total: {sum(self.flop_counts['Global'].values())/1e9 } GFLOPS")
+        for mod in self.flop_counts.keys():
+            print(f"Module: ", mod)
+            for k,v in self.flop_counts[mod].items():
+                print(f"{k}: {v/1e9} GFLOPS")
+            print()
+        for func in self.funcs:
+            print(func)
+        super().__exit__(*args)
 
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs if kwargs else {}
 
-__all__ = ["instrument_module", "display_flops"]
+        out = func(*args, **kwargs)
+        func_packet = func._overloadpacket
+        self.funcs.add(func_packet.op.__name__)
+        if func_packet in flop_mapping:
+            flop_count = flop_mapping[func_packet](args, out if isinstance(out, tuple) else (out, ))
+            for par in self.parents:
+                self.flop_counts[par][func_packet] += flop_count
+
+        return out

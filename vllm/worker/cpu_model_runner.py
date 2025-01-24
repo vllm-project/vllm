@@ -8,7 +8,6 @@ from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Type,
 import torch
 from torch import nn
 
-from vllm.flop_utils import FlopTensor, display_flops
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
@@ -191,11 +190,6 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                                     dtype=torch.long,
                                     device="cpu") \
                                     if input_data.token_type_ids else None
-        
-        input_tokens = FlopTensor(input_tokens)
-        input_positions = FlopTensor(input_positions)
-        token_type_ids = FlopTensor(token_type_ids) if token_type_ids else None
-
         # For multi-modal models
         multi_modal_kwargs = None
         if len(input_data.multi_modal_inputs_list) != 0:
@@ -494,7 +488,6 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
 
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config)
-
         if self.lora_config:
             assert supports_lora(
                 self.model
@@ -685,7 +678,6 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
             if model_input.is_prompt:
                 output.prefill_hidden_states = hidden_states
             output.hidden_states = hidden_states
-        display_flops()
         return [output]
 
     def generate_proposals(self, *args, **kwargs):
