@@ -855,24 +855,18 @@ class GPUModelRunner:
 
             # Compute the positions of the prompt tokens
             is_partial_req = request_id in scheduler_output.partial_req_ids
-            prompt_indices = self._prepare_prompt_indices(
-                request_id, is_partial_req, req_indices)
-            prompt_hidden_states = hidden_states[prompt_indices]
+            req_idx = self.input_batch.req_id_to_index[request_id]
+            start = self.input_batch.num_computed_tokens_cpu[req_idx]
+            end = start + scheduler_output.num_scheduled_tokens[request_id]
+            if not is_partial_req:
+                # Exclude the sample token if there is one.
+                end -= 1
+            prompt_hidden_states = hidden_states[start:end]
             logits = self.model.compute_logits(prompt_hidden_states, None)
             # - Offset `prompt_indices` by 1 because (in general) the logprob
             #   distribution at sequence position i is predicting position i+1
-            if is_partial_req:
-                # - The prompt logprobs at the final position in this chunk,
-                #   are predicting the probability distribution of the first
-                #   token id in the next chunk - thus we must peek ahead at
-                #   the first token in the next chunk in order to know which
-                #   token's prompt logprobs to hold on to.
-                peek_token_id = (self.input_batch.
-                                 cached_partial_req_peek_token_ids[request_id])
-                chunk_prompt_token_ids = torch.cat(
-                    (input_ids[prompt_indices[:-1] + 1], peek_token_id))
-            else:
-                chunk_prompt_token_ids = input_ids[prompt_indices + 1]
+            chunk_prompt_token_ids = self.input_batch.token_ids_cpu_tensor[
+                req_idx, start + 1: end + 1]
 
             # Compute prompt logprobs.
             prompt_logprobs_dict[request_id] = self.model.sampler.get_logprobs(
