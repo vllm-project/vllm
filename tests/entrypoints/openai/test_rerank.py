@@ -36,8 +36,8 @@ def test_rerank_texts(server: RemoteOpenAIServer, model_name: str):
     assert rerank.id is not None
     assert rerank.results is not None
     assert len(rerank.results) == 2
-    assert rerank.results[1].relevance_score <= 0.01
     assert rerank.results[0].relevance_score >= 0.9
+    assert rerank.results[1].relevance_score <= 0.01
 
 
 @pytest.mark.asyncio
@@ -62,8 +62,8 @@ def test_top_n(server: RemoteOpenAIServer, model_name: str):
     assert rerank.id is not None
     assert rerank.results is not None
     assert len(rerank.results) == 2
-    assert rerank.results[1].relevance_score <= 0.01
     assert rerank.results[0].relevance_score >= 0.9
+    assert rerank.results[1].relevance_score <= 0.01
 
 
 @pytest.mark.asyncio
