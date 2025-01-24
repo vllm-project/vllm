@@ -854,19 +854,33 @@ class GPUModelRunner:
              ) in self.input_batch.num_prompt_logprobs.items():
 
             # Compute the positions of the prompt tokens
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                request_id]
             is_partial_req = request_id in scheduler_output.partial_req_ids
             req_idx = self.input_batch.req_id_to_index[request_id]
-            start = self.input_batch.num_computed_tokens_cpu[req_idx]
-            end = start + scheduler_output.num_scheduled_tokens[request_id]
-            if not is_partial_req:
+            # Index of this request's first scheduled prompt token within
+            # model input token vector
+            start_idx_in_inp_ids = self.query_start_loc_np[req_idx].item()
+            # Index of this request's first scheduled prompt token,
+            # relative to the beginning of this request's prompt
+            start_idx_in_prompt = self.input_batch.num_computed_tokens_cpu[
+                req_idx]
+            # Unless request is partial,
+            num_scheduled_prompt_tokens = (
+                num_scheduled_tokens if is_partial_req
                 # Exclude the sample token if there is one.
-                end -= 1
-            prompt_hidden_states = hidden_states[start:end]
+                else num_scheduled_tokens - 1)
+            end_idx_in_inp_ids = (start_idx_in_inp_ids +
+                                  num_scheduled_prompt_tokens)
+            end_idx_in_prompt = (start_idx_in_prompt +
+                                 num_scheduled_prompt_tokens)
+            prompt_hidden_states = (
+                hidden_states[start_idx_in_inp_ids:end_idx_in_inp_ids])
             logits = self.model.compute_logits(prompt_hidden_states, None)
             # - Offset `prompt_indices` by 1 because (in general) the logprob
             #   distribution at sequence position i is predicting position i+1
             chunk_prompt_token_ids = self.input_batch.token_ids_cpu_tensor[
-                req_idx, start + 1: end + 1]
+                req_idx, start_idx_in_prompt + 1:end_idx_in_prompt + 1]
 
             # Compute prompt logprobs.
             prompt_logprobs_dict[request_id] = self.model.sampler.get_logprobs(
