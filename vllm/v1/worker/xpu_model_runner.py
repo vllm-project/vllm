@@ -372,8 +372,8 @@ class XPUModelRunner(GPUModelRunner):
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(self.model, num_tokens, self.kv_caches)
-                self._dummy_run(self.model, num_tokens, self.kv_caches)
+                    self._dummy_run(num_tokens, self.kv_caches)
+                self._dummy_run(num_tokens, self.kv_caches)
         end_time = time.perf_counter()
         end_used_memory = torch.xpu.memory_allocated()
         elapsed_time = end_time - start_time
