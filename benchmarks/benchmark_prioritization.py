@@ -71,6 +71,12 @@ def run_vllm(
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
 
+    assert all(
+        llm.llm_engine.model_config.max_model_len >= (request[1] + request[2])
+        for request in requests), (
+            "Please ensure that max_model_len is greater than the sum of"
+            " input_len and output_len for all requests.")
+
     # Add the requests to the engine.
     prompts = []
     sampling_params = []
