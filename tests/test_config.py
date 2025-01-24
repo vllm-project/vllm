@@ -284,7 +284,7 @@ def test_uses_mrope(model_id, uses_mrope):
 
 
 def test_generation_config_loading():
-    model_id = "/large-storage/model/Qwen2.5/qwen/Qwen2___5-1___5B-Instruct/"
+    model_id = "Qwen/Qwen2.5-1.5B-Instruct"
 
     # When set generation_config to None, the default generation config
     # will not be loaded.
