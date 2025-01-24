@@ -25,8 +25,6 @@ class PEFTHelper:
     def _validate_features(self):
         error_msg = []
 
-        if self.modules_to_save:
-            error_msg.append("vLLM only supports modules_to_save being None.")
         if self.use_rslora:
             error_msg.append("vLLM does not yet support RSLoRA.")
 

@@ -46,7 +46,8 @@ class LoRALayerWeights:
         """Optimize the LoRA by merging the scaling into lora_b."""
         if self.scaling == 1:
             return self
-        self.lora_b *= self.scaling
+        if self.scaling is not None:
+            self.lora_b *= self.scaling
         self.scaling = 1
         return self
 
@@ -106,6 +107,7 @@ class LoRALayerWeights:
                                  device=device,
                                  pin_memory=pin_memory)
             embeddings_tensor = None
+            bias=None
         else:
             lora_a = torch.zeros([input_dim, rank],
                                  dtype=dtype,

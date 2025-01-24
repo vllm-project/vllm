@@ -26,6 +26,7 @@ from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
+from vllm.lora.layers import ModulesToSaveWrapper
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
@@ -301,6 +302,7 @@ class LoRAModel(AdapterModel):
             if lora_model_id is None else lora_model_id,
             tensors=tensors,
             peft_helper=peft_helper,
+            enable_lora_modules_to_save=enable_lora_modules_to_save,
             device=device,
             dtype=dtype,
             embeddings=embeddings,
@@ -562,15 +564,26 @@ class LoRAModelManager(AdapterModelManager):
                                              hasattr(module.base_layer,
                                                      "embedding_dim") else
                                              module.base_layer.weight.shape[1])
-                    lora = LoRALayerWeights.create_dummy_lora_weights(
-                        module_name,
-                        input_dim,
-                        output_dim,
-                        rank,
-                        module.lora_a_stacked[0].dtype,
-                        "cpu",
-                        embeddings_tensor_dim=embeddings_tensor_dim,
-                        bias_enabled=bias_enabled)
+                    if isinstance(module, ModulesToSaveWrapper):
+                        lora=LoRALayerWeights.create_dummy_lora_weights(
+                            module_name,
+                            input_dim,
+                            output_dim,
+                            None,
+                            module.dtype,
+                            "cpu",
+                            embeddings_tensor_dim=embeddings_tensor_dim,
+                            bias_enabled=bias_enabled)
+                    else:
+                        lora = LoRALayerWeights.create_dummy_lora_weights(
+                            module_name,
+                            input_dim,
+                            output_dim,
+                            rank,
+                            module.lora_a_stacked[0].dtype,
+                            "cpu",
+                            embeddings_tensor_dim=embeddings_tensor_dim,
+                            bias_enabled=bias_enabled)
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
