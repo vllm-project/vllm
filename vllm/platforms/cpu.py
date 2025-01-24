@@ -1,3 +1,4 @@
+import os
 from typing import TYPE_CHECKING, Optional
 
 import psutil
@@ -104,6 +105,32 @@ class CpuPlatform(Platform):
                     "vllm.worker.cpu_worker.CPUWorker"
             else:
                 parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
+
+        assert vllm_config.device_config.device_type == "cpu"
+
+        #
+        # Environment variables for CPU executor
+        #
+
+        # Disable torch async compiling which won't work with daemonic processes
+        os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+
+        # Intel OpenMP setting
+        ld_prealod_str = os.getenv("LD_PRELOAD", "")
+        if "libiomp5.so" in ld_prealod_str:
+            # The time(milliseconds) that a thread should wait after
+            # completing the execution of a parallel region, before sleeping.
+            os.environ['KMP_BLOCKTIME'] = "1"
+            # Prevents the CPU to run into low performance state
+            os.environ['KMP_TPAUSE'] = "0"
+            # Provides fine granularity parallelism
+            os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
+            os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
+            os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
+
+        # To hint IPEX uses shared memory based AllReduce
+        os.environ["LOCAL_WORLD_SIZE"] = str(
+            vllm_config.parallel_config.tensor_parallel_size)
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:

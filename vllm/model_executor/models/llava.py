@@ -5,9 +5,11 @@ from typing import (Final, Iterable, List, Literal, Mapping, Optional,
 
 import torch
 import torch.nn as nn
+from packaging.version import Version
 from transformers import (BatchFeature, CLIPVisionConfig, LlavaConfig,
                           PixtralVisionConfig, PretrainedConfig,
                           SiglipVisionConfig)
+from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.models.llava import LlavaProcessor
 from transformers.models.pixtral import PixtralProcessor
 
@@ -22,7 +24,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputsV2, MultiModalKwargs,
+                                    MultiModalInputs, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
@@ -313,13 +315,14 @@ class PixtralHFMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         hf_config = self.info.get_hf_config()
-        image_token_id = hf_config.image_token_index
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
 
-        processor = self.info.get_hf_processor()
-        image_token = processor.image_token
-        image_break_token = processor.image_break_token
-        image_end_token = processor.image_end_token
+        image_break_id = vocab[processor.image_break_token]
+        image_token_id = hf_config.image_token_index
+        image_end_id = vocab[processor.image_end_token]
 
         vision_config = hf_config.vision_config
         assert isinstance(vision_config, PixtralVisionConfig)
@@ -334,10 +337,10 @@ class PixtralHFMultiModalProcessor(
                 image_height=image_size.height,
             )
 
-            tokens = ([image_token] * ncols + [image_break_token]) * nrows
-            tokens[-1] = image_end_token
+            tokens = ([image_token_id] * ncols + [image_break_id]) * nrows
+            tokens[-1] = image_end_id
 
-            return "".join(tokens)
+            return tokens
 
         return [
             PromptReplacement(
@@ -463,14 +466,10 @@ def init_vision_tower_for_llava(
                                         info=_build_llava_or_pixtral_hf_info,
                                         dummy_inputs=LlavaDummyInputsBuilder)
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -720,6 +719,27 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         return loader.load_weights(weights)
 
 
+class MantisProcessingInfo(LlavaProcessingInfo):
+
+    def get_hf_processor(self):
+        hf_config = self.get_hf_config()
+        vision_info = self.get_vision_encoder_info()
+
+        if Version(TRANSFORMERS_VERSION) < Version("4.48"):
+            # BUG: num_additional_image_tokens = 0 but treated as 1,
+            # so we set vision_feature_select_strategy to None to offset this
+            vision_feature_select_strategy = None
+        else:
+            # FIXED: https://github.com/huggingface/transformers/pull/33424/files#diff-6a37acc21efcadaae622b079b2712a131131448ff64262bd219aa346aeec38faL150
+            vision_feature_select_strategy = hf_config.vision_feature_select_strategy  # noqa: E501
+
+        return self.ctx.get_hf_processor(
+            LlavaProcessor,
+            patch_size=vision_info.get_patch_size(),
+            vision_feature_select_strategy=vision_feature_select_strategy,
+        )
+
+
 class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 
     def apply(
@@ -727,7 +747,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> MultiModalInputsV2:
+    ) -> MultiModalInputs:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
 
@@ -786,7 +806,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return MultiModalInputsV2(
+        return MultiModalInputs(
             type="multimodal",
             prompt=prompt,
             prompt_token_ids=prompt_ids,
@@ -798,7 +818,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 # To use this model, please use
 # `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'`
 @MULTIMODAL_REGISTRY.register_processor(MantisMultiModalProcessor,
-                                        info=LlavaProcessingInfo,
+                                        info=MantisProcessingInfo,
                                         dummy_inputs=LlavaDummyInputsBuilder)
 class MantisForConditionalGeneration(LlavaForConditionalGeneration):
     pass
