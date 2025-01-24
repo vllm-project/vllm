@@ -31,9 +31,17 @@ __global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
   const size_t tokens_per_thread = CEILDIV(numel, blockDim.x);
   const size_t start_idx = threadIdx.x * tokens_per_thread;
 
+  // compute aligned shared mem offset to make sure cumsum is aligned
+  int cnts_byte_offset =
+      ((blockDim.x + 1) * num_experts) * sizeof(token_cnts_t);
+  int aligned_offset =
+      (cnts_byte_offset + sizeof(int32_t) - 1) / sizeof(int32_t);
+
   extern __shared__ int32_t shared_mem[];
-  int32_t* cumsum = shared_mem;  // 1d tensor with shape (num_experts + 1)
-  token_cnts_t* tokens_cnts = (token_cnts_t*)(shared_mem + blockDim.x + 1);
+  token_cnts_t* tokens_cnts = (token_cnts_t*)
+      shared_mem;  // 2d tensor with shape (blockDim.x + 1, num_experts)
+  int32_t* cumsum =
+      shared_mem + aligned_offset;  // 1d tensor with shape (num_experts + 1)
 
   for (int i = 0; i < num_experts; ++i) {
     tokens_cnts[index(num_experts, threadIdx.x + 1, i)] = 0;
