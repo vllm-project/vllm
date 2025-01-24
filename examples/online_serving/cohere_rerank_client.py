@@ -12,11 +12,9 @@ rerank_v1_result = co.rerank(
     model="BAAI/bge-reranker-base",
     query="What is the capital of France?",
     documents=[
-        "The capital of France is Paris",
-        "Reranking is fun!",
+        "The capital of France is Paris", "Reranking is fun!",
         "vLLM is an open-source framework for fast AI serving"
-    ]
-)
+    ])
 
 print(rerank_v1_result)
 
@@ -27,11 +25,8 @@ v2_rerank_result = co2.rerank(
     model="BAAI/bge-reranker-base",
     query="What is the capital of France?",
     documents=[
-        "The capital of France is Paris",
-        "Reranking is fun!",
+        "The capital of France is Paris", "Reranking is fun!",
         "vLLM is an open-source framework for fast AI serving"
-    ]
-)
+    ])
 
 print(v2_rerank_result)
-

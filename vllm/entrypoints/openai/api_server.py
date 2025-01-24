@@ -528,20 +528,12 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
 @router.post("/v1/rerank")
 @with_cancellation
 async def do_rerank_v1(request: RerankRequest, raw_request: Request):
-    logger.warning(
-        "To indicate that the rerank API is not part of the standard OpenAI"
-        " API, we have located it at `/rerank`. Please update your client"
-        "accordingly. (Note: Conforms to JinaAI rerank API)")
     return await do_rerank(request, raw_request)
 
 
 @router.post("/v2/rerank")
 @with_cancellation
 async def do_rerank_v2(request: RerankRequest, raw_request: Request):
-    logger.warning(
-        "To indicate that the rerank API is not part of the standard OpenAI"
-        " API, we have located it at `/rerank`. Please update your client"
-        "accordingly. (Note: Conforms to JinaAI rerank API)")
     return await do_rerank(request, raw_request)
 
 
