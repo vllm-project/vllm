@@ -281,7 +281,8 @@ class LoRAModel(AdapterModel):
                 new_embeddings_tensor_path)
         elif os.path.isfile(new_embeddings_bin_file_path):
             embeddings = torch.load(new_embeddings_bin_file_path,
-                                    map_location=device)
+                                    map_location=device,
+                                    weights_only=True)
 
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id()
