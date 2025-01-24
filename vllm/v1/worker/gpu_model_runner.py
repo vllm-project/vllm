@@ -393,8 +393,9 @@ class GPUModelRunner:
         num_copy_tokens = total_num_scheduled_tokens
         flat_token_ids_cpu_tensor = (
             self.input_batch.token_ids_cpu_tensor.flatten())
-        if (scheduler_output.partial_req_id and scheduler_output.partial_req_id
-                in self.input_batch.num_prompt_logprobs):
+        partial_req_id = scheduler_output.partial_req_id
+        if (partial_req_id
+                and partial_req_id in self.input_batch.num_prompt_logprobs):
             # To facilitate computing prompt logprobs of the last token
             # in a partial prefill chunk, inject the first token of the next
             # prefill chunk ("peek token") at the last index of the
