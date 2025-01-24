@@ -669,6 +669,10 @@ class OpenAIServingChat(OpenAIServing):
                             arguments=output.text))
                     ])
 
+                if isinstance(tokenizer, MistralTokenizer):
+                    for tool_call in message.tool_calls:
+                        tool_call.id = generate_valid_mistral_tool_id()
+
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
             elif not request.tool_choice or request.tool_choice == "none":
@@ -710,11 +714,6 @@ class OpenAIServingChat(OpenAIServing):
                     " if tools should be extracted. Returning a standard chat "
                     "completion.")
                 message = ChatMessage(role=role, content=output.text)
-
-            if isinstance(tokenizer, MistralTokenizer):
-                for tool_call in message.tool_calls:
-                    tool_call.id = generate_valid_mistral_tool_id()
-                    logger.warning(f"Assigned new tool_id: {tool_call.id} for tool: {tool_call}")
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,

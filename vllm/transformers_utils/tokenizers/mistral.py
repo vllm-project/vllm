@@ -61,9 +61,9 @@ def maybe_serialize_tool_calls(request: ChatCompletionRequest):
             while True:
                 try:
                     tool_call = next(tool_calls_validator)  # type: ignore
-                    tool_call['id'] = generate_valid_mistral_tool_id()
-                    logger.warning(f"Assigned new tool_id: {tool_call['id']} for tool: {tool_call}")
                     validated_tool_calls.append(tool_call)
+                    if not re.match(r"^[a-zA-Z0-9]{9}$", tool_call['id']):
+                        tool_call['id'] = generate_valid_mistral_tool_id()
                 except StopIteration:
                     break
 

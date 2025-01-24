@@ -2213,6 +2213,6 @@ def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
     return func(*args, **kwargs)
 
 def generate_valid_mistral_tool_id():
-    # Mistral Tool Call Ids must be alphanumeric with a maximum length of 9.
+    # Mistral Tool Call Ids must be alphanumeric with a length of 9.
     # https://github.com/mistralai/mistral-common/blob/21ee9f6cee3441e9bb1e6ed2d10173f90bd9b94b/src/mistral_common/protocol/instruct/validator.py#L299
     return "".join(choices(ALPHANUMERIC, k=9))
