@@ -18,7 +18,7 @@ class CompilerInterface:
     # This is a class-level attribute.
     name: str
 
-    def __init__(self, cache_dir: str, disable_cache: bool = False):
+    def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
         pass
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
@@ -140,7 +140,7 @@ class InductorAdaptor(CompilerInterface):
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()[:10]
         return hash_str
 
-    def __init__(self, cache_dir: str, disable_cache: bool = False):
+    def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
         if disable_cache:
             return
         # redirect the cache directory to a sub-directory

@@ -39,13 +39,15 @@ class CompilerManager:
     support int as key.
     """
 
-    def __init__(self,
-                 cache_dir: str,
-                 use_inductor: bool,
-                 disable_cache: bool = False):
+    def __init__(self, use_inductor: bool):
         self.cache: Dict[Tuple[Optional[int], int, str], Any] = dict()
         cls = InductorAdaptor if use_inductor else EagerAdaptor
-        self.compiler = cls(cache_dir=cache_dir, disable_cache=disable_cache)
+        self.compiler = cls()
+
+    def compute_hash(self, vllm_config: VllmConfig) -> str:
+        return self.compiler.compute_hash(vllm_config)
+
+    def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
         self.disable_cache = disable_cache
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
@@ -57,6 +59,9 @@ class CompilerManager:
                 # because it is a safe way to parse Python literals.
                 # do not use eval(), it is unsafe.
                 self.cache = ast.literal_eval(f.read())
+
+        self.compiler.initialize_cache(cache_dir=cache_dir,
+                                       disable_cache=disable_cache)
 
     def save_to_file(self):
         if self.disable_cache:
@@ -321,6 +326,9 @@ class VllmBackend:
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
 
+        self.compiler_manager: CompilerManager = CompilerManager(
+            self.compilation_config.use_inductor)
+
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
@@ -347,9 +355,11 @@ class VllmBackend:
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
 
+            factors = []
             # 1. factors come from the vllm_config (it mainly summarizes how the
             #    model is created)
             config_hash = vllm_config.compute_hash()
+            factors.append(config_hash)
 
             # 2. factors come from the code files that are traced by Dynamo (
             #    it mainly summarizes how the model is used in forward pass)
@@ -367,10 +377,15 @@ class VllmBackend:
             import hashlib
             code_hash = hashlib.md5(
                 "\n".join(hash_content).encode()).hexdigest()
+            factors.append(code_hash)
 
-            # combine the two hashes to generate the cache dir
-            hash_key = hashlib.md5(
-                f"{config_hash}_{code_hash}".encode()).hexdigest()[:10]
+            # 3. compiler hash
+            compiler_hash = self.compiler_manager.compute_hash(vllm_config)
+            factors.append(compiler_hash)
+
+            # combine all factors to generate the cache dir
+            hash_key = hashlib.md5(str(factors).encode()).hexdigest()[:10]
+
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
                 "torch_compile_cache",
@@ -385,15 +400,14 @@ class VllmBackend:
         self.compilation_config.local_cache_dir = local_cache_dir
 
         disable_cache = envs.VLLM_DISABLE_COMPILE_CACHE
-        self.compiler_manager: CompilerManager = CompilerManager(
-            local_cache_dir,
-            self.compilation_config.use_inductor,
-            disable_cache=disable_cache)
+
         if disable_cache:
             logger.info("vLLM's torch.compile cache is disabled.")
         else:
             logger.info("Using cache directory: %s for vLLM's torch.compile",
                         local_cache_dir)
+
+        self.compiler_manager.initialize_cache(local_cache_dir, disable_cache)
 
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done
