@@ -28,6 +28,7 @@ from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
+from vllm.features import *
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
@@ -201,6 +202,7 @@ class LLMEngine:
         return outputs_
 
     tokenizer: Optional[BaseTokenizerGroup]
+    _base_features: FeatureUsage
 
     def __init__(
         self,
@@ -402,6 +404,11 @@ class LLMEngine:
             ))
 
         self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}
+
+        # Initialize the base feature set in use based on engine-wide config.
+        self._base_features = FeatureUsage()
+        if vllm_config.speculative_config:
+            self._base_features.add(FEATURE_SPEC_DECODE)
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -731,6 +738,19 @@ class LLMEngine:
             raise ValueError(f"Got priority {priority} but "
                              "Priority scheduling is not enabled.")
 
+        # Start with the set of base features enabled at the engine level
+        features = FeatureUsage(self._base_features)
+        # Add any additional features enabled at the request level
+        if isinstance(params, SamplingParams):
+            if params.guided_decoding:
+                features.add(FEATURE_STRUCTURED_OUTPUT)
+            if params.n > 1:
+                features.add(FEATURE_BEST_OF)
+        # Ensure features are compatible
+        if not features.compatible():
+            raise FeaturesIncompatible(features.conflicts())
+
+        # TODO: Rework this using the generic FeatureUsage interface
         if isinstance(params, SamplingParams) \
             and (params.guided_decoding or params.logits_processors) \
             and self.scheduler_config.num_scheduler_steps > 1:

@@ -294,7 +294,7 @@ class MQLLMEngine:
         try:
             self.engine.add_lora(request.lora_request)
         except BaseException as e:
-            # Send back an error if the adater fails to load
+            # Send back an error if the adapter fails to load
             rpc_err = RPCError(request_id=request.request_id,
                                is_engine_errored=False,
                                exception=e)
