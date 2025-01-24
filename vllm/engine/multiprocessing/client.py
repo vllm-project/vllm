@@ -27,8 +27,9 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCAdapterLoadedResponse, RPCError,
                                          RPCLoadAdapterRequest,
-                                         RPCProcessRequest, RPCStartupRequest,
-                                         RPCStartupResponse,
+                                         RPCProcessRequest,
+                                         RPCResetPrefixCacheRequest,
+                                         RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 from vllm.engine.protocol import EngineClient
 # yapf: enable
@@ -674,6 +675,13 @@ class MQLLMEngineClient(EngineClient):
 
         await self._send_one_way_rpc_request(
             request=RPCUProfileRequest.STOP_PROFILE, socket=self.input_socket)
+
+    async def reset_prefix_cache(self) -> None:
+        """Reset the prefix cache"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCResetPrefixCacheRequest.RESET_PREFIX_CACHE,
+            socket=self.input_socket)
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""

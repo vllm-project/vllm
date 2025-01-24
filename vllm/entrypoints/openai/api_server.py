@@ -1,5 +1,6 @@
 import asyncio
 import atexit
+import gc
 import importlib
 import inspect
 import multiprocessing
@@ -104,6 +105,11 @@ async def lifespan(app: FastAPI):
             task.add_done_callback(_running_tasks.remove)
         else:
             task = None
+
+        # Mark the startup heap as static so that it's ignored by GC.
+        # Reduces pause times of oldest generation collections.
+        gc.collect()
+        gc.freeze()
         try:
             yield
         finally:
@@ -517,6 +523,18 @@ TASK_HANDLERS: Dict[str, Dict[str, tuple]] = {
         "default": (PoolingCompletionRequest, create_pooling),
     },
 }
+
+if envs.VLLM_SERVER_DEV_MODE:
+
+    @router.post("/reset_prefix_cache")
+    async def reset_prefix_cache(raw_request: Request):
+        """
+        Reset the prefix cache. Note that we currently do not check if the
+        prefix cache is successfully reset in the API server.
+        """
+        logger.info("Resetting prefix cache...")
+        await engine_client(raw_request).reset_prefix_cache()
+        return Response(status_code=200)
 
 
 @router.post("/invocations")

@@ -1132,6 +1132,9 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
+    def reset_prefix_cache(self) -> bool:
+        return self.llm_engine.reset_prefix_cache()
+
     def sleep(self, level: int = 1):
         """
         Put the engine to sleep. The engine should not process any requests.
@@ -1150,9 +1153,13 @@ class LLM:
             where previous model weights are not needed. It reduces CPU memory 
             pressure.
         """
+        self.reset_prefix_cache()
         self.llm_engine.sleep(level=level)
 
     def wake_up(self):
+        """
+        Wake up the engine from sleep mode. See the :meth:`sleep` method
+        for more details."""
         self.llm_engine.wake_up()
 
     # LEGACY
