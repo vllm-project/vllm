@@ -70,7 +70,7 @@ class MiniCPMVImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: List[torch.Tensor]
     """
-    Shape: `(batch_size * num_images, num_channels, height, width)`
+    Shape: `(batch_size * num_images * num_slices, num_channels, height, width)`
 
     Note that the image size may vary, so we pass it as a list
     instead of a batched tensor.
@@ -78,14 +78,14 @@ class MiniCPMVImagePixelInputs(TypedDict):
 
     image_bounds: torch.Tensor
     """
-    Shape: `(batch_size * num_images, 2)`
+    Shape: `(batch_size * num_images * num_slices, 2)`
 
     This should be in `(start, stop)` format.
     """
 
     tgt_sizes: torch.Tensor
     """
-    Shape: `(batch_size * num_images, 2)`
+    Shape: `(batch_size * num_images * num_slices, 2)`
 
     This should be in `(height, width)` format.
     """
@@ -95,7 +95,7 @@ class MiniCPMVImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
     """
-    Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
+    Shape: `(batch_size * num_images * num_slices, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     instead of a batched tensor.
@@ -103,7 +103,7 @@ class MiniCPMVImageEmbeddingInputs(TypedDict):
 
     image_bounds: torch.Tensor
     """
-    Shape: `(batch_size * num_images, 2)`
+    Shape: `(batch_size * num_images * num_slices, 2)`
 
     This should be in `(start, stop)` format.
     """

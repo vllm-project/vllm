@@ -60,31 +60,45 @@ MiniCPMOEmbeddingItems = MiniCPMVEmbeddingItems
 
 class MiniCPMOAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
-    data: List[torch.Tensor]
+    data: torch.Tensor
     """
-    Shape: 
+    Shape: `(batch_size * num_audios * num_slices, num_channels, length)`
+    Slice here means chunk. Audio that is too long will be splited into slices,
+    which is the same as image.
+    Padding is used therefore `data` is `torch.Tensor`.
     """
 
     audio_feature_lens: torch.Tensor
     """
-    Shape:
+    Shape: `(batch_size * num_audios * num_slices)`
+
+    This should be feature length of each audio slice, 
+    which equals to `data.shape[-1]`
     """
 
     audio_bounds: torch.Tensor
     """
-    Shape:
+    Shape: `(batch_size * num_audios * num_slices, 2)`
+
+    This should be in `(start, stop)` format.
     """
 
 
 class MiniCPMOAudioEmbeddingInputs(TypedDict):
     type: Literal["audio_embeds"]
-    data: torch.Tensor
+    data: List[torch.Tensor]
     """
-    Shape:
+    Shape: `(batch_size * num_images * num_slices, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    instead of a batched tensor.
+    Length of each slice may vary, so pass it as a list.
     """
     audio_bounds: torch.Tensor
     """
-    Shape:
+    Shape: `(batch_size * num_audios * num_slices, 2)`
+
+    This should be in `(start, stop)` format.
     """
 
 
