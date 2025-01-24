@@ -137,7 +137,7 @@ class GPUModelRunner:
         self.num_sms = self.device_properties.multi_processor_count
 
         # Persistent buffers for CUDA graphs.
-        self.input_ids = torch.zeros(self.max_num_tokens,
+        self.input_ids = torch.zeros(self.max_num_tokens + 1,
                                      dtype=torch.int32,
                                      device=self.device)
         self.positions = torch.zeros(self.max_num_tokens,
@@ -177,7 +177,7 @@ class GPUModelRunner:
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
         # not make any assumptions about the values in these tensors.
-        self.input_ids_cpu = torch.zeros(self.max_num_tokens,
+        self.input_ids_cpu = torch.zeros(self.max_num_tokens + 1,
                                          dtype=torch.int32,
                                          device="cpu",
                                          pin_memory=self.pin_memory)
@@ -423,14 +423,18 @@ class GPUModelRunner:
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
+        num_peek_tokens = 0
+        if len(scheduler_output.partial_req_ids) > 0:
+            token_indices = np.append(token_indices, token_indices[-1] + 1)
+            num_peek_tokens = 1
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
         torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
                            torch.from_numpy(token_indices),
-                           out=self.input_ids_cpu[:total_num_scheduled_tokens])
-
+                           out=self.input_ids_cpu[:total_num_scheduled_tokens +
+                                                  num_peek_tokens])
         # Calculate the slot mapping.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
@@ -460,8 +464,9 @@ class GPUModelRunner:
         max_seq_len = self.seq_lens_np[:num_reqs].max()
 
         # Copy the tensors to the GPU.
-        self.input_ids[:total_num_scheduled_tokens].copy_(
-            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        self.input_ids[:total_num_scheduled_tokens + 1].copy_(
+            self.input_ids_cpu[:total_num_scheduled_tokens + 1],
+            non_blocking=True)
         if self.model_config.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
@@ -861,10 +866,6 @@ class GPUModelRunner:
             # Index of this request's first scheduled prompt token within
             # model input token vector
             start_idx_in_inp_ids = self.query_start_loc_np[req_idx].item()
-            # Index of this request's first scheduled prompt token,
-            # relative to the beginning of this request's prompt
-            start_idx_in_prompt = self.input_batch.num_computed_tokens_cpu[
-                req_idx]
             # Unless request is partial,
             num_scheduled_prompt_tokens = (
                 num_scheduled_tokens if is_partial_req
@@ -872,23 +873,19 @@ class GPUModelRunner:
                 else num_scheduled_tokens - 1)
             end_idx_in_inp_ids = (start_idx_in_inp_ids +
                                   num_scheduled_prompt_tokens)
-            end_idx_in_prompt = (start_idx_in_prompt +
-                                 num_scheduled_prompt_tokens)
             prompt_hidden_states = (
                 hidden_states[start_idx_in_inp_ids:end_idx_in_inp_ids])
             logits = self.model.compute_logits(prompt_hidden_states, None)
             # - Offset `prompt_indices` by 1 because (in general) the logprob
             #   distribution at sequence position i is predicting position i+1
-            chunk_prompt_token_ids = self.input_batch.token_ids_cpu_tensor[
-                req_idx, start_idx_in_prompt + 1:end_idx_in_prompt + 1]
-
+            chunk_prompt_token_ids = self.input_ids[start_idx_in_inp_ids +
+                                                    1:end_idx_in_inp_ids + 1]
             # Compute prompt logprobs.
             prompt_logprobs_dict[request_id] = self.model.sampler.get_logprobs(
                 logits,
                 num_prompt_logprobs,
                 token_ids=chunk_prompt_token_ids  #type: ignore
             )
-
         sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
