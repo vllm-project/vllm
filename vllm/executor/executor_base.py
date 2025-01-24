@@ -47,6 +47,7 @@ class ExecutorBase(ABC):
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self._init_executor()
+        self.is_sleeping = False
 
     @abstractmethod
     def _init_executor(self) -> None:
@@ -194,15 +195,18 @@ class ExecutorBase(ABC):
         self.collective_rpc("stop_profile")
 
     def sleep(self, level: int = 1):
-        if self.cache_config.enable_prefix_caching:
-            # TODO: support sleep with prefix caching
-            # by resetting the prefix cache state,
-            # after https://github.com/vllm-project/vllm/pull/12284
-            raise ValueError("Cannot sleep when prefix caching is enabled.")
+        if self.is_sleeping:
+            logger.warning("Executor is already sleeping.")
+            return
         self.collective_rpc("sleep", kwargs=dict(level=level))
+        self.is_sleeping = True
 
     def wake_up(self):
+        if not self.is_sleeping:
+            logger.warning("Executor is not sleeping.")
+            return
         self.collective_rpc("wake_up")
+        self.is_sleeping = False
 
     def save_sharded_state(
         self,

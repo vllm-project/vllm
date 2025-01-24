@@ -105,7 +105,9 @@ def main(
         start_time = time.perf_counter()
 
         # Using default kv_scale
-        k_scale = v_scale = 1.0
+        k_scale = v_scale = torch.tensor(1.0,
+                                         dtype=torch.float32,
+                                         device=device)
 
         for _ in range(num_iters):
             if version == "v1":
@@ -165,8 +167,6 @@ def main(
                         kv_cache_dtype,
                         k_scale,
                         v_scale,
-                        None,
-                        PARTITION_SIZE,
                     )
             else:
                 raise ValueError(f"Invalid version: {version}")

@@ -101,6 +101,7 @@ class OutputProcessor:
     def process_outputs(
         self,
         engine_core_outputs: List[EngineCoreOutput],
+        iteration_stats: Optional[IterationStats] = None,
     ) -> OutputProcessorOutput:
         """
         Process the EngineCoreOutputs:
@@ -133,7 +134,8 @@ class OutputProcessor:
 
         request_outputs: List[RequestOutput] = []
         reqs_to_abort: List[str] = []
-        iteration_stats = IterationStats(self.log_stats)
+        if not iteration_stats:
+            iteration_stats = IterationStats(self.log_stats)
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
@@ -175,8 +177,8 @@ class OutputProcessor:
             iteration_stats=iteration_stats,
         )
 
+    @staticmethod
     def _make_request_output(
-        self,
         request_state: RequestState,
         detokenizer_output: Optional[DetokenizerOutput],
     ) -> Optional[RequestOutput]:
