@@ -198,16 +198,18 @@ class Inductor25Adaptor(CompilerInterface):
                 return inductor_compiled_graph
         elif torch.__version__ >= "2.6":
             # function renamed in 2.6
-            original_load = FxGraphCache.load_with_key
+            original_load = FxGraphCache._save_graph
             original_load_name = ("torch._inductor.codecache"
-                                  ".FxGraphCache.load_with_key")
+                                  ".FxGraphCache._save_graph")
 
             def hijack_load(*args, **kwargs):
-                # it returns a tuple, we only need the first element
-                inductor_compiled_graph, _ = original_load(*args, **kwargs)
+                output = original_load(*args, **kwargs)
                 nonlocal file_path
+                nonlocal hash_str
+                inductor_compiled_graph = args[1]
+                hash_str = args[0]
                 file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
-                return inductor_compiled_graph, _
+                return output
 
         def hijack_compiled_fx_graph_hash(*args, **kwargs):
             out = compiled_fx_graph_hash(*args, **kwargs)
@@ -253,6 +255,8 @@ class Inductor25Adaptor(CompilerInterface):
 
         assert hash_str is not None, (
             "failed to get the hash of the compiled graph")
+        assert file_path is not None, (
+            "failed to get the file path of the compiled graph")
         return compiled_graph, (hash_str, file_path)
 
     def load(self,
