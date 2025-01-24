@@ -49,7 +49,7 @@ def test_top_n(server: RemoteOpenAIServer, model_name: str):
         "The capital of France is Paris.", "Cross-encoder models are neat"
     ]
 
-    rerank_response = requests.post(server.url_for("score"),
+    rerank_response = requests.post(server.url_for("rerank"),
                                     json={
                                         "model": model_name,
                                         "query": query,
@@ -68,7 +68,7 @@ def test_top_n(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_score_max_model_len(server: RemoteOpenAIServer, model_name: str):
+def test_rerank_max_model_len(server: RemoteOpenAIServer, model_name: str):
 
     query = "What is the capital of France?" * 100
     documents = [
@@ -84,15 +84,4 @@ def test_score_max_model_len(server: RemoteOpenAIServer, model_name: str):
     assert rerank_response.status_code == 400
     # Assert just a small fragments of the response
     assert "Please reduce the length of the input." in \
-        rerank_response.text
-
-    # Test truncation
-    rerank_response = requests.post(server.url_for("rerank"),
-                                    json={
-                                        "model": model_name,
-                                        "query": query,
-                                        "documents": documents
-                                    })
-    assert rerank_response.status_code == 400
-    assert "Please, select a smaller truncation size." in \
         rerank_response.text
