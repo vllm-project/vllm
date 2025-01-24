@@ -36,13 +36,13 @@ class CompilerManager:
     def __init__(self,
                  cache_dir: str,
                  use_inductor: bool,
-                 disabled: bool = False):
+                 disable_cache: bool = False):
         self.cache: Dict[Tuple[Optional[int], int, str], Any] = dict()
         self.compiler = InductorAdaptor() if use_inductor else EagerAdaptor()
-        self.disabled = disabled
+        self.disable_cache = disable_cache
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "compiler_manager.py")
-        if disabled:
+        if disable_cache:
             return
 
         self.compiler.init_with_cache_dir(cache_dir)
@@ -62,7 +62,7 @@ class CompilerManager:
         return printer.pformat(self.cache)
 
     def save_to_file(self):
-        if self.disabled:
+        if self.disable_cache:
             return
         with open(self.cache_file_path, "w") as f:
             f.write(self.serialize())
@@ -105,7 +105,7 @@ class CompilerManager:
 
         compiled_graph = None
 
-        if not self.disabled:
+        if not self.disable_cache:
             compiled_graph = self.load(graph, example_inputs, graph_index,
                                        runtime_shape)
             if compiled_graph is not None:
@@ -390,12 +390,12 @@ class VllmBackend:
             cache_dir, f"rank_{vllm_config.parallel_config.rank}")
         self.compilation_config.local_cache_dir = local_cache_dir
 
-        disabled = envs.VLLM_DISABLE_COMPILE_CACHE
+        disable_cache = envs.VLLM_DISABLE_COMPILE_CACHE
         self.compiler_manager: CompilerManager = CompilerManager(
             local_cache_dir,
             self.compilation_config.use_inductor,
-            disabled=disabled)
-        if disabled:
+            disable_cache=disable_cache)
+        if disable_cache:
             logger.info("vLLM's torch.compile cache is disabled.")
         else:
             logger.info("Using cache directory: %s for vLLM's torch.compile",
