@@ -219,6 +219,7 @@ class FlashInferState(AttentionState):
             num_prefills=0,
             slot_mapping=self._graph_slot_mapping[:batch_size],
             multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=False,
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
             max_prefill_seq_len=0,
@@ -733,6 +734,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
+            enable_kv_scales_calculation=False,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             max_prefill_seq_len=max_prefill_seq_len,
@@ -888,8 +890,8 @@ class FlashInferImpl(AttentionImpl):
                     kv_cache,
                     logits_soft_cap=logits_soft_cap,
                     causal=True,
-                    k_scale=layer._k_scale,
-                    v_scale=layer._v_scale,
+                    k_scale=layer._k_scale_float,
+                    v_scale=layer._v_scale_float,
                     window_left=window_left)
         if decode_meta := attn_metadata.decode_metadata:
             assert decode_meta is not None
@@ -899,8 +901,8 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache,
                 sm_scale=softmax_scale,
                 logits_soft_cap=logits_soft_cap,
-                k_scale=layer._k_scale,
-                v_scale=layer._v_scale,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
                 window_left=window_left)
 
         if prefill_output is None and decode_output is not None:
