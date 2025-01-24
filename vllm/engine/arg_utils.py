@@ -944,7 +944,9 @@ class EngineArgs:
             "Defaults to None, will use the default generation config in vLLM. "
             "If set to 'auto', the generation config will be automatically "
             "loaded from model. If set to a folder path, the generation config "
-            "will be loaded from the specified folder path.")
+            "will be loaded from the specified folder path. If "
+            "`max_new_tokens` is specified, then it sets a server-wide limit "
+            "on the number of output tokens for all requests.")
 
         parser.add_argument("--enable-sleep-mode",
                             action="store_true",
