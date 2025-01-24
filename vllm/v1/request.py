@@ -64,6 +64,12 @@ class Request:
         # recomputing.
         self._kv_block_hashes: List[BlockHashType] = []
 
+        # Read-only views
+        # Prevent directly appending to the these lists since
+        # they should also be updated simultaneously.
+        self.output_token_ids = ConstantList(self._output_token_ids)
+        self.all_token_ids = ConstantList(self._all_token_ids)
+
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         return cls(
@@ -78,18 +84,6 @@ class Request:
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
         )
-
-    @property
-    def output_token_ids(self) -> ConstantList[int]:
-        # Prevent directly appending to the output_token_ids since
-        # all_token_ids should also be updated simultaneously.
-        return ConstantList(self._output_token_ids)
-
-    @property
-    def all_token_ids(self) -> ConstantList[int]:
-        # Prevent directly appending to the all_token_ids since
-        # output_token_ids should also be updated simultaneously
-        return ConstantList(self._all_token_ids)
 
     def append_output_token_ids(
         self,
