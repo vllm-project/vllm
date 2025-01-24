@@ -342,7 +342,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         hf_processor = self.ctx.get_hf_processor()
         return hf_processor
 
-    def get_image_processor(self, ):
+    def get_image_processor(self):
         hf_processor = self.get_hf_processor()
         image_processor = hf_processor.image_processor  # type: ignore
         return image_processor
@@ -415,7 +415,9 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
                             + slice_grid[1] - 1 + num_additional_tokens
         return num_tokens
 
-    def get_image_slice_nums(self, image_size: torch.Tensor, max_slice_nums):
+    def get_image_slice_nums(self, 
+                             image_size: torch.Tensor, 
+                             max_slice_nums: int) -> int:
         grid = self.get_sliced_grid(image_size, max_slice_nums)
         return 1 if grid is None else grid[0] * grid[1] + 1
 
@@ -528,7 +530,7 @@ class MiniCPMVMultiModalProcessor(
         ])
         return prompt_texts
 
-    def get_special_tokens(self):
+    def get_special_tokens(self) -> Dict[str, torch.Tensor]:
         tokenizer = self.info.get_tokenizer()
         special_tokens = {
             "im_start_id": torch.tensor(tokenizer.im_start_id),
@@ -569,7 +571,7 @@ class MiniCPMVMultiModalProcessor(
         return image_outputs
 
     def process_videos(self, mm_data: Mapping[str, object],
-                       mm_kwargs: Mapping[str, object]):
+                       mm_kwargs: Mapping[str, object]) -> Dict[str, object]:
         videos = mm_data.pop("videos", [])
         video_embeds = mm_data.pop("video_embeds", [])
         if len(videos) > 0 and isinstance(videos[0], Image.Image):

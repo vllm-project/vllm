@@ -142,10 +142,10 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
             "video": self.get_max_video_tokens(seq_len)
         }
 
-    def get_default_audio_pool_step(self):
+    def get_default_audio_pool_step(self) -> int:
         return 2
 
-    def get_default_audio_sampling_rate(self):
+    def get_default_audio_sampling_rate(self) -> int:
         return 16000
 
     def get_chunk_length(self) -> int:
@@ -225,11 +225,11 @@ class MiniCPMOMultiModalProcessor(
     def get_audio_prompt_texts(self,
                                audio_lens: int,
                                chunk_input: bool = True,
-                               chunk_length: int = 1):
+                               chunk_length: int = 1) -> str:
         return self.info.get_hf_processor().get_audio_placeholder(
             audio_lens, chunk_input, chunk_length)
 
-    def get_special_tokens(self):
+    def get_special_tokens(self) -> Dict[str, torch.Tensor]:
         tokenizer = self.info.get_tokenizer()
         special_tokens = super().get_special_tokens()
         if hasattr(tokenizer, "audio_start_id"):
@@ -240,7 +240,7 @@ class MiniCPMOMultiModalProcessor(
         return special_tokens
 
     def process_audios(self, mm_data: Mapping[str, object],
-                       mm_kwargs: Mapping[str, object]):
+                       mm_kwargs: Mapping[str, object]) -> Dict[str, object]:
         audios = mm_data.pop("audios", [])
         audio_embeds = mm_data.pop("audio_embeds", [])
         if isinstance(audios, (list, torch.Tensor)) and len(audios) > 0:
@@ -375,7 +375,7 @@ class MiniCPMOMultiModalProcessor(
 
 class MultiModalProjector(nn.Module):
 
-    def __init__(self, in_dim, out_dim):
+    def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
         self.linear1 = nn.Linear(in_features=in_dim,
                                  out_features=out_dim,
@@ -385,7 +385,7 @@ class MultiModalProjector(nn.Module):
                                  out_features=out_dim,
                                  bias=True)
 
-    def forward(self, audio_features):
+    def forward(self, audio_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.relu(self.linear1(audio_features))
         hidden_states = self.linear2(hidden_states)
         return hidden_states
