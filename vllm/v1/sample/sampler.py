@@ -145,7 +145,9 @@ class Sampler(nn.Module):
         topk_indices = torch.cat((token_ids, topk_indices), dim=1)
         topk_logprobs = torch.cat((sampled_logprobs, topk_logprobs), dim=1)
 
-        return topk_logprobs.cpu(), topk_indices.cpu()
+        return topk_logprobs.to(device='cpu',
+                                non_blocking=True), topk_indices.to(
+                                    device='cpu', non_blocking=True)
 
     def apply_penalties(
         self,
