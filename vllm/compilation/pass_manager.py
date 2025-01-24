@@ -1,5 +1,6 @@
 from typing import Any, Dict, List
 
+import torch
 from torch import fx as fx
 
 from vllm.config import CompilationConfig
@@ -13,7 +14,17 @@ from .reshapes import RedundantReshapesPass
 logger = init_logger(__name__)
 
 
-class PostGradPassManager:
+class PlaceHolder:
+    pass
+
+
+if torch.__version__ < "2.6":
+    Parent = PlaceHolder
+else:
+    Parent = torch._inductor.custom_graph_pass.CustomGraphPass
+
+
+class PostGradPassManager(Parent):
     """
     The pass manager for post-grad passes.
     It handles configuration, adding custom passes, and running passes.
@@ -52,6 +63,9 @@ class PostGradPassManager:
     def add(self, pass_: InductorPass):
         assert isinstance(pass_, InductorPass)
         self.passes.append(pass_)
+
+    def uuid(self):
+        return self.__getstate__()
 
     def __getstate__(self) -> Dict[str, List[Any]]:
         """
