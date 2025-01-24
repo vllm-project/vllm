@@ -7,19 +7,20 @@ MooncakePipe.
 
 But the logic can be extended to support other pipe and lookup buffer.
 """
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 from copy import deepcopy
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from vllm import _custom_ops as ops
+from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
     SimpleBuffer)
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
-from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
@@ -37,6 +38,7 @@ class SimpleConnector(KVConnectorBase):
     ):
 
         self.config = config.kv_transfer_config
+        self.tp_size = config.parallel_config.tensor_parallel_size
         # The following config is needed to rebuild the model input
         self.cache_config = config.cache_config
 
@@ -205,7 +207,7 @@ class SimpleConnector(KVConnectorBase):
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor]
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], List[bool],
                "ModelInputForGPUWithSamplingMetadata"]:
 
         input_tokens_tensor = model_input.input_tokens
@@ -296,8 +298,13 @@ class SimpleConnector(KVConnectorBase):
                 # Some of the KV cache of this request is not retrieved
                 # Here we will fall back to normal model forwarding
                 logger.debug(
-                    f"[rank{torch.distributed.get_rank()}]: Failed to receive request {i}'s KVs and hidden states, redo model forwarding.")
-                hidden_or_intermediate_states = torch.cat(hidden_or_intermediate_states_for_one_req, dim=0)
+                    "[rank%d]: Failed to receive request %d's"
+                    " KVs and hidden states, "
+                    "redo model forwarding.", torch.distributed.get_rank(),
+                    idx)
+
+                hidden_or_intermediate_states = torch.cat(
+                    hidden_or_intermediate_states_for_one_req, dim=0)
                 all_bypass_flag = False
         if all_bypass_flag:
             logger.debug(
@@ -308,15 +315,11 @@ class SimpleConnector(KVConnectorBase):
 
         if not all(bypass_model_exec):
             rebuilt_model_input = self.build_partial_prefill_input(
-                model_input,
-                input_tokens_list,
-                num_computed_tokens_list,
-                start_pos_list,
-                slot_mapping,
-                kv_caches[0][0].device
-            )
+                model_input, input_tokens_list, num_computed_tokens_list,
+                start_pos_list, slot_mapping, kv_caches[0][0].device)
             logger.debug("Rebuilt the input!")
-            return hidden_or_intermediate_states, bypass_model_exec, rebuilt_model_input
+            return (hidden_or_intermediate_states, bypass_model_exec,
+                    rebuilt_model_input)
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
@@ -332,14 +335,11 @@ class SimpleConnector(KVConnectorBase):
             pass
 
     def build_partial_prefill_input(
-        self,
-        model_input: "ModelInputForGPUWithSamplingMetadata",
-        full_tokens_list: List[torch.Tensor],
-        num_computed_tokens_list: List[int],
-        start_pos_list: List[int],
-        slot_mapping_flat: torch.Tensor,
-        device: torch.device
-    ) -> "ModelInputForGPUWithSamplingMetadata":
+            self, model_input: "ModelInputForGPUWithSamplingMetadata",
+            full_tokens_list: List[torch.Tensor],
+            num_computed_tokens_list: List[int], start_pos_list: List[int],
+            slot_mapping_flat: torch.Tensor,
+            device: torch.device) -> "ModelInputForGPUWithSamplingMetadata":
         """Helper function to rebuild the model input for the current request.
         """
         assert model_input.attn_metadata is not None
@@ -371,14 +371,15 @@ class SimpleConnector(KVConnectorBase):
             num_computed_token = num_computed_tokens_list[idx]
             start_pos = start_pos_list[idx]
             q_len = num_token - num_computed_token
-            
+
             rebuilt_input_tokens.append(token_tensor[num_computed_token:])
 
             assert q_len > 0
             start_input_pos_idx = start_pos + num_computed_token
             end_input_pos_idx = start_input_pos_idx + q_len
             rebuilt_input_positions.append(
-                model_input.input_positions[start_input_pos_idx:end_input_pos_idx])
+                model_input.
+                input_positions[start_input_pos_idx:end_input_pos_idx])
 
             # Attn metadata-related
             rebuilt_num_prefills += 1
@@ -389,7 +390,8 @@ class SimpleConnector(KVConnectorBase):
             rebuilt_slot_mapping.append(new_slot_mapping)
             rebuilt_max_query_len = max(q_len, rebuilt_max_query_len)
             last_query_start_loc += q_len
-            rebuilt_query_start_loc.append(last_query_start_loc)  # start with 0
+            rebuilt_query_start_loc.append(
+                last_query_start_loc)  # start with 0
             rebuilt_context_lens_tensor.append(num_computed_token)
 
             # recover `block_table`
@@ -407,8 +409,8 @@ class SimpleConnector(KVConnectorBase):
         rebuilt_attn_metadata = deepcopy(model_input.attn_metadata)
         rebuilt_attn_metadata.num_prefills = rebuilt_num_prefills
         rebuilt_attn_metadata.num_prefill_tokens = rebuilt_num_prefill_tokens
-        rebuilt_attn_metadata.slot_mapping = torch.cat(rebuilt_slot_mapping).to(
-            device)
+        rebuilt_attn_metadata.slot_mapping = torch.cat(
+            rebuilt_slot_mapping).to(device)
         rebuilt_attn_metadata.max_query_len = rebuilt_max_query_len
         rebuilt_attn_metadata.block_tables = pad_sequence(
             rebuilt_block_tables, batch_first=True).to(device)
@@ -422,7 +424,8 @@ class SimpleConnector(KVConnectorBase):
         rebuilt_attn_metadata._cached_prefill_metadata = None
 
         # import here to avoid circular import.
-        from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+        from vllm.worker.model_runner import (
+            ModelInputForGPUWithSamplingMetadata)
         rebuilt_model_input = ModelInputForGPUWithSamplingMetadata(
             input_tokens=torch.cat(rebuilt_input_tokens).to(device),
             input_positions=torch.cat(rebuilt_input_positions).to(device),
