@@ -168,10 +168,6 @@ class InputBatch:
         # NOTE(rob): num_prompt_logprobs ONLY includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: Dict[str, int] = {}
-        # Dict mapping from partial request ID, to the ID of the token which
-        # immediately follows the last token processed in the current step.
-        # Only necessary for partial requests with prompt logprobs enabled.
-        self.cached_partial_req_peek_token_ids: Dict[str, torch.Tensor] = {}
 
     def add_request(
         self,
