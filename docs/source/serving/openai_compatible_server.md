@@ -479,7 +479,7 @@ The following extra parameters are supported:
 :end-before: end-score-extra-params
 ```
 
-(rerank-api) =
+(rerank-api)=
 
 ### Re-rank API
 
