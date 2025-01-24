@@ -389,10 +389,6 @@ class EngineArgs:
             'to "ray" if Ray is installed and fail otherwise. Note that tpu '
             'only supports Ray for distributed inference.')
 
-        parser.add_argument(
-            '--worker-use-ray',
-            action='store_true',
-            help='Deprecated, use ``--distributed-executor-backend=ray``.')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,

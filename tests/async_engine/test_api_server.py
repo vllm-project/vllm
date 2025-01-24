@@ -36,7 +36,7 @@ def api_server(tokenizer_pool_size: int, worker_use_ray: bool):
     ]
 
     if worker_use_ray:
-        commands.append("--worker-use-ray")
+        commands.extend(["--distributed-executor-backend", "ray"])
     uvicorn_process = subprocess.Popen(commands)
     yield
     uvicorn_process.terminate()
