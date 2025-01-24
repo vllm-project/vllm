@@ -1,4 +1,3 @@
-import logging
 from typing import Any, Dict, List, Literal, Optional, cast
 
 import torch
@@ -10,6 +9,7 @@ from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationType)
 from pydantic import BaseModel
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
@@ -28,7 +28,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import current_platform
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 __all__ = ["CompressedTensorsLinearMethod"]
 
