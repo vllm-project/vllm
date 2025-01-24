@@ -190,6 +190,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                                     dtype=torch.long,
                                     device="cpu") \
                                     if input_data.token_type_ids else None
+
         # For multi-modal models
         multi_modal_kwargs = None
         if len(input_data.multi_modal_inputs_list) != 0:
@@ -488,6 +489,7 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
 
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config)
+
         if self.lora_config:
             assert supports_lora(
                 self.model
