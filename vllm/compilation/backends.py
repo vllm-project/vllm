@@ -49,10 +49,9 @@ class CompilerManager:
         self.disable_cache = disable_cache
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
-        if disable_cache:
-            return
 
-        if os.path.exists(self.cache_file_path):
+        if not disable_cache and os.path.exists(self.cache_file_path):
+            # load the cache from the file
             with open(self.cache_file_path) as f:
                 # we use ast.literal_eval to parse the data
                 # because it is a safe way to parse Python literals.
