@@ -1709,31 +1709,31 @@ void paged_attention_custom_launcher(
   }
 }
 
-#define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, PSIZE, ALIBI_ENABLED)  \
-  paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, T,                \
-                                  PSIZE, ALIBI_ENABLED>(                                   \
-      out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,                   \
-      num_kv_heads, scale, block_tables, context_lens, max_context_len,                    \
+#define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, PSIZE, ALIBI_ENABLED) \
+  paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, T,               \
+                                  PSIZE, ALIBI_ENABLED>(                                  \
+      out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,                  \
+      num_kv_heads, scale, block_tables, context_lens, max_context_len,                   \
       alibi_slopes, k_scale, v_scale);
 
-#define CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, PSIZE)  \
-  if (alibi_slopes) {                                                             \
-    CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, PSIZE, true);     \
-  } else {                                                                        \
-    CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, PSIZE, false);    \
+#define CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, PSIZE) \
+  if (alibi_slopes) {                                                            \
+    CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, PSIZE, true);    \
+  } else {                                                                       \
+    CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, PSIZE, false);   \
   }
 
-#define CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, HEAD_SIZE)                 \
-  switch (block_size) {                                                       \
-    case 16:                                                                  \
-      CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, 16, HEAD_SIZE, 256);       \
-      break;                                                                  \
-    case 32:                                                                  \
-      CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, 32, HEAD_SIZE, 256);       \
-      break;                                                                  \
-    default:                                                                  \
-      TORCH_CHECK(false, "Unsupported block size: ", block_size);             \
-      break;                                                                  \
+#define CALL_CUSTOM_LAUNCHER_BLK(T, KVT, KV_DTYPE, HEAD_SIZE)           \
+  switch (block_size) {                                                 \
+    case 16:                                                            \
+      CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, 16, HEAD_SIZE, 256); \
+      break;                                                            \
+    case 32:                                                            \
+      CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, 32, HEAD_SIZE, 256); \
+      break;                                                            \
+    default:                                                            \
+      TORCH_CHECK(false, "Unsupported block size: ", block_size);       \
+      break;                                                            \
   }
 
 #define CALL_CUSTOM_LAUNCHER_BLK_HEAD(T, KVT, KV_DTYPE)         \
