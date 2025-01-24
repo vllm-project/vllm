@@ -1284,6 +1284,10 @@ class LLM:
 
         if use_tqdm:
             pbar.close()
+
+        # Make sure that all workers are finished.
+        self.llm_engine.stop_remote_worker_execution_loop()
+
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
