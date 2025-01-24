@@ -397,7 +397,7 @@ async def async_request_openai_chat_completions(
                                                       most_recent_timestamp)
 
                                 generated_text += content or ""
-                            elif usage := data.get("usage"):
+                            if usage := data.get("usage"):
                                 output.output_tokens = usage.get(
                                     "completion_tokens")
 
