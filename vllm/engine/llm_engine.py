@@ -341,6 +341,11 @@ class LLMEngine:
         # of request outputs to asyncio queues
         self.process_request_outputs_callback: Optional[Callable] = None
 
+        # This is used to evict the finished requests from the Mamba cache and
+        # Baichuan-M1, We should use it to keep finished_req_ids when scheduler
+        # is empty.
+        self.finished_requests_ids: List[str] = list()
+
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
@@ -1323,6 +1328,7 @@ class LLMEngine:
 
             finished_requests_ids = self.scheduler[
                 virtual_engine].get_and_reset_finished_requests_ids()
+            self.finished_requests_ids.extend(finished_requests_ids)
 
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
@@ -1335,8 +1341,6 @@ class LLMEngine:
                 self._cache_scheduler_outputs_for_multi_step(
                     virtual_engine, seq_group_metadata_list, scheduler_outputs,
                     allow_async_output_proc)
-        else:
-            finished_requests_ids = list()
 
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
@@ -1357,10 +1361,13 @@ class LLMEngine:
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
-                finished_requests_ids=finished_requests_ids,
+                finished_requests_ids=self.finished_requests_ids,
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
                 last_sampled_token_ids=last_sampled_token_ids)
+
+            # Clear finished_requests_ids list.
+            self.finished_requests_ids = list()
 
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[

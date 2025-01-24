@@ -96,6 +96,11 @@ See [this page](#generative-models) for more information on how to use generativ
   - `baichuan-inc/Baichuan2-13B-Chat`, `baichuan-inc/Baichuan-7B`, etc.
   - ✅︎
   - ✅︎
+* - `BaichuanM1ForCausalLM`
+  - Baichuan-M1
+  - `baichuan-inc/Baichuan-M1-14B-Instruct`, `baichuan-inc/Baichuan-M1-14B-Base`, etc.
+  - ✅︎
+  - ✅︎
 * - `BloomForCausalLM`
   - BLOOM, BLOOMZ, BLOOMChat
   - `bigscience/bloom`, `bigscience/bloomz`, etc.

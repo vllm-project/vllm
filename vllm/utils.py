@@ -183,6 +183,7 @@ class Device(enum.Enum):
 class LayerBlockType(enum.Enum):
     attention = "attention"
     mamba = "mamba"
+    swa = "swa"
 
 
 class Counter:

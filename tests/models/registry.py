@@ -100,6 +100,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "BaichuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan2-7B-chat",
                                          trust_remote_code=True),
+    "BaichuanM1ForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan-M1-14B-Instruct", # noqa: E501
+                                         trust_remote_code=True),
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloomz-1b1"),
     # ChatGLMModel supports multimodal
     "CohereForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r-v01",
