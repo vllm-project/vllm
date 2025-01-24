@@ -28,9 +28,9 @@ from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
-from vllm.utils import generate_valid_mistral_tool_id
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
+from vllm.utils import generate_valid_mistral_tool_id
 
 logger = init_logger(__name__)
 

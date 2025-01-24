@@ -18,7 +18,7 @@ from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
                                                      Tekkenizer)
 
 from vllm.logger import init_logger
-from vllm.utils import is_list_of, generate_valid_mistral_tool_id
+from vllm.utils import generate_valid_mistral_tool_id, is_list_of
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
