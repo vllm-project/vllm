@@ -184,7 +184,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             self.model = self.lora_manager.create_lora_manager(self.model)
         
         self.model = ModelWrapper(self.model)
-        self.model = torch.compile(model,
+        self.model = torch.compile(self.model,
                         backend="openxla",
                         fullgraph=True,
                         dynamic=False)
@@ -321,7 +321,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             if self.lora_config is not None:
                 torch._dynamo.config.capture_dynamic_output_shape_ops = True
             else:
-                pass
                 torch._dynamo.mark_dynamic(token_ids, 0)
                 torch._dynamo.mark_dynamic(position_ids, 0)
                 torch._dynamo.mark_dynamic(input_lens, 0)
