@@ -255,11 +255,6 @@ class PlaceholderAttentionMetadataBuilder(
         AttentionMetadataBuilder[PlaceholderAttentionMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
-
-        self.input_builder = input_builder
-        self.runner = input_builder.runner
-
-    def prepare(self):
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
         self.curr_seq_lens: List[int] = []
@@ -269,6 +264,9 @@ class PlaceholderAttentionMetadataBuilder(
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
+
+        self.input_builder = input_builder
+        self.runner = input_builder.runner
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",

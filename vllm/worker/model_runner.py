@@ -455,13 +455,17 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.enable_prompt_adapter = (self.runner.prompt_adapter_config
                                       is not None)
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
+        self.finished_requests_ids = finished_requests_ids
         self.decode_only = True
 
+        # Intermediate data (data in CPU before going to GPU) for
+        # the current sequence group.
+        self.inter_data_list: List[
+            ModelInputForGPUBuilder.InterDataForSeqGroup] = []
+
         # Attention metadata inputs.
-        if self.attn_backend is not None:
-            # spec decode (e.g. Medusa) does not have atten backend
-            self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
-                weakref.proxy(self))
+        self.attn_metadata_builder = self.attn_backend.make_metadata_builder(
+            weakref.proxy(self))
 
         # Engine/Model configurations.
         self.chunked_prefill_enabled = (
@@ -472,17 +476,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 self.sliding_window + self.block_size - 1) // self.block_size
             self.block_aligned_sliding_window = \
                 self.sliding_window_blocks * self.block_size
-
-    def prepare(self,
-                finished_requests_ids: Optional[List[str]] = None) -> None:
-        self.finished_requests_ids = finished_requests_ids
-
-        # Intermediate data (data in CPU before going to GPU) for
-        # the current sequence group.
-        self.inter_data_list: List[
-            ModelInputForGPUBuilder.InterDataForSeqGroup] = []
-
-        self.attn_metadata_builder.prepare()
 
     def _compute_lens(self, inter_data: InterDataForSeqGroup, seq_idx: int,
                       seq_group_metadata: SequenceGroupMetadata):
@@ -998,7 +991,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     """
     _model_input_cls: Type[TModelInputForGPU]
     _builder_cls: Type[ModelInputForGPUBuilder]
-    builder: ModelInputForGPUBuilder
 
     def __init__(
         self,
@@ -1098,10 +1090,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.sampling_metadata_cache: SamplingMetadataCache = \
               SamplingMetadataCache() \
                 if self.parallel_config.pipeline_parallel_size == 1 else None
-
-        if hasattr(self, "_builder_cls"):
-            # multi-step model runner does not have `_builder_cls`
-            self.builder = self._builder_cls(weakref.proxy(self))
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -1208,13 +1196,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
-        self.builder.prepare(finished_requests_ids)
+        builder = self._builder_cls(weakref.proxy(self), finished_requests_ids)
         for seq_group_metadata in seq_group_metadata_list:
-            self.builder.add_seq_group(seq_group_metadata)
+            builder.add_seq_group(seq_group_metadata)
 
-        self.builder.reset_cached_inter_data()
+        builder.reset_cached_inter_data()
 
-        return self.builder.build()  # type: ignore
+        return builder.build()  # type: ignore
 
     @contextmanager
     def set_in_profile_run(self):
