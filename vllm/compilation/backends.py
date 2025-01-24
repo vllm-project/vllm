@@ -88,19 +88,15 @@ class CompilerManager:
                 example_inputs,
                 additional_inductor_config,
                 compilation_config: CompilationConfig,
-                vllm_backend: "VllmBackend",
                 graph_index: int = 0,
                 num_graphs: int = 1,
-                runtime_shape: Optional[int] = None,
-                use_inductor: bool = True) -> Any:
+                runtime_shape: Optional[int] = None) -> Any:
         if graph_index == 0:
             # before compiling the first graph, record the start time
             global compilation_start_time
             compilation_start_time = time.time()
 
-        if not use_inductor:
-            return graph
-
+        # TODO: rename to num_backend_compilations
         compilation_counter.num_inductor_compilations += 1
 
         compiled_graph = None
@@ -261,11 +257,9 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 args,
                 self.compilation_config.inductor_compile_config,
                 self.compilation_config,
-                self.vllm_backend,
                 graph_index=index,
                 num_graphs=len(self.compile_submod_names),
-                runtime_shape=None,
-                use_inductor=self.compilation_config.use_inductor)
+                runtime_shape=None)
 
             self.module.__dict__[target] = PiecewiseBackend(
                 submod, self.vllm_config, self.graph_pool, index,
@@ -609,11 +603,9 @@ class PiecewiseBackend:
                 args,
                 self.compilation_config.inductor_compile_config,
                 self.compilation_config,
-                self.vllm_backend,
                 graph_index=self.piecewise_compile_index,
                 num_graphs=self.total_piecewise_compiles,
-                runtime_shape=runtime_shape,
-                use_inductor=self.compilation_config.use_inductor)
+                runtime_shape=runtime_shape)
 
             # finished compilations for all required shapes
             if self.is_last_graph and not self.to_be_compiled_sizes:
