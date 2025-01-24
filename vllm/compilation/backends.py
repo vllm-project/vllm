@@ -44,10 +44,8 @@ class CompilerManager:
                  use_inductor: bool,
                  disable_cache: bool = False):
         self.cache: Dict[Tuple[Optional[int], int, str], Any] = dict()
-        self.compiler = InductorAdaptor(
-            cache_dir=cache_dir,
-            disable_cache=disable_cache) if use_inductor else EagerAdaptor(
-                cache_dir=cache_dir, disable_cache=disable_cache)
+        cls = InductorAdaptor if use_inductor else EagerAdaptor
+        self.compiler = cls(cache_dir=cache_dir, disable_cache=disable_cache)
         self.disable_cache = disable_cache
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
