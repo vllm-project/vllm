@@ -455,7 +455,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.enable_prompt_adapter = (self.runner.prompt_adapter_config
                                       is not None)
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
-        self.decode_only = True
 
         # Attention metadata inputs.
         if self.attn_backend is not None:
@@ -476,6 +475,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
     def prepare(self,
                 finished_requests_ids: Optional[List[str]] = None) -> None:
         self.finished_requests_ids = finished_requests_ids
+
+        # if the current batch is decode-only
+        self.decode_only = True
 
         # Intermediate data (data in CPU before going to GPU) for
         # the current sequence group.
