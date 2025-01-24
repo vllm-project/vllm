@@ -67,6 +67,7 @@ MLLAMA_IMAGE_TOKEN = "<|image|>"
 iteration = 0
 layer = 0
 
+
 class MllamaImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
@@ -845,9 +846,11 @@ class MllamaTextCrossAttention(nn.Module):
                     attn_metadata.cross_slot_mapping, "auto", i, i)
             else:
                 if self.attn.backend in (_Backend.FLASH_ATTN,
-                                        _Backend.FLASH_ATTN_VLLM_V1):
-                    cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
-                    cached_v = torch.cat([v[s:e] for s, e in kv_range_for_decode])
+                                         _Backend.FLASH_ATTN_VLLM_V1):
+                    cached_k = torch.cat(
+                        [k[s:e] for s, e in kv_range_for_decode])
+                    cached_v = torch.cat(
+                        [v[s:e] for s, e in kv_range_for_decode])
                     torch.ops._C_cache_ops.reshape_and_cache_flash(
                         cached_k,
                         cached_v,
@@ -859,11 +862,15 @@ class MllamaTextCrossAttention(nn.Module):
                         i,
                         i,
                     )
-                elif self.attn.backend in (_Backend.XFORMERS, _Backend.TORCH_SDPA):
+                elif self.attn.backend in (_Backend.XFORMERS,
+                                           _Backend.TORCH_SDPA):
                     key_cache, value_cache = PagedAttention.split_kv_cache(
-                        kv_cache, self.num_local_key_value_heads, self.head_dim)
-                    cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
-                    cached_v = torch.cat([v[s:e] for s, e in kv_range_for_decode])
+                        kv_cache, self.num_local_key_value_heads,
+                        self.head_dim)
+                    cached_k = torch.cat(
+                        [k[s:e] for s, e in kv_range_for_decode])
+                    cached_v = torch.cat(
+                        [v[s:e] for s, e in kv_range_for_decode])
                     PagedAttention.write_to_paged_cache(
                         cached_k, cached_v, key_cache, value_cache,
                         attn_metadata.cross_slot_mapping, "auto", i, i)
@@ -871,7 +878,8 @@ class MllamaTextCrossAttention(nn.Module):
                     raise ValueError(
                         f"Unsupported Attention backend {self.attn.backend} "
                         "enum found. Expected the Attention backend to be "
-                        "FLASH_ATTN, FLASH_ATTN_VLLM_V1, XFORMERS or TORCH_SDPA.")
+                        "FLASH_ATTN, FLASH_ATTN_VLLM_V1, "
+                        "XFORMERS or TORCH_SDPA.")
 
         # We have to call torch.sdpa for prefill when using a
         # custom cross-attention mask. Because the mask is not a
@@ -1465,7 +1473,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 break
             else:
                 orig_name = name
-                from vllm.model_executor.model_loader.weight_utils import maybe_remap_kv_scale_name
+                from vllm.model_executor.model_loader.weight_utils import (
+                    maybe_remap_kv_scale_name)
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     logger.debug("Missing name %s, orig name %s", name,
