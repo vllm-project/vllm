@@ -120,9 +120,9 @@ class AlwaysHitShapeEnv:
         return ""
 
 
-class Inductor25Adaptor(CompilerInterface):
+class InductorAdaptor(CompilerInterface):
     """
-    The adaptor for the Inductor compiler, version 2.5.
+    The adaptor for the Inductor compiler, version 2.5 and 2.6.
     """
     name = "inductor"
 
@@ -327,6 +327,3 @@ class EagerAdaptor(CompilerInterface):
         # we don't need to compile the graph, just return the graph itself.
         # It does not support caching, return None for the handle.
         return graph, None
-
-
-InductorAdaptor = Inductor25Adaptor
