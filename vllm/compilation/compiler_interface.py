@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import torch
+import torch._inductor.compile_fx
 import torch.fx as fx
 
 from vllm.config import VllmConfig
@@ -196,19 +197,21 @@ class InductorAdaptor(CompilerInterface):
                 nonlocal file_path
                 file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
                 return inductor_compiled_graph
+
+            hijacked_compile_fx_inner = torch._inductor.compile_fx.compile_fx_inner  # noqa
         elif torch.__version__ >= "2.6":
             # function renamed in 2.6
-            original_load = FxGraphCache._save_graph
-            original_load_name = ("torch._inductor.codecache"
-                                  ".FxGraphCache._save_graph")
+            original_load_name = None
 
-            def hijack_load(*args, **kwargs):
-                output = original_load(*args, **kwargs)
-                nonlocal file_path
+            def hijacked_compile_fx_inner(*args, **kwargs):
+                output = torch._inductor.compile_fx.compile_fx_inner(
+                    *args, **kwargs)
                 nonlocal hash_str
-                inductor_compiled_graph = args[1]
-                hash_str = args[0]
-                file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
+                inductor_compiled_graph = output
+                if inductor_compiled_graph is not None:
+                    nonlocal file_path
+                    file_path = inductor_compiled_graph.current_callable.__code__.co_filename  # noqa
+                    hash_str = inductor_compiled_graph._fx_graph_cache_key
                 return output
 
         def hijack_compiled_fx_graph_hash(*args, **kwargs):
@@ -231,7 +234,8 @@ class InductorAdaptor(CompilerInterface):
 
         with ExitStack() as stack:
             # hijack to get the compiled graph itself
-            stack.enter_context(patch(original_load_name, hijack_load))
+            if original_load_name is not None:
+                stack.enter_context(patch(original_load_name, hijack_load))
 
             # for hijacking the hash of the compiled graph
             stack.enter_context(
@@ -249,9 +253,11 @@ class InductorAdaptor(CompilerInterface):
                     "torch._inductor.codecache.FxGraphCache._check_can_cache",
                     _check_can_cache))
 
-            compiled_graph = compile_fx(graph,
-                                        example_inputs,
-                                        config_patches=current_config)
+            compiled_graph = compile_fx(
+                graph,
+                example_inputs,
+                inner_compile=hijacked_compile_fx_inner,
+                config_patches=current_config)
 
         assert hash_str is not None, (
             "failed to get the hash of the compiled graph")
