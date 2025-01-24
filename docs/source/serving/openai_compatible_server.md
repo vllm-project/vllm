@@ -479,7 +479,7 @@ The following extra parameters are supported:
 :end-before: end-score-extra-params
 ```
 
-(rerank-api) =
+(rerank-api)=
 
 ### Re-rank API
 
@@ -490,9 +490,9 @@ a scale of 0 to 1.
 You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
 The rerank endpoints support popular re-rank models such as `BAAI/bge-reranker-base` and other models supporting the
-`score` task. Additionally, both `/rerank` and `/v1/rerank` endpoints
-endpoints are compatible with both  [Jina AI's re-rank API interface](https://jina.ai/reranker/) and
-[Cohere's re-rank  API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
+`score` task. Additionally, both `/rerank` and `/v1/rerank`
+endpoints are compatible with both [Jina AI's re-rank API interface](https://jina.ai/reranker/) and
+[Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
 popular open-source tools.
 
 Code example: <gh-file:examples/online_serving/jinaai_rerank_client.py>

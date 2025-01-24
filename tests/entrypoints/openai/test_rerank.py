@@ -10,7 +10,7 @@ MODEL_NAME = "BAAI/bge-reranker-base"
 
 @pytest.fixture(scope="module")
 def server():
-    args = ['--enforce-eager', '--max-model-len 100']
+    args = ["--enforce-eager", "--max-model-len", "100"]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -36,8 +36,8 @@ def test_rerank_texts(server: RemoteOpenAIServer, model_name: str):
     assert rerank.id is not None
     assert rerank.results is not None
     assert len(rerank.results) == 2
-    assert rerank.results[1].relevance_score <= 0.01
     assert rerank.results[0].relevance_score >= 0.9
+    assert rerank.results[1].relevance_score <= 0.01
 
 
 @pytest.mark.asyncio
@@ -49,7 +49,7 @@ def test_top_n(server: RemoteOpenAIServer, model_name: str):
         "The capital of France is Paris.", "Cross-encoder models are neat"
     ]
 
-    rerank_response = requests.post(server.url_for("rerank"),
+    rerank_response = requests.post(server.url_for("score"),
                                     json={
                                         "model": model_name,
                                         "query": query,
@@ -62,8 +62,8 @@ def test_top_n(server: RemoteOpenAIServer, model_name: str):
     assert rerank.id is not None
     assert rerank.results is not None
     assert len(rerank.results) == 2
-    assert rerank.results[1].relevance_score <= 0.01
     assert rerank.results[0].relevance_score >= 0.9
+    assert rerank.results[1].relevance_score <= 0.01
 
 
 @pytest.mark.asyncio
