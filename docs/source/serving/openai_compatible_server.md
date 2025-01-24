@@ -491,8 +491,8 @@ You can find the documentation for these kind of models at [sbert.net](https://w
 
 The rerank endpoints support popular re-rank models such as `BAAI/bge-reranker-base` and other models supporting the
 `score` task. Additionally, both `/rerank` and `/v1/rerank` endpoints
-endpoints are compatible with both  [Jina AI's re-rank API interface](https://jina.ai/reranker/) and
-[Cohere's re-rank  API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
+endpoints are compatible with both [Jina AI's re-rank API interface](https://jina.ai/reranker/) and
+[Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
 popular open-source tools.
 
 Code example: <gh-file:examples/online_serving/jinaai_rerank_client.py>
