@@ -19,6 +19,11 @@ class CompilerInterface:
     name: str
 
     def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
+        """
+        when the vLLM process uses `cache_dir` as the cache directory,
+        the compiler should initialize itself with the cache directory,
+        e.g. by re-directing its own cache directory to a sub-directory.
+        """
         pass
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
@@ -30,15 +35,7 @@ class CompilerInterface:
         is already considered by default. This function should only
         consider the information that is specific to the compiler.
         """
-        pass
-
-    def init_with_cache_dir(self, cache_dir: str) -> None:
-        """
-        when the vLLM process uses `cache_dir` as the cache directory,
-        the compiler should initialize itself with the cache directory,
-        e.g. by re-directing its own cache directory to a sub-directory.
-        """
-        pass
+        return ""
 
     def compile(
         self,
@@ -67,7 +64,7 @@ class CompilerInterface:
         handle. If the compiler fails to compile the graph, it should return
         None for the compiled function as well.
         """
-        pass
+        return None, None
 
     def load(self,
              handle: Any,
@@ -81,7 +78,7 @@ class CompilerInterface:
 
         The handle is the second return value of the `compile` function.
         """
-        pass
+        raise NotImplementedError("caching is not supported")
 
 
 class AlwaysHitShapeEnv:
@@ -122,9 +119,11 @@ class AlwaysHitShapeEnv:
         return ""
 
 
-class InductorAdaptor(CompilerInterface):
+class Inductor25Adaptor(CompilerInterface):
+    """
+    The adaptor for the Inductor compiler, version 2.5.
+    """
     name = "inductor"
-    dynamic_shape = True
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         factors: List[Any] = []
@@ -288,13 +287,6 @@ class InductorAdaptor(CompilerInterface):
 
 class EagerAdaptor(CompilerInterface):
     name = "eager"
-    dynamic_shape = True
-
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
-        """
-        We don't need to cache the compiled model for the eager compiler,
-        which just runs the graph directly."""
-        return ""
 
     def compile(
         self,
@@ -307,12 +299,5 @@ class EagerAdaptor(CompilerInterface):
         # It does not support caching, return None for the handle.
         return graph, None
 
-    def load(self,
-             handle: Any,
-             graph: fx.GraphModule,
-             example_inputs: List[Any],
-             graph_index: int,
-             runtime_shape: Optional[int] = None) -> Callable:
-        # handle is None, we don't need to load anything
-        raise NotImplementedError(
-            "Eager compiler doesn't support compilation cache")
+
+InductorAdaptor = Inductor25Adaptor
