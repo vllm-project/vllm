@@ -1328,7 +1328,6 @@ class LLM:
                 if output.finished:
                     outputs.append(output)
                     if streaming_queue is not None:
-                        output = self.engine_class.validate_output(output, RequestOutput)
                         streaming_queue.put(output)
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
