@@ -806,7 +806,8 @@ async def init_app_state(
         engine_client,
         model_config,
         state.openai_serving_models,
-        request_logger=request_logger)
+        request_logger=request_logger
+    ) if model_config.task == "score" else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
