@@ -942,17 +942,20 @@ class EngineArgs:
             type=nullable_str,
             default=None,
             help="The folder path to the generation config. "
-            "Defaults to None, will use the default generation config in vLLM. "
-            "If set to 'auto', the generation config will be automatically "
-            "loaded from model. If set to a folder path, the generation config "
-            "will be loaded from the specified folder path.")
+            "Defaults to None, no generation config is loaded, vLLM defaults "
+            "will be used. If set to 'auto', the generation config will be "
+            "loaded from model path. If set to a folder path, the generation "
+            "config will be loaded from the specified folder path.")
+
         parser.add_argument(
             "--override-generation-config",
             type=json.loads,
             default=None,
-            help="Override or set generation config. "
-            "Defaults to None, will use for the default generation config. "
-            "e.g. ``{\"temperature\": 0.5, \"top_k\": 50}``.")
+            help="Overrides or sets generation config in JSON format. "
+            "e.g. ``{\"temperature\": 0.5}``. If used with "
+            "--generation-config=auto, the override parameters will be merged "
+            "with the default config from the model. If generation-config is "
+            "None, only the override parameters are used.")
 
         parser.add_argument("--enable-sleep-mode",
                             action="store_true",

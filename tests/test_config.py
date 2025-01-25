@@ -336,3 +336,18 @@ def test_generation_config_loading():
     override_result.update(override_generation_config)
 
     assert model_config.get_diff_sampling_param() == override_result
+
+    # When generation_config is set to None and override_generation_config
+    # is set, the override_generation_config should be used directly.
+    model_config = ModelConfig(
+        model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        generation_config=None,
+        override_generation_config=override_generation_config)
+
+    assert model_config.get_diff_sampling_param() == override_generation_config
