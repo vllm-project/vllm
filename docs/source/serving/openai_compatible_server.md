@@ -50,7 +50,7 @@ In addition, we have the following custom APIs:
   - Applicable to all [pooling models](../models/pooling_models.md).
 - [Score API](#score-api) (`/score`)
   - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
-- [Re-rank API](#rerank-api) (`/rerank`, `/v1/rerank`)
+- [Re-rank API](#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
   - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
   - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
   - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
@@ -490,7 +490,7 @@ a scale of 0 to 1.
 You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
 The rerank endpoints support popular re-rank models such as `BAAI/bge-reranker-base` and other models supporting the
-`score` task. Additionally, both `/rerank` and `/v1/rerank`
+`score` task. Additionally, `/rerank`, `/v1/rerank`, and `/v2/rerank`
 endpoints are compatible with both [Jina AI's re-rank API interface](https://jina.ai/reranker/) and
 [Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
 popular open-source tools.
