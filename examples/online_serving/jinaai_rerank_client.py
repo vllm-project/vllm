@@ -2,7 +2,7 @@
 Example of using the OpenAI entrypoint's rerank API which is compatible with
 Jina and Cohere https://jina.ai/reranker
 
-run: vllm serve --model BAAI/bge-reranker-base
+run: vllm serve BAAI/bge-reranker-base
 """
 import json
 
