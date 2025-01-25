@@ -136,5 +136,6 @@ def test_score():
             BatchRequestOutput.model_validate_json(line)
 
             # Ensure that there is no error in the response.
-            line = json.loads(line)
-            assert line["error"] is None
+            line_dict = json.loads(line)
+            assert isinstance(line_dict, dict)
+            assert line_dict["error"] is None
