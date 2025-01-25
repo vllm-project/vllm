@@ -446,7 +446,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 message(STATUS "Enabling C extension.")
-list(VLLM_C_LIBS)
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_C_LIBS cuda)
 endif()
