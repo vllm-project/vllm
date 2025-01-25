@@ -97,7 +97,7 @@ static inline auto make_cute_layout(torch::Tensor const& tensor,
 
 template <typename Stride>
 static inline auto maybe_make_cute_layout(
-    c10::optional<torch::Tensor> const& tensor,
+    std::optional<torch::Tensor> const& tensor,
     std::string_view name = "tensor") {
   using Layout = decltype(make_cute_layout<Stride>(*tensor));
 

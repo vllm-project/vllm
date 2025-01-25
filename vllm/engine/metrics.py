@@ -120,7 +120,8 @@ class Metrics:
             labelnames=labelnames)
         buckets = [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
         if not vllm_config.model_config.enforce_eager:
-            buckets = vllm_config.compilation_config.capture_sizes.copy()
+            buckets = vllm_config.compilation_config.\
+                cudagraph_capture_sizes.copy()
             buckets.sort()
         self.histogram_iteration_tokens = self._histogram_cls(
             name="vllm:iteration_tokens_total",

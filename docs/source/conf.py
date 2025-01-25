@@ -43,6 +43,11 @@ extensions = [
     "sphinx.ext.autosummary",
     "myst_parser",
     "sphinxarg.ext",
+    "sphinx_design",
+    "sphinx_togglebutton",
+]
+myst_enable_extensions = [
+    "colon_fence",
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -51,7 +56,7 @@ templates_path = ['_templates']
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns: List[str] = ["**/*.template.md"]
+exclude_patterns: List[str] = ["**/*.template.md", "**/*.inc.md"]
 
 # Exclude the prompt "$" when copying code
 copybutton_prompt_text = r"\$ "
@@ -191,6 +196,7 @@ def linkcode_resolve(domain, info):
 
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
 autodoc_mock_imports = [
+    "blake3",
     "compressed_tensors",
     "cpuinfo",
     "cv2",
@@ -207,7 +213,7 @@ autodoc_mock_imports = [
     "tensorizer",
     "pynvml",
     "outlines",
-    "xgrammar,"
+    "xgrammar",
     "librosa",
     "soundfile",
     "gguf",

@@ -2,8 +2,8 @@
 # to run the OpenAI compatible server.
 
 # Please update any changes made here to
-# docs/source/dev/dockerfile/dockerfile.md and
-# docs/source/assets/dev/dockerfile-stages-dependency.png
+# docs/source/contributing/dockerfile/dockerfile.md and
+# docs/source/assets/contributing/dockerfile-stages-dependency.png
 
 ARG CUDA_VERSION=12.4.1
 #################### BASE BUILD IMAGE ####################
@@ -52,7 +52,7 @@ WORKDIR /workspace
 # after this step
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" "torchvision==0.22.0.dev20241215";  \
+        python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu126 "torch==2.7.0.dev20250121+cu126" "torchvision==0.22.0.dev20250121";  \
     fi
 
 COPY requirements-common.txt requirements-common.txt
@@ -126,8 +126,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
-# Default max size of the wheel is 250MB
-ARG VLLM_MAX_SIZE_MB=250
+# sync the default value with .buildkite/check-wheel-size.py
+ARG VLLM_MAX_SIZE_MB=300
 ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
 ARG RUN_WHEEL_CHECK=true
 RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
@@ -234,8 +234,8 @@ RUN mv vllm test_docs/
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
-# openai api server alternative
-FROM vllm-base AS vllm-openai
+# base openai image with additional requirements, for any subsequent openai-style images
+FROM vllm-base AS vllm-openai-base
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -246,6 +246,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
+
+# define sagemaker first, so it is not default from `docker build`
+FROM vllm-openai-base AS vllm-sagemaker
+
+COPY examples/online_serving/sagemaker-entrypoint.sh .
+RUN chmod +x sagemaker-entrypoint.sh
+ENTRYPOINT ["./sagemaker-entrypoint.sh"]
+
+FROM vllm-openai-base AS vllm-openai
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################

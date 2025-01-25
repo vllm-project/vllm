@@ -8,13 +8,13 @@ In vLLM, generative models implement the {class}`~vllm.model_executor.models.Vll
 Based on the final hidden states of the input, these models output log probabilities of the tokens to generate,
 which are then passed through {class}`~vllm.model_executor.layers.Sampler` to obtain the final text.
 
+For generative models, the only supported `--task` option is `"generate"`.
+Usually, this is automatically inferred so you don't have to specify it.
+
 ## Offline Inference
 
 The {class}`~vllm.LLM` class provides various methods for offline inference.
 See [Engine Arguments](#engine-args) for a list of options when initializing the model.
-
-For generative models, the only supported {code}`task` option is {code}`"generate"`.
-Usually, this is automatically inferred so you don't have to specify it.
 
 ### `LLM.generate`
 
@@ -33,7 +33,7 @@ for output in outputs:
 ```
 
 You can optionally control the language generation by passing {class}`~vllm.SamplingParams`.
-For example, you can use greedy sampling by setting {code}`temperature=0`:
+For example, you can use greedy sampling by setting `temperature=0`:
 
 ```python
 llm = LLM(model="facebook/opt-125m")
@@ -46,7 +46,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference.py>
+A code example can be found here: <gh-file:examples/offline_inference/basic.py>
 
 ### `LLM.beam_search`
 
@@ -103,7 +103,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference_chat.py>
+A code example can be found here: <gh-file:examples/offline_inference/chat.py>
 
 If the model doesn't have a chat template or you want to specify another one,
 you can explicitly pass a chat template:
@@ -118,9 +118,9 @@ print("Loaded chat template:", custom_template)
 outputs = llm.chat(conversation, chat_template=custom_template)
 ```
 
-## Online Inference
+## Online Serving
 
-Our [OpenAI Compatible Server](../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
+Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints that correspond to the offline APIs:
 
 - [Completions API](#completions-api) is similar to `LLM.generate` but only accepts text.
 - [Chat API](#chat-api)  is similar to `LLM.chat`, accepting both text and [multi-modal inputs](#multimodal-inputs) for models with a chat template.
