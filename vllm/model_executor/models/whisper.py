@@ -636,10 +636,13 @@ def input_mapper_for_whisper(
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
     "audio", get_max_whisper_audio_tokens)
 class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
-
     packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "kv_proj": ["k_proj", "v_proj"]
+        "self_attn.qkv_proj": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+        ],
+        "encoder_attn.kv_proj": ["encoder_attn.k_proj", "encoder_attn.v_proj"],
     }
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={

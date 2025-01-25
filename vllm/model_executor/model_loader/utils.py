@@ -1,7 +1,7 @@
 """Utilities for selecting and loading models."""
 import contextlib
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 from torch import nn
@@ -73,3 +73,10 @@ class ParamMapping:
                     packed_name,
                     index,
                 )
+
+    def get_sub_modules(self,
+                        module_name: str) -> Optional[Tuple[str, List[str]]]:
+        for key, value in self.packed_mapping.items():
+            if module_name.endswith(key):
+                return key, value
+        return None
