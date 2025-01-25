@@ -1219,7 +1219,7 @@ class BatchRequestInput(OpenAIBaseModel):
     url: str
 
     # The parameters of the request.
-    body: Union[ChatCompletionRequest, EmbeddingRequest]
+    body: Union[ChatCompletionRequest, EmbeddingRequest, ScoreRequest]
 
 
 class BatchResponseData(OpenAIBaseModel):
@@ -1230,7 +1230,8 @@ class BatchResponseData(OpenAIBaseModel):
     request_id: str
 
     # The body of the response.
-    body: Optional[Union[ChatCompletionResponse, EmbeddingResponse]] = None
+    body: Optional[Union[ChatCompletionResponse, EmbeddingResponse,
+                         ScoreResponse]] = (None)
 
 
 class BatchRequestOutput(OpenAIBaseModel):
