@@ -49,6 +49,8 @@ class PrometheusStatLogger(StatLoggerBase):
         labelnames = self.labels.keys()
         labelvalues = self.labels.values()
 
+        self._unregister_vllm_metrics()
+
         self.gauge_scheduler_running = prometheus_client.Gauge(
             name="vllm:num_requests_running",
             documentation="Number of requests in model execution batches.",
@@ -63,3 +65,10 @@ class PrometheusStatLogger(StatLoggerBase):
         """Log to prometheus."""
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
+
+    @staticmethod
+    def _unregister_vllm_metrics():
+        # Unregister any existing vLLM collectors (for CI/CD
+        for collector in list(prometheus_client.REGISTRY._collector_to_names):
+            if hasattr(collector, "_name") and "vllm" in collector._name:
+                prometheus_client.REGISTRY.unregister(collector)
