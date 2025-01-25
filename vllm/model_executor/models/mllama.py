@@ -831,6 +831,7 @@ class MllamaTextCrossAttention(nn.Module):
     ) -> torch.Tensor:
         # Skip writing kv-cache for the initial profiling run.
         if len(kv_cache.shape) > 1:
+            i = torch.ones(1, dtype=torch.float32)
             if self.attn.backend in (_Backend.FLASH_ATTN,
                                      _Backend.FLASH_ATTN_VLLM_V1):
                 cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
@@ -843,8 +844,8 @@ class MllamaTextCrossAttention(nn.Module):
                     attn_metadata.
                     cross_slot_mapping,  # type: ignore[union-attr]
                     "auto",
-                    1.0,
-                    1.0,
+                    i,
+                    i,
                 )
             elif self.attn.backend in (_Backend.XFORMERS, _Backend.TORCH_SDPA):
                 key_cache, value_cache = PagedAttention.split_kv_cache(
@@ -853,7 +854,7 @@ class MllamaTextCrossAttention(nn.Module):
                 cached_v = torch.cat([v[s:e] for s, e in kv_range_for_decode])
                 PagedAttention.write_to_paged_cache(
                     cached_k, cached_v, key_cache, value_cache,
-                    attn_metadata.cross_slot_mapping, "auto", 1.0, 1.0)
+                    attn_metadata.cross_slot_mapping, "auto", i, i)
             else:
                 raise ValueError(
                     f"Unsupported Attention backend {self.attn.backend} "
@@ -1432,8 +1433,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 loaded_weight = loaded_weight.view(loaded_weight.shape[0], -1)
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
-                # Loading kv cache scales for quark and
-                # compressed-tensors quantization
+                # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

@@ -52,7 +52,7 @@ WORKDIR /workspace
 # after this step
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" "torchvision==0.22.0.dev20241215";  \
+        python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu126 "torch==2.7.0.dev20250121+cu126" "torchvision==0.22.0.dev20250121";  \
     fi
 
 COPY requirements-common.txt requirements-common.txt
@@ -126,8 +126,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
-# Default max size of the wheel is 250MB
-ARG VLLM_MAX_SIZE_MB=250
+# sync the default value with .buildkite/check-wheel-size.py
+ARG VLLM_MAX_SIZE_MB=300
 ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
 ARG RUN_WHEEL_CHECK=true
 RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
