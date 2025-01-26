@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from mistral_common.protocol.instruct.messages import ImageChunk
 from PIL import Image
 from transformers import PixtralVisionConfig
+from transformers.models.pixtral import PixtralProcessor
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens)
 from transformers.models.pixtral.modeling_pixtral import (
@@ -29,10 +30,16 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalInputs,
+                                    NestedTensors, PlaceholderRange)
+from vllm.multimodal.parse import ImageSize
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges)
 from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (init_vllm_registered_model, maybe_prefix,
@@ -171,6 +178,77 @@ def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
                         prompt_token_ids=prompt_token_ids,
                         multi_modal_data=multi_modal_data,
                         multi_modal_placeholders={"image": placeholder_ranges})
+
+
+class PixtralProcessingInfo(BaseProcessingInfo):
+
+    def get_tokenizer(self) -> AnyTokenizer:
+        return cached_get_tokenizer(
+            self.ctx.model_config.tokenizer,
+            tokenizer_mode=self.ctx.model_config.tokenizer_mode)
+
+    def get_hf_processor(self):
+        return self.ctx.get_hf_processor(PixtralProcessor)
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def get_max_pixtral_image_tokens(self) -> int:
+        tokenizer = self.get_tokenizer()
+        image_encoder = tokenizer.instruct.image_encoder
+
+        max_image_size = image_encoder.image_config.max_image_size
+        image_patch_size = image_encoder.image_config.image_patch_size
+
+        return ((max_image_size // image_patch_size)**2)
+
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        return {"image": self.get_max_pixtral_image_tokens()}
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        tokenizer = self.get_tokenizer()
+        image_encoder = tokenizer.instruct.image_encoder
+        max_image_size = image_encoder.image_config.max_image_size
+
+        return ImageSize(width=max_image_size, height=max_image_size)
+
+
+class PixtralDummyInputBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
+
+    # This is supposed to only build image related inputs.
+    # It builds a prompt text reprensenting the image placeholder text,
+    # and builds images as multi-modal data.
+    # The tokenization and mm processing is assumed to be done later.
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 1)
+        w, h = self.info.get_image_size_with_most_features()
+        images = self._get_dummy_images(width=w,
+                                        height=h,
+                                        num_images=num_images)
+
+        processor = self.info.get_hf_processor()
+        image_token = processor.image_token
+
+        return ProcessorInputs(
+            prompt=image_token * num_images,
+            mm_data={"image": images},
+        )
+
+
+class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
+                                 ):
+
+    def apply(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalInputs:
+        pass
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_pixtral)
