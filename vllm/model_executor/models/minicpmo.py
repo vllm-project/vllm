@@ -23,7 +23,6 @@
 from functools import partial
 from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
-from collections import Counter
 
 import torch
 import torch.types
