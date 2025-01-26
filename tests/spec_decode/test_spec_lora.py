@@ -64,6 +64,7 @@ def test_lora_batch_expansion():
 
     assert result == spec_result
 
+
 def test_lora_mqa_scorer():
     MODEL_PATH = "meta-llama/Llama-2-7b-hf"
     SPEC_MODEL = "meta-llama/Llama-2-7b-hf"
