@@ -4,7 +4,7 @@ import signal
 import threading
 import time
 from multiprocessing.connection import Connection
-from typing import List, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import psutil
 import zmq
@@ -15,7 +15,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import get_exception_traceback, zmq_socket_ctx
+from vllm.utils import (get_exception_traceback, zmq_socket_ctx,
+                        make_zmq_socket)
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
@@ -155,19 +156,28 @@ class EngineCoreProc(EngineCore):
 
         self.log_stats = log_stats
 
-        # Background Threads and Queues for IO. These enable us to
+        # Input IO Background Threads and Queues. Enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
         # and to overlap some serialization/deserialization with the
         # model forward pass.
-        # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+        # NOTE: doing this as a callback like for Output IO did not work
+        # well because it requires introducing polling into the hotpath.
         self.input_queue: queue.Queue[EngineCoreRequestUnion] = queue.Queue()
-        self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
                          args=(input_path, ),
                          daemon=True).start()
-        threading.Thread(target=self.process_output_socket,
-                         args=(output_path, ),
-                         daemon=True).start()
+
+        # Output IO.
+        # * run_engine_loop sets the value of output in each step
+        # * send_output() does serialization + sending. It is passed
+        #   as a callback to the ModelRunner.execute_model to ensure
+        #   overlapping with GPU execution.
+        self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        self.output_socket = make_zmq_socket(
+            self.ctx, output_path, zmq.constants.PUSH)
+        self.output_encoder = msgpack.Encoder()
+        self.output_buffer = bytearray()
+        self.output: Optional[EngineCoreOutputs] = None
 
         # Send Readiness signal to EngineClient.
         ready_pipe.send({"status": "READY"})
@@ -215,12 +225,12 @@ class EngineCoreProc(EngineCore):
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
-        # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
             if not self.scheduler.has_unfinished_requests():
                 while True:
                     try:
+                        self._send_outputs_to_client()
                         req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
                         self._handle_client_request(req)
                         break
@@ -238,10 +248,17 @@ class EngineCoreProc(EngineCore):
                 self._handle_client_request(req)
 
             # 3) Step the engine core.
-            outputs = self.step()
+            self.output = self.step()
 
-            # 5) Put EngineCoreOutputs into the output queue.
-            self.output_queue.put_nowait(outputs)
+    def _send_outputs_to_client(self) -> None:
+        """
+        Send EngineCoreOutputs to Client.
+        Passed as callback to Executor for overlap with GPU execution.
+        """
+        if self.output:
+            self.output_encoder.encode_input(self.output, self.output_buffer)
+            self.output_socket.send_multipart((self.output_buffer,), copy=False)
+            self.output = None
 
     def _handle_client_request(self, request: EngineCoreRequestUnion) -> None:
         """Handle EngineCoreRequest or EngineCoreABORT from Client."""
@@ -286,16 +303,7 @@ class EngineCoreProc(EngineCore):
                 # Push to input queue for core busy loop.
                 self.input_queue.put_nowait(request)
 
-    def process_output_socket(self, output_path: str):
-        """Output socket IO thread."""
-
-        # Msgpack serialization encoding.
-        encoder = msgpack.Encoder()
-        # Reuse send buffer.
-        buffer = bytearray()
-
-        with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
-            while True:
-                outputs = self.output_queue.get()
-                encoder.encode_into(outputs, buffer)
-                socket.send_multipart((buffer, ), copy=False)
+    def shutdown(self):
+        super().shutdown()
+        if hasattr(self, "ctx"):
+            self.ctx.destroy(linger=0)
