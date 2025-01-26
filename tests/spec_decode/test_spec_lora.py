@@ -88,6 +88,7 @@ def test_lora_mqa_scorer():
                              disable_log_stats=True,
                              disable_logprobs_during_spec_decoding=True,
                              speculative_disable_mqa_scorer=False,
+                             gpu_memory_utilization=0.8,
                              max_num_seqs=60)
     engine = LLMEngine.from_engine_args(engine_args)
     spec_result = do_sample(engine)
