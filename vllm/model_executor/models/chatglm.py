@@ -4,7 +4,7 @@
 from argparse import Namespace
 from array import array
 from typing import (Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple,
-                    TypedDict)
+                    TypedDict,Union)
 
 import torch
 from PIL import Image
@@ -258,7 +258,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: Optional[ProcessorMixin],
     ) -> int:
-        return self.image_tokens
+        return self.image_token_num
 
     def get_image_size(self) -> ImageSize:
 
@@ -272,8 +272,6 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
-        assert num_images == 1
-
         target_width, target_height = self.info.get_image_size()
 
         mm_data = {
@@ -281,24 +279,7 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
                 width=target_width, height=target_height, num_images=num_images
             )
         }
-
-        hf_config = self.info.get_hf_config()
-        image_placeholder_length = self.info.image_token_num
-
-        token_ids = array(
-            VLLM_TOKEN_ID_ARRAY_TYPE,
-            [hf_config.boi_token_id]
-            + [0] * image_placeholder_length
-            + [hf_config.eoi_token_id],
-        )
-        token_ids += array(
-            VLLM_TOKEN_ID_ARRAY_TYPE,
-            [0] * (seq_len - image_placeholder_length - 2),
-        )
-
-        tokenizer = self.info.get_tokenizer()
-        text = tokenizer.decode(token_ids)
-
+        text="<|endoftext|>"
         return ProcessorInputs(
             prompt_text=text,
             mm_data=mm_data,
@@ -313,33 +294,69 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.batched("image"),
+            images=MultiModalFieldConfig.batched("image"),
+
         )
 
+    
+    
+    def _apply_hf_processor_main(
+        self,
+        prompt: Union[str, list[int]],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        *,
+        enable_hf_prompt_replacement: bool,
+    ) -> tuple[list[int], MultiModalKwargs]:
+        """
+        Apply the HF processor on the prompt text and multi-modal data.
+
+        Note:
+            If :code:`enable_hf_prompt_replacement=False`, the prompt should
+            correspond to the multi-modal items.
+        """
+        if isinstance(prompt, str):
+            if enable_hf_prompt_replacement:
+                return self._apply_hf_processor_text_mm(
+                    prompt_text=prompt,
+                    mm_items=mm_items,
+                    hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                )
+
+            prompt_ids = self._apply_hf_processor_text_only(prompt)
+        else:
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt)
+
+        mm_missing_kwargs = self._apply_hf_processor_mm_only(
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        return prompt_ids, mm_missing_kwargs
+
+    
     def _call_hf_processor(
         self,
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-      
-        hf_config = self.info.get_hf_config()
-        vision_config = getattr(hf_config, "vision_config", None)
+        if not mm_data:
+            tokenizer = self.info.get_tokenizer()
+            prefix = "<|begin_of_image|><|endoftext|><|end_of_image|>"
+            prompt_ids = tokenizer.encode(prompt + prefix)
 
-        if vision_config is None:
-            return prompt
-
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         try:
             
             tokenizer = self.info.get_tokenizer()
+            img=mm_data.get("images",None)[0]
             raw_batch_data = tokenizer.apply_chat_template(
                 conversation=[
                     {
                         "role": "user",
-                        "image": mm_data.get("image",None),
+                        "image":img,
                         "content": prompt,
                     }
                 ],
@@ -350,83 +367,41 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
             ).data
         except Exception:
             logger.error("Failed to process content (%s)", prompt)
-            raise
-        input_ids = raw_batch_data["input_ids"][0].tolist()
 
-        boi_token_id = hf_config.boi_token_id
-        eoi_token_id = hf_config.eoi_token_id
-        boi_positions = find_all_positions(input_ids, boi_token_id)
-        eoi_positions = find_all_positions(input_ids, eoi_token_id)
-
-        assert len(boi_positions) == len(eoi_positions)
-
-        new_input_ids = []
-        final_processed_position = 0
-
-        for boi_position, eoi_position in zip(boi_positions, eoi_positions):
-            assert boi_position < eoi_position
-            new_input_ids.extend(
-                input_ids[final_processed_position : boi_position + 1]
+        return BatchFeature(
+            dict(
+                input_ids=raw_batch_data["input_ids"],
+                images=[raw_batch_data["images"][0]] if mm_data else None,
             )
-            new_input_ids.extend(
-                [input_ids[boi_position + 1]] * self.info.image_token_num
-            )
-            final_processed_position = eoi_position
-
-        new_input_ids.extend(input_ids[final_processed_position:])
-
-        if prompt is None:
-            prompt = tokenizer.decode(new_input_ids)
-
-        return token_inputs(
-            prompt_token_ids=new_input_ids,
-            prompt=prompt,
-            multi_modal_data=mm_data,
         )
+
+        # return token_inputs(
+        #     prompt_token_ids=new_input_ids,
+        #     prompt=prompt,
+        #     multi_modal_data=mm_data,
+        # )
 
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, Any],
+        hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
-
-        tokenizer = self.info.get_tokenizer()
-        bos_token_id = tokenizer.bos_token_id
-        assert isinstance(bos_token_id, int)
-
-        def get_replacement_phi3v(item_idx: int):
-            images = mm_items.get_items(
-                "image", (ImageEmbeddingItems, ImageProcessorItems))
-
-            if isinstance(images, ImageEmbeddingItems):
-                num_image_tokens = images.get_feature_size(item_idx)
-            else:
-                image_size = images.get_image_size(item_idx)
-                num_image_tokens = self.info.get_num_image_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
-                    processor=hf_processor,
-                )
-
-            image_tokens = [_IMAGE_TOKEN_ID] * num_image_tokens
-
-            return PromptReplacementDetails(
-                full=image_tokens + [bos_token_id],
-                features=image_tokens,
-            )
-
-        num_images = mm_items.get_count("image", strict=False)
+        tokenizer=self.info.get_tokenizer()
+        image_token_str = "<|endoftext|>"
+        image_token_id = tokenizer.convert_tokens_to_ids(image_token_str)
+        def get_replacement(item_idx: int):
+            num_image_tokens=self.info.get_num_image_tokens(image_height=1120,image_width=1120,processor=None)
+            return [image_token_id] * num_image_tokens
 
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
-                replacement=get_replacement_phi3v,
-            ) for image_token in image_tokens[:num_images]
+                target=[image_token_id],
+                replacement=get_replacement,
+            ),
         ]
+            
 
 
 class GLMAttention(nn.Module):
