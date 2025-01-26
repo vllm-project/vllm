@@ -234,7 +234,7 @@ class PixtralDummyInputBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         image_token = processor.image_token
 
         return ProcessorInputs(
-            prompt=image_token * num_images,
+            prompt_text=image_token * num_images,
             mm_data={"image": images},
         )
 
