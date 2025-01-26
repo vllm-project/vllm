@@ -243,6 +243,15 @@ class MultiHeadAttention(nn.Module):
         if self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
 
+            # Expand key and value to match number of query heads
+            if self.num_kv_heads != self.num_heads:
+                key = key.repeat_interleave(self.num_heads //
+                                            self.num_kv_heads,
+                                            dim=2)
+                value = value.repeat_interleave(self.num_heads //
+                                                self.num_kv_heads,
+                                                dim=2)
+
             out = xops.memory_efficient_attention_forward(query,
                                                           key,
                                                           value,
