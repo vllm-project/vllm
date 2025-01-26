@@ -302,8 +302,8 @@ See [this page](#generative-models) for more information on how to use generativ
   - ✅︎
   - ✅︎
 * - `Phi3ForCausalLM`
-  - Phi-3
-  - `microsoft/Phi-3-mini-4k-instruct`, `microsoft/Phi-3-mini-128k-instruct`, `microsoft/Phi-3-medium-128k-instruct`, etc.
+  - Phi-4, Phi-3
+  - `microsoft/Phi-4`, `microsoft/Phi-3-mini-4k-instruct`, `microsoft/Phi-3-mini-128k-instruct`, `microsoft/Phi-3-medium-128k-instruct`, etc.
   - ✅︎
   - ✅︎
 * - `Phi3SmallForCausalLM`

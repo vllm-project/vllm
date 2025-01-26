@@ -416,8 +416,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
                             + slice_grid[1] - 1 + num_additional_tokens
         return num_tokens
 
-    def get_image_slice_nums(self, 
-                             image_size: torch.Tensor, 
+    def get_image_slice_nums(self, image_size: torch.Tensor,
                              max_slice_nums: int) -> int:
         grid = self.get_sliced_grid(image_size, max_slice_nums)
         return 1 if grid is None else grid[0] * grid[1] + 1

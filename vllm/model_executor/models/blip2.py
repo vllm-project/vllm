@@ -481,14 +481,14 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
         bos_token_id = tokenizer.bos_token_id
         assert isinstance(bos_token_id, int)
 
-        image_token_id = vocab["image"]
+        image_token_id = vocab["<image>"]
         num_image_tokens = self.info.get_num_image_tokens()
         image_tokens = [image_token_id] * num_image_tokens
 
         return [
             PromptReplacement(
                 modality="image",
-                target="</s>",
+                target=[bos_token_id],
                 replacement=PromptReplacementDetails(
                     full=image_tokens + [bos_token_id],
                     features=image_tokens,
