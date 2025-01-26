@@ -213,6 +213,7 @@ RUN --mount=type=bind,from=build,src=/workspace/flashinfer/dist,target=/vllm-wor
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install flashinfer-dist/*.whl --verbose
 
+# TODO: restore to stable release once it fixes AOT compilation issue
 # RUN --mount=type=cache,target=/root/.cache/pip \
 # . /etc/environment && \
 # if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
