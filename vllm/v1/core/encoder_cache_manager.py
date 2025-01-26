@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Dict, List, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -35,8 +35,8 @@ class EncoderCacheManager:
         self.cached[req_id].add(input_id)
         self.num_free_slots -= request.get_num_encoder_tokens(input_id)
 
-    def get_cached_input_ids(self, request: Request) -> Set[int]:
-        return self.cached.get(request.request_id, set())
+    def get_cached_input_ids(self, request: Request) -> Optional[Set[int]]:
+        return self.cached.get(request.request_id, None)
 
     def free(self, request: Request, input_id: int) -> None:
         req_id = request.request_id
