@@ -122,6 +122,7 @@ class VisionArenaBenchSampler(HFDatasetSampler):
     """Dataset sampler for 'lmarena-ai/vision-arena-bench-v0.1' dataset."""
 
     def filter_func(self, data: dict) -> bool:
+        # vision-arena-bench always has an image and one turn conversation.
         return True
 
     def sample(
