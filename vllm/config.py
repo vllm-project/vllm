@@ -910,12 +910,18 @@ class ModelConfig:
             "top_k",
             "top_p",
             "min_p",
+            "max_new_tokens",
         ]
         if any(p in config for p in available_params):
             diff_sampling_param = {
                 p: config.get(p)
                 for p in available_params if config.get(p) is not None
             }
+            # Huggingface definition of max_new_tokens is equivalent
+            # to vLLM's max_tokens
+            if "max_new_tokens" in diff_sampling_param:
+                diff_sampling_param["max_tokens"] = diff_sampling_param.pop(
+                    "max_new_tokens")
         else:
             diff_sampling_param = {}
         return diff_sampling_param
