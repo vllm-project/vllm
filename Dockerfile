@@ -99,11 +99,11 @@ ENV FLASHINFER_ENABLE_AOT=1
 # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
 ENV TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX'
 RUN git clone https://github.com/flashinfer-ai/flashinfer.git
-RUN cd flashinfer && \
-    git checkout 6e6f38d3534994c34b2c6b09b5b45c8a7b92ffd2
+WORKDIR /workspace/flashinfer
+RUN git checkout 6e6f38d3534994c34b2c6b09b5b45c8a7b92ffd2
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 setup.py bdist_wheel --dist-dir=dist --verbose
-RUN cd ..
+WORKDIR /workspace
 
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
