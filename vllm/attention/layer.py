@@ -210,9 +210,6 @@ class MultiHeadAttention(nn.Module):
         self.scale = scale
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
-        assert self.num_heads % self.num_kv_heads == 0
-        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
         dtype = torch.get_default_dtype()
         attn_backend = get_attn_backend(head_size,
                                         dtype,
