@@ -208,7 +208,7 @@ $ cat results.jsonl
 
 ### Additional prerequisites
 
-* Ensure you are using `vllm >= 0.6.7`.
+* Ensure you are using `vllm >= 0.7.0`.
 
 ### Step 1: Create your batch file
  

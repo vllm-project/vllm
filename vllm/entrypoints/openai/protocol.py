@@ -1231,7 +1231,7 @@ class BatchResponseData(OpenAIBaseModel):
 
     # The body of the response.
     body: Optional[Union[ChatCompletionResponse, EmbeddingResponse,
-                         ScoreResponse]] = (None)
+                         ScoreResponse]] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
