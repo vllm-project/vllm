@@ -111,6 +111,7 @@ class PagedAttention:
 
     @staticmethod
     def forward_decode(
+        out: torch.Tensor,
         query: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
@@ -137,7 +138,7 @@ class PagedAttention:
                 (f"{blocksparse_block_size=} needs to be a multiple of"
                  f"{block_size=} used in block_tables.")
 
-        output = torch.empty_like(query)
+        # output = torch.empty_like(query)
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
@@ -153,7 +154,7 @@ class PagedAttention:
         max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
         if kv_cache_dtype not in ['int8', 'fp8', 'fp8', 'fp8_e5m2', 'fp8_e4m3']:
             k_scale, v_scale = (None, None)
-        return aiter.pa_fwd_asm(query, key_cache, value_cache, block_tables, seq_lens, max_num_blocks_per_seq, k_scale, v_scale)
+        return aiter.pa_fwd_asm(query, key_cache, value_cache, block_tables, seq_lens, max_num_blocks_per_seq, k_scale, v_scale, out)
 
     @staticmethod
     def forward_prefix(

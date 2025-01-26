@@ -858,7 +858,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 if cpa_fp8_out:
                     return out.view(num_seqs, num_heads * head_size)
             else:
-                output[num_prefill_tokens:] = PagedAttention.forward_decode(
+                PagedAttention.forward_decode(
+                    output[num_prefill_tokens:],
                     decode_query,
                     key_cache,
                     value_cache,
