@@ -149,7 +149,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04 AS vllm-base
+# TODO: Restore to base image after FlashInfer AOT wheel fixed
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS vllm-base
 ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.12
 WORKDIR /vllm-workspace
