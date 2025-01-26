@@ -5,7 +5,7 @@ import random
 import unittest
 from numbers import Number
 from typing import (Any, Dict, List, NamedTuple, Optional, Sequence, Tuple,
-                    Union)
+                    Type, Union)
 
 import pytest
 import torch
@@ -1100,3 +1100,28 @@ def opcheck(op: Union[torch._ops.OpOverload, torch._ops.OpOverloadPacket,
             kwargs,
             test_utils=test_utils,
             raise_exception=raise_exception) if cond else {}
+
+
+# For testing quantized linear kernels
+def to_fp8(tensor: torch.Tensor):
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    return torch.round(tensor.clamp(
+        min=finfo.min, max=finfo.max)).to(dtype=torch.float8_e4m3fn)
+
+
+def to_int8(tensor: torch.Tensor):
+    return torch.round(tensor.clamp(min=-128, max=127)).to(dtype=torch.int8)
+
+
+def baseline_scaled_mm(a: torch.Tensor,
+                       b: torch.Tensor,
+                       scale_a: torch.Tensor,
+                       scale_b: torch.Tensor,
+                       out_dtype: Type[torch.dtype],
+                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    output = (scale_a * (scale_b * (torch.mm(
+        a.to(dtype=torch.float32), b.to(dtype=torch.float32))))).to(out_dtype)
+    if bias is not None:
+        output = output + bias
+
+    return output
