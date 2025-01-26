@@ -962,8 +962,8 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache[:, 1],
                 attn_metadata.slot_mapping.flatten(),
                 kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
+                layer._k_scale_float,
+                layer._v_scale_float,
             )
             # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
             # to process the cache when the kv_cache_dtype is fp8
@@ -1027,8 +1027,8 @@ class FlashInferImpl(AttentionImpl):
                 prefill_output = prefill_meta.prefill_wrapper.run(
                     query,
                     kv_cache,
-                    k_scale=layer._k_scale,
-                    v_scale=layer._v_scale,
+                    k_scale=layer._k_scale_float,
+                    v_scale=layer._v_scale_float,
                 )
         if decode_meta := attn_metadata.decode_metadata:
             assert decode_meta is not None
@@ -1042,8 +1042,8 @@ class FlashInferImpl(AttentionImpl):
             decode_output = decode_meta.decode_wrapper.run(
                 decode_query,
                 kv_cache,
-                k_scale=layer._k_scale,
-                v_scale=layer._v_scale,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
             )
 
         if prefill_output is None and decode_output is not None:
