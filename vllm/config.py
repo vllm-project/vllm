@@ -1228,9 +1228,6 @@ class ParallelConfig:
     pipeline_parallel_size: int = 1  # Number of pipeline parallel groups.
     tensor_parallel_size: int = 1  # Number of tensor parallel groups.
 
-    # Deprecated, use distributed_executor_backend instead.
-    worker_use_ray: Optional[bool] = None
-
     # Maximum number of multiple batches
     # when load model sequentially. To avoid RAM OOM when using tensor
     # parallel and large models.
@@ -1284,13 +1281,6 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
-        if self.worker_use_ray:
-            if self.distributed_executor_backend is None:
-                self.distributed_executor_backend = "ray"
-            elif not self.use_ray:
-                raise ValueError(f"worker-use-ray can't be used with "
-                                 f"distributed executor backend "
-                                 f"'{self.distributed_executor_backend}'.")
         ray_only_devices = ["tpu"]
         from vllm.platforms import current_platform
         if (current_platform.device_type in ray_only_devices
