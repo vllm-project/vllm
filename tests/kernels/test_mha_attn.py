@@ -26,7 +26,7 @@ def clear_cache():
 @pytest.mark.parametrize("device", ["cpu", "hip", "cuda"])
 def test_mha_attn_platform(device: str):
     """
-    Test that the attention selector between different platform and device.
+    Test the attention selector between different platform and device.
     """
     torch.set_default_dtype(torch.float16)
 
@@ -41,7 +41,7 @@ def test_mha_attn_platform(device: str):
     else:
         with patch("vllm.attention.selector.current_platform", CudaPlatform()):
             attn = MultiHeadAttention(16, 64, scale=1)
-            assert attn.attn_backend == _Backend.FLASH_ATTN
+            assert attn.attn_backend == _Backend.XFORMERS
 
         with patch("vllm.attention.selector.current_platform", CudaPlatform()):
             attn = MultiHeadAttention(16, 72, scale=1)
