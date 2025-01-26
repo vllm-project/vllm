@@ -102,7 +102,7 @@ RUN git clone https://github.com/flashinfer-ai/flashinfer.git
 RUN cd flashinfer && \
     git checkout 6e6f38d3534994c34b2c6b09b5b45c8a7b92ffd2
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m build --wheel --outdir ./dist --no-isolation --verbose .
+    python3 setup.py bdist_wheel --dist-dir=dist --verbose
 RUN cd ..
 
 ARG USE_SCCACHE
