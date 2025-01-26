@@ -49,7 +49,7 @@ def test_top_n(server: RemoteOpenAIServer, model_name: str):
         "The capital of France is Paris.", "Cross-encoder models are neat"
     ]
 
-    rerank_response = requests.post(server.url_for("score"),
+    rerank_response = requests.post(server.url_for("rerank"),
                                     json={
                                         "model": model_name,
                                         "query": query,
