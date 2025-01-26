@@ -497,6 +497,21 @@ def mantis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def minicpmv_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    orig_generate = hf_model.model.generate
+
+    def _generate(self, *args, **kwargs):
+        return orig_generate(
+            decode_text=False,
+            *args,
+            **kwargs
+        )
+
+    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
+
+    return hf_model
+
+
 def _generate_greedy_logprobs_limit(
     self,
     prompts: List[str],
