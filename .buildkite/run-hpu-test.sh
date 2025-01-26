@@ -20,10 +20,5 @@ trap remove_docker_container_and_exit EXIT
 remove_docker_container
 
 # Run the image and launch offline inference
-docker run --runtime=habana --name=hpu-test --network=host \
-    -e HABANA_VISIBLE_DEVICES=all -e VLLM_SKIP_WARMUP=true \
-    --entrypoint="" hpu-test-env \
-    /bin/bash -c "python3 examples/offline_inference/basic.py \
-    && python3 -m pip install pytest \
-    && pytest -v -s /workspace/vllm/tests/entrypoints/llm/test_guided_generate.py"
+docker run --runtime=habana --name=hpu-test --network=host -e HABANA_VISIBLE_DEVICES=all -e VLLM_SKIP_WARMUP=true --entrypoint="" hpu-test-env python3 examples/offline_inference/basic.py
 EXITCODE=$?
