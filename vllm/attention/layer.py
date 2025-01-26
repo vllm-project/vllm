@@ -263,15 +263,16 @@ class MultiHeadAttention(nn.Module):
                                         device=key.device)
 
             out = flash_attn_varlen_func(
-                query,
-                key,
-                value,
+                query.flatten(0, 1),
+                key.flatten(0, 1),
+                value.flatten(0, 1),
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_q=q_len,
                 max_seqlen_k=kv_len,
                 softmax_scale=self.scale,
             )
+            out = out.reshape(bsz, q_len, -1)
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
 
