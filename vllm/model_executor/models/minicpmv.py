@@ -26,6 +26,7 @@ from functools import cached_property, partial
 from itertools import accumulate
 from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
                     Optional, Set, Tuple, TypedDict, Union)
+from collections import Counter
 
 import numpy as np
 import torch
@@ -553,6 +554,8 @@ class MiniCPMVMultiModalProcessor(
                        mm_kwargs: Mapping[str, object]) -> Dict[str, object]:
         images = mm_data.pop("images", [])
         image_embeds = mm_data.pop("image_embeds", [])
+        if isinstance(images, Image.Image):
+            images = [images]
         if isinstance(images, (list, torch.Tensor)) and len(images) > 0:
             image_outputs = super()._call_hf_processor(
                 prompt=self.info.image_pattern * len(images),
@@ -624,19 +627,46 @@ class MiniCPMVMultiModalProcessor(
             "video": self.process_videos(mm_data, mm_kwargs)
         }
 
+    def get_input_modalities(self, mm_data) -> List[str]:
+        supported_mm_modalities = self.info.get_supported_mm_modalities()
+        input_modalities = []
+        for modality in supported_mm_modalities:
+            if modality in mm_data and mm_data[modality] != {}:
+                input_modalities.append(modality)
+        return input_modalities
+
+    def get_modality_num_counter(self, modality: str) -> str:
+        if modality == "image":
+            return "image_sizes"
+        elif modality == "video":
+            return "video_image_sizes"
+
     def get_num_slices_by_modality(self, inputs: Dict[str, object],
                                    modality: str, index: int) -> int:
         if modality == "image":
             return self.info.get_image_slice_nums(
-                inputs["image"]["image_sizes"][index],
+                inputs[modality]["image_sizes"][index],
                 self.info.get_max_slice_num())
         elif modality == "video":
             return self.info.get_image_slice_nums(
-                inputs["video"]["video_image_sizes"][index],
+                inputs[modality]["video_image_sizes"][index],
                 self.info.get_video_max_slice_num()
-            ) * inputs["video"]["num_frames"][index]
+            ) * inputs[modality]["num_frames"][index]
         else:
             raise ValueError(f"UnExpected modality: {modality}")
+
+    def check_mm_inputs(self, inputs: Dict[str, object],
+                        matches: List[str]) -> None:
+        counts = Counter(matches)
+        for modality, count in counts.items():
+            if modality not in inputs or not inputs[modality]:
+                raise ValueError(f"None input data of {modality}."
+                                "But prompt requires.")
+            counter_key = self.get_modality_num_counter(modality)
+            if len(inputs[modality][counter_key]) != count:
+                raise ValueError(f"The prompt requires {count} "
+                                    f"{modality} inputs while you pass "
+                                    f"{len(inputs[modality][counter_key])}")
 
     def get_prompt_texts_by_modality(self, inputs: Dict[str, object],
                                      modality: str, index: int) -> str:
@@ -668,50 +698,32 @@ class MiniCPMVMultiModalProcessor(
     ) -> BatchFeature:
         # Do not support combination inputs of images and videos for now
         # Try to handle interleaved multimodal data
-        tokenizer = self.info.get_tokenizer()
-
-        supported_mm_modalities = self.info.get_supported_mm_modalities()
-        inputs = self.process_mm_inputs(mm_data, mm_kwargs)
-        counts = {modality: 0 for modality in supported_mm_modalities}
-        num_mm_slices = {modality: [] for modality in supported_mm_modalities}
-        orders_in_mm_data = {
-            modality: []
-            for modality in supported_mm_modalities
-        }
-        matches = re.findall(self.get_placeholder_match_pattern(), prompt)
-        chunks = re.split(self.get_placeholder_split_pattern(), prompt)
-        new_prompt = chunks[0]
-        for idx, item in enumerate(matches):
-            orders_in_mm_data[item].append(idx)
-            num_mm_slices[item].append(
-                self.get_num_slices_by_modality(inputs, item, counts[item]))
-            new_prompt += self.get_prompt_texts_by_modality(
-                inputs, item, counts[item])
-            counts[item] += 1
-            new_prompt += chunks[idx + 1]
-
-        input_ids = tokenizer.encode(new_prompt)
-
-        def get_slices(num_slices: List[int]):
+        def get_slices(num_slices: List[int]) -> List[int]:
             slice_idices = [0] + list(accumulate(num_slices))
             slices = [(slice_idices[i], slice_idices[i + 1])
-                      for i in range(len(num_slices))]
+                        for i in range(len(num_slices))]
             return slices
 
+        tokenizer = self.info.get_tokenizer()
+        inputs = self.process_mm_inputs(mm_data, mm_kwargs)
+        mm_input_modalities = self.get_input_modalities(inputs)
+        num_mm_slices = {modality: [] for modality in mm_input_modalities}
+        for modality in mm_input_modalities:
+            num_counter_key = self.get_modality_num_counter(modality)
+            for index in range(len(inputs[modality][num_counter_key])):
+                num_mm_slices[modality].append(
+                    self.get_num_slices_by_modality(inputs, modality, index)
+                )
         return {
-            "input_ids": np.array([input_ids]),
+            "input_ids": np.array([tokenizer.encode(prompt)]),
             **{
                 key: value
                 for modality in inputs for key, value in inputs[modality].items(
                 )
             },
             **{
-                f"{modality}_orders_in_mm_data": orders_in_mm_data[modality]
-                for modality in orders_in_mm_data
-            },
-            **{
                 f"{modality}_slices": get_slices(num_mm_slices[modality])
-                for modality in num_mm_slices
+                for modality in mm_input_modalities
             }
         }
 
@@ -746,7 +758,6 @@ class MiniCPMVMultiModalProcessor(
         hf_inputs,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-
         def get_slices(slices_indices: List[int]):
             return [slice(*slice_item) for slice_item in slices_indices]
 
@@ -754,18 +765,17 @@ class MiniCPMVMultiModalProcessor(
             hf_inputs.get("image_slices", torch.empty(0, 2)))
         video_slices = get_slices(
             hf_inputs.get("video_slices", torch.empty(0, 2)))
+
         return dict(
             pixel_values=MultiModalFieldConfig.flat("image", image_slices),
             image_sizes=MultiModalFieldConfig.batched("image"),
             tgt_sizes=MultiModalFieldConfig.flat("image", image_slices),
             image_slices=MultiModalFieldConfig.batched("image"),
-            image_orders_in_mm_data=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.flat("image", image_slices),
             video_pixel_values=MultiModalFieldConfig.flat(
                 "video", video_slices),
             video_image_sizes=MultiModalFieldConfig.batched("video"),
             video_tgt_sizes=MultiModalFieldConfig.flat("video", video_slices),
-            video_orders_in_mm_data=MultiModalFieldConfig.batched("video"),
             video_embeds=MultiModalFieldConfig.flat("video", video_slices),
             video_slices=MultiModalFieldConfig.batched("video"))
 
@@ -775,8 +785,14 @@ class MiniCPMVMultiModalProcessor(
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputs:
+        supported_mm_modalities = self.info.get_supported_mm_modalities()
+        matches = re.findall(self.get_placeholder_match_pattern(), prompt)
+        mm_orders = {
+            f"{modality}_orders": torch.tensor([
+                index for index, m in enumerate(matches) if m == modality
+            ]) for modality in supported_mm_modalities
+        }
         result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
-
         # Exclude <image_id>x</image_id> from placeholders
         if "image" in result["mm_placeholders"] and \
             self.info.get_model_version() == (2, 6):
@@ -785,6 +801,7 @@ class MiniCPMVMultiModalProcessor(
                                  length=p["length"] - 3 - idx // 10)
                 for idx, p in enumerate(result["mm_placeholders"]["image"])
             ]
+        result["mm_kwargs"].update(**mm_orders)
         result["mm_kwargs"].update(**self.get_special_tokens())
         return result
 
@@ -915,8 +932,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         im_end_id = kwargs.pop("im_end_id", None)
         slice_start_id = kwargs.pop("slice_start_id", None)
         slice_end_id = kwargs.pop("slice_end_id", None)
-        orders_in_mm_data = {
-            modality: kwargs.pop(f"{modality}_orders_in_mm_data", None)
+        mm_orders = {
+            f"{modality}": kwargs.pop(f"{modality}_orders", None)
             for modality in ["image", "video", "audio"]
         }
         batch_size = max(len(mm_data["image"]["pixel_values"]),
@@ -967,30 +984,25 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         pixel_values_flat: List[torch.Tensor] = []
         tgt_sizes_flat: List[torch.Tensor] = []
         for b in range(batch_size):
-            orders_in_mm_data_b = {
-                modality: orders[b] if orders is not None else []
-                for modality, orders in orders_in_mm_data.items()
-            }
-            mm_data_indices = [
-                (index, (pos, media_type))
-                for media_type in ["image", "video", "audio"]
-                for pos, index in enumerate(orders_in_mm_data_b[media_type])
+            mm_counts = {"image": 0, "video": 0} if self.version == (2, 6) \
+                        else {"image": 0}
+            mm_orders_b = [
+                (index, modality) for modality in mm_counts
+                for index in mm_orders[modality][b]
             ]
-            mm_data_indices = [(pos, modality) for index, (
-                pos, modality) in sorted(mm_data_indices, key=lambda x: x[0])]
-            for pos, modality in mm_data_indices:
-                if modality == "image":
-                    slice_index = mm_data[modality]["image_slices"][b][pos]
-                    pixel_values_flat += mm_data[modality]["pixel_values"][b][
-                        slice_index[0]:slice_index[1]]
-                    tgt_sizes_flat += mm_data[modality]["tgt_sizes"][b][
-                        slice_index[0]:slice_index[1]]
-                elif modality == "video":
-                    slice_index = mm_data[modality]["video_slices"][b][pos]
-                    pixel_values_flat += mm_data[modality]["pixel_values"][b][
-                        slice_index[0]:slice_index[1]]
-                    tgt_sizes_flat += mm_data[modality]["tgt_sizes"][b][
-                        slice_index[0]:slice_index[1]]
+            mm_orders_b = [
+                modality for (_, modality) in sorted(
+                    mm_orders_b, key=lambda x: x[0]
+                )
+            ]
+            for modality in mm_orders_b:
+                pos = mm_counts[modality]
+                slice_index = mm_data[modality][f"{modality}_slices"][b][pos]
+                pixel_values_flat += mm_data[modality]["pixel_values"][b][
+                    slice_index[0]:slice_index[1]]
+                tgt_sizes_flat += mm_data[modality]["tgt_sizes"][b][
+                    slice_index[0]:slice_index[1]]
+                mm_counts[modality] += 1
 
         # NOTE: Input IDs does not contain image tokens during memory profiling,
         # so we allow it to be empty

@@ -23,6 +23,7 @@
 from functools import partial
 from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
+from collections import Counter
 
 import torch
 import torch.types
@@ -302,6 +303,11 @@ class MiniCPMOMultiModalProcessor(
             "video": self.process_videos(mm_data, mm_kwargs),
             "audio": self.process_audios(mm_data, mm_kwargs)
         }
+
+    def get_modality_num_counter(self, modality: str) -> str:
+        if modality == "audio":
+            return "audio_lens"
+        return super().get_modality_num_counter(modality)
 
     def get_num_slices_by_modality(self, inputs: Dict[str, object],
                                    modality: str, index: int) -> int:
