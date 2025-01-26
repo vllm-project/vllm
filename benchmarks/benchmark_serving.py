@@ -1097,7 +1097,7 @@ if __name__ == "__main__":
     hf_group.add_argument(
         "--hf-output-len",
         type=int,
-        default=None,
+        default=128,
         help="Output length for each request. Overrides the output lengths "
         "from the sampled HF dataset.",
     )

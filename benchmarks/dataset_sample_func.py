@@ -45,7 +45,8 @@ class HFDatasetSampler(ABC):
 
     @abstractmethod
     def filter_func(self, data: dict) -> bool:
-        return True
+        """Filter function to filter out unsatisfied rows from dataset."""
+        raise NotImplementedError
 
     @abstractmethod
     def sample(
@@ -54,10 +55,16 @@ class HFDatasetSampler(ABC):
         tokenizer: PreTrainedTokenizerBase,
         fixed_output_len: Optional[int] = None
     ) -> list[tuple[str, int, int, dict[str, Collection[str]]]]:
+        """Function to sample requests from the dataset."""
         raise NotImplementedError
 
 
-class SonnetSampler(HFDatasetSampler):
+class ShareGPTSampler(HFDatasetSampler):
+    """
+    Dataset sampler for ShareGPT-style datasets.
+    - Text-only dataset like: 'RyokoAI/ShareGPT52K' etc.
+    - Vision dataset like: 'lmms-lab/LLaVA-OneVision-Data' etc.
+    """
 
     def __init__(self, dataset: IterableDataset, seed: Optional[int] = None):
         assert "conversations" in dataset.features, (
@@ -69,7 +76,7 @@ class SonnetSampler(HFDatasetSampler):
 
     def _get_mm_content(self,
                         data: dict) -> Optional[dict[str, Collection[str]]]:
-        if "image" in data and isinstance(data["image"], Image):
+        if "image" in data and isinstance(data["image"], Image.Image):
             return pil_image_to_mm_content(data["image"])
         elif "image" in data and isinstance(data["image"], str):
             return image_url_to_mm_content(data["image"])
@@ -112,6 +119,10 @@ class SonnetSampler(HFDatasetSampler):
 
 
 class VisionArenaBenchSampler(HFDatasetSampler):
+    """Dataset sampler for 'lmarena-ai/vision-arena-bench-v0.1' dataset."""
+
+    def filter_func(self, data: dict) -> bool:
+        return True
 
     def sample(
         self,
@@ -157,9 +168,10 @@ def get_hf_dataset_sampler(
         f"Split '{dataset_split}' not found in dataset '{dataset_path}'")
     dataset = load_dataset(dataset_path,
                            name=dataset_subset,
-                           split=dataset_split)
+                           split=dataset_split,
+                           streaming=True)
 
     if dataset_path in DATASET_SAMPLE_FUNC:
         return DATASET_SAMPLE_FUNC[dataset_path](dataset, seed=seed)
     else:
-        return SonnetSampler(dataset, seed=seed)
+        return ShareGPTSampler(dataset, seed=seed)
