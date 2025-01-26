@@ -60,16 +60,6 @@ COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-cuda.txt
 
-# Build AOT from source for FlashInfer
-ENV FLASHINFER_ENABLE_AOT=1
-# Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
-ENV TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX'
-RUN --mount=type=cache,target=/root/.cache/pip \
-. /etc/environment && \
-if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-    python3 -m pip install -v git+https://github.com/flashinfer-ai/flashinfer.git@6e6f38d3534994c34b2c6b09b5b45c8a7b92ffd2; \
-fi
-
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
 # explicitly set the list to avoid issues with torch 2.2
@@ -145,6 +135,19 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
     else \
         echo "Skipping wheel size check."; \
     fi
+
+
+# Build FlashInfer wheel
+# TODO: switch to stable release once it fixes AOT compilation issue
+ENV FLASHINFER_ENABLE_AOT=1
+# Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
+ENV TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX'
+RUN git clone https://github.com/flashinfer-ai/flashinfer.git
+RUN cd flashinfer && \
+    git checkout 6e6f38d3534994c34b2c6b09b5b45c8a7b92ffd2
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip build flashinfer --wheel --no-use-pep517 --wheel-dir ./dist --no-build-isolation
+
 #################### EXTENSION Build IMAGE ####################
 
 #################### DEV IMAGE ####################
@@ -204,7 +207,11 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install dist/*.whl --verbose
 
+# Install FlashInfer wheel
 # NOTE: FlashInfer's wheel is not AOT compiled for 0.2.0, so we will build AOT from source in `base` stage
+RUN --mount=type=bind,from=build,src=/workspace/flashinfer/dist,target=/vllm-workspace/flashinfer-dist \
+    --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install flashinfer-dist/*.whl --verbose
 
 # RUN --mount=type=cache,target=/root/.cache/pip \
 # . /etc/environment && \
