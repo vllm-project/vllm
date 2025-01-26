@@ -210,6 +210,9 @@ class MultiHeadAttention(nn.Module):
         self.scale = scale
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+
         dtype = torch.get_default_dtype()
         attn_backend = get_attn_backend(head_size,
                                         dtype,
@@ -240,18 +243,13 @@ class MultiHeadAttention(nn.Module):
         key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
         value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
 
+        if (num_repeat := self.num_queries_per_kv) > 1:
+            # Handle MQA and GQA
+            key = torch.repeat_interleave(key, num_repeat, dim=2)
+            value = torch.repeat_interleave(value, num_repeat, dim=2)
+
         if self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
-
-            # Expand key and value to match number of query heads
-            if self.num_kv_heads != self.num_heads:
-                assert self.num_heads % self.num_kv_heads == 0
-                key = key.repeat_interleave(self.num_heads //
-                                            self.num_kv_heads,
-                                            dim=2)
-                value = value.repeat_interleave(self.num_heads //
-                                                self.num_kv_heads,
-                                                dim=2)
 
             out = xops.memory_efficient_attention_forward(query,
                                                           key,
