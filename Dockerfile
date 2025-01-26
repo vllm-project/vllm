@@ -195,12 +195,30 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install dist/*.whl --verbose
 
+# How to build this FlashInfer wheel:
+# $ export FLASHINFER_ENABLE_AOT=1
+# $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
+# $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX'
+# $ git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
+# $ cd flashinfer
+# $ git checkout 6e6f38d3534994c34b2c6b09b5b45c8a7b92ffd2
+# $ python3 setup.py bdist_wheel --dist-dir=dist --verbose
+
 RUN --mount=type=cache,target=/root/.cache/pip \
 . /etc/environment && \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
     python3 -m pip install https://wheels.vllm.ai/flashinfer/6e6f38d3534994c34b2c6b09b5b45c8a7b92ffd2/flashinfer_python-0.2.0.post1-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl; \
 fi
 COPY examples examples
+
+# Although we build Flashinfer with AOT mode, there's still
+# some issues w.r.t. JIT compilation. Therefore we need to
+# install build dependencies for JIT compilation.
+# TODO: Remove this once FlashInfer AOT wheel is fixed
+COPY requirements-build.txt requirements-build.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -r requirements-build.txt
+
 #################### vLLM installation IMAGE ####################
 
 #################### TEST IMAGE ####################
