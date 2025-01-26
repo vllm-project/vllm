@@ -171,7 +171,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
         # make intermediate_size and hidden_size diviable by group_size
         # we reduce the group size to ensure that
         # and we would repeat the loaded_weight later
-        while intermediate_size_per_partition % group_size or hidden_size % group_size:
+        while intermediate_size_per_partition % group_size or \
+                hidden_size % group_size:
             group_size = group_size // 2
             group_size_div_factor *= 2
             assert group_size >= 32
