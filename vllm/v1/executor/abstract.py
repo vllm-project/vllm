@@ -1,4 +1,4 @@
-from typing import Type
+from typing import Callable, Optional, Type
 
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
@@ -71,9 +71,11 @@ class Executor(ExecutorBase):
     def execute_model(
         self,
         scheduler_output,
+        callback: Optional[Callable],
     ) -> ModelRunnerOutput:
+
         output = self.collective_rpc("execute_model",
-                                     args=(scheduler_output, ))
+                                     args=(scheduler_output, callback))
         return output[0]
 
     def profile(self, is_start: bool = True):

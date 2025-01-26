@@ -4,7 +4,7 @@ import signal
 import threading
 import time
 from multiprocessing.connection import Connection
-from typing import List, Optional, Tuple, Type
+from typing import Callable, List, Optional, Tuple, Type
 
 import psutil
 import zmq
@@ -15,8 +15,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import (get_exception_traceback, zmq_socket_ctx,
-                        make_zmq_socket)
+from vllm.utils import get_exception_traceback, make_zmq_socket, zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
@@ -117,7 +116,7 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
-    def step(self) -> EngineCoreOutputs:
+    def step(self, callback: Optional[Callable] = None) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
         if not self.scheduler.has_unfinished_requests():
@@ -125,7 +124,7 @@ class EngineCore:
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
         scheduler_output = self.scheduler.schedule()
-        output = self.model_executor.execute_model(scheduler_output)
+        output = self.model_executor.execute_model(scheduler_output, callback)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)
         return engine_core_outputs
@@ -168,16 +167,15 @@ class EngineCoreProc(EngineCore):
                          daemon=True).start()
 
         # Output IO.
-        # * run_engine_loop sets the value of output in each step
-        # * send_output() does serialization + sending. It is passed
-        #   as a callback to the ModelRunner.execute_model to ensure
-        #   overlapping with GPU execution.
+        # * run_engine_loop sets the value of last_outputs in each step
+        # * send_output_to_client() serializes and sends. Passed as
+        #   a callback to the Executor to ensure overlapped with GPU.
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-        self.output_socket = make_zmq_socket(
-            self.ctx, output_path, zmq.constants.PUSH)
+        self.output_socket = make_zmq_socket(self.ctx, output_path,
+                                             zmq.constants.PUSH)
         self.output_encoder = msgpack.Encoder()
         self.output_buffer = bytearray()
-        self.output: Optional[EngineCoreOutputs] = None
+        self.last_outputs: Optional[EngineCoreOutputs] = None
 
         # Send Readiness signal to EngineClient.
         ready_pipe.send({"status": "READY"})
@@ -248,17 +246,17 @@ class EngineCoreProc(EngineCore):
                 self._handle_client_request(req)
 
             # 3) Step the engine core.
-            self.output = self.step()
+            self.last_outputs = self.step(self._send_outputs_to_client)
 
     def _send_outputs_to_client(self) -> None:
-        """
-        Send EngineCoreOutputs to Client.
-        Passed as callback to Executor for overlap with GPU execution.
-        """
-        if self.output:
-            self.output_encoder.encode_input(self.output, self.output_buffer)
-            self.output_socket.send_multipart((self.output_buffer,), copy=False)
-            self.output = None
+        """Serialize + send last output. Callback to Executor."""
+
+        if self.last_outputs:
+            self.output_encoder.encode_into(self.last_outputs,
+                                            self.output_buffer)
+            self.output_socket.send_multipart((self.output_buffer, ),
+                                              copy=False)
+            self.last_outputs = None
 
     def _handle_client_request(self, request: EngineCoreRequestUnion) -> None:
         """Handle EngineCoreRequest or EngineCoreABORT from Client."""

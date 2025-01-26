@@ -1,6 +1,6 @@
 import gc
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, cast
 
 import numpy as np
 import torch
@@ -703,9 +703,9 @@ class GPUModelRunner:
 
     @torch.inference_mode()
     def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput:
+            self,
+            scheduler_output: "SchedulerOutput",
+            callback: Optional[Callable] = None) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
 
         if self.is_multimodal_model:
@@ -764,6 +764,8 @@ class GPUModelRunner:
                 attn_metadata=None,
                 inputs_embeds=inputs_embeds,
             )
+            if callback is not None:
+                callback()
         hidden_states = hidden_states[:num_scheduled_tokens]
         hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(hidden_states, None)

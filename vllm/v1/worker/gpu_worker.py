@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
 import torch.distributed
@@ -231,8 +231,9 @@ class Worker:
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
+        callback: Optional[Callable] = None,
     ) -> Optional[ModelRunnerOutput]:
-        output = self.model_runner.execute_model(scheduler_output)
+        output = self.model_runner.execute_model(scheduler_output, callback)
         return output if self.rank == 0 else None
 
     def profile(self, is_start: bool = True):
