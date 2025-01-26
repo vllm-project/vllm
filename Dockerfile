@@ -93,18 +93,6 @@ ENV MAX_JOBS=${max_jobs}
 ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
-# Build FlashInfer wheel
-# TODO: switch to stable release once it fixes AOT compilation issue
-ENV FLASHINFER_ENABLE_AOT=1
-# Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
-ENV TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX'
-RUN git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
-WORKDIR /workspace/flashinfer
-RUN git checkout 6e6f38d3534994c34b2c6b09b5b45c8a7b92ffd2
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 setup.py bdist_wheel --dist-dir=dist --verbose
-WORKDIR /workspace
-
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
@@ -147,7 +135,6 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
     else \
         echo "Skipping wheel size check."; \
     fi
-
 #################### EXTENSION Build IMAGE ####################
 
 #################### DEV IMAGE ####################
@@ -207,19 +194,11 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install dist/*.whl --verbose
 
-# Install FlashInfer wheel
-# NOTE: FlashInfer's wheel is not AOT compiled for 0.2.0, so we will build AOT from source in `base` stage
-RUN --mount=type=bind,from=build,src=/workspace/flashinfer/dist,target=/vllm-workspace/flashinfer-dist \
-    --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install flashinfer-dist/*.whl --verbose
-
-# TODO: restore to stable release once it fixes AOT compilation issue
-# RUN --mount=type=cache,target=/root/.cache/pip \
-# . /etc/environment && \
-# if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-#     python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.0.post1/flashinfer-0.2.0.post1+cu121torch2.4-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl; \
-# fi
-
+RUN --mount=type=cache,target=/root/.cache/pip \
+. /etc/environment && \
+if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+    python3 -m pip install https://wheels.vllm.ai/flashinfer/6e6f38d3534994c34b2c6b09b5b45c8a7b92ffd2/flashinfer_python-0.2.0.post1-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl; \
+fi
 COPY examples examples
 #################### vLLM installation IMAGE ####################
 
