@@ -214,9 +214,23 @@ class EngineCoreProc(EngineCore):
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
+        import pyinstrument
+        profiler = pyinstrument.Profiler()
 
         # Loop until process is sent a SIGINT or SIGTERM
+        i = 0
         while True:
+            i += 1
+            if i == 1000:
+                logger.info("starting profiler...")
+                profiler.start()
+            if i == 1100:
+                logger.info("stopping profiler...")
+                profiler.stop()
+                profiler.write_html("run_busy_loop.html",
+                                    timeline=True,
+                                    show_all=True)
+
             # 1) Poll the input queue until there is work to do.
             if not self.scheduler.has_unfinished_requests():
                 while True:
