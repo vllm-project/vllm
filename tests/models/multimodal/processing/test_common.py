@@ -147,6 +147,9 @@ def _test_processing_correctness(
     ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf", {"image": True, "video": True}),  # noqa: E501
     ("TIGER-Lab/Mantis-8B-siglip-llama3", {"image": True}),
     ("mistral-community/pixtral-12b", {"image": True}),
+    ("openbmb/MiniCPM-Llama3-V-2_5", {"image": True}),
+    ("openbmb/MiniCPM-V-2_6", {"image": True, "video": True}),
+    ("openbmb/MiniCPM-O-2_6", {"image": True, "video": True, "audio": True}),
     ("Qwen/Qwen2-VL-2B-Instruct", {"image": True, "video": True}),
     ("Qwen/Qwen2-Audio-7B-Instruct", {"audio": True}),
     ("fixie-ai/ultravox-v0_3", {"audio": True}),
