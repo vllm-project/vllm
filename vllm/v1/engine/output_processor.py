@@ -154,8 +154,7 @@ class OutputProcessor:
 
         output_kind = request_state.output_kind
         finished = bool(finish_reason)
-        if output_kind == RequestOutputKind.FINAL_ONLY \
-                and not finished:
+        if output_kind == RequestOutputKind.FINAL_ONLY and not finished:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
