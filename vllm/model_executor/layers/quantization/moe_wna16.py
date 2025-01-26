@@ -155,6 +155,11 @@ def is_layer_skipped_quant(prefix: str, modules_to_not_convert: List[str]):
 
 
 class MoeWNA16Method(FusedMoEMethodBase):
+    """Linear method for MOE WNA16 (W8A16/W4A16) quantization.
+
+    Args:
+        quant_config: The MOE WNA16 (W8A16/W4A16) quantization config.
+    """
 
     def __init__(self, quant_config: MoeWNA16Config):
         self.quant_config = quant_config
