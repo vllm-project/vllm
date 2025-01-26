@@ -58,7 +58,8 @@ class Request:
 
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
-        assert len(self.mm_inputs) == len(self.mm_hashes)
+        if self.mm_hashes:
+            assert len(self.mm_inputs) == len(self.mm_hashes)
 
         # Cache the computed kv block hashes of the request to avoid
         # recomputing.
