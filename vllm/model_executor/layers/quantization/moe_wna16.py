@@ -160,7 +160,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                       hidden_size: int, intermediate_size: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
         layer.quant_config = self.quant_config
@@ -171,7 +171,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         # make intermediate_size and hidden_size diviable by group_size
         # we reduce the group size to ensure that
         # and we would repeat the loaded_weight later
-        while intermediate_size % group_size or hidden_size % group_size:
+        while intermediate_size_per_partition % group_size or hidden_size % group_size:
             group_size = group_size // 2
             group_size_div_factor *= 2
             assert group_size >= 32
@@ -191,38 +191,39 @@ class MoeWNA16Method(FusedMoEMethodBase):
         extra_weight_attrs['weight_loader'] = wrapped_weight_loader
 
         # Fused gate_up_proj (column parallel)
-        w13_qweight = torch.nn.Parameter(torch.empty(num_experts,
-                                                     2 * intermediate_size,
-                                                     hidden_size //
-                                                     bit8_pack_factor,
-                                                     dtype=torch.uint8),
+        w13_qweight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_size // bit8_pack_factor,
+            dtype=torch.uint8),
                                          requires_grad=False)
         layer.register_parameter("w13_qweight", w13_qweight)
         set_weight_attrs(w13_qweight, extra_weight_attrs)
 
         # down_proj (row parallel)
-        w2_qweight = torch.nn.Parameter(torch.empty(num_experts,
-                                                    hidden_size,
-                                                    intermediate_size //
-                                                    bit8_pack_factor,
-                                                    dtype=torch.uint8),
+        w2_qweight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition // bit8_pack_factor,
+            dtype=torch.uint8),
                                         requires_grad=False)
         layer.register_parameter("w2_qweight", w2_qweight)
         set_weight_attrs(w2_qweight, extra_weight_attrs)
 
-        w13_scales = torch.nn.Parameter(torch.zeros(num_experts,
-                                                    2 * intermediate_size,
-                                                    hidden_size // group_size,
-                                                    dtype=params_dtype),
+        w13_scales = torch.nn.Parameter(torch.zeros(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_size // group_size,
+            dtype=params_dtype),
                                         requires_grad=False)
         layer.register_parameter("w13_scales", w13_scales)
         set_weight_attrs(w13_scales, extra_weight_attrs)
 
-        w2_scales = torch.nn.Parameter(torch.zeros(num_experts,
-                                                   hidden_size,
-                                                   intermediate_size //
-                                                   group_size,
-                                                   dtype=params_dtype),
+        w2_scales = torch.nn.Parameter(torch.zeros(
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition // group_size,
+            dtype=params_dtype),
                                        requires_grad=False)
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
@@ -230,7 +231,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         if self.quant_config.has_zp:
             w13_qzeros = torch.nn.Parameter(torch.zeros(
                 num_experts,
-                2 * intermediate_size // bit8_pack_factor,
+                2 * intermediate_size_per_partition // bit8_pack_factor,
                 hidden_size // group_size,
                 dtype=torch.uint8),
                                             requires_grad=False)
@@ -240,7 +241,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             w2_qzeros = torch.nn.Parameter(torch.zeros(
                 num_experts,
                 hidden_size // bit8_pack_factor,
-                intermediate_size // group_size,
+                intermediate_size_per_partition // group_size,
                 dtype=torch.uint8),
                                            requires_grad=False)
             layer.register_parameter("w2_qzeros", w2_qzeros)
