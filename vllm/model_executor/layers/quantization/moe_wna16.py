@@ -22,7 +22,7 @@ from vllm.platforms import current_platform
 
 
 class MoeWNA16Config(QuantizationConfig):
-    """Config class for Int8 experts quantization."""
+    """Config class for MOE WNA16 (W8A16/W4A16) quantization."""
 
     def __init__(self, linear_quant_method: str, weight_bits: int,
                  group_size: int, has_zp: bool, lm_head_quantized: bool,
