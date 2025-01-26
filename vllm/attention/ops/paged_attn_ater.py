@@ -85,7 +85,6 @@ class PagedAttention:
         dtypeDict = {'fp16': torch.float16, 'bf16': torch.bfloat16, 'fp8': torch.int8, 'int8': torch.int8, 'auto': torch.float16 }
         kvCacheDtype = dtypeDict[kv_cache_dtype]
         if key_cache.dtype.itemsize == 1:
-            # print('reshape_and_cache_with_pertoken_quant')
             aiter.reshape_and_cache_with_pertoken_quant(
                 key,
                 value,
@@ -153,7 +152,12 @@ class PagedAttention:
         max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
         if kv_cache_dtype not in ['int8', 'fp8', 'fp8', 'fp8_e5m2', 'fp8_e4m3']:
             k_scale, v_scale = (None, None)
-        return aiter.pa_fwd_asm(query, key_cache, value_cache, block_tables, seq_lens, max_num_blocks_per_seq, k_scale, v_scale,out)
+        dtype=out.dtype
+        aiter.pa_fwd_asm(query.to(torch.bfloat16), key_cache, value_cache, block_tables, seq_lens, max_num_blocks_per_seq, k_scale, v_scale,out)
+        if dtype==torch.float16:
+            # aiter.pa_fwd_as only support bf16 output for now
+            out.copy_(out.view(torch.bfloat16).to(torch.float16))
+        return out
 
     @staticmethod
     def forward_prefix(
