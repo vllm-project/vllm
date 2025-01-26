@@ -245,6 +245,7 @@ class MultiHeadAttention(nn.Module):
 
             # Expand key and value to match number of query heads
             if self.num_kv_heads != self.num_heads:
+                assert self.num_heads % self.num_kv_heads == 0
                 key = key.repeat_interleave(self.num_heads //
                                             self.num_kv_heads,
                                             dim=2)
