@@ -93,6 +93,18 @@ ENV MAX_JOBS=${max_jobs}
 ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
 
+# Build FlashInfer wheel
+# TODO: switch to stable release once it fixes AOT compilation issue
+ENV FLASHINFER_ENABLE_AOT=1
+# Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
+ENV TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX'
+RUN git clone https://github.com/flashinfer-ai/flashinfer.git
+RUN cd flashinfer && \
+    git checkout 6e6f38d3534994c34b2c6b09b5b45c8a7b92ffd2
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m build --wheel --outdir ./dist --no-isolation --verbose .
+RUN cd ..
+
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
@@ -135,18 +147,6 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
     else \
         echo "Skipping wheel size check."; \
     fi
-
-
-# Build FlashInfer wheel
-# TODO: switch to stable release once it fixes AOT compilation issue
-ENV FLASHINFER_ENABLE_AOT=1
-# Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
-ENV TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX'
-RUN git clone https://github.com/flashinfer-ai/flashinfer.git
-RUN cd flashinfer && \
-    git checkout 6e6f38d3534994c34b2c6b09b5b45c8a7b92ffd2
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m build --wheel --outdir ./dist --no-isolation --verbose .
 
 #################### EXTENSION Build IMAGE ####################
 
