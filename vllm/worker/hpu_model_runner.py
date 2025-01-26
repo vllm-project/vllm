@@ -606,7 +606,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self._setup_buckets()
         self._set_gc_threshold()
         self.use_contiguous_pa = os.environ.get('VLLM_CONTIGUOUS_PA',
-                                                'true').lower() == 'true'
+                                                'true').lower() in ['1', 'true']
 
     def _set_gc_threshold(self) -> None:
         # Read https://docs.python.org/3/library/gc.html#gc.set_threshold
