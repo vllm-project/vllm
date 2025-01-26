@@ -3,9 +3,7 @@ from huggingface_hub import snapshot_download
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.lora.request import LoRARequest
 
-MODEL_PATH = "meta-llama/Llama-2-7b-hf"
-SPEC_MODEL = "JackFram/llama-68m"
-lora_path = snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
+LoRA_PATH = snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
 
 
 def do_sample(engine):
@@ -16,7 +14,7 @@ def do_sample(engine):
         (prompt_text,
          SamplingParams(temperature=0.0, max_tokens=100,
                         stop=["[/assistant]"]),
-         LoRARequest("sql_test", 1, lora_path)),
+         LoRARequest("sql_test", 1, LoRA_PATH)),
     ]
 
     request_id = 0
@@ -37,23 +35,58 @@ def do_sample(engine):
     return results
 
 
-def test_lora():
+def test_lora_batch_expansion():
+    MODEL_PATH = "meta-llama/Llama-2-7b-hf"
+    SPEC_MODEL = "JackFram/llama-68m"
+
     engine_args = EngineArgs(model=MODEL_PATH,
                              enable_lora=True,
                              enforce_eager=True,
                              disable_log_stats=True,
-                             gpu_memory_utilization=0.3,
                              max_num_seqs=60)
     engine = LLMEngine.from_engine_args(engine_args)
     result = do_sample(engine)
 
+    del engine
+
+    # run speculative decoding with batch expansion.
     engine_args = EngineArgs(model=MODEL_PATH,
                              speculative_model=SPEC_MODEL,
                              num_speculative_tokens=3,
                              enable_lora=True,
                              enforce_eager=True,
                              disable_log_stats=True,
-                             gpu_memory_utilization=0.6,
+                             disable_logprobs_during_spec_decoding=True,
+                             speculative_disable_mqa_scorer=True,
+                             max_num_seqs=60)
+    engine = LLMEngine.from_engine_args(engine_args)
+    spec_result = do_sample(engine)
+
+    assert result == spec_result
+
+def test_lora_mqa_scorer():
+    MODEL_PATH = "meta-llama/Llama-2-7b-hf"
+    SPEC_MODEL = "meta-llama/Llama-2-7b-hf"
+
+    engine_args = EngineArgs(model=MODEL_PATH,
+                             enable_lora=True,
+                             enforce_eager=True,
+                             disable_log_stats=True,
+                             max_num_seqs=60)
+    engine = LLMEngine.from_engine_args(engine_args)
+    result = do_sample(engine)
+
+    del engine
+
+    # run speculative decoding with mqa scorer.
+    engine_args = EngineArgs(model=MODEL_PATH,
+                             speculative_model=SPEC_MODEL,
+                             num_speculative_tokens=3,
+                             enable_lora=True,
+                             enforce_eager=True,
+                             disable_log_stats=True,
+                             disable_logprobs_during_spec_decoding=True,
+                             speculative_disable_mqa_scorer=False,
                              max_num_seqs=60)
     engine = LLMEngine.from_engine_args(engine_args)
     spec_result = do_sample(engine)
