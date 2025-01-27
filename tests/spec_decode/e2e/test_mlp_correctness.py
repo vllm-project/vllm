@@ -441,7 +441,9 @@ def test_mlp_different_k(vllm_runner, common_llm_kwargs,
         # Use smaller output len for fast test.
         32,
     ])
-# test with chunk size >= `speculative_disable_by_batch_size`
+# Speculative decoding is disabled when sequences reach decoding and the batch
+# consists of single-token requests. Hence we set `max_num_seqs`
+# >= `speculative_disable_by_batch_size` to test feature interaction.
 @pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 @pytest.mark.parametrize("seed", [1])
 def test_mlp_disable_queue(vllm_runner, common_llm_kwargs,
