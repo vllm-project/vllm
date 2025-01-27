@@ -3311,7 +3311,7 @@ _current_vllm_config: Optional[VllmConfig] = None
 
 
 @contextmanager
-def set_current_vllm_config(vllm_config: VllmConfig):
+def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     """
     Temporarily set the current VLLM config.
     Used during model initialization.
@@ -3331,7 +3331,8 @@ def set_current_vllm_config(vllm_config: VllmConfig):
                      vllm_config.compilation_config.enabled_custom_ops)
         logger.debug("disabled custom ops: %s",
                      vllm_config.compilation_config.disabled_custom_ops)
-        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
+        if check_compile and \
+            vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
             and compilation_counter.num_models_seen == num_models_seen:
             # If the model supports compilation,
             # compilation_counter.num_models_seen should be increased
