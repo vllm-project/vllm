@@ -184,6 +184,7 @@ api/model/index
 :caption: Community
 :maxdepth: 1
 
+community/blog
 community/meetups
 community/sponsors
 ```
