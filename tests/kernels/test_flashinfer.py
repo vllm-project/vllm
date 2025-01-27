@@ -336,7 +336,7 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
     workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
     wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
         workspace_buffer, "NHD")
-    wrapper.begin_forward(
+    wrapper.plan(
         qo_indptr,
         kv_indptr,
         kv_indices,
@@ -345,13 +345,12 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
         num_kv_heads,
         head_size,
         block_size,
+        q_data_type=dtype,
+        kv_data_type=kv_cache_dtype,
+        logits_soft_cap=soft_cap,
     )
 
-    output = wrapper.forward(query,
-                             kv_cache_fp8,
-                             logits_soft_cap=soft_cap,
-                             k_scale=k_scale,
-                             v_scale=v_scale)
+    output = wrapper.run(query, kv_cache_fp8, k_scale=k_scale, v_scale=v_scale)
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=key_cache.squeeze(1),
