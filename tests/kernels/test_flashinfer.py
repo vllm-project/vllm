@@ -442,21 +442,18 @@ def test_flashinfer_decode_with_paged_fp8_kv(
     wrapper = flashinfer.\
         BatchDecodeWithPagedKVCacheWrapper(workspace_buffer, "NHD",
                     use_tensor_cores=use_tensor_cores)
-    wrapper.begin_forward(kv_indptr,
-                          kv_indices,
-                          kv_last_page_lens,
-                          num_query_heads,
-                          num_kv_heads,
-                          head_size,
-                          block_size,
-                          "NONE",
-                          data_type=dtype,
-                          q_data_type=dtype)
-    output = wrapper.forward(query,
-                             kv_cache_fp8,
-                             logits_soft_cap=soft_cap,
-                             k_scale=k_scale,
-                             v_scale=v_scale)
+    wrapper.plan(kv_indptr,
+                 kv_indices,
+                 kv_last_page_lens,
+                 num_query_heads,
+                 num_kv_heads,
+                 head_size,
+                 block_size,
+                 "NONE",
+                 q_data_type=dtype,
+                 kv_data_type=kv_cache_dtype,
+                 logits_soft_cap=soft_cap)
+    output = wrapper.run(query, kv_cache_fp8, k_scale=k_scale, v_scale=v_scale)
     key_cache = key_value_cache[:, 0, :, :, :].squeeze(1)
     value_cache = key_value_cache[:, 1, :, :, :].squeeze(1)
 
