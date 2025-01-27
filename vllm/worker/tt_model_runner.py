@@ -6,15 +6,13 @@ import torch
 import torch.nn.functional as F
 from transformers import TopPLogitsWarper
 
-import ttnn
-
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig,
                          ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.tt_loader import TTModelLoader
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.model_executor.models import supports_multimodal
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata, Logprob, SequenceOutput, CompletionSequenceGroupOutput, SequenceGroup
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 from vllm.transformers_utils.config import uses_mrope
@@ -193,6 +191,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         seq_groups: List[int] = []
         top_pk_sampling_params = {}
         multi_modal_kwargs: Dict[str, Any] = {}
+        if supports_multimodal(self.model) and is_prompt:
+            multi_modal_kwargs = {"images": []}
         cross_block_tables: List[List[int]] = []
 
         for seq_group_metadata in seq_group_metadata_list:
@@ -225,13 +225,13 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             
             # Multi-modal data
             # TODO: Replace with multi_modal_input_mapper (used by CPU/GPU model runners) once TT models no longer require raw PIL images
-            if (multi_modal_data := seq_group_metadata.multi_modal_data):
-                assert "image" in multi_modal_data, "Currently only supporting image multi-modal inputs"
-                image = multi_modal_data["image"]  # this is of type PIL.Image.Image
-                if "images" not in multi_modal_kwargs:
-                    multi_modal_kwargs["images"] = [image]
-                else:
+            if supports_multimodal(self.model) and is_prompt:
+                if (multi_modal_data := seq_group_metadata.multi_modal_data):
+                    assert "image" in multi_modal_data, "Currently only supporting image multi-modal inputs"
+                    image = multi_modal_data["image"]  # this is of type PIL.Image.Image
                     multi_modal_kwargs["images"].append(image)
+                else:
+                    multi_modal_kwargs["images"].append(None)
             
             # Encoder-decoder data (currently only supporting cross attention metadata and not additional encoder data)
             if self.model_config.is_encoder_decoder_model:
