@@ -201,13 +201,13 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX'
 # $ git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
 # $ cd flashinfer
-# $ git checkout 6e6f38d3534994c34b2c6b09b5b45c8a7b92ffd2
+# $ git checkout 524304395bd1d8cd7d07db083859523fcaa246a4
 # $ python3 setup.py bdist_wheel --dist-dir=dist --verbose
 
 RUN --mount=type=cache,target=/root/.cache/pip \
 . /etc/environment && \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-    python3 -m pip install https://wheels.vllm.ai/flashinfer/6e6f38d3534994c34b2c6b09b5b45c8a7b92ffd2/flashinfer_python-0.2.0.post1-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl; \
+    python3 -m pip install https://wheels.vllm.ai/flashinfer/524304395bd1d8cd7d07db083859523fcaa246a4/flashinfer_python-0.2.0.post1-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl; \
 fi
 COPY examples examples
 
