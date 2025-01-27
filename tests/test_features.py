@@ -1,4 +1,5 @@
-from vllm.features import *
+from vllm.features import (FEATURE_BEST_OF, FEATURE_SPEC_DECODE,
+                           FEATURE_STRUCTURED_OUTPUT, FeatureUsage)
 
 
 def test_incompatible_features():
