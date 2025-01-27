@@ -79,9 +79,9 @@ def run_minicpmo(question: str, audio_count: int):
 
     stop_tokens = ['<|im_end|>', '<|endoftext|>']
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
-    
+
     audio_placeholder = "(<audio>./</audio>)" * audio_count
-    audio_chat_template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n<|spk_bos|><|spk|><|spk_eos|><|tts_bos|>' }}{% endif %}"
+    audio_chat_template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n<|spk_bos|><|spk|><|spk_eos|><|tts_bos|>' }}{% endif %}"  # noqa: E501
     messages = [{
         'role': 'user',
         'content': f'{audio_placeholder}\n{question}'
@@ -94,8 +94,8 @@ def run_minicpmo(question: str, audio_count: int):
 
 
 model_example_map = {
-    "ultravox": run_ultravox, 
-    "qwen2_audio": run_qwen2_audio, 
+    "ultravox": run_ultravox,
+    "qwen2_audio": run_qwen2_audio,
     "minicpmo": run_minicpmo
 }
 

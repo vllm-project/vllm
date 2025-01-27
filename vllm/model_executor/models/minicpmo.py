@@ -746,13 +746,12 @@ class MiniCPMO(MiniCPMV2_6):
                 type="audio_embeds")
         if len(audio_features) > 0:
             audio_features_all = [
-                i.permute(1, 0)
-                for audio_feature in audio_features
+                i.permute(1, 0) for audio_feature in audio_features
                 for i in audio_feature
             ]
             audio_features = torch.nn.utils.rnn.pad_sequence(
-                audio_features_all, batch_first=True, padding_value=0.0
-            ).permute(0, 2, 1)
+                audio_features_all, batch_first=True,
+                padding_value=0.0).permute(0, 2, 1)
             audio_feature_lens = torch.cat(
                 [item for item in audio_feature_lens])
 

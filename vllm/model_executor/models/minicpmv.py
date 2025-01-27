@@ -1000,7 +1000,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             ]
             for modality in mm_orders_b:
                 pos = mm_counts[modality]
-                num_slices = mm_data[modality][f"{modality}_num_slices"][b][pos]
+                num_slices = mm_data[modality][f"{modality}_num_slices"][b][
+                    pos]
                 slice_start_idx = mm_slice_counts[modality]
                 slice_end_idx = slice_start_idx + num_slices
                 pixel_values_flat += mm_data[modality]["pixel_values"][b][
