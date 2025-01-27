@@ -1,12 +1,12 @@
 # vLLM Engine
 
-:::{eval-rst}
+```{eval-rst}
 .. automodule:: vllm.engine
-:::
+```
 
-:::{eval-rst}
+```{eval-rst}
 .. currentmodule:: vllm.engine
-:::
+```
 
 :::{toctree}
 :caption: Engines

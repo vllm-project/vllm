@@ -11,9 +11,9 @@ Looking to add your own multi-modal model? Please follow the instructions listed
 
 ## Module Contents
 
-:::{eval-rst}
+```{eval-rst}
 .. autodata:: vllm.multimodal.MULTIMODAL_REGISTRY
-:::
+```
 
 ## Submodules
 

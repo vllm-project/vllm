@@ -1,7 +1,7 @@
 # LLMEngine
 
-:::{eval-rst}
+```{eval-rst}
 .. autoclass:: vllm.LLMEngine
     :members:
     :show-inheritance:
-:::
+```

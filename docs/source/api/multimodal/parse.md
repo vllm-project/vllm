@@ -2,8 +2,8 @@
 
 ## Module Contents
 
-:::{eval-rst}
+```{eval-rst}
 .. automodule:: vllm.multimodal.parse
     :members:
     :member-order: bysource
-:::
+```
