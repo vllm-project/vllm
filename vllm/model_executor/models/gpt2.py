@@ -258,14 +258,12 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         self.transformer = GPT2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(
                                          prefix, "transformer"))
-
-        # GPT-2 ties the weights of the embedding layer and the final
-        # linear layer.
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size,
                                       quant_config=quant_config,
                                       prefix=f"{prefix}.lm_head")
-        self.lm_head = self.lm_head.tie_weights(self.transformer.wte)
+        if self.config.tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(self.transformer.wte)
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = get_sampler()
@@ -311,15 +309,12 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-            if name.startswith("lm_head"):
-                # GPT-2 ties the weights of the embedding layer and the final
-                # linear layer.
-                continue
             if ".attn.bias" in name or ".attn.masked_bias" in name:
                 # Skip attention mask.
                 # NOTE: "c_attn.bias" should not be skipped.
                 continue
-            if not name.startswith("transformer."):
+            if not name.startswith("transformer.") and not name.startswith(
+                    "lm_head"):
                 name = "transformer." + name
 
             if is_pp_missing_parameter(name, self):
