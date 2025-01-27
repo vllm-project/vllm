@@ -133,17 +133,19 @@ def test_flashinfer_decode_with_paged_kv(
                 use_tensor_cores=(
                     (num_query_heads//num_kv_heads) > 4)
                 )
-    wrapper.begin_forward(kv_indptr,
-                          kv_indices,
-                          kv_last_page_lens,
-                          num_query_heads,
-                          num_kv_heads,
-                          head_size,
-                          block_size,
-                          "NONE",
-                          data_type=dtype)
+    wrapper.plan(kv_indptr,
+                 kv_indices,
+                 kv_last_page_lens,
+                 num_query_heads,
+                 num_kv_heads,
+                 head_size,
+                 block_size,
+                 "NONE",
+                 q_data_type=dtype,
+                 kv_data_type=dtype,
+                 logits_soft_cap=soft_cap)
 
-    output = wrapper.forward(query, key_value_cache, logits_soft_cap=soft_cap)
+    output = wrapper.run(query, key_value_cache)
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=key_cache,
