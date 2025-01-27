@@ -392,7 +392,9 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         max_slice_num = getattr(hf_config, "max_slice_num", 9)
         return max_slice_num
 
-    def get_sliced_grid(self, image_size, max_slice_num) -> Tuple[int, int]:
+    def get_sliced_grid(self, 
+                        image_size: ImageSize, 
+                        max_slice_num: int) -> Tuple[int, int]:
         if self.get_model_version() == (2, 6):
             slice_grid = self.get_image_processor().get_sliced_grid(
                 image_size, max_slice_num)
