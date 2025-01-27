@@ -962,8 +962,8 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache[:, 1],
                 attn_metadata.slot_mapping.flatten(),
                 kv_cache_dtype,
-                layer._k_scale_float,
-                layer._v_scale_float,
+                layer._k_scale,
+                layer._v_scale,
             )
             # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
             # to process the cache when the kv_cache_dtype is fp8
