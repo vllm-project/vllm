@@ -222,8 +222,7 @@ class MiniCPMOMultiModalProcessor(
 
     def _get_data_parser(self) -> MultiModalDataParser:
         return MiniCPMOMultiModalDataParser(
-            target_sr=self.info.get_default_audio_sampling_rate()
-        )
+            target_sr=self.info.get_default_audio_sampling_rate())
 
     def get_audio_prompt_texts(self,
                                audio_lens: int,

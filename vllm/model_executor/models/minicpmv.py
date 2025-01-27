@@ -991,8 +991,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         for b in range(batch_size):
             mm_counts = {"image": 0, "video": 0} if self.version == (2, 6) \
                         else {"image": 0}
-            mm_slice_counts = {"image": 0, "video": 0} if self.version == (2, 6) \
-                        else {"image": 0}
+            mm_slice_counts = {"image": 0, "video": 0} \
+                               if self.version == (2, 6) else {"image": 0}
             mm_orders_b = [(index, modality) for modality in mm_counts
                            for index in mm_orders[modality][b]]
             mm_orders_b = [
