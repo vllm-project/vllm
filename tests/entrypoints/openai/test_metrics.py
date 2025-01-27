@@ -16,6 +16,24 @@ from ...utils import RemoteOpenAIServer
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 
+@pytest.fixture(scope="module", params=[True, False])
+def use_v1(request):
+    # Module-scoped variant of run_with_both_engines
+    #
+    # Use this fixture to run a test with both v0 and v1, and
+    # also to conditionalize the test logic e.g.
+    #
+    # def test_metrics_exist(use_v1, server, client):
+    #     ...
+    #     expected = EXPECTED_V1_METRICS if use_v1 else EXPECTED_METRICS
+    #     for metric in expected:
+    #         assert metric in response.text
+    #
+    # @skip_v1 wouldn't work here because this is a module-level
+    # fixture - per-function decorators would have no effect
+    yield request.param
+
+
 @pytest.fixture(scope="module")
 def default_server_args():
     return [
@@ -36,10 +54,12 @@ def default_server_args():
                     "--enable-chunked-prefill",
                     "--disable-frontend-multiprocessing",
                 ])
-def server(default_server_args, request):
+def server(use_v1, default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+    env_dict = dict(VLLM_USE_V1='1' if use_v1 else '0')
+    with RemoteOpenAIServer(MODEL_NAME, default_server_args,
+                            env_dict=env_dict) as remote_server:
         yield remote_server
 
 
@@ -84,7 +104,9 @@ EXPECTED_VALUES = {
 
 @pytest.mark.asyncio
 async def test_metrics_counts(server: RemoteOpenAIServer,
-                              client: openai.AsyncClient):
+                              client: openai.AsyncClient, use_v1: bool):
+    if use_v1:
+        pytest.skip("Skipping test on vllm V1")
     for _ in range(_NUM_REQUESTS):
         # sending a request triggers the metrics to be logged.
         await client.completions.create(
@@ -174,10 +196,15 @@ EXPECTED_METRICS = [
     "swap_space_bytes",
 ]
 
+EXPECTED_METRICS_V1 = [
+    "vllm:num_requests_running",
+    "vllm:num_requests_waiting",
+]
+
 
 @pytest.mark.asyncio
 async def test_metrics_exist(server: RemoteOpenAIServer,
-                             client: openai.AsyncClient):
+                             client: openai.AsyncClient, use_v1: bool):
     # sending a request triggers the metrics to be logged.
     await client.completions.create(model=MODEL_NAME,
                                     prompt="Hello, my name is",
@@ -187,11 +214,13 @@ async def test_metrics_exist(server: RemoteOpenAIServer,
     response = requests.get(server.url_for("metrics"))
     assert response.status_code == HTTPStatus.OK
 
-    for metric in EXPECTED_METRICS:
+    for metric in (EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS):
         assert metric in response.text
 
 
-def test_metrics_exist_run_batch():
+def test_metrics_exist_run_batch(use_v1: bool):
+    if use_v1:
+        pytest.skip("Skipping test on vllm V1")
     input_batch = """{"custom_id": "request-0", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are a helpful assistant."}}"""  # noqa: E501
 
     base_url = "0.0.0.0"
