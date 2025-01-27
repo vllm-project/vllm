@@ -79,33 +79,6 @@ class ModelRunnerBase:
         assert self.model is not None
         return self.model
 
-    def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput:
-        raise NotImplementedError()
-
-    def load_model(self) -> None:
-        raise NotImplementedError()
-
-    def dummy_run(
-        self,
-        kv_caches,
-        num_tokens: int,
-        seq_len: Optional[int] = None,
-        exec_mode: Optional[ExecutionMode] = None,
-    ) -> torch.Tensor:
-        raise NotImplementedError()
-
-    def profile_run(self) -> None:
-        raise NotImplementedError()
-
-    def capture_model(self) -> None:
-        raise NotImplementedError()
-
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        raise NotImplementedError()
-
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
         Generates the KVCacheSpec by parsing the kv cache format from each 
@@ -140,3 +113,30 @@ class ModelRunnerBase:
                     f"Unknown attention type: {attn_module.attn_type}")
 
         return kv_cache_spec
+
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        raise NotImplementedError()
+
+    def execute_model(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> ModelRunnerOutput:
+        raise NotImplementedError()
+
+    def load_model(self) -> None:
+        raise NotImplementedError()
+
+    def dummy_run(
+        self,
+        kv_caches,
+        num_tokens: int,
+        seq_len: Optional[int] = None,
+        exec_mode: Optional[ExecutionMode] = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError()
+
+    def profile_run(self) -> None:
+        raise NotImplementedError()
+
+    def capture_model(self) -> None:
+        raise NotImplementedError()
