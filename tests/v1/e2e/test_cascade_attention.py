@@ -1,9 +1,6 @@
 from vllm import LLM, SamplingParams
 
-from ...utils import fork_new_process_for_each_test
 
-
-@fork_new_process_for_each_test
 def test_cascade_attention(example_system_message, monkeypatch):
     prompt = "\n<User>: Implement fibonacci sequence in Python.\n<Claude>:"
 
@@ -11,7 +8,7 @@ def test_cascade_attention(example_system_message, monkeypatch):
         m.setenv("VLLM_USE_V1", "1")
 
         llm = LLM(model="Qwen/Qwen2-1.5B-Instruct")
-        sampling_params = SamplingParams(temperature=0.0, max_tokens=20)
+        sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
 
         # No cascade attention.
         single_prompt = [example_system_message + prompt]
