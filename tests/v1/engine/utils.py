@@ -309,10 +309,8 @@ class MockEngineCore:
                     new_logprobs=logprobs,
                     new_logprobs_token_ids=logprobs_token_ids,
                     new_prompt_logprobs=prompt_logprobs,
-                    new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
-                    finished=False)
+                    new_prompt_logprobs_token_ids=prompt_logprobs_token_ids)
                 if token_idx == len(token_ids) - 1:
-                    output.finished = True
                     output.finish_reason = "stopped"
                 outputs.append(output)
 

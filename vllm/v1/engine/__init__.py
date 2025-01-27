@@ -43,13 +43,16 @@ class EngineCoreOutput(
 
     request_id: str
     new_token_ids: List[int]
-    finished: bool
     new_logprobs: List[torch.Tensor] = []
     new_logprobs_token_ids: List[torch.Tensor] = []
     new_prompt_logprobs: Optional[torch.Tensor] = None
     new_prompt_logprobs_token_ids: Optional[torch.Tensor] = None
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
+
+    @property
+    def finished(self) -> bool:
+        return bool(self.finish_reason)
 
 
 class EngineCoreOutputs(
