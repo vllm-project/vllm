@@ -392,8 +392,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         max_slice_num = getattr(hf_config, "max_slice_num", 9)
         return max_slice_num
 
-    def get_sliced_grid(self, 
-                        image_size: ImageSize, 
+    def get_sliced_grid(self, image_size: ImageSize,
                         max_slice_num: int) -> Tuple[int, int]:
         if self.get_model_version() == (2, 6):
             slice_grid = self.get_image_processor().get_sliced_grid(
@@ -530,8 +529,7 @@ class MiniCPMVMultiModalProcessor(
                 image_size=image_size,
                 image_idx=0,
                 max_slice_nums=self.info.get_video_max_slice_num(),
-                use_image_id=False) for image_idx in range(num_frames)
-        )
+                use_image_id=False) for image_idx in range(num_frames))
         return prompt_texts
 
     def get_special_tokens(self) -> Dict[str, torch.Tensor]:
