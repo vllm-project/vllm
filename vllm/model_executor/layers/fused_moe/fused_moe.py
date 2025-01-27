@@ -497,7 +497,10 @@ def grouped_topk(hidden_states: torch.Tensor,
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
     if e_score_correction_bias is not None:
-        scores.add_(e_score_correction_bias.unsqueeze(0))
+        # Store original scores before applying correction bias. We use biased
+        # scores for expert selection but original scores for routing weights
+        original_scores = scores
+        scores = scores + e_score_correction_bias.unsqueeze(0)
 
     num_token = scores.shape[0]
     group_scores = scores.view(num_token, num_expert_group,
@@ -510,10 +513,16 @@ def grouped_topk(hidden_states: torch.Tensor,
         num_token, num_expert_group,
         scores.shape[-1] // num_expert_group).reshape(num_token, -1)  # [n, e]
     tmp_scores = scores.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
-    topk_weights, topk_ids = torch.topk(tmp_scores,
-                                        k=topk,
-                                        dim=-1,
-                                        sorted=False)
+
+    if e_score_correction_bias is not None:
+        topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=False)[1]
+        # Use original unbiased scores for the routing weights
+        topk_weights = original_scores.gather(1, topk_ids)
+    else:
+        topk_weights, topk_ids = torch.topk(tmp_scores,
+                                            k=topk,
+                                            dim=-1,
+                                            sorted=False)
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
@@ -701,8 +710,14 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
 
-    compute_type = (tl.bfloat16
-                    if hidden_states.dtype == torch.bfloat16 else tl.float16)
+    if hidden_states.dtype == torch.bfloat16:
+        compute_type = tl.bfloat16
+    elif hidden_states.dtype == torch.float16:
+        compute_type = tl.float16
+    elif hidden_states.dtype == torch.float32:
+        compute_type = tl.float32
+    else:
+        raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
     if inplace:
         out_hidden_states = hidden_states
@@ -753,7 +768,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_int8_w8a16=use_int8_w8a16,
                                 block_shape=block_shape)
 
-        ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+        torch.ops._C.silu_and_mul(intermediate_cache2,
+                                  intermediate_cache1.view(-1, N))
 
         invoke_fused_moe_kernel(intermediate_cache2,
                                 w2,

@@ -19,13 +19,21 @@ class TpuPlatform(Platform):
     device_name: str = "tpu"
     device_type: str = "tpu"
     dispatch_key: str = "XLA"
-    supported_quantization: list[str] = ["tpu_int8"]
+    ray_device_key: str = "TPU"
+    device_control_env_var: str = "TPU_VISIBLE_CHIPS"
+
+    supported_quantization: list[str] = [
+        "tpu_int8", "compressed-tensors", "compressed_tensors"
+    ]
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool) -> str:
         if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
-        return _Backend.PALLAS
+        logger.info("Using Pallas backend.")
+        return "vllm.attention.backends.pallas.PallasAttentionBackend"
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -63,6 +71,16 @@ class TpuPlatform(Platform):
 
         assert vllm_config.speculative_config is None, \
             "TPU does not support speculative decoding"
+
+        assert not vllm_config.scheduler_config.chunked_prefill_enabled, (
+            "Chunked prefill is not yet supported for TPU backend")
+        assert not vllm_config.speculative_config, (
+            "Speculative decoding is not yet supported for TPU backend")
+        if vllm_config.model_config.dtype in (torch.float16, torch.float32):
+            logger.warning(
+                "The TPU backend currently does not support %s. "
+                "Using bfloat16 instead.", vllm_config.model_config.dtype)
+            vllm_config.model_config.dtype = torch.bfloat16
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config

@@ -4,6 +4,7 @@ from functools import cached_property
 from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 import torch
+import torch.nn as nn
 
 from vllm.config import ParallelConfig, SpeculativeConfig, VllmConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
@@ -40,8 +41,8 @@ from vllm.spec_decode.util import (Timer, create_logprobs_output,
                                    get_all_num_logprobs,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
-from vllm.worker.worker_base import (LoraNotSupportedWorkerBase, WorkerBase,
-                                     WorkerWrapperBase)
+from vllm.utils import resolve_obj_by_qualname
+from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
 logger = init_logger(__name__)
 
@@ -64,8 +65,9 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     target_worker_config = copy.deepcopy(vllm_config)
     target_worker_config.parallel_config.worker_cls =\
         target_worker_config.parallel_config.sd_worker_cls
-    target_worker = WorkerWrapperBase(vllm_config=target_worker_config)
-    target_worker.init_worker(*args, **kwargs)
+    cls = resolve_obj_by_qualname(
+        target_worker_config.parallel_config.worker_cls)
+    target_worker = cls(*args, **kwargs)
     # Set the disable_logprobs variable in the TargetModelRunner instance
     # as per its value specified in the SpeculativeConfig.
     target_worker.model_runner.disable_logprobs =\
@@ -108,7 +110,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     return spec_decode_worker
 
 
-# Reminder: Please update docs/source/usage/compatibility_matrix.md
+# Reminder: Please update docs/source/features/compatibility_matrix.md
 # If the feature combo become valid
 class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     """Worker which implements speculative decoding.
@@ -401,6 +403,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                             num_cpu_blocks=num_cpu_blocks)
         self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                               num_cpu_blocks=num_cpu_blocks)
+
+    def get_model(self) -> nn.Module:
+        return self.scorer_worker.get_model()
 
     @torch.inference_mode()
     def execute_model(

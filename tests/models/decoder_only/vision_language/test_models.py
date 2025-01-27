@@ -9,7 +9,7 @@ from typing import Type
 
 import pytest
 from transformers import AutoModelForVision2Seq
-from transformers.utils import is_flash_attn_2_available
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
@@ -139,9 +139,7 @@ VLM_TEST_SETTINGS = {
     #### Extended model tests
     "aria": VLMTestInfo(
         models=["rhymes-ai/Aria"],
-        tokenizer_mode="slow",
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        dtype="bfloat16",
         prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
         img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
         max_model_len=4096,
@@ -157,8 +155,8 @@ VLM_TEST_SETTINGS = {
         max_tokens=64,
         marks=[
             pytest.mark.skipif(
-                not is_flash_attn_2_available(),
-                reason="Model needs flash-attn for numeric convergence.",
+                TRANSFORMERS_VERSION < "4.48.0",
+                reason="HF model requires transformers>=4.48.0",
             ),
             large_gpu_mark(min_gb=64),
         ],
@@ -187,6 +185,30 @@ VLM_TEST_SETTINGS = {
         comparator=check_outputs_equal,
         max_tokens=8,
         dtype="bfloat16",
+    ),
+    "deepseek_vl_v2": VLMTestInfo(
+        models=["Isotr0py/deepseek-vl2-tiny"], # model repo using dynamic module
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|User|>: {img_prompt}\n\n<|Assistant|>: ", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<image>\nWhat's the content in the center of the image?", # noqa: E501
+            "cherry_blossom": "<image>\nPlease infer the season with reason in details.",   # noqa: E501
+        }),
+        multi_image_prompt="image_1:<image>\nimage_2:<image>\nWhich image can we see the car and the tower?",    # noqa: E501
+        vllm_runner_kwargs={"hf_overrides": {"architectures": ["DeepseekVLV2ForCausalLM"]}},  # noqa: E501
+        patch_hf_runner=model_utils.deepseekvl2_patch_hf_runner,
+        postprocess_inputs=model_utils.cast_dtype_post_processor("images"),
+        hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
+        stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],  # noqa: E501
+        image_size_factors=[(), (1.0, ), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
+        marks=[
+            pytest.mark.skipif(
+                TRANSFORMERS_VERSION >= "4.48.0",
+                reason="HF model is not compatible with transformers>=4.48.0",
+            )
+        ],
     ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
@@ -274,10 +296,8 @@ VLM_TEST_SETTINGS = {
             ),
             limit_mm_per_prompt={"image": 4},
         )],
-        # Llava-next tests fixed sizes & the default size factors
-        image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
     ),
-    "llava_one_vision": VLMTestInfo(
+    "llava_onevision": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
         test_type=VLMTestType.CUSTOM_INPUTS,
         prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
@@ -288,8 +308,6 @@ VLM_TEST_SETTINGS = {
         ),
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
-        # Llava-one-vision tests fixed sizes & the default size factors
-        image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
         custom_test_opts=[CustomTestOptions(
             inputs=custom_inputs.multi_video_multi_aspect_ratio_inputs(
                 formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
@@ -306,7 +324,6 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
-        image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
     ),
     "mantis": VLMTestInfo(
         models=["TIGER-Lab/Mantis-8B-siglip-llama3"],
@@ -345,6 +362,16 @@ VLM_TEST_SETTINGS = {
             "image_sizes"
         ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
+    ),
+    "molmo": VLMTestInfo(
+        models=["allenai/Molmo-7B-D-0924"],
+        test_type=(VLMTestType.IMAGE),
+        prompt_formatter=lambda img_prompt:"User: " + img_prompt + " Assistant:", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        image_size_factors=[(),(1.0, 1.0, 1.0)],
+        patch_hf_runner=model_utils.mlomo_patch_hf_runner,
+        postprocess_inputs=model_utils.molmo_post_processor,
     ),
     # Tests for phi3v currently live in another file because of a bug in
     # transformers. Once this issue is fixed, we can enable them here instead.
@@ -431,7 +458,7 @@ VLM_TEST_SETTINGS = {
             ) for inp in custom_inputs.different_patch_input_cases_internvl()
         ],
     ),
-    "llava_one_vision-multiple-images": VLMTestInfo(
+    "llava_onevision-multiple-images": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=16384,

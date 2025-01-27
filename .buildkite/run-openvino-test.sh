@@ -13,4 +13,4 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image and launch offline inference
-docker run --network host --env VLLM_OPENVINO_KVCACHE_SPACE=1 --name openvino-test openvino-test python3 /workspace/examples/offline_inference.py
+docker run --network host --env VLLM_OPENVINO_KVCACHE_SPACE=1 --name openvino-test openvino-test python3 /workspace/examples/offline_inference/basic.py

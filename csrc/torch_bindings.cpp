@@ -30,7 +30,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor value_cache, int num_kv_heads, float scale,"
       "    Tensor block_tables, Tensor seq_lens, int block_size,"
       "    int max_seq_len, Tensor? alibi_slopes,"
-      "    str kv_cache_dtype, float k_scale, float v_scale,"
+      "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
       "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
       "    int blocksparse_head_sliding_step) -> ()");
@@ -44,7 +44,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor value_cache, int num_kv_heads, float scale,"
       "    Tensor block_tables, Tensor seq_lens, int block_size,"
       "    int max_seq_len, Tensor? alibi_slopes,"
-      "    str kv_cache_dtype, float k_scale, float v_scale,"
+      "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
       "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
       "    int blocksparse_head_sliding_step) -> ()");
@@ -58,6 +58,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
+
+  ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
+  ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);
+
   // Activation function used in GeGLU with `none` approximation.
   ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_and_mul", torch::kCUDA, &gelu_and_mul);
@@ -449,7 +453,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                  Tensor! key_cache, Tensor! value_cache,"
       "                  Tensor slot_mapping,"
       "                  str kv_cache_dtype,"
-      "                  float k_scale, float v_scale) -> ()");
+      "                  Tensor k_scale, Tensor v_scale) -> ()");
   cache_ops.impl("reshape_and_cache", torch::kCUDA, &reshape_and_cache);
 
   // Reshape the key and value tensors and cache them.
@@ -459,7 +463,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                        Tensor! value_cache,"
       "                        Tensor slot_mapping,"
       "                        str kv_cache_dtype,"
-      "                        float k_scale, float v_scale) -> ()");
+      "                        Tensor k_scale, Tensor v_scale) -> ()");
   cache_ops.impl("reshape_and_cache_flash", torch::kCUDA,
                  &reshape_and_cache_flash);
 

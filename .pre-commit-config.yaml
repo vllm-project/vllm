@@ -1,0 +1,92 @@
+default_stages:
+  - pre-commit # Run locally
+  - manual # Run in CI
+repos:
+- repo: https://github.com/google/yapf
+  rev: v0.32.0
+  hooks:
+  - id: yapf
+    args: [--in-place, --verbose]
+    additional_dependencies: [toml] # TODO: Remove when yapf is upgraded
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.6.5
+  hooks:
+  - id: ruff
+    args: [--output-format, github]
+- repo: https://github.com/codespell-project/codespell
+  rev: v2.3.0
+  hooks:
+  - id: codespell
+    exclude: 'benchmarks/sonnet.txt|(build|tests/(lora/data|models/fixtures|prompts))/.*'
+- repo: https://github.com/PyCQA/isort
+  rev: 5.13.2
+  hooks:
+  - id: isort
+- repo: https://github.com/pre-commit/mirrors-clang-format
+  rev: v18.1.5
+  hooks:
+  - id: clang-format
+    exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))'
+    types_or: [c++, cuda]
+    args: [--style=file, --verbose]
+- repo: https://github.com/jackdewinter/pymarkdown
+  rev: v0.9.27
+  hooks:
+  - id: pymarkdown
+    files: docs/.*
+- repo: https://github.com/rhysd/actionlint
+  rev: v1.7.6
+  hooks:
+  - id: actionlint
+- repo: local
+  hooks:
+  - id: mypy-local
+    name: Run mypy for local Python installation
+    entry: tools/mypy.sh 0 "local"
+    language: python
+    types: [python]
+    additional_dependencies: &mypy_deps [mypy==1.11.1, types-setuptools, types-PyYAML, types-requests]
+    stages: [pre-commit] # Don't run in CI
+  - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.9
+    entry: tools/mypy.sh 1 "3.9"
+    language: python
+    types: [python]
+    additional_dependencies: *mypy_deps
+    stages: [manual] # Only run in CI
+  - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.10
+    entry: tools/mypy.sh 1 "3.10"
+    language: python
+    types: [python]
+    additional_dependencies: *mypy_deps
+    stages: [manual] # Only run in CI
+  - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.11
+    entry: tools/mypy.sh 1 "3.11"
+    language: python
+    types: [python]
+    additional_dependencies: *mypy_deps
+    stages: [manual] # Only run in CI
+  - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.12
+    entry: tools/mypy.sh 1 "3.12"
+    language: python
+    types: [python]
+    additional_dependencies: *mypy_deps
+    stages: [manual] # Only run in CI
+  - id: shellcheck
+    name: Lint shell scripts
+    entry: tools/shellcheck.sh
+    language: script
+    types: [shell]
+  - id: png-lint
+    name: Lint PNG exports from excalidraw
+    entry: tools/png-lint.sh
+    language: script
+    types: [png]
+  - id: suggestion
+    name: Suggestion
+    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
+    language: system
+    verbose: true

@@ -175,7 +175,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         } if self.has_inner_state else {}
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-        with set_forward_context(model_input.attn_metadata, self.vllm_config):
+        with set_forward_context(model_input.attn_metadata, self.vllm_config,
+                                 model_input.virtual_engine):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -287,12 +288,11 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                                           seq_len,
                                           self.mm_registry,
                                           is_encoder_data=False)
-            encoder_dummy_data \
-                = self.input_registry.dummy_data_for_profiling(
-                    self.model_config,
-                                         seq_len,
-                                         self.mm_registry,
-                                         is_encoder_data=True)
+            encoder_dummy_data = self.input_registry \
+                .dummy_data_for_profiling(self.model_config,
+                                          seq_len,
+                                          self.mm_registry,
+                                          is_encoder_data=True)
 
             # Having more tokens is over-conservative but otherwise fine
             assert len(

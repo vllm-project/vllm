@@ -14,30 +14,53 @@ As shown in the [Compatibility Matrix](#compatibility-matrix), most vLLM feature
 pooling models as they only work on the generation or decode stage, so performance may not improve as much.
 ```
 
+For pooling models, we support the following `--task` options.
+The selected option sets the default pooler used to extract the final hidden states:
+
+```{list-table}
+:widths: 50 25 25 25
+:header-rows: 1
+
+* - Task
+  - Pooling Type
+  - Normalization
+  - Softmax
+* - Embedding (`embed`)
+  - `LAST`
+  - ✅︎
+  - ✗
+* - Classification (`classify`)
+  - `LAST`
+  - ✗
+  - ✅︎
+* - Sentence Pair Scoring (`score`)
+  - \*
+  - \*
+  - \*
+* - Reward Modeling (`reward`)
+  - `ALL`
+  - ✗
+  - ✗
+```
+
+\*The default pooler is always defined by the model.
+
+```{note}
+If the model's implementation in vLLM defines its own pooler, the default pooler is set to that instead of the one specified in this table.
+```
+
+When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
+we attempt to override the default pooler based on its Sentence Transformers configuration file (`modules.json`).
+
+```{tip}
+You can customize the model's pooling method via the `--override-pooler-config` option,
+which takes priority over both the model's and Sentence Transformers's defaults.
+```
+
 ## Offline Inference
 
 The {class}`~vllm.LLM` class provides various methods for offline inference.
 See [Engine Arguments](#engine-args) for a list of options when initializing the model.
-
-For pooling models, we support the following {code}`task` options:
-
-- Embedding ({code}`"embed"` / {code}`"embedding"`)
-- Classification ({code}`"classify"`)
-- Sentence Pair Scoring ({code}`"score"`)
-- Reward Modeling ({code}`"reward"`)
-
-The selected task determines the default {class}`~vllm.model_executor.layers.Pooler` that is used:
-
-- Embedding: Extract only the hidden states corresponding to the last token, and apply normalization.
-- Classification: Extract only the hidden states corresponding to the last token, and apply softmax.
-- Sentence Pair Scoring: Extract only the hidden states corresponding to the last token, and apply softmax.
-- Reward Modeling: Extract all of the hidden states and return them directly.
-
-When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
-we attempt to override the default pooler based on its Sentence Transformers configuration file ({code}`modules.json`).
-
-You can customize the model's pooling method via the {code}`override_pooler_config` option,
-which takes priority over both the model's and Sentence Transformers's defaults.
 
 ### `LLM.encode`
 
@@ -65,7 +88,7 @@ embeds = output.outputs.embedding
 print(f"Embeddings: {embeds!r} (size={len(embeds)})")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference_embedding.py>
+A code example can be found here: <gh-file:examples/offline_inference/embedding.py>
 
 ### `LLM.classify`
 
@@ -80,7 +103,7 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference_classification.py>
+A code example can be found here: <gh-file:examples/offline_inference/classification.py>
 
 ### `LLM.score`
 
@@ -102,11 +125,11 @@ score = output.outputs.score
 print(f"Score: {score}")
 ```
 
-A code example can be found here: <gh-file:examples/offline_inference_scoring.py>
+A code example can be found here: <gh-file:examples/offline_inference/scoring.py>
 
-## Online Inference
+## Online Serving
 
-Our [OpenAI Compatible Server](../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
+Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints that correspond to the offline APIs:
 
 - [Pooling API](#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
 - [Embeddings API](#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](#multimodal-inputs) for embedding models.
