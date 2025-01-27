@@ -65,11 +65,6 @@ class AttentionBackend(ABC):
     def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
         raise NotImplementedError
 
-    @classmethod
-    def make_metadata_builder(cls, *args,
-                              **kwargs) -> "AttentionMetadataBuilder":
-        return cls.get_builder_cls()(*args, **kwargs)
-
     @staticmethod
     @abstractmethod
     def get_kv_cache_shape(
@@ -218,6 +213,12 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
 
     @abstractmethod
     def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
+        """Create the builder, remember some configuration and parameters."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare(self) -> None:
+        """Prepare for one batch."""
         raise NotImplementedError
 
     @abstractmethod
@@ -231,6 +232,8 @@ class AttentionLayer(Protocol):
 
     _k_scale: torch.Tensor
     _v_scale: torch.Tensor
+    _k_scale_float: torch.Tensor
+    _v_scale_float: torch.Tensor
     _q_scale: torch.Tensor
     _prob_scale: torch.Tensor
 

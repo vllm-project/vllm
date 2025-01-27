@@ -79,6 +79,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         # These are used in the final Attention.forward()
         layer._k_scale.copy_(k_scale)
         layer._v_scale.copy_(v_scale)
+        layer._k_scale_float = k_scale
+        layer._v_scale_float = v_scale
         if (k_scale == 1.0 and v_scale == 1.0
                 and (layer.kv_cache_dtype != "auto"
                      or envs.VLLM_USE_ROCM_FP8_FLASH_ATTN)

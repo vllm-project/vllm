@@ -165,8 +165,6 @@ class Fp8LinearMethod(LinearMethodBase):
         if current_platform.is_rocm():
             self.use_marlin = False
 
-        self.default_scale = torch.finfo(torch.float32).min
-
         self.block_quant = self.quant_config.weight_block_size is not None
         if self.block_quant:
             # Marlin doesn't support block-wise fp8
@@ -218,9 +216,8 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.output_size_per_partition = output_size_per_partition
         layer.orig_dtype = params_dtype
 
-        fp8_dtype = torch.float8_e4m3fn
         # WEIGHT
-        weight_dtype = (fp8_dtype
+        weight_dtype = (torch.float8_e4m3fn
                         if self.quant_config.is_checkpoint_fp8_serialized else
                         params_dtype)
 
@@ -243,7 +240,7 @@ class Fp8LinearMethod(LinearMethodBase):
                                      dtype=torch.float32),
                     weight_loader=weight_loader,
                 )
-                scale[:] = self.default_scale
+                scale[:] = torch.finfo(torch.float32).min
                 layer.register_parameter("weight_scale", scale)
             else:
                 assert self.quant_config.activation_scheme == "dynamic"
@@ -257,7 +254,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     output_dim=0,
                     weight_loader=weight_loader,
                 )
-                scale[:] = self.default_scale
+                scale[:] = torch.finfo(torch.float32).min
                 # The weight_scale_inv name is intentional for deepseekv3
                 layer.register_parameter("weight_scale_inv", scale)
 
@@ -267,7 +264,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     len(output_partition_sizes), dtype=torch.float32),
                                                 weight_loader=weight_loader)
 
-                scale[:] = self.default_scale
+                scale[:] = torch.finfo(torch.float32).min
                 layer.register_parameter("input_scale", scale)
             else:
                 layer.register_parameter("input_scale", None)
@@ -308,13 +305,13 @@ class Fp8LinearMethod(LinearMethodBase):
         # If checkpoint is fp8, handle that there are N scales for N
         # shards in a fused module
         else:
-            layer.weight_scale.data[layer.weight_scale.data ==
-                                    self.default_scale] = 1
+            layer.weight_scale.data[layer.weight_scale.data == torch.finfo(
+                torch.float32).min] = 1
             layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
                                                     requires_grad=False)
             if self.quant_config.activation_scheme == "static":
-                layer.input_scale.data[layer.input_scale.data ==
-                                       self.default_scale] = 1
+                layer.input_scale.data[layer.input_scale.data == torch.finfo(
+                    torch.float32).min] = 1
                 layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
                                                        requires_grad=False)
             # If using marlin (w8a16), kernel uses channelwise weights,
@@ -427,8 +424,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.block_quant = self.quant_config.weight_block_size is not None
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
-                       intermediate_size: int, params_dtype: torch.dtype,
-                       **extra_weight_attrs):
+                       intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
 
         if self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
@@ -443,30 +440,34 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # scales, the output_size of the weights for both the gate and up
             # layers must be divisible by block_n.
             # Required by column parallel or enabling merged weights
-            if intermediate_size % block_n != 0:
+            if intermediate_size_per_partition % block_n != 0:
                 raise ValueError(
                     f"The output_size of gate's and up's weight = "
-                    f"{intermediate_size} is not divisible by "
+                    f"{intermediate_size_per_partition} is not divisible by "
                     f"weight quantization block_n = {block_n}.")
-            if (tp_size > 1 and intermediate_size % block_k != 0):
+            if (tp_size > 1
+                    and intermediate_size_per_partition % block_k != 0):
                 # Required by row parallel
-                raise ValueError(f"The input_size of down's weight = "
-                                 f"{intermediate_size} is not divisible by "
-                                 f"weight quantization block_k = {block_k}.")
+                raise ValueError(
+                    f"The input_size of down's weight = "
+                    f"{intermediate_size_per_partition} is not divisible by "
+                    f"weight quantization block_k = {block_k}.")
 
         # WEIGHTS
-        w13_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                    2 * intermediate_size,
-                                                    hidden_size,
-                                                    dtype=params_dtype),
+        w13_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_size,
+            dtype=params_dtype),
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
-        w2_weight = torch.nn.Parameter(torch.empty(num_experts,
-                                                   hidden_size,
-                                                   intermediate_size,
-                                                   dtype=params_dtype),
+        w2_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            dtype=params_dtype),
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
@@ -487,7 +488,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w13_weight_scale = torch.nn.Parameter(
                 torch.ones(
                     num_experts,
-                    2 * ((intermediate_size + block_n - 1) // block_n),
+                    2 * ((intermediate_size_per_partition + block_n - 1) //
+                         block_n),
                     (hidden_size + block_k - 1) // block_k,
                     dtype=torch.float32,
                 ),
@@ -497,7 +499,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 torch.ones(
                     num_experts,
                     (hidden_size + block_n - 1) // block_n,
-                    (intermediate_size + block_k - 1) // block_k,
+                    (intermediate_size_per_partition + block_k - 1) // block_k,
                     dtype=torch.float32,
                 ),
                 requires_grad=False,
