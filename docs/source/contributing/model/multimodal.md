@@ -120,8 +120,8 @@ When calling the model, the output embeddings from the visual encoder are assign
 containing placeholder feature tokens. Therefore, the number of placeholder feature tokens should be equal
 to the size of the output embeddings.
 
-::::{tab-set}
-:::{tab-item} Basic example: LLaVA
+:::::{tab-set}
+::::{tab-item} Basic example: LLaVA
 :sync: llava
 
 Looking at the code of HF's `LlavaForConditionalGeneration`:
@@ -258,8 +258,8 @@ def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
 Our [actual code](gh-file:vllm/model_executor/models/llava.py) is more abstracted to support vision encoders other than CLIP.
 :::
 
-:::
 ::::
+:::::
 
 ## 3. Specify dummy inputs
 
@@ -324,8 +324,8 @@ to fill in the missing details about HF processing.
 Override {class}`~vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config` to
 return a schema of the tensors outputted by the HF processor that are related to the input multi-modal items.
 
-::::{tab-set}
-:::{tab-item} Basic example: LLaVA
+:::::{tab-set}
+::::{tab-item} Basic example: LLaVA
 :sync: llava
 
 Looking at the model's `forward` method:
@@ -372,8 +372,8 @@ Our [actual code](gh-file:vllm/model_executor/models/llava.py) additionally supp
 pre-computed image embeddings, which can be passed to be model via the `image_embeds` argument.
 :::
 
-:::
 ::::
+:::::
 
 ### Prompt replacements
 
