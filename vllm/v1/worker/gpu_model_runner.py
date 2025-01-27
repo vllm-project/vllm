@@ -171,7 +171,8 @@ class GPUModelRunner:
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
         self.arange_np = np.arange(max(self.max_num_reqs + 1,
-                                       self.max_model_len),
+                                       self.max_model_len,
+                                       self.max_num_tokens),
                                    dtype=np.int32)
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
@@ -358,8 +359,15 @@ class GPUModelRunner:
 
         # Get batched arange.
         # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        arange = np.concatenate(
-            [self.arange_np[:n] for n in num_scheduled_tokens])
+        # Equivalent to but faster than:
+        # np.concatenate([np.arange(n) for n in num_scheduled_tokens])
+        # Step 1. [2, 5, 3] -> [2, 7, 10]
+        cu_num_tokens = np.cumsum(num_scheduled_tokens)
+        # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
+        cumsums_offsets = np.repeat(cu_num_tokens - num_scheduled_tokens,
+                                    num_scheduled_tokens)
+        # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
 
         # Get positions.
         positions_np = self.positions_np[:total_num_scheduled_tokens]
@@ -406,8 +414,7 @@ class GPUModelRunner:
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
-        np.cumsum(num_scheduled_tokens,
-                  out=self.query_start_loc_np[1:num_reqs + 1])
+        self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
 
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
