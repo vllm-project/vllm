@@ -180,10 +180,10 @@ def test_engine_core_advanced_sampling(monkeypatch):
         _check_engine_state()
 
         # Second request.
-        request: EngineCoreRequest = make_request()
-        request.sampling_params = SamplingParams(
+        request2 = make_request()
+        request2.sampling_params = SamplingParams(
             top_p=0.99,
             top_k=50,
         )
-        engine_core.add_request(request)
+        engine_core.add_request(request2)
         _check_engine_state()
