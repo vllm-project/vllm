@@ -49,10 +49,10 @@ class OpenAIBaseModel(BaseModel):
     @classmethod
     def __log_extra_fields__(cls, data, handler):
         result = handler(data)
+        if not isinstance(data, dict):
+            return result
         field_names = cls.field_names
         if field_names is None:
-            if not isinstance(data, dict):
-                return result
             # Get all class field names and their potential aliases
             field_names = set()
             for field_name, field in cls.model_fields.items():
