@@ -97,7 +97,7 @@ COPY --from=export_vllm /tests ${COMMON_WORKDIR}/vllm/tests
 COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
 COPY --from=export_vllm /.buildkite ${COMMON_WORKDIR}/vllm/.buildkite
 
-COPY aiter /app/
+COPY aiter /app/aiter/
 
 RUN cd /app/aiter && pip install -r requirements.txt && PREBUILD_KERNELS=1 python3 setup.py develop
 
