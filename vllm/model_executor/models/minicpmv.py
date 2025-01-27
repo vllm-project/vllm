@@ -704,7 +704,6 @@ class MiniCPMVMultiModalProcessor(
     ) -> BatchFeature:
         # Do not support combination inputs of images and videos for now
         # Try to handle interleaved multimodal data
-
         tokenizer = self.info.get_tokenizer()
         inputs = self.process_mm_inputs(mm_data, mm_kwargs)
         mm_input_modalities = self.get_input_modalities(inputs)

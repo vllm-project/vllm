@@ -262,12 +262,16 @@ class MiniCPMOMultiModalProcessor(
                     mm_kwargs=mm_kwargs)
                 audio_outputs["audio_lens"].append(len(audio))
                 audio_outputs["audio_features"].append(
-                    single_audio_outputs["audio_features"][0])
+                    single_audio_outputs["audio_features"])
                 audio_outputs["audio_num_segments"].append(
                     len(single_audio_outputs["audio_feature_lens"][0]))
                 audio_outputs["audio_feature_lens"] += \
                     single_audio_outputs["audio_feature_lens"]
-
+            audio_outputs["audio_features"] = [
+                audio_feature for single_audio_features in \
+                    audio_outputs["audio_features"]
+                for audio_feature in single_audio_features
+            ]
             audio_outputs["audio_feature_lens"] = torch.cat(
                 audio_outputs["audio_feature_lens"])
         elif len(audio_embeds):
@@ -741,7 +745,14 @@ class MiniCPMO(MiniCPMV2_6):
                 data=audio_embeds,
                 type="audio_embeds")
         if len(audio_features) > 0:
-            audio_features = torch.cat([item for item in audio_features])
+            audio_features_all = [
+                i.permute(1, 0)
+                for audio_feature in audio_features
+                for i in audio_feature
+            ]
+            audio_features = torch.nn.utils.rnn.pad_sequence(
+                audio_features_all, batch_first=True, padding_value=0.0
+            ).permute(0, 2, 1)
             audio_feature_lens = torch.cat(
                 [item for item in audio_feature_lens])
 
