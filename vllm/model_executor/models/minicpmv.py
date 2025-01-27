@@ -523,13 +523,13 @@ class MiniCPMVMultiModalProcessor(
 
     def get_video_prompt_texts(self, image_size: ImageSize,
                                num_frames: int) -> str:
-        prompt_texts = "".join([
+        prompt_texts = "".join(
             self.get_slice_image_placeholder(
                 image_size=image_size,
                 image_idx=0,
                 max_slice_nums=self.info.get_video_max_slice_num(),
                 use_image_id=False) for image_idx in range(num_frames)
-        ])
+        )
         return prompt_texts
 
     def get_special_tokens(self) -> Dict[str, torch.Tensor]:
