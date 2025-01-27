@@ -3,6 +3,7 @@ import triton
 import triton.language as tl
 
 from vllm.utils import direct_register_custom_op
+
 from .utils import get_lora_op_configs
 
 
@@ -118,13 +119,12 @@ def _bgmv_embed(
     )
     return embeddings
 
+
 try:
-    direct_register_custom_op(
-        op_name="bgmv_embed",
-        op_func=_bgmv_embed,
-        mutates_args=[],
-        fake_impl=None
-    )
+    direct_register_custom_op(op_name="bgmv_embed",
+                              op_func=_bgmv_embed,
+                              mutates_args=[],
+                              fake_impl=None)
     bgmv_embed = torch.ops.vllm.bgmv_embed
 
 except AttributeError:

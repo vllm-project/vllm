@@ -101,7 +101,7 @@ class LoRALayerWeights:
                                  device=device,
                                  pin_memory=pin_memory)
             embeddings_tensor = None
-            bias=None
+            bias = None
         else:
             lora_a = torch.zeros([input_dim, rank],
                                  dtype=dtype,

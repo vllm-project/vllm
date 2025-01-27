@@ -50,7 +50,8 @@ def main(args: argparse.Namespace):
         if not args.use_beam_search:
             llm.generate(dummy_prompts,
                          sampling_params=sampling_params,
-                         use_tqdm=False)
+                         use_tqdm=False,
+                         lora_request=lora_request)
         else:
             llm.beam_search(
                 dummy_prompts,

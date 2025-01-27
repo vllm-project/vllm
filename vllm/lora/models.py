@@ -18,14 +18,13 @@ from vllm.config import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA,
                               LinearScalingRotaryEmbeddingWithLora,
-                              LoRAMapping)
+                              LoRAMapping, ModulesToSaveWrapper)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
-from vllm.lora.layers import ModulesToSaveWrapper
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
@@ -559,7 +558,7 @@ class LoRAModelManager(AdapterModelManager):
                                                      "embedding_dim") else
                                              module.base_layer.weight.shape[1])
                     if isinstance(module, ModulesToSaveWrapper):
-                        lora=LoRALayerWeights.create_dummy_lora_weights(
+                        lora = LoRALayerWeights.create_dummy_lora_weights(
                             module_name,
                             input_dim,
                             output_dim,
