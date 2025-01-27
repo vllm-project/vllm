@@ -996,11 +996,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                                if self.version == (2, 6) else {"image": 0}
             mm_orders_b = [(index, modality) for modality in mm_counts
                            for index in mm_orders[modality][b]]
-            mm_orders_b = [
-                modality
-                for (_, modality) in sorted(mm_orders_b, key=lambda x: x[0])
-            ]
-            for modality in mm_orders_b:
+            for _, modality in sorted(mm_orders_b, key=lambda x: x[0]):
                 pos = mm_counts[modality]
                 num_slices = mm_data[modality][f"{modality}_num_slices"][b][
                     pos]
