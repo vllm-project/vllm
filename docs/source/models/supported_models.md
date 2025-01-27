@@ -17,7 +17,7 @@ By default, vLLM loads models from [HuggingFace (HF) Hub](https://huggingface.co
 To determine whether a given model is supported, you can check the `config.json` file inside the HF repository.
 If the `"architectures"` field contains a model architecture listed below, then it should be supported in theory.
 
-````{tip}
+:::{tip}
 The easiest way to check if your model is really supported at runtime is to run the program below:
 
 ```python
@@ -35,7 +35,7 @@ print(output)
 ```
 
 If vLLM successfully returns text (for generative models) or hidden states (for pooling models), it indicates that your model is supported.
-````
+:::
 
 Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
@@ -72,10 +72,11 @@ See [this page](#generative-models) for more information on how to use generativ
 
 #### Text Generation (`--task generate`)
 
-```{list-table}
+:::{list-table}
 :widths: 25 25 50 5 5
 :header-rows: 1
 
+<!--- pyml disable-num-lines 285 ul-style-->
 * - Architecture
   - Models
   - Example HF Models
@@ -361,27 +362,28 @@ See [this page](#generative-models) for more information on how to use generativ
   - `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.
   - ✅︎
   - ✅︎
-```
+:::
 
-```{note}
+:::{note}
 Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
-```
+:::
 
 ### Pooling Models
 
 See [this page](pooling-models) for more information on how to use pooling models.
 
-```{important}
+:::{important}
 Since some model architectures support both generative and pooling tasks,
 you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
-```
+:::
 
 #### Text Embedding (`--task embed`)
 
-```{list-table}
+:::{list-table}
 :widths: 25 25 50 5 5
 :header-rows: 1
 
+<!--- pyml disable-num-lines 40 ul-style-->
 * - Architecture
   - Models
   - Example HF Models
@@ -422,14 +424,14 @@ you should explicitly specify the task type to ensure that the model is used in 
   - `intfloat/multilingual-e5-large`, etc.
   -
   -
-```
+:::
 
-```{note}
+:::{note}
 `ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
 You should manually set mean pooling by passing `--override-pooler-config '{"pooling_type": "MEAN"}'`.
-```
+:::
 
-```{note}
+:::{note}
 Unlike base Qwen2, `Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
 You can set `--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
 
@@ -438,7 +440,7 @@ despite being described otherwise on its model card.
 
 Regardless of the variant, you need to enable `--trust-remote-code` for the correct tokenizer to be
 loaded. See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
-```
+:::
 
 If your model is not in the above list, we will try to automatically convert the model using
 {func}`~vllm.model_executor.models.adapters.as_embedding_model`. By default, the embeddings
@@ -446,10 +448,11 @@ of the whole prompt are extracted from the normalized hidden state corresponding
 
 #### Reward Modeling (`--task reward`)
 
-```{list-table}
+:::{list-table}
 :widths: 25 25 50 5 5
 :header-rows: 1
 
+<!--- pyml disable-num-lines 25 ul-style-->
 * - Architecture
   - Models
   - Example HF Models
@@ -475,22 +478,23 @@ of the whole prompt are extracted from the normalized hidden state corresponding
   - `Qwen/Qwen2.5-Math-PRM-7B`, `Qwen/Qwen2.5-Math-PRM-72B`, etc.
   - ✅︎
   - ✅︎
-```
+:::
 
 If your model is not in the above list, we will try to automatically convert the model using
 {func}`~vllm.model_executor.models.adapters.as_reward_model`. By default, we return the hidden states of each token directly.
 
-```{important}
+:::{important}
 For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
 e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
-```
+:::
 
 #### Classification (`--task classify`)
 
-```{list-table}
+:::{list-table}
 :widths: 25 25 50 5 5
 :header-rows: 1
 
+<!--- pyml disable-num-lines 15 ul-style-->
 * - Architecture
   - Models
   - Example HF Models
@@ -506,17 +510,18 @@ e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "r
   - `jason9693/Qwen2.5-1.5B-apeach`, etc.
   - ✅︎
   - ✅︎
-```
+:::
 
 If your model is not in the above list, we will try to automatically convert the model using
 {func}`~vllm.model_executor.models.adapters.as_classification_model`. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
 #### Sentence Pair Scoring (`--task score`)
 
-```{list-table}
+:::{list-table}
 :widths: 25 25 50 5 5
 :header-rows: 1
 
+<!--- pyml disable-num-lines 20 ul-style-->
 * - Architecture
   - Models
   - Example HF Models
@@ -537,7 +542,7 @@ If your model is not in the above list, we will try to automatically convert the
   - `BAAI/bge-reranker-v2-m3`, etc.
   -
   -
-```
+:::
 
 (supported-mm-models)=
 
@@ -545,6 +550,7 @@ If your model is not in the above list, we will try to automatically convert the
 
 The following modalities are supported depending on the model:
 
+<!--- pyml disable-num-lines 4 ul-style-->
 - **T**ext
 - **I**mage
 - **V**ideo
@@ -552,19 +558,22 @@ The following modalities are supported depending on the model:
 
 Any combination of modalities joined by `+` are supported.
 
+<!--- pyml disable-next-line ul-style-->
 - e.g.: `T + I` means that the model supports text-only, image-only, and text-with-image inputs.
 
 On the other hand, modalities separated by `/` are mutually exclusive.
 
+<!--- pyml disable-next-line ul-style-->
 - e.g.: `T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
 
 See [this page](#multimodal-inputs) on how to pass multi-modal inputs to the model.
 
-````{important}
+:::{important}
 To enable multiple multi-modal items per text prompt, you have to set `limit_mm_per_prompt` (offline inference)
 or `--limit-mm-per-prompt` (online serving). For example, to enable passing up to 4 images per text prompt:
 
 Offline inference:
+
 ```python
 llm = LLM(
     model="Qwen/Qwen2-VL-7B-Instruct",
@@ -573,14 +582,16 @@ llm = LLM(
 ```
 
 Online serving:
+
 ```bash
 vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
 ```
-````
 
-```{note}
+:::
+
+:::{note}
 vLLM currently only supports adding LoRA to the language backbone of multimodal models.
-```
+:::
 
 ### Generative Models
 
@@ -588,10 +599,11 @@ See [this page](#generative-models) for more information on how to use generativ
 
 #### Text Generation (`--task generate`)
 
-```{list-table}
+:::{list-table}
 :widths: 25 25 15 20 5 5 5
 :header-rows: 1
 
+<!--- pyml disable-num-lines 175 ul-style-->
 * - Architecture
   - Models
   - Inputs
@@ -767,52 +779,53 @@ See [this page](#generative-models) for more information on how to use generativ
   -
   - ✅︎
   - ✅︎
-```
+:::
 
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
-```{note}
+:::{note}
 To use `DeepSeek-VL2` series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
-```
+:::
 
-```{note}
+:::{note}
 To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
-```
+:::
 
-```{note}
+:::{note}
 The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
 For more details, please see: <gh-pr:4087#issuecomment-2250397630>
-```
+:::
 
-```{note}
+:::{note}
 The chat template for Pixtral-HF is incorrect (see [discussion](https://huggingface.co/mistral-community/pixtral-12b/discussions/22)).
 A corrected version is available at <gh-file:examples/template_pixtral_hf.jinja>.
-```
+:::
 
 ### Pooling Models
 
 See [this page](pooling-models) for more information on how to use pooling models.
 
-```{important}
+:::{important}
 Since some model architectures support both generative and pooling tasks,
 you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
-```
+:::
 
 #### Text Embedding (`--task embed`)
 
 Any text generation model can be converted into an embedding model by passing `--task embed`.
 
-```{note}
+:::{note}
 To get the best results, you should use pooling models that are specifically trained as such.
-```
+:::
 
 The following table lists those that are tested in vLLM.
 
-```{list-table}
+:::{list-table}
 :widths: 25 25 15 25 5 5
 :header-rows: 1
 
+<!--- pyml disable-num-lines 24 ul-style-->
 * - Architecture
   - Models
   - Inputs
@@ -837,7 +850,7 @@ The following table lists those that are tested in vLLM.
   - `MrLight/dse-qwen2-2b-mrl-v1`
   -
   - ✅︎
-```
+:::
 
 _________________
 
@@ -849,9 +862,9 @@ At vLLM, we are committed to facilitating the integration and support of third-p
 
 2. **Best-Effort Consistency**: While we aim to maintain a level of consistency between the models implemented in vLLM and other frameworks like transformers, complete alignment is not always feasible. Factors like acceleration techniques and the use of low-precision computations can introduce discrepancies. Our commitment is to ensure that the implemented models are functional and produce sensible results.
 
-    ```{tip}
+    :::{tip}
     When comparing the output of `model.generate` from HuggingFace Transformers with the output of `llm.generate` from vLLM, note that the former reads the model's generation config file (i.e., [generation_config.json](https://github.com/huggingface/transformers/blob/19dabe96362803fb0a9ae7073d03533966598b17/src/transformers/generation/utils.py#L1945)) and applies the default parameters for generation, while the latter only uses the parameters passed to the function. Ensure all sampling parameters are identical when comparing outputs.
-    ```
+    :::
 
 3. **Issue Resolution and Model Updates**: Users are encouraged to report any bugs or issues they encounter with third-party models. Proposed fixes should be submitted via PRs, with a clear explanation of the problem and the rationale behind the proposed solution. If a fix for one model impacts another, we rely on the community to highlight and address these cross-model dependencies. Note: for bugfix PRs, it is good etiquette to inform the original author to seek their feedback.
 

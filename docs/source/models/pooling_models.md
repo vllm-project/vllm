@@ -8,19 +8,20 @@ In vLLM, pooling models implement the {class}`~vllm.model_executor.models.VllmMo
 These models use a {class}`~vllm.model_executor.layers.Pooler` to extract the final hidden states of the input
 before returning them.
 
-```{note}
+:::{note}
 We currently support pooling models primarily as a matter of convenience.
 As shown in the [Compatibility Matrix](#compatibility-matrix), most vLLM features are not applicable to
 pooling models as they only work on the generation or decode stage, so performance may not improve as much.
-```
+:::
 
 For pooling models, we support the following `--task` options.
 The selected option sets the default pooler used to extract the final hidden states:
 
-```{list-table}
+:::{list-table}
 :widths: 50 25 25 25
 :header-rows: 1
 
+<!--- pyml disable-num-lines 20 ul-style-->
 * - Task
   - Pooling Type
   - Normalization
@@ -41,21 +42,21 @@ The selected option sets the default pooler used to extract the final hidden sta
   - `ALL`
   - ✗
   - ✗
-```
+:::
 
 \*The default pooler is always defined by the model.
 
-```{note}
+:::{note}
 If the model's implementation in vLLM defines its own pooler, the default pooler is set to that instead of the one specified in this table.
-```
+:::
 
 When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
 we attempt to override the default pooler based on its Sentence Transformers configuration file (`modules.json`).
 
-```{tip}
+:::{tip}
 You can customize the model's pooling method via the `--override-pooler-config` option,
 which takes priority over both the model's and Sentence Transformers's defaults.
-```
+:::
 
 ## Offline Inference
 
@@ -111,10 +112,10 @@ The {class}`~vllm.LLM.score` method outputs similarity scores between sentence p
 It is primarily designed for [cross-encoder models](https://www.sbert.net/examples/applications/cross-encoder/README.html).
 These types of models serve as rerankers between candidate query-document pairs in RAG systems.
 
-```{note}
+:::{note}
 vLLM can only perform the model inference component (e.g. embedding, reranking) of RAG.
 To handle RAG at a higher level, you should use integration frameworks such as [LangChain](https://github.com/langchain-ai/langchain).
-```
+:::
 
 ```python
 llm = LLM(model="BAAI/bge-reranker-v2-m3", task="score")
@@ -131,6 +132,7 @@ A code example can be found here: <gh-file:examples/offline_inference/scoring.py
 
 Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints that correspond to the offline APIs:
 
+<!--- pyml disable-num-lines 3 ul-style-->
 - [Pooling API](#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
 - [Embeddings API](#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](#multimodal-inputs) for embedding models.
 - [Score API](#score-api) is similar to `LLM.score` for cross-encoder models.

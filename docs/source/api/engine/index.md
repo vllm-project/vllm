@@ -1,17 +1,17 @@
 # vLLM Engine
 
-```{eval-rst}
+:::{eval-rst}
 .. automodule:: vllm.engine
-```
+:::
 
-```{eval-rst}
+:::{eval-rst}
 .. currentmodule:: vllm.engine
-```
+:::
 
-```{toctree}
+:::{toctree}
 :caption: Engines
 :maxdepth: 2
 
 llm_engine
 async_llm_engine
-```
+:::

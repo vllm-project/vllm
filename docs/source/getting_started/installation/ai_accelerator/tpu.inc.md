@@ -47,10 +47,10 @@ When you request queued resources, the request is added to a queue maintained by
 the Cloud TPU service. When the requested resource becomes available, it's
 assigned to your Google Cloud project for your immediate exclusive use.
 
-```{note}
+:::{note}
 In all of the following commands, replace the ALL CAPS parameter names with
 appropriate values. See the parameter descriptions table for more information.
-```
+:::
 
 ### Provision Cloud TPUs with GKE
 
@@ -75,9 +75,10 @@ gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
 --service-account SERVICE_ACCOUNT
 ```
 
-```{list-table} Parameter descriptions
+:::{list-table} Parameter descriptions
 :header-rows: 1
 
+<!--- pyml disable-num-lines 23 ul-style-->
 * - Parameter name
   - Description
 * - QUEUED_RESOURCE_ID
@@ -101,7 +102,7 @@ gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
   - The email address for your service account. You can find it in the IAM
     Cloud Console under *Service Accounts*. For example:
     `tpu-service-account@<your_project_ID>.iam.gserviceaccount.com`
-```
+:::
 
 Connect to your TPU using SSH:
 
@@ -178,15 +179,15 @@ Run the Docker image with the following command:
 docker run --privileged --net host --shm-size=16G -it vllm-tpu
 ```
 
-```{note}
+:::{note}
 Since TPU relies on XLA which requires static shapes, vLLM bucketizes the
 possible input shapes and compiles an XLA graph for each shape. The
 compilation time may take 20~30 minutes in the first run. However, the
 compilation time reduces to ~5 minutes afterwards because the XLA graphs are
 cached in the disk (in {code}`VLLM_XLA_CACHE_PATH` or {code}`~/.cache/vllm/xla_cache` by default).
-```
+:::
 
-````{tip}
+:::{tip}
 If you encounter the following error:
 
 ```console
@@ -198,9 +199,10 @@ file or directory
 Install OpenBLAS with the following command:
 
 ```console
-$ sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev
+sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev
 ```
-````
+
+:::
 
 ## Extra information
 

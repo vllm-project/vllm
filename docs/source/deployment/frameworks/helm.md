@@ -38,15 +38,16 @@ chart **including persistent volumes** and deletes the release.
 
 ## Architecture
 
-```{image} /assets/deployment/architecture_helm_deployment.png
-```
+:::{image} /assets/deployment/architecture_helm_deployment.png
+:::
 
 ## Values
 
-```{list-table}
+:::{list-table}
 :widths: 25 25 25 25
 :header-rows: 1
 
+<!--- pyml disable-num-lines 200 ul-style-->
 * - Key
   - Type
   - Default
@@ -247,4 +248,4 @@ chart **including persistent volumes** and deletes the release.
   - string
   - test
   - Release name
-```
+:::
