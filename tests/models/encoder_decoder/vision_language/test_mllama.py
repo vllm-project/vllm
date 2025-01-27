@@ -499,7 +499,7 @@ def test_get_cross_attention_mask(input_indices_and_output) -> None:
         use_cuda_graph=False,
     )
 
-    dummy = {}
+    dummy: dict[str, str] = {}
 
     cross_attention_mask, kv_range_for_decode = MllamaForConditionalGeneration\
         .get_cross_attention_mask(dummy,
