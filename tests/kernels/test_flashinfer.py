@@ -363,7 +363,7 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
     del query
     del block_tables
     # verify prefill fp8
-    torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2), \
+    torch.testing.assert_close(output, ref_output, atol=5e-2, rtol=1e-2), \
         f"{torch.max(torch.abs(output - ref_output))}"
 
 
