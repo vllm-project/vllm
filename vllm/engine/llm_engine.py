@@ -28,7 +28,9 @@ from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
-from vllm.features import *
+from vllm.features import (FEATURE_BEST_OF, FEATURE_SPEC_DECODE,
+                           FEATURE_STRUCTURED_OUTPUT, FeaturesIncompatible,
+                           FeatureUsage)
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
