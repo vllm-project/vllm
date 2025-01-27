@@ -465,8 +465,10 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[MiniCPMVProcessingInfo]
                                  ):
 
     def get_dummy_processor_inputs(
-            self, seq_len: int, mm_counts: Mapping[str,
-                                                   int]) -> ProcessorInputs:
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
