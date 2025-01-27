@@ -76,7 +76,7 @@ def dist_init():
                                  distributed_init_method=f"file://{temp_file}",
                                  local_rank=0,
                                  backend=backend)
-    initialize_model_parallel(1, 1)
+    initialize_model_parallel(1, 1, 1)
     yield
     cleanup_dist_env_and_memory(shutdown_ray=True)
 

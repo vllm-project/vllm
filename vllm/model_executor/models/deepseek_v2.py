@@ -84,7 +84,7 @@ class DeepseekV2MLP(nn.Module):
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
-    def forward(self, x):
+    def forward(self, x, print_args = -1) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
@@ -141,7 +141,8 @@ class DeepseekV2MoE(nn.Module):
                 reduce_results=False,
             )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor,
+                print_args = -1) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         if self.n_shared_experts is not None:
@@ -150,7 +151,8 @@ class DeepseekV2MoE(nn.Module):
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
-            router_logits=router_logits) * self.routed_scaling_factor
+            router_logits=router_logits,
+            print_args=print_args) * self.routed_scaling_factor
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1:
@@ -390,6 +392,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
+        print_args = -1
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -408,7 +411,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, print_args)
         return hidden_states, residual
 
 
@@ -426,6 +429,7 @@ class DeepseekV2Model(nn.Module):
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
+        self.print_args = -1
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -465,11 +469,20 @@ class DeepseekV2Model(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+
+        
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
+                in_shape = inputs_embeds.shape
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
+                in_shape = input_ids.shape
+            if in_shape[0] < 32:
+                print (f"\033[91mDeepseekV2Model Input Size:\033[0m {in_shape}")
+                self.print_args += 1
+                if self.print_args > 2:
+                    self.print_args = -1            
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -478,9 +491,17 @@ class DeepseekV2Model(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states, residual = layer(positions, hidden_states,
-                                            kv_caches[i - self.start_layer],
-                                            attn_metadata, residual)
+            if i == self.start_layer + 1:
+                hidden_states, residual = layer(positions, hidden_states,
+                                                kv_caches[i - self.start_layer],
+                                                attn_metadata, residual,
+                                                print_args=self.print_args)
+            else:
+                hidden_states, residual = layer(positions, hidden_states,
+                                                kv_caches[i - self.start_layer],
+                                                attn_metadata, residual,
+                                                print_args=-1)
+                                                
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -502,6 +523,8 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
         self.quant_config = quant_config
         self.model = DeepseekV2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "model"))
+        print (f"DeepseekV2ForCausalLM: {self.model}")
+        
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)

@@ -143,7 +143,7 @@ def dist_init():
         local_rank=0,
         backend="nccl",
     )
-    initialize_model_parallel(1, 1)
+    initialize_model_parallel(1, 1, 1)
     yield
     cleanup_dist_env_and_memory()
 

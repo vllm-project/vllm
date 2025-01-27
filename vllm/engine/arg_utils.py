@@ -108,6 +108,7 @@ class EngineArgs:
     distributed_executor_backend: Optional[Union[str,
                                                  Type[ExecutorBase]]] = None
     # number of P/D disaggregation (or other disaggregation) workers
+    expert_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
@@ -402,6 +403,11 @@ class EngineArgs:
             '--worker-use-ray',
             action='store_true',
             help='Deprecated, use ``--distributed-executor-backend=ray``.')
+        parser.add_argument('--expert-parallel-size',
+                            '-ep',
+                            type=int,
+                            default=EngineArgs.expert_parallel_size,
+                            help='Number of expert parallel replicas.')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,
@@ -1061,6 +1067,7 @@ class EngineArgs:
             cpu_offload_gb=self.cpu_offload_gb,
         )
         parallel_config = ParallelConfig(
+            expert_parallel_size=self.expert_parallel_size,
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             worker_use_ray=self.worker_use_ray,
