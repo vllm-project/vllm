@@ -2,9 +2,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from sampling_params import RequestOutputKind
-
 from vllm.outputs import RequestOutput
+from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.engine.output_processor_utils import RequestState
