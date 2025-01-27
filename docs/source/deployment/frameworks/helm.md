@@ -43,11 +43,11 @@ chart **including persistent volumes** and deletes the release.
 
 ## Values
 
+<!--- pyml disable-num-lines 204 ul-style-->
 :::{list-table}
 :widths: 25 25 25 25
 :header-rows: 1
 
-<!--- pyml disable-num-lines 200 ul-style-->
 * - Key
   - Type
   - Default

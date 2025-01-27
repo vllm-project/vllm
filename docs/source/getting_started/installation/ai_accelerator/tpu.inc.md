@@ -75,10 +75,10 @@ gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
 --service-account SERVICE_ACCOUNT
 ```
 
+<!--- pyml disable-num-lines 26 ul-style-->
 :::{list-table} Parameter descriptions
 :header-rows: 1
 
-<!--- pyml disable-num-lines 23 ul-style-->
 * - Parameter name
   - Description
 * - QUEUED_RESOURCE_ID

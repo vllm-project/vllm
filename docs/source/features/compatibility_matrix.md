@@ -25,12 +25,12 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
 </style>
 :::
 
+<!--- pyml disable-num-lines 294 ul-style-->
 :::{list-table}
 :header-rows: 1
 :stub-columns: 1
 :widths: auto
 
-<!--- pyml disable-num-lines 289 ul-style-->
 * - Feature
   - [CP](#chunked-prefill)
   - [APC](#automatic-prefix-caching)
@@ -326,12 +326,12 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
 
 ## Feature x Hardware
 
+<!--- pyml disable-num-lines 141 ul-style-->
 :::{list-table}
 :header-rows: 1
 :stub-columns: 1
 :widths: auto
 
-<!--- pyml disable-num-lines 136 ul-style-->
 * - Feature
   - Volta
   - Turing

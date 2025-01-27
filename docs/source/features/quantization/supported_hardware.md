@@ -4,11 +4,11 @@
 
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
 
+<!-- pyml disable-num-lines 114 ul-style -->
 :::{list-table}
 :header-rows: 1
 :widths: 20 8 8 8 8 8 8 8 8 8 8
 
-<!-- pyml disable-num-lines 110 ul-style -->
 * - Implementation
   - Volta
   - Turing

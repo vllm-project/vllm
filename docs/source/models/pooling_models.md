@@ -17,11 +17,11 @@ pooling models as they only work on the generation or decode stage, so performan
 For pooling models, we support the following `--task` options.
 The selected option sets the default pooler used to extract the final hidden states:
 
+<!--- pyml disable-num-lines 24 ul-style-->
 :::{list-table}
 :widths: 50 25 25 25
 :header-rows: 1
 
-<!--- pyml disable-num-lines 20 ul-style-->
 * - Task
   - Pooling Type
   - Normalization

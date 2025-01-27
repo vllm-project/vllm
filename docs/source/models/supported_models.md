@@ -72,11 +72,11 @@ See [this page](#generative-models) for more information on how to use generativ
 
 #### Text Generation (`--task generate`)
 
+<!--- pyml disable-num-lines 289 ul-style-->
 :::{list-table}
 :widths: 25 25 50 5 5
 :header-rows: 1
 
-<!--- pyml disable-num-lines 285 ul-style-->
 * - Architecture
   - Models
   - Example HF Models
@@ -379,11 +379,11 @@ you should explicitly specify the task type to ensure that the model is used in 
 
 #### Text Embedding (`--task embed`)
 
+<!--- pyml disable-num-lines 44 ul-style-->
 :::{list-table}
 :widths: 25 25 50 5 5
 :header-rows: 1
 
-<!--- pyml disable-num-lines 40 ul-style-->
 * - Architecture
   - Models
   - Example HF Models
@@ -448,11 +448,11 @@ of the whole prompt are extracted from the normalized hidden state corresponding
 
 #### Reward Modeling (`--task reward`)
 
+<!--- pyml disable-num-lines 29 ul-style-->
 :::{list-table}
 :widths: 25 25 50 5 5
 :header-rows: 1
 
-<!--- pyml disable-num-lines 25 ul-style-->
 * - Architecture
   - Models
   - Example HF Models
@@ -490,11 +490,11 @@ e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "r
 
 #### Classification (`--task classify`)
 
+<!--- pyml disable-num-lines 19 ul-style-->
 :::{list-table}
 :widths: 25 25 50 5 5
 :header-rows: 1
 
-<!--- pyml disable-num-lines 15 ul-style-->
 * - Architecture
   - Models
   - Example HF Models
@@ -517,11 +517,11 @@ If your model is not in the above list, we will try to automatically convert the
 
 #### Sentence Pair Scoring (`--task score`)
 
+<!--- pyml disable-num-lines 24 ul-style-->
 :::{list-table}
 :widths: 25 25 50 5 5
 :header-rows: 1
 
-<!--- pyml disable-num-lines 20 ul-style-->
 * - Architecture
   - Models
   - Example HF Models
@@ -599,11 +599,11 @@ See [this page](#generative-models) for more information on how to use generativ
 
 #### Text Generation (`--task generate`)
 
+<!--- pyml disable-num-lines 179 ul-style-->
 :::{list-table}
 :widths: 25 25 15 20 5 5 5
 :header-rows: 1
 
-<!--- pyml disable-num-lines 175 ul-style-->
 * - Architecture
   - Models
   - Inputs
@@ -821,11 +821,11 @@ To get the best results, you should use pooling models that are specifically tra
 
 The following table lists those that are tested in vLLM.
 
+<!--- pyml disable-num-lines 28 ul-style-->
 :::{list-table}
 :widths: 25 25 15 25 5 5
 :header-rows: 1
 
-<!--- pyml disable-num-lines 24 ul-style-->
 * - Architecture
   - Models
   - Inputs

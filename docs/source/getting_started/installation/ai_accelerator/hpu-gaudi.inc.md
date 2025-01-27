@@ -155,11 +155,11 @@ Gaudi2 devices. Configurations that are not listed may or may not work.
 
 Currently in vLLM for HPU we support four execution modes, depending on selected HPU PyTorch Bridge backend (via `PT_HPU_LAZY_MODE` environment variable), and `--enforce-eager` flag.
 
+<!--- pyml disable-num-lines 19 ul-style-->
 :::{list-table} vLLM execution modes
 :widths: 25 25 50
 :header-rows: 1
 
-<!--- pyml disable-num-lines 15 ul-style-->
 * - `PT_HPU_LAZY_MODE`
   - `enforce_eager`
   - execution mode
