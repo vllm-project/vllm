@@ -369,8 +369,8 @@ class MiniCPMOMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
 
         def get_slices(num_slices: List[int]) -> List[int]:
-            slice_idices = [0] + list(accumulate(num_slices))
-            slices = [(slice_idices[i], slice_idices[i + 1])
+            slice_indices = [0] + list(accumulate(num_slices))
+            slices = [(slice_indices[i], slice_indices[i + 1])
                       for i in range(len(num_slices))]
             return [slice(*slice_item) for slice_item in slices]
 
