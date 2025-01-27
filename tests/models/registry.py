@@ -247,9 +247,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                       hf_overrides={"architectures": ["MantisForConditionalGeneration"]}),  # noqa: E501
     "MiniCPMV_25": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
                                 trust_remote_code=True),
-    "MiniCPMV_26": _HfExamplesInfo("openbmb/MiniCPM-V-2_6",
-                                trust_remote_code=True),
     "MiniCPMO_26": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
+                                trust_remote_code=True),                    
+    "MiniCPMV_26": _HfExamplesInfo("openbmb/MiniCPM-V-2_6",
                                 trust_remote_code=True),
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
                                         trust_remote_code=True),
