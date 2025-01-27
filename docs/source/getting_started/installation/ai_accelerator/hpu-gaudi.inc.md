@@ -155,26 +155,25 @@ Gaudi2 devices. Configurations that are not listed may or may not work.
 
 Currently in vLLM for HPU we support four execution modes, depending on selected HPU PyTorch Bridge backend (via `PT_HPU_LAZY_MODE` environment variable), and `--enforce-eager` flag.
 
-<!--- pyml disable-num-lines 19 ul-style-->
 :::{list-table} vLLM execution modes
 :widths: 25 25 50
 :header-rows: 1
 
-* - `PT_HPU_LAZY_MODE`
-  - `enforce_eager`
-  - execution mode
-* - 0
-  - 0
-  - torch.compile
-* - 0
-  - 1
-  - PyTorch eager mode
-* - 1
-  - 0
-  - HPU Graphs
-* - 1
-  - 1
-  - PyTorch lazy mode
+- * `PT_HPU_LAZY_MODE`
+  * `enforce_eager`
+  * execution mode
+- * 0
+  * 0
+  * torch.compile
+- * 0
+  * 1
+  * PyTorch eager mode
+- * 1
+  * 0
+  * HPU Graphs
+- * 1
+  * 1
+  * PyTorch lazy mode
 :::
 
 :::{warning}
@@ -353,13 +352,13 @@ INFO 08-02 17:38:43 hpu_executor.py:91] init_cache_engine took 37.92 GiB of devi
 
 - `VLLM_{phase}_{dim}_BUCKET_{param}` - collection of 12 environment variables configuring ranges of bucketing mechanism
 
-  - `{phase}` is either `PROMPT` or `DECODE`
+  * `{phase}` is either `PROMPT` or `DECODE`
 
-  - `{dim}` is either `BS`, `SEQ` or `BLOCK`
+  * `{dim}` is either `BS`, `SEQ` or `BLOCK`
 
-  - `{param}` is either `MIN`, `STEP` or `MAX`
+  * `{param}` is either `MIN`, `STEP` or `MAX`
 
-  - Default values:
+  * Default values:
 
     - Prompt:
       - batch size min (`VLLM_PROMPT_BS_BUCKET_MIN`): `1`

@@ -17,31 +17,30 @@ pooling models as they only work on the generation or decode stage, so performan
 For pooling models, we support the following `--task` options.
 The selected option sets the default pooler used to extract the final hidden states:
 
-<!--- pyml disable-num-lines 24 ul-style-->
 :::{list-table}
 :widths: 50 25 25 25
 :header-rows: 1
 
-* - Task
-  - Pooling Type
-  - Normalization
-  - Softmax
-* - Embedding (`embed`)
-  - `LAST`
-  - ✅︎
-  - ✗
-* - Classification (`classify`)
-  - `LAST`
-  - ✗
-  - ✅︎
-* - Sentence Pair Scoring (`score`)
-  - \*
-  - \*
-  - \*
-* - Reward Modeling (`reward`)
-  - `ALL`
-  - ✗
-  - ✗
+- * Task
+  * Pooling Type
+  * Normalization
+  * Softmax
+- * Embedding (`embed`)
+  * `LAST`
+  * ✅︎
+  * ✗
+- * Classification (`classify`)
+  * `LAST`
+  * ✗
+  * ✅︎
+- * Sentence Pair Scoring (`score`)
+  * \*
+  * \*
+  * \*
+- * Reward Modeling (`reward`)
+  * `ALL`
+  * ✗
+  * ✗
 :::
 
 \*The default pooler is always defined by the model.
@@ -132,7 +131,6 @@ A code example can be found here: <gh-file:examples/offline_inference/scoring.py
 
 Our [OpenAI-Compatible Server](#openai-compatible-server) provides endpoints that correspond to the offline APIs:
 
-<!--- pyml disable-num-lines 3 ul-style-->
 - [Pooling API](#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
 - [Embeddings API](#embeddings-api) is similar to `LLM.embed`, accepting both text and [multi-modal inputs](#multimodal-inputs) for embedding models.
 - [Score API](#score-api) is similar to `LLM.score` for cross-encoder models.
