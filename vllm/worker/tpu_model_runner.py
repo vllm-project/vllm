@@ -158,6 +158,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                    fullgraph=True,
                                    dynamic=False)
 
+    def get_model(self) -> nn.Module:
+        return self.model.model
+
     def _dummy_run(
         self,
         batch_size: int,
@@ -187,6 +190,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     num_decode_tokens=0,
                     slot_mapping=slot_mapping,
                     multi_modal_placeholder_index_maps=None,
+                    enable_kv_scales_calculation=False,
                     block_tables=None,
                     context_lens=None,
                     effective_query_lens=None,
@@ -205,6 +209,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     num_decode_tokens=0,
                     slot_mapping=slot_mapping,
                     multi_modal_placeholder_index_maps=None,
+                    enable_kv_scales_calculation=False,
                     block_tables=block_tables,
                     context_lens=context_lens,
                     effective_query_lens=effective_query_lens,
@@ -236,6 +241,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 num_decode_tokens=batch_size * seq_len,
                 slot_mapping=slot_mapping,
                 multi_modal_placeholder_index_maps=None,
+                enable_kv_scales_calculation=False,
                 block_tables=block_tables,
                 context_lens=context_lens,
             )
@@ -422,6 +428,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=False,
             block_tables=block_tables,
             context_lens=context_lens,
             effective_query_lens=prompt_lens,
@@ -493,6 +500,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_decode_tokens=batch_size,
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=False,
             block_tables=block_tables,
             context_lens=context_lens,
         )
