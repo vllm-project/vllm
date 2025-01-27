@@ -13,3 +13,12 @@ env PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu \
     VLLM_TARGET_DEVICE=cpu \
     pip install .
 ```
+
+or with uv
+
+```console
+env UV_PIP_INDEX_STRATEGY=unsafe-best-match \
+    UV_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
+    VLLM_TARGET_DEVICE=cpu \
+    uv pip install .
+```
