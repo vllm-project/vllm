@@ -1,6 +1,5 @@
 sphinx==6.2.1
 sphinx-argparse==0.4.0
-sphinx-autodoc2==0.5.0
 sphinx-book-theme==1.0.1
 sphinx-copybutton==0.5.2
 sphinx-design==0.6.1
