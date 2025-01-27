@@ -80,15 +80,9 @@ class WorkerBase:
         # Initialized by the specific platform
         self.model_runner: Optional[ModelRunnerBase] = None
 
-    def init_device(self):
-        raise NotImplementedError()
-
     def load_model(self) -> None:
         assert self.model_runner is not None
         self.model_runner.load_model()
-
-    def determine_available_memory(self) -> int:
-        raise NotImplementedError()
 
     def compile_or_warm_up_model(self) -> None:
         assert self.model_runner is not None
@@ -113,12 +107,6 @@ class WorkerBase:
         assert self.model_runner is not None
         self.model_runner.initialize_kv_cache(kv_cache_config)
 
-    def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> Optional[ModelRunnerOutput]:
-        raise NotImplementedError()
-
     def profile(self, is_start: bool = True):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
@@ -130,6 +118,18 @@ class WorkerBase:
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
+
+    def init_device(self):
+        raise NotImplementedError()
+
+    def determine_available_memory(self) -> int:
+        raise NotImplementedError()
+
+    def execute_model(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> Optional[ModelRunnerOutput]:
+        raise NotImplementedError()
 
 
 def check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
