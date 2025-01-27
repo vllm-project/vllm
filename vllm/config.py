@@ -2589,7 +2589,7 @@ class KVTransferConfig(BaseModel):
 
     @property
     def need_kv_transfer_agent(self) -> bool:
-        # Need to initialize the KV transfer agent when the connector is set.
+        # Need to initialize the KV transfer agent when `kv_connector` is set.
         return self.kv_connector is not None
 
     @property
