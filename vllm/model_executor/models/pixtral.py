@@ -9,7 +9,6 @@ import torch.nn.functional as F
 from mistral_common.protocol.instruct.messages import ImageChunk
 from PIL import Image
 from transformers import PixtralVisionConfig
-from transformers.models.pixtral import PixtralProcessor
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens)
 from transformers.models.pixtral.modeling_pixtral import (
@@ -51,6 +50,8 @@ try:
     USE_XFORMERS_OPS = True
 except ImportError:
     USE_XFORMERS_OPS = False
+
+PIXTRAL_IMAGE_TOKEN = "[IMG]"
 
 
 def get_max_pixtral_image_tokens(ctx: InputContext):
@@ -188,7 +189,8 @@ class PixtralProcessingInfo(BaseProcessingInfo):
             tokenizer_mode=self.ctx.model_config.tokenizer_mode)
 
     def get_hf_processor(self):
-        return self.ctx.get_hf_processor(PixtralProcessor)
+        raise ValueError(
+            "Pixtral model in Mistral format does not support HF processor.")
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -213,7 +215,7 @@ class PixtralProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=max_image_size, height=max_image_size)
 
 
-class PixtralDummyInputBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
+class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
 
     # This is supposed to only build image related inputs.
     # It builds a prompt text reprensenting the image placeholder text,
@@ -230,11 +232,8 @@ class PixtralDummyInputBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
                                         height=h,
                                         num_images=num_images)
 
-        processor = self.info.get_hf_processor()
-        image_token = processor.image_token
-
         return ProcessorInputs(
-            prompt_text=image_token * num_images,
+            prompt_text=PIXTRAL_IMAGE_TOKEN * num_images,
             mm_data={"image": images},
         )
 
