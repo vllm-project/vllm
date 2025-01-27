@@ -230,7 +230,7 @@ def test_flashinfer_prefill_with_paged_kv(seq_lens: List[Tuple[int, int]],
     workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
     wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
         workspace_buffer, "NHD")
-    wrapper.begin_forward(
+    wrapper.plan(
         qo_indptr,
         kv_indptr,
         kv_indices,
@@ -239,12 +239,14 @@ def test_flashinfer_prefill_with_paged_kv(seq_lens: List[Tuple[int, int]],
         num_kv_heads,
         head_size,
         block_size,
+        q_data_type=dtype,
+        kv_data_type=dtype,
+        logits_soft_cap=soft_cap,
     )
 
-    output = wrapper.forward(
+    output = wrapper.run(
         query,
         key_value_cache,
-        logits_soft_cap=soft_cap,
     )
 
     ref_output = ref_paged_attn(query=query,
