@@ -35,19 +35,22 @@ def get_sample_multi_modal_llama_inputs():
     Prepare 4 sample multi-modal prompts for Llama3.2-11B
     '''
     IMG_PATH = Path(resource_filename("llama_models", "scripts/resources/"))
-    relative_img_paths = ["dog.jpg", "pasta.jpeg", "ocr_image.jpeg", "clutter.jpeg"]
+    relative_img_paths = [None, "pasta.jpeg", "ocr_image.jpeg", "clutter.jpeg"]
     questions = [
-        "Write a haiku for this image.",
+        "Write a haiku.",
         "What is for dinner?",
         "What is the full text of this image? Do OCR",
         "What objects are in this image?"
     ]
     inputs = []
     for relative_img_path, question in zip(relative_img_paths, questions):
-        with open(IMG_PATH / relative_img_path, "rb") as f:
-            img = PIL_Image.open(f).convert("RGB")
-        prompt = f"{MLLAMA_IMAGE_TOKEN}{question}"
-        inputs.append({"prompt": prompt, "multi_modal_data": {"image": img}})
+        if relative_img_path is not None:
+            with open(IMG_PATH / relative_img_path, "rb") as f:
+                img = PIL_Image.open(f).convert("RGB")
+            prompt = f"{MLLAMA_IMAGE_TOKEN}{question}"
+            inputs.append({"prompt": prompt, "multi_modal_data": {"image": img}})
+        else:
+            inputs.append({"prompt": question})
     return inputs
 
 
