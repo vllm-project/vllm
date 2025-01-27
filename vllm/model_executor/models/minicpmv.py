@@ -766,9 +766,9 @@ class MiniCPMVMultiModalProcessor(
             return [slice(*slice_item) for slice_item in slices]
 
         image_slices = get_slices(
-            hf_inputs.get("num_image_slices", torch.empty(0)))
+            hf_inputs.get("image_num_slices", torch.empty(0)))
         video_slices = get_slices(
-            hf_inputs.get("num_video_slices", torch.empty(0)))
+            hf_inputs.get("video_num_slices", torch.empty(0)))
 
         return dict(
             pixel_values=MultiModalFieldConfig.flat("image", image_slices),
@@ -931,7 +931,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             "video": {
                 "pixel_values": kwargs.pop("video_pixel_values", []),
                 "tgt_sizes": kwargs.pop("video_tgt_sizes", []),
-                "video_num_slices": kwargs.pop("video_slices", [])
+                "video_num_slices": kwargs.pop("video_num_slices", [])
             }
         }
         im_start_id = kwargs.pop("im_start_id", None)
@@ -1001,7 +1001,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             ]
             for modality in mm_orders_b:
                 pos = mm_counts[modality]
-                num_slices = mm_data[modality][f"{modality}_slices"][b][pos]
+                num_slices = mm_data[modality][f"{modality}_num_slices"][b][pos]
                 slice_start_idx = mm_slice_counts[modality]
                 slice_end_idx = slice_start_idx + num_slices
                 pixel_values_flat += mm_data[modality]["pixel_values"][b][

@@ -378,7 +378,7 @@ class MiniCPMOMultiModalProcessor(
             audio_features=MultiModalFieldConfig.flat("audio", audio_slices),
             audio_feature_lens=MultiModalFieldConfig.flat(
                 "audio", audio_slices),
-            audio_slices=MultiModalFieldConfig.batched("audio"),
+            audio_num_slices=MultiModalFieldConfig.batched("audio"),
             audio_orders_in_mm_data=MultiModalFieldConfig.batched("audio"),
             audio_embeds=MultiModalFieldConfig.flat("audio", audio_slices))
 
