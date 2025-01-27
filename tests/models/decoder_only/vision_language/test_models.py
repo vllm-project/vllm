@@ -362,7 +362,7 @@ VLM_TEST_SETTINGS = {
             "image_sizes"
         ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
-        patch_hf_runner=model_utils.minicpmv_patch_hf_runner
+        patch_hf_runner=model_utils.minicpmo_patch_hf_runner
     ),
     "minicpmv_26": VLMTestInfo(
         models=["openbmb/MiniCPM-V-2_6"],
