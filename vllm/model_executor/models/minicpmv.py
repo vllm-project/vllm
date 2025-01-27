@@ -467,8 +467,10 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[MiniCPMVProcessingInfo]
                                  ):
 
     def get_dummy_processor_inputs(
-            self, seq_len: int, mm_counts: Mapping[str,
-                                                   int]) -> ProcessorInputs:
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
@@ -523,13 +525,13 @@ class MiniCPMVMultiModalProcessor(
 
     def get_video_prompt_texts(self, image_size: ImageSize,
                                num_frames: int) -> str:
-        prompt_texts = "".join([
+        prompt_texts = "".join(
             self.get_slice_image_placeholder(
                 image_size=image_size,
                 image_idx=0,
                 max_slice_nums=self.info.get_video_max_slice_num(),
                 use_image_id=False) for image_idx in range(num_frames)
-        ])
+        )
         return prompt_texts
 
     def get_special_tokens(self) -> Dict[str, torch.Tensor]:
@@ -761,8 +763,8 @@ class MiniCPMVMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
 
         def get_slices(num_slices: List[int]) -> List[int]:
-            slice_idices = [0] + list(accumulate(num_slices))
-            slices = [(slice_idices[i], slice_idices[i + 1])
+            slice_indices = [0] + list(accumulate(num_slices))
+            slices = [(slice_indices[i], slice_indices[i + 1])
                       for i in range(len(num_slices))]
             return [slice(*slice_item) for slice_item in slices]
 
@@ -996,11 +998,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                                if self.version == (2, 6) else {"image": 0}
             mm_orders_b = [(index, modality) for modality in mm_counts
                            for index in mm_orders[modality][b]]
-            mm_orders_b = [
-                modality
-                for (_, modality) in sorted(mm_orders_b, key=lambda x: x[0])
-            ]
-            for modality in mm_orders_b:
+            for _, modality in sorted(mm_orders_b, key=lambda x: x[0]):
                 pos = mm_counts[modality]
                 num_slices = mm_data[modality][f"{modality}_num_slices"][b][
                     pos]
