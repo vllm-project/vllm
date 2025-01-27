@@ -47,7 +47,8 @@ def _test_processing_correctness(
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
     ctx = InputProcessingContext(
         model_config,
-        tokenizer=cached_get_tokenizer(model_config.tokenizer),
+        tokenizer=cached_get_tokenizer(model_config.tokenizer,
+                                       trust_remote_code=model_info.trust_remote_code),
     )
     # Ensure that it can fit all of the data
     cache = ProcessingCache(capacity=1 << 30)
@@ -149,7 +150,7 @@ def _test_processing_correctness(
     ("mistral-community/pixtral-12b", {"image": True}),
     ("openbmb/MiniCPM-Llama3-V-2_5", {"image": True}),
     ("openbmb/MiniCPM-V-2_6", {"image": True, "video": True}),
-    ("openbmb/MiniCPM-O-2_6", {"image": True, "video": True, "audio": True}),
+    ("openbmb/MiniCPM-o-2_6", {"image": True, "video": True, "audio": True}),
     ("Qwen/Qwen2-VL-2B-Instruct", {"image": True, "video": True}),
     ("Qwen/Qwen2-Audio-7B-Instruct", {"audio": True}),
     ("fixie-ai/ultravox-v0_3", {"audio": True}),

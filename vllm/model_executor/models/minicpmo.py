@@ -21,6 +21,7 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 from functools import partial
+from itertools import accumulate
 from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
 
@@ -220,7 +221,9 @@ class MiniCPMOMultiModalProcessor(
         BaseMultiModalProcessor[MiniCPMOProcessingInfo]):
 
     def _get_data_parser(self) -> MultiModalDataParser:
-        return MiniCPMOMultiModalDataParser()
+        return MiniCPMOMultiModalDataParser(
+            target_sr=self.info.get_default_audio_sampling_rate()
+        )
 
     def get_audio_prompt_texts(self,
                                audio_lens: int,
@@ -260,13 +263,12 @@ class MiniCPMOMultiModalProcessor(
                     mm_kwargs=mm_kwargs)
                 audio_outputs["audio_lens"].append(len(audio))
                 audio_outputs["audio_features"].append(
-                    single_audio_outputs["audio_features"])
+                    single_audio_outputs["audio_features"][0])
                 audio_outputs["audio_num_segments"].append(
                     len(single_audio_outputs["audio_feature_lens"][0]))
                 audio_outputs["audio_feature_lens"] += \
                     single_audio_outputs["audio_feature_lens"]
-            audio_outputs["audio_features"] = torch.cat(
-                audio_outputs["audio_features"])
+
             audio_outputs["audio_feature_lens"] = torch.cat(
                 audio_outputs["audio_feature_lens"])
         elif len(audio_embeds):
@@ -363,11 +365,14 @@ class MiniCPMOMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
 
-        def get_slices(slices_indices: List[int]):
-            return [slice(*slice_item) for slice_item in slices_indices]
+        def get_slices(num_slices: List[int]) -> List[int]:
+            slice_idices = [0] + list(accumulate(num_slices))
+            slices = [(slice_idices[i], slice_idices[i + 1])
+                      for i in range(len(num_slices))]
+            return [slice(*slice_item) for slice_item in slices]
 
         audio_slices = get_slices(
-            hf_inputs.get("audio_slices", torch.empty(0, 2)))
+            hf_inputs.get("audio_num_slices", torch.empty(0)))
         return dict(
             **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
             audio_features=MultiModalFieldConfig.flat("audio", audio_slices),

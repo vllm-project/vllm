@@ -586,6 +586,13 @@ class MiniCPMVMultiModalProcessor(
                 "num_frames": []
             }
             for video in videos:
+                parsed_video = []
+                for frame in video:
+                    if isinstance(frame, np.ndarray):
+                        parsed_video.append(Image.fromarray(frame))
+                    else:
+                        parsed_video.append(frame)
+                video = parsed_video
                 single_video_outputs = super()._call_hf_processor(
                     prompt=self.info.image_pattern * len(video),
                     mm_data={"images": video},
@@ -697,11 +704,6 @@ class MiniCPMVMultiModalProcessor(
     ) -> BatchFeature:
         # Do not support combination inputs of images and videos for now
         # Try to handle interleaved multimodal data
-        def get_slices(num_slices: List[int]) -> List[int]:
-            slice_idices = [0] + list(accumulate(num_slices))
-            slices = [(slice_idices[i], slice_idices[i + 1])
-                      for i in range(len(num_slices))]
-            return slices
 
         tokenizer = self.info.get_tokenizer()
         inputs = self.process_mm_inputs(mm_data, mm_kwargs)
@@ -720,7 +722,7 @@ class MiniCPMVMultiModalProcessor(
                 )
             },
             **{
-                f"{modality}_slices": get_slices(num_mm_slices[modality])
+                f"{modality}_num_slices": num_mm_slices[modality]
                 for modality in mm_input_modalities
             }
         }
@@ -757,26 +759,29 @@ class MiniCPMVMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
 
-        def get_slices(slices_indices: List[int]):
-            return [slice(*slice_item) for slice_item in slices_indices]
+        def get_slices(num_slices: List[int]) -> List[int]:
+            slice_idices = [0] + list(accumulate(num_slices))
+            slices = [(slice_idices[i], slice_idices[i + 1])
+                      for i in range(len(num_slices))]
+            return [slice(*slice_item) for slice_item in slices]
 
         image_slices = get_slices(
-            hf_inputs.get("image_slices", torch.empty(0, 2)))
+            hf_inputs.get("num_image_slices", torch.empty(0)))
         video_slices = get_slices(
-            hf_inputs.get("video_slices", torch.empty(0, 2)))
+            hf_inputs.get("num_video_slices", torch.empty(0)))
 
         return dict(
             pixel_values=MultiModalFieldConfig.flat("image", image_slices),
             image_sizes=MultiModalFieldConfig.batched("image"),
             tgt_sizes=MultiModalFieldConfig.flat("image", image_slices),
-            image_slices=MultiModalFieldConfig.batched("image"),
+            image_num_slices=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.flat("image", image_slices),
             video_pixel_values=MultiModalFieldConfig.flat(
                 "video", video_slices),
             video_image_sizes=MultiModalFieldConfig.batched("video"),
             video_tgt_sizes=MultiModalFieldConfig.flat("video", video_slices),
             video_embeds=MultiModalFieldConfig.flat("video", video_slices),
-            video_slices=MultiModalFieldConfig.batched("video"))
+            video_num_slices=MultiModalFieldConfig.batched("video"))
 
     def apply(
         self,
@@ -785,6 +790,8 @@ class MiniCPMVMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputs:
         supported_mm_modalities = self.info.get_supported_mm_modalities()
+        if isinstance(prompt, list):
+            prompt = self.info.get_tokenizer().decode(prompt)
         matches = re.findall(self.get_placeholder_match_pattern(), prompt)
         mm_orders = {
             f"{modality}_orders": torch.tensor(
@@ -919,12 +926,12 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         mm_data = {
             "image": {
                 key: kwargs.pop(key, [])
-                for key in ["pixel_values", "tgt_sizes", "image_slices"]
+                for key in ["pixel_values", "tgt_sizes", "image_num_slices"]
             },
             "video": {
                 "pixel_values": kwargs.pop("video_pixel_values", []),
                 "tgt_sizes": kwargs.pop("video_tgt_sizes", []),
-                "video_slices": kwargs.pop("video_slices", [])
+                "video_num_slices": kwargs.pop("video_slices", [])
             }
         }
         im_start_id = kwargs.pop("im_start_id", None)
@@ -959,7 +966,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                 data=image_embeds,
                 type="image_embeds",
             )
-
         for modality, modality_mm_data in mm_data.items():
             if not isinstance(modality_mm_data["pixel_values"],
                               (torch.Tensor, list)):
@@ -985,6 +991,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         for b in range(batch_size):
             mm_counts = {"image": 0, "video": 0} if self.version == (2, 6) \
                         else {"image": 0}
+            mm_slice_counts = {"image": 0, "video": 0} if self.version == (2, 6) \
+                        else {"image": 0}
             mm_orders_b = [(index, modality) for modality in mm_counts
                            for index in mm_orders[modality][b]]
             mm_orders_b = [
@@ -993,11 +1001,13 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             ]
             for modality in mm_orders_b:
                 pos = mm_counts[modality]
-                slice_index = mm_data[modality][f"{modality}_slices"][b][pos]
+                num_slices = mm_data[modality][f"{modality}_slices"][b][pos]
+                slice_start_idx = mm_slice_counts[modality]
+                slice_end_idx = slice_start_idx + num_slices
                 pixel_values_flat += mm_data[modality]["pixel_values"][b][
-                    slice_index[0]:slice_index[1]]
+                    slice_start_idx:slice_end_idx]
                 tgt_sizes_flat += mm_data[modality]["tgt_sizes"][b][
-                    slice_index[0]:slice_index[1]]
+                    slice_start_idx:slice_end_idx]
                 mm_counts[modality] += 1
 
         # NOTE: Input IDs does not contain image tokens during memory profiling,
