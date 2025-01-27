@@ -1,3 +1,10 @@
+"""
+This file demonstrates the example usage of disaggregated prefilling
+We will launch 2 vllm instances (GPU 0 for prefill and GPU 1 for decode),
+and then transfer the KV cache between them.
+
+Learn more about Ray Data in https://docs.ray.io/en/latest/data/data.html
+"""
 import os
 import time
 from multiprocessing import Event, Process
@@ -7,11 +14,16 @@ from vllm.config import KVTransferConfig
 
 
 def run_prefill(prefill_done):
+    # We use GPU 0 for prefill node.
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
+    # The prefill node receives two requests, while the decode node receives
+    # three requests. So the decode node will only receive the KV Cache for
+    # requests 1 and 3. The decode node will use the KV Cache of requests 1
+    # and 3 and do prefilling on request 2.
     prompts = [
         "Hello, my name is",
-        # "Hi, your name is", # To simulate transmission failure
+        # "Hi, your name is", # To trigger partial prefill of batched requests
         "Tell me a very long story",
     ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
@@ -19,6 +31,8 @@ def run_prefill(prefill_done):
     ktc = KVTransferConfig.from_cli(
         '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}'
     )
+    # Example: Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
+    # memory. Reduce the value if your GPU has less memory.
     llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct",
               kv_transfer_config=ktc,
               max_model_len=2000,
@@ -37,6 +51,7 @@ def run_prefill(prefill_done):
 
 
 def run_decode(prefill_done):
+    # We use GPU 1 for decode node.
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
     prompts = [
@@ -49,6 +64,8 @@ def run_decode(prefill_done):
     ktc = KVTransferConfig.from_cli(
         '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2}'
     )
+    # Example: Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
+    # of memory. Reduce the value if your GPU has less memory.
     llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct",
               kv_transfer_config=ktc,
               max_model_len=2000,
@@ -67,14 +84,15 @@ def run_decode(prefill_done):
 
 if __name__ == "__main__":
     prefill_done = Event()
-    process_a = Process(target=run_prefill, args=(prefill_done, ))
-    process_b = Process(target=run_decode, args=(prefill_done, ))
+    prefill_process = Process(target=run_prefill, args=(prefill_done, ))
+    decode_process = Process(target=run_decode, args=(prefill_done, ))
 
     # Start prefill node
-    process_a.start()
+    prefill_process.start()
 
     # Start decode node
-    process_b.start()
+    decode_process.start()
 
-    process_b.join()
-    process_a.terminate()
+    # Terminate the prefill node when decode is finished
+    decode_process.join()
+    prefill_process.terminate()
