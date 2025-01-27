@@ -190,7 +190,8 @@ steps:
     - VLLM_USE_V1=1 pytest -v -s v1/worker
     - VLLM_USE_V1=1 pytest -v -s v1/test_stats.py
     - VLLM_USE_V1=1 pytest -v -s v1/test_utils.py
-    # TODO: accuracy does not match.
+    # TODO: accuracy does not match, whether setting
+    # VLLM_USE_FLASHINFER_SAMPLER or not.
     # - VLLM_USE_V1=1 pytest -v -s v1/e2e
 
 - label: Examples Test # 25min
