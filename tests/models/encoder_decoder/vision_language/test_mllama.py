@@ -1,11 +1,15 @@
 from typing import List, Optional, Tuple, Type, overload
 
 import pytest
+import torch
 from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
                           BatchEncoding)
 
+from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.attention.selector import (_Backend, _cached_get_attn_backend,
                                      global_force_attn_backend_context_manager)
+from vllm.model_executor.models.mllama import (MLLAMA_IMAGE_TOKEN_ID,
+                                               MllamaForConditionalGeneration)
 from vllm.multimodal.image import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
@@ -427,3 +431,90 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
                                             max_tokens,
                                             num_logprobs,
                                             images=images)
+
+
+TEXT_ONLY = '0'
+IMAGE_AT_BEG = '1'
+IMAGE_AT_MIDDLE = '2'
+TWO_IMAGES = '3'
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("input_indices_and_output",
+                         [([TEXT_ONLY], (None, None)),
+                          ([TEXT_ONLY, IMAGE_AT_BEG], (None, None)),
+                          ([IMAGE_AT_MIDDLE], ((10, 12), [[0, 6]])),
+                          ([TEXT_ONLY, IMAGE_AT_MIDDLE], ((14, 12), [[0, 6]])),
+                          ([TEXT_ONLY, IMAGE_AT_BEG, IMAGE_AT_MIDDLE],
+                           ((23, 24), [[0, 6], [6, 12]])),
+                          ([IMAGE_AT_MIDDLE, TEXT_ONLY],
+                           ((14, 12), [[0, 6]]))])
+def test_get_cross_attention_mask(input_indices_and_output) -> None:
+
+    input_indices, expected_output = input_indices_and_output
+    data = {
+        # Tell me a story
+        TEXT_ONLY: [41551, 757, 264, 3446],
+        # <|image|> What's the content of this image
+        IMAGE_AT_BEG:
+        [MLLAMA_IMAGE_TOKEN_ID, 3639, 596, 279, 2262, 315, 420, 2217, 220],
+        # Hello <|image|>What' the content of this image
+        IMAGE_AT_MIDDLE:
+        [9906, 220, MLLAMA_IMAGE_TOKEN_ID, 3923, 6, 279, 2262, 315, 420, 2217],
+        #<|image|>Is there a duck in this image?<|image|>What's the animal in this image? # noqa: E501
+        TWO_IMAGES: [
+            MLLAMA_IMAGE_TOKEN_ID, 3957, 1070, 264, 37085, 304, 420, 2217, 30,
+            MLLAMA_IMAGE_TOKEN_ID, 3923, 596, 279, 10065, 304, 420, 2217, 30
+        ]
+    }
+
+    tiles_data = {
+        TEXT_ONLY: None,
+        IMAGE_AT_BEG: [2, 2],
+        IMAGE_AT_MIDDLE: [2, 2],
+        TWO_IMAGES: [2, 2],
+    }
+
+    sequences = [torch.tensor(data[i]) for i in input_indices]
+    num_tiles = [
+        tiles_data[i] for i in input_indices if tiles_data[i] is not None
+    ]
+    input = torch.cat(sequences)
+
+    seq_lens = [len(s) for s in sequences]
+
+    attn_data = FlashAttentionMetadata(
+        seq_lens=seq_lens,
+        # Dummy values
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decode_tokens=0,
+        slot_mapping=0,
+        multi_modal_placeholder_index_maps=None,
+        seq_lens_tensor=0,
+        max_prefill_seq_len=0,
+        max_decode_seq_len=0,
+        context_lens_tensor=None,
+        block_tables=None,
+        use_cuda_graph=False,
+    )
+
+    dummy = {}
+
+    cross_attention_mask, kv_range_for_decode = MllamaForConditionalGeneration\
+        .get_cross_attention_mask(dummy,
+                                  input,
+                                  attn_data,
+                                  num_tiles=num_tiles,
+                                  num_tokens_per_tile=3,
+                                  dtype=torch.bfloat16)
+
+    expected_cross_attention_mask, expected_kv_range_for_decode = \
+        expected_output
+
+    assert kv_range_for_decode == expected_kv_range_for_decode
+    if expected_cross_attention_mask is not None:
+        assert cross_attention_mask is not None
+        assert cross_attention_mask.shape == expected_cross_attention_mask
+    else:
+        assert cross_attention_mask is None
