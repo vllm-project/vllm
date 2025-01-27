@@ -309,7 +309,7 @@ async def main(args):
                     request,
                     error_msg=
                     "Only /v1/chat/completions, /v1/embeddings, and /v1/score "
-                    " are supported in the batch endpoint.",
+                    "are supported in the batch endpoint.",
                 ))
 
     with tracker.pbar():
