@@ -1,5 +1,6 @@
 import asyncio
 import time
+from http import HTTPStatus
 from typing import AsyncGenerator, AsyncIterator, Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple, Union, cast
@@ -23,6 +24,7 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.features import FeaturesIncompatible
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -215,6 +217,10 @@ class OpenAIServingCompletion(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
+        except FeaturesIncompatible as e:
+            return self.create_error_response(message=str(e),
+                                              err_type="Conflict",
+                                              status_code=HTTPStatus.CONFLICT)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))

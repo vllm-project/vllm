@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import time
+from http import HTTPStatus
 from typing import AsyncGenerator, Final, List, Literal, Optional, Union, cast
 
 import numpy as np
@@ -18,6 +19,7 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.features import FeaturesIncompatible
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput)
@@ -167,6 +169,10 @@ class OpenAIServingEmbedding(OpenAIServing):
                 )
 
                 generators.append(generator)
+        except FeaturesIncompatible as e:
+            return self.create_error_response(message=str(e),
+                                              err_type="Conflict",
+                                              status_code=HTTPStatus.CONFLICT)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
