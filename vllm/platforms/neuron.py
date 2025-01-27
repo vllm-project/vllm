@@ -38,8 +38,8 @@ class NeuronPlatform(Platform):
         if parallel_config.world_size > 1:
             parallel_config.distributed_executor_backend = "uni"
 
-        assert (vllm_config.lora_config is
-                None), "LoRA is not supported for Neuron backend."
+        assert (vllm_config.lora_config
+                is None), "LoRA is not supported for Neuron backend."
         assert (not vllm_config.speculative_config
                 ), "Speculative decoding not yet supported for Neuron backend."
 

@@ -1121,8 +1121,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 # from being incorrectly identified as being present in
                 # 'vpm.encoder.layers.0.self_attn.qkv_proj.weight
                 shard_pos = quant_param_name.find(shard_name)
-                can_correct_rename = (shard_pos > 0) and (
-                    quant_param_name[shard_pos - 1] == ".")
+                can_correct_rename = (shard_pos
+                                      > 0) and (quant_param_name[shard_pos - 1]
+                                                == ".")
                 # If the quant_param_name is packed, it won't occur in the
                 # param_dict before renaming.
                 new_quant_param_name = quant_param_name.replace(

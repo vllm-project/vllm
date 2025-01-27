@@ -67,7 +67,8 @@ _RUNNER_TASKS: Dict[RunnerType, List[_ResolvedTask]] = {
 
 _TASK_RUNNER: Dict[_ResolvedTask, RunnerType] = {
     task: runner
-    for runner, tasks in _RUNNER_TASKS.items() for task in tasks
+    for runner, tasks in _RUNNER_TASKS.items()
+    for task in tasks
 }
 
 HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
@@ -1980,8 +1981,8 @@ class SpeculativeConfig:
                              "typical_acceptance_sampler.")
 
         if (self.draft_token_acceptance_method != 'rejection_sampler'
-                and self.draft_token_acceptance_method !=
-                'typical_acceptance_sampler'):
+                and self.draft_token_acceptance_method
+                != 'typical_acceptance_sampler'):
             raise ValueError(
                 "Expected draft_token_acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "
