@@ -247,8 +247,8 @@ class Scheduler:
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                has_partial_request = (num_computed_tokens + num_new_tokens <
-                                       request.num_tokens)
+                has_partial_request = (num_computed_tokens + num_new_tokens
+                                       < request.num_tokens)
 
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
@@ -411,6 +411,10 @@ class Scheduler:
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
         outputs: List[EngineCoreOutput] = []
+
+        # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
+        # loop can be a performance bottleneck. We should do our best to avoid
+        # expensive operations inside the loop.
         for request in self.running:
             req_id = request.request_id
             request.num_computed_tokens += num_scheduled_tokens[req_id]
@@ -421,13 +425,15 @@ class Scheduler:
 
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
-            for input_id in list(cached_encoder_input_ids):
-                start_pos = request.mm_positions[input_id]["offset"]
-                num_tokens = request.mm_positions[input_id]["length"]
-                if start_pos + num_tokens <= request.num_computed_tokens:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
-                    self.encoder_cache_manager.free(request, input_id)
+            # OPTIMIZATION: Avoid list(set) if the set is empty.
+            if cached_encoder_input_ids:
+                for input_id in list(cached_encoder_input_ids):
+                    start_pos = request.mm_positions[input_id]["offset"]
+                    num_tokens = request.mm_positions[input_id]["length"]
+                    if start_pos + num_tokens <= request.num_computed_tokens:
+                        # The encoder output is already processed and stored
+                        # in the decoder's KV cache.
+                        self.encoder_cache_manager.free(request, input_id)
 
             if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
