@@ -213,13 +213,6 @@ class Scheduler:
                     num_new_tokens = self.block_size
                     computed_blocks.pop()
 
-                # TODO: Remove
-                # If chunked prefill is not enabled, then breakout of the loop
-                # when above budget.
-                # if (not self.scheduler_config.chunked_prefill_enabled
-                #         and num_new_tokens > token_budget):
-                #     break
-
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
