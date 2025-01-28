@@ -90,11 +90,11 @@ models/extensions/index
 features/quantization/index
 features/lora
 features/tool_calling
+features/reasoning_models
 features/structured_outputs
 features/automatic_prefix_caching
 features/disagg_prefill
 features/spec_decode
-features/reasoning-models
 features/compatibility_matrix
 ```
 
