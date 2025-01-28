@@ -417,7 +417,7 @@ def get_rocm_version():
 
         if (get_rocm_core_version(ctypes.byref(major), ctypes.byref(minor),
                                   ctypes.byref(patch)) == 0):
-            return "%d.%d.%d" % (major.value, minor.value, patch.value)
+            return f"{major.value}.{minor.value}.{patch.value}"
         return None
     except Exception:
         return None

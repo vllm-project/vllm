@@ -352,8 +352,8 @@ class MessageQueue:
                     sched_yield()
 
                     # if we wait for a long time, log a message
-                    if (time.monotonic() - start_time >
-                            VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
+                    if (time.monotonic() - start_time
+                            > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.debug("No available block found in %s second. ",
                                      VLLM_RINGBUFFER_WARNING_INTERVAL)
                         n_warning += 1
@@ -410,8 +410,8 @@ class MessageQueue:
                     sched_yield()
 
                     # if we wait for a long time, log a message
-                    if (time.monotonic() - start_time >
-                            VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
+                    if (time.monotonic() - start_time
+                            > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.debug("No available block found in %s second. ",
                                      VLLM_RINGBUFFER_WARNING_INTERVAL)
                         n_warning += 1
