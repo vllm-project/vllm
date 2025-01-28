@@ -115,7 +115,7 @@ class LogprobsProcessor:
         token_ids: Optional[torch.Tensor],
         prompt_logprobs: Optional[torch.Tensor],
         prompt_token_ids_lst: List[int],
-    ) -> Optional[PromptLogprobs]:
+    ) -> None:
         """Incorporate prompt logprobs from this step, if they exist.
 
         If prompt logprobs are enabled for this request and EngineCore
@@ -146,7 +146,7 @@ class LogprobsProcessor:
             # Prompt logprobs are enabled for this request but prefill
             # is finished and no more logprobs are being streamed from
             # engine core
-            return []
+            return
         # Prompt logprobs are enabled & engine core is streaming prompt
         # logprobs, in one or more chunks.
         assert self.prompt_logprobs is not None
@@ -202,7 +202,29 @@ class LogprobsProcessor:
                         decoded_tokens[decoded_tokens_offset:],
                         self.num_prompt_logprobs,
                         (prompt_token_id, prompt_logprob_obj)))
-        return self.prompt_logprobs
+
+    def pop_prompt_logprobs(self) -> Optional[PromptLogprobs]:
+        """Pop and return all request prompt logprobs
+        
+        The logprobs processor aggregates prompt chunk logprobs
+        over one or more prefill chunks. This method returns
+        all prompt logprobs at once and then forgets them.
+        Ensures correct RequestOutputKind.DELTA semantics
+        wherein all prompt logprobs are returned at once at
+        the end of prefill.
+
+        Returns:
+          None if prompt logprobs are disabled for this request.
+          List of all prompt logprobs, otherwise.
+        """
+        plp = self.prompt_logprobs
+        if plp is None:
+            # Prompt logprobs disabled for this request
+            return None
+        # Pop all prompt logprobs
+        if plp:
+            self.prompt_logprobs = []
+        return plp
 
     @staticmethod
     def _make_pos_logprob_dict(

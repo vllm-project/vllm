@@ -104,10 +104,11 @@ class OutputProcessor:
             iteration_stats.update_from_output(engine_core_output,
                                                req_state.is_prefilling,
                                                req_state.prompt_len)
-            req_state.is_prefilling = False
 
             new_token_ids = engine_core_output.new_token_ids
             finish_reason = engine_core_output.finish_reason
+
+            req_state.is_prefilling = not new_token_ids
 
             # 2) Detokenize the token ids into text and check for stop
             #    strings.
@@ -153,7 +154,8 @@ class OutputProcessor:
 
         output_kind = request_state.output_kind
         finished = bool(finish_reason)
-        if output_kind == RequestOutputKind.FINAL_ONLY and not finished:
+        if (request_state.is_prefilling or
+            (output_kind == RequestOutputKind.FINAL_ONLY and not finished)):
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
@@ -172,7 +174,8 @@ class OutputProcessor:
             text=detokenizer.get_next_output_text(finished, delta),
             token_ids=new_token_ids if delta else detokenizer.output_token_ids,
             logprobs=logprobs,
-            prompt_logprobs=logprobs_processor.prompt_logprobs,
+            # Side effect: logprobs processor forgets prompt logprobs
+            prompt_logprobs=logprobs_processor.pop_prompt_logprobs(),
             cumulative_logprob=logprobs_processor.cumulative_logprob,
             finished=finished,
         )
