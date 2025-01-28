@@ -30,6 +30,7 @@ class Scheduler(SchedulerInterface):
         lora_config: Optional[LoRAConfig],
     ) -> None:
         self.scheduler_config = scheduler_config
+        self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
         # TODO: Support LoRA.

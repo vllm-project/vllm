@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Dict, Iterable, List, Optional, Set, Tuple,
                     Union)
 
@@ -137,12 +137,14 @@ class SchedulerOutput:
     scheduled_new_reqs: List[NewRequestData]
     scheduled_resumed_reqs: List[ResumedRequestData]
     scheduled_running_reqs: List[RunningRequestData]
+    preempted_req_ids: Set[str]
+    finished_req_ids: Set[str]
 
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int
-    scheduled_encoder_inputs: Dict[str, List[int]]
-    num_common_prefix_blocks: int
 
-    preempted_req_ids: Set[str]
-    finished_req_ids: Set[str]
-    free_encoder_input_ids: List[Tuple[str, int]]
+    # Optional fields
+    scheduled_encoder_inputs: Dict[str, List[int]] = \
+        field(default_factory=dict)
+    free_encoder_input_ids: List[Tuple[str, int]] = field(default_factory=list)
+    num_common_prefix_blocks: int = 0
