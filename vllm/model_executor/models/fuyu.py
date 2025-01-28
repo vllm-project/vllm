@@ -31,7 +31,7 @@ from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, MultiModalKwargs,
+                                    MultiModalInputsV2, MultiModalKwargs,
                                     NestedTensors, PlaceholderRange)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
@@ -232,7 +232,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> MultiModalInputs:
+    ) -> MultiModalInputsV2:
         result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
 
         # Only |SPEAKER| (image) tokens should be considered as placeholders,

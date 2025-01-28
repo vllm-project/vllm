@@ -36,9 +36,8 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, MultiModalKwargs,
-                                    NestedTensors, PlaceholderRange)
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -154,23 +153,28 @@ class Qwen2AudioMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, Any],
     ) -> BatchFeature:
-        # Text-only input not supported in composite processor
-        if not mm_data or not mm_data.get("audios", []):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+        mm_data = dict(mm_data)
+        audios = mm_data.pop("audios", [])
 
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-        mm_kwargs = dict(
-            **mm_kwargs,
-            sampling_rate=feature_extractor.sampling_rate,
-        )
+        if audios:
+            mm_data["audios"] = audios
 
-        return super()._call_hf_processor(
+            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+            mm_kwargs = dict(
+                **mm_kwargs,
+                sampling_rate=feature_extractor.sampling_rate,
+            )
+        else:
+            # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
+            pass
+
+        processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
         )
+
+        return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -188,14 +192,8 @@ class Qwen2AudioMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        processor = self.info.get_hf_processor()
-
-        # Use getattr with default to be compatible with transformers<4.48
-        audio_token = getattr(processor, "audio_token", "<|AUDIO|>")
-        audio_bos_token = getattr(processor, "audio_bos_token",
-                                  "<|audio_bos|>")
-        audio_eos_token = getattr(processor, "audio_eos_token",
-                                  "<|audio_eos|>")
+        hf_config = self.info.get_hf_config()
+        placeholder = hf_config.audio_token_index
 
         feature_attention_mask = out_mm_kwargs.get("feature_attention_mask")
         if feature_attention_mask is None:
@@ -216,16 +214,12 @@ class Qwen2AudioMultiModalProcessor(
                     f"The audio {audio} (len={len(audio)}) is too short "
                     "to be represented inside the model")
 
-            return "".join([
-                audio_bos_token,
-                audio_token * num_placeholders,
-                audio_eos_token,
-            ])
+            return [placeholder] * num_placeholders
 
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[placeholder],
                 replacement=get_replacement_qwen2_audio,
             )
         ]
@@ -239,26 +233,6 @@ class Qwen2AudioMultiModalProcessor(
         # audios are short (the corresponding placeholders may take up fewer
         # tokens than the number of audio items)
         return not hasattr(self.info.get_hf_processor(), "audio_token")
-
-    def apply(
-        self,
-        prompt: Union[str, list[int]],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> MultiModalInputs:
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
-
-        # Only <|AUDIO|> tokens should be considered as placeholders,
-        # so we ignore the audio_bos_token and audio_eos_token
-        result["mm_placeholders"] = {
-            modality: [
-                PlaceholderRange(offset=p["offset"] + 1,
-                                 length=p["length"] - 2) for p in ps
-            ]
-            for modality, ps in result["mm_placeholders"].items()
-        }
-
-        return result
 
 
 @MULTIMODAL_REGISTRY.register_processor(

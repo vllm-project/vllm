@@ -24,13 +24,10 @@ def test_classification_models(
 ) -> None:
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.classify(example_prompts)
-
         # This test is for verifying whether the model's extra_repr
         # can be printed correctly.
-        def print_model(model):
-            print(model)
-
-        vllm_model.apply_model(print_model)
+        print(vllm_model.model.llm_engine.model_executor.driver_worker.
+              model_runner.model)
 
     with hf_runner(model,
                    dtype=dtype,

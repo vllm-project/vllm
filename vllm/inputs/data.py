@@ -9,7 +9,7 @@ from typing_extensions import NotRequired, TypedDict, TypeVar, assert_never
 if TYPE_CHECKING:
     from vllm.multimodal import (MultiModalDataDict, MultiModalKwargs,
                                  MultiModalPlaceholderDict)
-    from vllm.multimodal.inputs import MultiModalInputs
+    from vllm.multimodal.inputs import MultiModalInputsV2
 
 
 class TextPrompt(TypedDict):
@@ -207,7 +207,7 @@ def token_inputs(
     return inputs
 
 
-DecoderOnlyInputs = Union[TokenInputs, "MultiModalInputs"]
+DecoderOnlyInputs = Union[TokenInputs, "MultiModalInputsV2"]
 """
 The inputs in :class:`~vllm.LLMEngine` before they are
 passed to the model executor.
@@ -222,14 +222,14 @@ class EncoderDecoderInputs(TypedDict):
 
     This specifies the required data for encoder-decoder models.
     """
-    encoder: Union[TokenInputs, "MultiModalInputs"]
+    encoder: Union[TokenInputs, "MultiModalInputsV2"]
     """The inputs for the encoder portion."""
 
-    decoder: Union[TokenInputs, "MultiModalInputs"]
+    decoder: Union[TokenInputs, "MultiModalInputsV2"]
     """The inputs for the decoder portion."""
 
 
-SingletonInputs = Union[TokenInputs, "MultiModalInputs"]
+SingletonInputs = Union[TokenInputs, "MultiModalInputsV2"]
 """
 A processed :class:`SingletonPrompt` which can be passed to
 :class:`vllm.sequence.Sequence`.
@@ -311,7 +311,7 @@ class SingletonInputsAdapter:
             return inputs.get("multi_modal_hashes", [])
 
         if inputs["type"] == "multimodal":
-            # only the case when we use MultiModalInputs
+            # only the case when we use MultiModalInputsV2
             return inputs.get("mm_hashes", [])  # type: ignore[return-value]
 
         assert_never(inputs)  # type: ignore[arg-type]

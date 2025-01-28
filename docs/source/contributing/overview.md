@@ -25,12 +25,10 @@ Check out the [building from source](#build-from-source) documentation for detai
 ```bash
 pip install -r requirements-dev.txt
 
-# Linting, formatting and static type checking
-pre-commit install
-
-# You can manually run pre-commit with
-pre-commit run --all-files
-
+# linting and formatting
+bash format.sh
+# Static type checking
+mypy
 # Unit tests
 pytest tests/
 ```
@@ -90,8 +88,7 @@ If the PR spans more than one category, please include all relevant prefixes.
 The PR needs to meet the following code quality standards:
 
 - We adhere to [Google Python style guide](https://google.github.io/styleguide/pyguide.html) and [Google C++ style guide](https://google.github.io/styleguide/cppguide.html).
-- Pass all linter checks. Please use `pre-commit` to format your code. See
-  <https://pre-commit.com/#usage> if `pre-commit` is new to you.
+- Pass all linter checks. Please use <gh-file:format.sh> to format your code.
 - The code needs to be well-documented to ensure future contributors can easily
   understand the code.
 - Include sufficient tests to ensure the project stays correct and robust. This

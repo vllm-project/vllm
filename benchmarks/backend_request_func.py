@@ -22,7 +22,6 @@ class RequestFuncInput:
     prompt_len: int
     output_len: int
     model: str
-    model_name: Optional[str] = None
     best_of: int = 1
     logprobs: Optional[int] = None
     extra_body: Optional[dict] = None
@@ -79,7 +78,7 @@ async def async_request_tgi(
                             continue
                         chunk_bytes = chunk_bytes.decode("utf-8")
 
-                        # NOTE: Sometimes TGI returns a ping response without
+                        #NOTE: Sometimes TGI returns a ping response without
                         # any data, we should skip it.
                         if chunk_bytes.startswith(":"):
                             continue
@@ -236,8 +235,7 @@ async def async_request_openai_completions(
 
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         payload = {
-            "model": request_func_input.model_name \
-                if request_func_input.model_name else request_func_input.model,
+            "model": request_func_input.model,
             "prompt": request_func_input.prompt,
             "temperature": 0.0,
             "best_of": request_func_input.best_of,
@@ -330,8 +328,7 @@ async def async_request_openai_chat_completions(
         if request_func_input.multi_modal_content:
             content.append(request_func_input.multi_modal_content)
         payload = {
-            "model": request_func_input.model_name \
-                if request_func_input.model_name else request_func_input.model,
+            "model": request_func_input.model,
             "messages": [
                 {
                     "role": "user",

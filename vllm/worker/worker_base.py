@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import cloudpickle
 import torch
-import torch.nn as nn
 
 from vllm.config import ObservabilityConfig, VllmConfig
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
@@ -91,11 +90,6 @@ class WorkerBase(ABC):
                 if output is None:
                     return None
 
-    @abstractmethod
-    def get_model(self) -> nn.Module:
-        raise NotImplementedError
-
-    @abstractmethod
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
@@ -156,9 +150,6 @@ class DelegateWorkerBase(WorkerBase):
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
-
-    def get_model(self) -> nn.Module:
-        return self.worker.get_model()
 
     def execute_model(
         self,
@@ -376,9 +367,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         else:
             return self._get_worker_input_from_broadcast()
 
-    def get_model(self) -> nn.Module:
-        return self.model_runner.get_model()
-
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
@@ -538,6 +526,9 @@ class WorkerWrapperBase:
         """
         kwargs = all_kwargs[self.rpc_rank]
         enable_trace_function_call_for_thread(self.vllm_config)
+
+        from vllm import configure_as_vllm_process
+        configure_as_vllm_process()
 
         from vllm.plugins import load_general_plugins
         load_general_plugins()

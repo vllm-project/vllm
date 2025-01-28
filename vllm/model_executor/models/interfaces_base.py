@@ -3,6 +3,7 @@ from typing import (TYPE_CHECKING, List, Optional, Protocol, Type, Union,
 
 import torch
 import torch.nn as nn
+from transformers import PretrainedConfig
 from typing_extensions import TypeIs, TypeVar
 
 from vllm.logger import init_logger
@@ -18,6 +19,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# The type of HF config
+C_co = TypeVar("C_co", bound=PretrainedConfig, covariant=True)
+
 # The type of hidden states
 # Currently, T = torch.Tensor for all models except for Medusa
 # which has T = List[torch.Tensor]
@@ -30,7 +34,7 @@ T_co = TypeVar("T_co", default=torch.Tensor, covariant=True)
 
 
 @runtime_checkable
-class VllmModel(Protocol[T_co]):
+class VllmModel(Protocol[C_co, T_co]):
     """The interface required for all models in vLLM."""
 
     def __init__(
@@ -93,7 +97,7 @@ def is_vllm_model(
 
 
 @runtime_checkable
-class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
+class VllmModelForTextGeneration(VllmModel[C_co, T], Protocol[C_co, T]):
     """The interface required for all generative models in vLLM."""
 
     def compute_logits(
@@ -139,7 +143,7 @@ def is_text_generation_model(
 
 
 @runtime_checkable
-class VllmModelForPooling(VllmModel[T], Protocol[T]):
+class VllmModelForPooling(VllmModel[C_co, T], Protocol[C_co, T]):
     """The interface required for all pooling models in vLLM."""
 
     def pooler(

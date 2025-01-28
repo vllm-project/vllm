@@ -459,7 +459,16 @@ def tensorize_vllm_model(engine_args: EngineArgs,
             stream.write(encryption_params.key)
 
     engine = LLMEngine.from_engine_args(engine_args)
-    engine.model_executor.collective_rpc(
-        "save_tensorized_model",
-        kwargs=dict(tensorizer_config=tensorizer_config),
-    )
+    if tensorizer_config._is_sharded:
+        # if the engine is a distributed engine (for tensor parallel) then each
+        # worker shard needs to serialize its part of the model.
+        engine.model_executor._run_workers(
+            "save_tensorized_model",
+            tensorizer_config=tensorizer_config,
+        )
+    else:
+        # with a single worker, we can get to the underlying model directly
+        serialize_vllm_model(
+            engine.model_executor.driver_worker.model_runner.model,
+            tensorizer_config,
+        )
