@@ -149,7 +149,8 @@ class DeepseekV3MoE(nn.Module):
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        num_tokens, hidden_dim = hidden_states.shape
+        batch_size, seq_len, hidden_dim = hidden_states.shape
+        num_tokens = batch_size * seq_len
         hidden_states = hidden_states.view(-1, hidden_dim)
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
@@ -164,7 +165,7 @@ class DeepseekV3MoE(nn.Module):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
-        return final_hidden_states.view(num_tokens, hidden_dim)
+        return final_hidden_states.view(batch_size, seq_len, hidden_dim)
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
@@ -284,6 +285,10 @@ class DeepseekV3Attention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        batch_size, seq_len = hidden_states.size(0), hidden_states.size(1)
+        hidden_states = hidden_states.view(batch_size * seq_len, *hidden_states.shape[2:])
+        positions = positions.view(-1)
+        print(f"hidden_states: {hidden_states.shape}, positions: {positions.shape}")
         if self.q_lora_rank is not None:
             q = self.q_a_proj(hidden_states)[0]
             q = self.q_a_layernorm(q)
@@ -324,11 +329,18 @@ class DeepseekV3Attention(nn.Module):
         v = torch.nn.functional.pad(
             v, [0, self.qk_head_dim - self.v_head_dim],
             value=0).view(-1, self.num_local_heads * self.qk_head_dim)
+
+        ### reshape for HPU
+        q = q.view(batch_size, seq_len, self.num_local_heads * self.qk_head_dim)
+        k = k.view(batch_size, seq_len, self.num_local_heads * self.qk_head_dim)
+        v = v.view(batch_size, seq_len, self.num_local_heads * self.qk_head_dim)
+
+        print(f"before sending to attn, q shape is {q.shape}, k shape is {k.shape}, v shape is {v.shape}")
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         attn_output = attn_output.view(
-            -1, self.num_local_heads,
+            batch_size, seq_len, self.num_local_heads,
             self.qk_head_dim)[..., :self.v_head_dim].reshape(
-                -1, self.num_local_heads * self.v_head_dim)
+                batch_size, seq_len, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
         return output
 
