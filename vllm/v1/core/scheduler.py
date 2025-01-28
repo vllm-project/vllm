@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections import deque
+from concurrent import futures
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Optional,
-                    Set, Tuple, Union)
+from typing import (TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Literal,
+                    Optional, Set, Tuple, Union)
 
 from vllm.config import (CacheConfig, DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
@@ -70,22 +71,6 @@ class Scheduler:
         self.waiting: Deque[Request] = deque()
         self.running: List[Request] = []
 
-        # A set of unready requests that might be waiting for grammar compilation
-        # we can also use this for tracking spec decode request
-        self.grammar_queue: Deque[Request] = deque()
-        # initialize the tokenizer on the scheduler (this is used for constrained decoding)
-        tokenizer_group = init_tokenizer_from_configs(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
-            parallel_config=parallel_config,
-            lora_config=lora_config)
-        tokenizer_group.ping()
-        # setup guided decoding, right now uses xgrammar
-        self.guided_decoding_manager = GuidedDecodingManager[Any].from_backend(
-            backend=decoding_config.guided_decoding_backend,
-            tokenizer_group=tokenizer_group,
-            model_config=model_config)
-
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
@@ -117,6 +102,21 @@ class Scheduler:
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
 
+        # A request queue for grammar compilation
+        self.grammar: Deque[Request] = deque()
+        # initialize the tokenizer on the scheduler (this is used for constrained decoding)
+        tokenizer_group = init_tokenizer_from_configs(
+            model_config=model_config,
+            scheduler_config=scheduler_config,
+            parallel_config=parallel_config,
+            lora_config=lora_config)
+        tokenizer_group.ping()
+        # setup guided decoding, right now uses xgrammar
+        self.guided_decoding_manager = GuidedDecodingManager.from_backend(
+            backend=decoding_config.guided_decoding_backend,
+            tokenizer_group=tokenizer_group,
+            model_config=model_config)
+
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -133,21 +133,20 @@ class Scheduler:
         preempted_reqs: List[Request] = []
 
         # we need to check the grammar queue for any requests that have finished FSM compilation
-        newly_ready_reqs: List[Request] = []
-        remaining_grammar_reqs: Deque[Request] = deque()
-        while self.grammar_queue:
-            request = self.grammar_queue.popleft()
-            grammar = self.guided_decoding_manager.get(request)
-            if grammar is not None:
-                request.grammar = grammar
+        newly_grammar_reqs: List[Request] = []
+        scheduled_grammar_reqs: Deque[Request] = deque()
+        while self.grammar:
+            request = self.grammar.popleft()
+            try:
+                request.grammar = request.grammar.result(timeout=0.05)
                 request.status = RequestStatus.WAITING
-                newly_ready_reqs.append(request)
-            else:
-                remaining_grammar_reqs.append(request)
-        self.grammar_queue = remaining_grammar_reqs
+                newly_grammar_reqs.append(request)
+            except futures._base.TimeoutError:
+                scheduled_grammar_reqs.append(request)
+        self.grammar = scheduled_grammar_reqs
 
         # append all newly ready requests to waiting queue with higher priority
-        for req in newly_ready_reqs:
+        for req in newly_grammar_reqs:
             self.waiting.appendleft(req)
 
         req_to_new_block_ids: Dict[str, List[int]] = {}
@@ -161,7 +160,6 @@ class Scheduler:
         vocab_size = self.model_config.get_vocab_size()
         guided_decoding_bitmasks: Dict[str, torch.Tensor] = {}
         guided_decoding_reqs: List[Request] = []
-        batch_has_grammar = False
 
         # First, schedule the RUNNING requests.
         # NOTE(woosuk): At most 1 request in the RUNNING queue is allowed to be
@@ -242,7 +240,6 @@ class Scheduler:
             # Track if we need guided decoding
             # Create individual bitmask for requests with grammar
             if request.grammar is not None:
-                batch_has_grammar = True
                 if request.request_id not in guided_decoding_bitmasks:
                     bitmask = request.grammar.allocate_bitmask(1, vocab_size)
                     guided_decoding_bitmasks[request.request_id] = bitmask
@@ -266,7 +263,6 @@ class Scheduler:
 
                 # Track guided decoding needs
                 if request.grammar is not None:
-                    batch_has_grammar = True
                     if request.request_id not in guided_decoding_bitmasks:
                         bitmask = request.grammar.allocate_bitmask(
                             1, vocab_size)
@@ -568,10 +564,10 @@ class Scheduler:
     def add_request(self, request: Request) -> None:
         self.requests[request.request_id] = request
 
-        add_to_grammar_queue = self.guided_decoding_manager.collect(request)
-
-        if add_to_grammar_queue: self.grammar_queue.append(request)
-        else: self.waiting.append(request)
+        if self.guided_decoding_manager.collect(request):
+            self.grammar.append(request)
+        else:
+            self.waiting.append(request)
 
     def finish_requests(
         self,

@@ -4,17 +4,19 @@ from abc import ABC, abstractmethod
 from typing import (TYPE_CHECKING, Any, Generic, Literal, TypeVar, get_args,
                     overload)
 
+from typing_extensions import Annotated, LiteralString
+
 from vllm.utils import LazyLoader
 
 if TYPE_CHECKING:
     import torch
     import xgrammar as xgr
-    from typing_extensions import LiteralString, Self
+    from typing_extensions import Self
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
     torch = LazyLoader("torch", globals(), "torch")
 
-T = TypeVar("T", bound=str)
+T = TypeVar("T", bound=Annotated[LiteralString, str])
 
 
 class Grammar(ABC, Generic[T]):
@@ -93,13 +95,19 @@ class Grammar(ABC, Generic[T]):
 
     @overload
     @classmethod
-    def from_backend(cls,
-                     backend: LiteralString = ...,
-                     **kwargs: Any) -> Grammar:
+    def from_backend(
+        cls,
+        backend: Literal["outlines"] = ...,
+        *,
+        guide: str = ...,
+        whitespace_pattern: str | None = ...,
+    ) -> XGrammar:
         ...
 
     @classmethod
-    def from_backend(cls, backend: LiteralString = "xgrammar", **kwargs: Any) -> Grammar[T]:
+    def from_backend(cls,
+                     backend: LiteralString = "xgrammar",
+                     **kwargs: Any) -> Grammar[T]:
         grammar_cls = cls._registry.get(backend)
         if grammar_cls is None:
             raise ValueError(
@@ -108,8 +116,7 @@ class Grammar(ABC, Generic[T]):
 
 
 class XGrammar(Grammar[Literal["xgrammar"]]):
-    # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string
-    # for jump-forward decoding
+    # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string for jump-forward decoding
 
     def __init__(self, matcher: xgr.GrammarMatcher, vocab_size: int,
                  ctx: xgr.CompiledGrammar) -> None:

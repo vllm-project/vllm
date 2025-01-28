@@ -11,6 +11,8 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
+    from concurrent.futures import Future
+
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.inputs import PlaceholderRange
@@ -81,7 +83,7 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
 
         # grammar objects
-        self.grammar = grammar
+        self.grammar: Optional[Grammar[Any] | Future[Grammar[Any]]] = grammar
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":

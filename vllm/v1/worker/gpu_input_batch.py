@@ -169,7 +169,7 @@ class InputBatch:
 
         self.num_logprobs: Dict[str, int] = {}
         self.prompt_logprob_reqs: Set[str] = set()
-        self.guided_decoding_reqs: Set[str] = set()
+        self.grammar_reqs: Set[str] = set()
 
     def add_request(
         self,
@@ -237,7 +237,7 @@ class InputBatch:
         if sampling_params.prompt_logprobs:
             self.prompt_logprob_reqs.add(req_id)
 
-        if request.grammar is not None: self.guided_decoding_reqs.add(req_id)
+        if request.grammar is not None: self.grammar_reqs.add(req_id)
 
     def remove_request(self, req_id: str) -> Optional[int]:
         req_index = self.req_id_to_index.pop(req_id, None)
@@ -255,7 +255,7 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.prompt_logprob_reqs.discard(req_id)
-        self.guided_decoding_reqs.discard(req_id)
+        self.grammar_reqs.discard(req_id)
         return req_index
 
     def clear(self) -> None:
@@ -271,7 +271,7 @@ class InputBatch:
         self.generators.clear()
         self.num_logprobs.clear()
         self.prompt_logprob_reqs.clear()
-        self.guided_decoding_reqs.clear()
+        self.grammar_reqs.clear()
 
     def condense(self, empty_req_indices: List[int]) -> None:
         if self.num_reqs == 0:

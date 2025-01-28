@@ -5,12 +5,11 @@ import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Generic, Literal, Optional, TypeVar,
-                    get_args)
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, get_args
 
 from transformers import PreTrainedTokenizer
 
-from vllm.config import DecodingConfig, ModelConfig
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.utils import LazyLoader
 from vllm.v1.request import GuidedDecodingKey, Request, RequestStatus
@@ -23,6 +22,8 @@ if TYPE_CHECKING:
     from typing_extensions import LiteralString
 
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+
+    from .grammar import XGrammar
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -48,58 +49,67 @@ class GuidedDecodingManager(ABC, Generic[T]):
 
     def flush(self):
         with self._lock:
-            self.cache.clear()
+            self.grammar_cache.clear()
 
-    def cache_grammar(self, request: Request):
-        return self.executor.submit(self._add_grammar_to_cache, request)
+    def cache(self, request: Request):
 
-    def get_grammar(self, request: Request):
+        def _executor_loop(request: Request):
+            key = request.guided_decoding_key
+            with self._lock:
+                cache_hit = False
+                if key in self.grammar_cache:
+                    cache_hit, entry = True, self.grammar_cache[key]
+                else:
+                    entry = GrammarCache(None, threading.Event())
+                    self.grammar_cache[key] = entry
+
+            if cache_hit:
+                entry.event.wait()
+            else:
+                entry.value = self.initialize_cache(key)
+                entry.event.set()
+            return copy.copy(entry.value) if entry.value else None
+
+        return self.executor.submit(_executor_loop, request)
+
+    def get(self, request: Request):
         with self._lock:
-            entry = self.cache.get(request.guided_decoding_key)
+            entry = self.grammar_cache.get(request.guided_decoding_key)
             if entry is None or not entry.event.is_set(): return None
             return copy.copy(entry.value) if entry.value else None
 
-    def should_add(self, request: Request):
+    def collect(self, request: Request):
         if not request.use_guided_decoding: return False
-        request.grammar = self.get_grammar(request)
+        request.grammar = self.get(request)
         if not request.grammar:
-            request.grammar = self.cache_grammar(request)
+            request.grammar = self.cache(request)
             request.status = RequestStatus.WAITING_FOR_FSM
             return True
         return False
 
-    def _add_grammar_to_cache(self, request: Request):
-        key = request.guided_decoding_key
-        with self._lock:
-            cache_hit = False
-            if key in self.cache:
-                cache_hit, entry = True, self.cache[key]
-            else:
-                entry = GrammarCache(None, threading.Event())
-                self.cache[key] = entry
-
-        if cache_hit:
-            entry.event.wait()
-        else:
-            entry.value = self.initialize_cache(key)
-            entry.event.set()
-        return copy.copy(entry.value) if entry.value else None
-
     @classmethod
-    def from_backend(cls, /, backend: LiteralString = "xgrammar", *,
+    def from_backend(cls,
+                     backend: LiteralString = "xgrammar",
+                     /,
+                     *,
                      tokenizer_group: BaseTokenizerGroup,
                      model_config: ModelConfig) -> GuidedDecodingManager[T]:
         manager_cls = cls._registry.get(backend)
-        if manager_cls is None: raise ValueError( f"Backend '{backend}' not found in registry. Available backends: {list(cls._registry)}")
-        return manager_cls(tokenizer_group=tokenizer_group, model_config=model_config)
+        if manager_cls is None:
+            raise ValueError(
+                f"Backend '{backend}' not found in registry. Available backends: {list(cls._registry)}"
+            )
+        return manager_cls(tokenizer_group=tokenizer_group,
+                           model_config=model_config)
 
     _registry: dict[str, type[GuidedDecodingManager[T]]] = {}
     _backend: T
 
-    def __init__(self, *, tokenizer_group: BaseTokenizerGroup, model_config: ModelConfig):
+    def __init__(self, *, tokenizer_group: BaseTokenizerGroup,
+                 model_config: ModelConfig):
         self.model_config = model_config
         self.tokenizer = tokenizer_group.get_lora_tokenizer(None)
-        self.cache: dict[GuidedDecodingKey, GrammarCache] = {}
+        self.grammar_cache: dict[GuidedDecodingKey, GrammarCache] = {}
         self.executor = ThreadPoolExecutor()
         self._lock = threading.Lock()
 
@@ -136,7 +146,7 @@ class XGrammarManager(GuidedDecodingManager[Literal["xgrammar"]]):
     _compiler_cache: dict[str, xgr.GrammarCompiler] = {}
     _compiler: xgr.GrammarCompiler | None = None
 
-    def initialize_cache(self, key: GuidedDecodingKey) -> Grammar:
+    def initialize_cache(self, key: GuidedDecodingKey) -> XGrammar:
         request_type, grammar_spec = key
         compiler = XGrammarManager.get_compiler(self.tokenizer)
         if request_type == "json":
