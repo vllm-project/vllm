@@ -689,6 +689,20 @@ class ModelConfig:
                 f"Total number of attention heads ({total_num_attention_heads})"
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
+            
+        expert_parallel_size = parallel_config.expert_parallel_size
+        if expert_parallel_size > 1:
+            num_experts = getattr(self.hf_text_config, "n_routed_experts", 0)
+            if num_experts < 1:
+                print (f"hf config: {self.hf_text_config}")
+                raise ValueError(
+                    "Number of experts must be greater than 0 when using "
+                    "expert parallelism.")
+            if num_experts % expert_parallel_size != 0:
+                print (f"hf config: {self.hf_text_config}")
+                raise ValueError(
+                    f"Number of experts ({num_experts}) must be divisible by "
+                    f"expert parallel size ({expert_parallel_size}).")
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1:
@@ -812,11 +826,10 @@ class ModelConfig:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
     
-    def get_num_experts(self, parallel_config: "ParallelConfig") -> int:
-        num_experts = getattr(self.hf_text_config, "num_experts", 0)
-        return num_experts // parallel_config.tensor_parallel_size
+    def get_num_routed_experts(self, parallel_config: "ParallelConfig") -> int:
+        num_routed_experts = getattr(self.hf_text_config, "n_routed_experts", 0)
+        return num_routed_experts // parallel_config.expert_parallel_size
         
-
     def get_layers_start_end_indices(
             self, parallel_config: "ParallelConfig") -> Tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
@@ -1282,8 +1295,10 @@ class ParallelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
+        self.tensor_parallel_size *= self.expert_parallel_size
+        
         self.world_size = self.pipeline_parallel_size * \
-            self.tensor_parallel_size * self.expert_parallel_size
+            self.tensor_parallel_size
 
         if self.worker_use_ray:
             if self.distributed_executor_backend is None:

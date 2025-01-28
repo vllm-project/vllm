@@ -6,6 +6,7 @@ import torch
 
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
+                              get_expert_model_parallel_size,
                               tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -256,6 +257,7 @@ class FusedMoE(torch.nn.Module):
         topk_group: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
         tp_size: Optional[int] = None,
+        ep_size: Optional[int] = None,
         prefix: str = "",
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
@@ -268,6 +270,20 @@ class FusedMoE(torch.nn.Module):
 
         self.tp_size = (tp_size if tp_size is not None else
                         get_tensor_model_parallel_world_size())
+        self.ep_size = (ep_size if ep_size is not None else
+                        get_expert_model_parallel_size())
+        if num_experts % self.ep_size != 0:
+            raise ValueError(
+                f"Number of routed experts {num_experts} must be "
+                f"divisible by the expert parallel size {self.ep_size}.")
+        if self.tp_size % self.ep_size != 0:
+            raise ValueError(
+                f"Tensor parallel size {self.tp_size} must be divisible by "
+                f"the expert parallel size {self.ep_size}.")
+        print(f"\033[91mCreating MoE with TP, EP, TP within EP size of:\033[0m "
+              f"{self.tp_size}, {self.ep_size}, {self.tp_size // self.ep_size}")
+        
+        self.tp_size = self.tp_size // self.ep_size
         self.top_k = top_k
         self.num_experts = num_experts
         assert intermediate_size % self.tp_size == 0

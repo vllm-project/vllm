@@ -108,9 +108,12 @@ class EngineArgs:
     distributed_executor_backend: Optional[Union[str,
                                                  Type[ExecutorBase]]] = None
     # number of P/D disaggregation (or other disaggregation) workers
-    expert_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
+    # MoE layers will use the specified number of EPs, with TP
+    # of tensor_parallel_size. Non-MoE layers will use TP of 
+    # tensor_parallel_size * expert_parallel_size.
+    expert_parallel_size: int = 1 
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
@@ -403,11 +406,6 @@ class EngineArgs:
             '--worker-use-ray',
             action='store_true',
             help='Deprecated, use ``--distributed-executor-backend=ray``.')
-        parser.add_argument('--expert-parallel-size',
-                            '-ep',
-                            type=int,
-                            default=EngineArgs.expert_parallel_size,
-                            help='Number of expert parallel replicas.')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,
@@ -418,6 +416,15 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.tensor_parallel_size,
                             help='Number of tensor parallel replicas.')
+        parser.add_argument('--expert-parallel-size',
+                            '-ep',
+                            type=int,
+                            default=EngineArgs.expert_parallel_size,
+                            help='Number of expert parallelism for MoE layers. '
+                            'Tensor parallelism in MoE layers will be applied '
+                            'within each expert parallel group. Non-MoE layers '
+                            'without experts will use tensor parallelism of '
+                            'tensor_parallel_size * expert_parallel_size.')
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,
@@ -1300,6 +1307,7 @@ class EngineArgs:
 
 @dataclass
 class AsyncEngineArgs(EngineArgs):
+    
     """Arguments for asynchronous vLLM engine."""
     disable_log_requests: bool = False
 
