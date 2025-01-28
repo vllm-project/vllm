@@ -60,8 +60,8 @@ def vllm_flash_attention_forward(_module,
         query,
         key,
         value,
-        _kv_cache=kv_caches[layer_idx],
-        _attn_metadata=attn_metadata), None
+        kv_cache=kv_caches[layer_idx],
+        attn_metadata=attn_metadata), None
 
 
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
