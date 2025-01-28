@@ -34,11 +34,8 @@ from vllm import LLM, SamplingParams
 sampling_params = SamplingParams(temperature=1.3, top_p=0.8)
 llm = LLM(model="meta-llama/Llama-2-7b-chat-hf",
           kv_cache_dtype="fp8",
-          quantization_param_path="./tests/fp8_kv/llama2-7b-fp8-kv/kv_cache_scales.json")
+          calculate_kv_scales=True)
 prompt = "London is the capital of"
 out = llm.generate(prompt, sampling_params)[0].outputs[0].text
 print(out)
-
-# output w/ scaling factors:  England, the United Kingdom, and one of the world's leading financial,
-# output w/o scaling factors:  England, located in the southeastern part of the country. It is known
 ```

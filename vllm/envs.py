@@ -72,6 +72,13 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
+    VLLM_USE_SDPA_ATTENTION: bool = False
+    VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
+    VLLM_USE_ROCM_CUSTOM_PAGED_ATTN: bool = False
+    VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = False
+    Q_SCALE_CONSTANT: int = 20
+    K_SCALE_CONSTANT: int = 20
+    V_SCALE_CONSTANT: int = 10
 
 
 def get_default_cache_root():
@@ -467,6 +474,37 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: float(os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")),
     "VLLM_DISABLE_COMPILE_CACHE":
     lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
+
+    # flag to control if vllm should use naive scaled dot-product attention
+    "VLLM_USE_SDPA_ATTENTION":
+    lambda: (os.environ.get("VLLM_USE_SDPA_ATTENTION", "False").lower() in
+             ("true", "1")),
+
+    # use quantized q,k,v,softmax(qk^T), attn output during prefill
+    "VLLM_USE_ROCM_FP8_FLASH_ATTN":
+    lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
+             ("true", "1")),
+
+    # have custom paged attention implemented for MI3* cards write out fp8
+    "VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT":
+    lambda:
+    (os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT", "True").lower() in
+     ("true", "1")),
+
+    # Divisor for dynamic query scale factor calculation for FP8 attention
+    "Q_SCALE_CONSTANT":
+    lambda: int(os.getenv("Q_SCALE_CONSTANT", "20")),
+
+    # Divisor for dynamic key scale factor calculation
+    # for FP8 KV Cache and attention
+    "K_SCALE_CONSTANT":
+    lambda: int(os.getenv("K_SCALE_CONSTANT", "20")),
+
+    # Divisor for dynamic value scale factor calculation
+    # for FP8 KV Cache and attention
+    "V_SCALE_CONSTANT":
+    lambda: int(os.getenv("V_SCALE_CONSTANT", "10")),
+
 }
 
 # end-env-vars-definition

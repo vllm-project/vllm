@@ -11,6 +11,7 @@ from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
 from vllm.attention.backends.abstract import AttentionType
 from vllm.multimodal import MultiModalPlaceholderMap
+from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
@@ -228,9 +229,18 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
             input_block_tables = self.runner.graph_block_tables[:batch_size]
+            max_blocks = input_block_tables.shape[1]
             for i, block_table in enumerate(self.block_tables):
                 if block_table:
-                    input_block_tables[i, :len(block_table)] = block_table
+                    num_blocks = len(block_table)
+                    if num_blocks <= max_blocks:
+                        input_block_tables[i, :num_blocks] = block_table
+                    else:
+                        # It may be possible to have more blocks allocated due
+                        # to lookahead slots of multi-step, however, they are
+                        # not used anyway, so can be safely ignored.
+                        input_block_tables[
+                            i, :max_blocks] = block_table[:max_blocks]
             block_tables = torch.from_numpy(input_block_tables).to(
                 device, non_blocking=True)
         else:
@@ -264,6 +274,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
+            enable_kv_scales_calculation=True,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -316,6 +327,7 @@ class CommonAttentionState(AttentionState):
             num_decode_tokens=batch_size,
             slot_mapping=self._graph_slot_mapping[:batch_size],
             multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=True,
             seq_lens=None,
             seq_lens_tensor=self._graph_seq_lens[:batch_size],
             max_query_len=1,
@@ -329,15 +341,22 @@ class CommonAttentionState(AttentionState):
             use_cuda_graph=True,
         )
         if is_encoder_decoder_model:
-            # The encoder decoder model works only with XFormers and
-            # Flash Attention backend. Assert the same.
-            assert self.runner.attn_backend.get_name() in\
-                ["XFORMERS", "FLASH_ATTN"], \
-                f"Expected attn_backend name to be either 'XFORMERS' or " \
-                f"'FLASH_ATTN', but "\
-                f"got '{self.runner.attn_backend.get_name()}'"
-            self._update_captured_metadata_for_enc_dec_model(
-                batch_size=batch_size, attn_metadata=attn_metadata)
+            # The encoder decoder model works only with XFormers backend.
+            # Assert the same.
+            if current_platform.is_rocm():
+                assert (self.runner.attn_backend.get_name() == "ROCM_FLASH"), (
+                    f"Expected attn_backend name to be 'ROCM_FLASH', but "
+                    f" got '{self.runner.attn_backend.get_name()}'")
+                self._update_captured_metadata_for_enc_dec_model(
+                    batch_size=batch_size, attn_metadata=attn_metadata)
+            else:
+                assert self.runner.attn_backend.get_name() in\
+                    ["XFORMERS", "FLASH_ATTN"], \
+                    f"Expected attn_backend name to be either 'XFORMERS' or " \
+                    f"'FLASH_ATTN', but "\
+                    f"got '{self.runner.attn_backend.get_name()}'"
+                self._update_captured_metadata_for_enc_dec_model(
+                    batch_size=batch_size, attn_metadata=attn_metadata)
 
         return attn_metadata
 
@@ -353,13 +372,20 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers and
             # Flash Attention backend. Assert the same.
-            assert self.runner.attn_backend.get_name() in\
+            if current_platform.is_rocm():
+                assert (self.runner.attn_backend.get_name() == "ROCM_FLASH"), (
+                    f"Expected attn_backend name to be 'ROCM_FLASH', but "
+                    f" got '{self.runner.attn_backend.get_name()}'")
+                self._add_additonal_input_buffers_for_enc_dec_model(
+                    attn_metadata=attn_metadata, input_buffers=input_buffers)
+            else:
+                assert self.runner.attn_backend.get_name() in\
                 ["XFORMERS", "FLASH_ATTN"], \
-                f"Expected attn_backend name to be either 'XFORMERS' or "\
+                    f"Expected attn_backend name to be either 'XFORMERS' or "\
                 f"'FLASH_ATTN', but "\
-                f"got '{self.runner.attn_backend.get_name()}'"
-            self._add_additonal_input_buffers_for_enc_dec_model(
-                attn_metadata=attn_metadata, input_buffers=input_buffers)
+                    f"got '{self.runner.attn_backend.get_name()}'"
+                self._add_additonal_input_buffers_for_enc_dec_model(
+                    attn_metadata=attn_metadata, input_buffers=input_buffers)
         return input_buffers
 
     def prepare_graph_input_buffers(
@@ -374,13 +400,21 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers and
             # Flash Attention backend. Assert the same.
-            assert self.runner.attn_backend.get_name() in\
+
+            if current_platform.is_rocm():
+                assert (self.runner.attn_backend.get_name() == "ROCM_FLASH"), (
+                    f"Expected attn_backend name to be 'ROCM_FLASH', but "
+                    f" got '{self.runner.attn_backend.get_name()}'")
+                self._prepare_input_buffers_for_enc_dec_model(
+                    attn_metadata, input_buffers)
+            else:
+                assert self.runner.attn_backend.get_name() in\
                 ["XFORMERS", "FLASH_ATTN"], \
-                f"Expected attn_backend name to be either 'XFORMERS' or "\
+                    f"Expected attn_backend name to be either 'XFORMERS' or "\
                 f"'FLASH_ATTN', but "\
-                f"got '{self.runner.attn_backend.get_name()}'"
-            self._prepare_input_buffers_for_enc_dec_model(
-                attn_metadata, input_buffers)
+                    f"got '{self.runner.attn_backend.get_name()}'"
+                self._prepare_input_buffers_for_enc_dec_model(
+                    attn_metadata, input_buffers)
 
     def begin_forward(self, model_input) -> None:
         return

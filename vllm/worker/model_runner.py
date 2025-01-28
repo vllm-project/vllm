@@ -3,7 +3,6 @@ import gc
 import inspect
 import itertools
 import time
-import warnings
 import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -41,7 +40,6 @@ from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
                              MultiModalRegistry)
-from vllm.platforms import current_platform
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
@@ -126,6 +124,8 @@ class ModelInputForGPU(ModelRunnerInputBase):
         if attn_backend is not None:
             tensor_dict = _init_attn_metadata_from_tensor_dict(
                 attn_backend, tensor_dict)
+        if "enable_kv_scales_calculation" in tensor_dict:
+            tensor_dict.pop("enable_kv_scales_calculation")
         return cls(**tensor_dict)
 
     # Exclude `async_callback` to be able to pickle this object
@@ -1139,34 +1139,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.prompt_adapter_manager.create_prompt_adapter_manager(
                     self.model))
 
-        if self.kv_cache_dtype == "fp8" and (current_platform.is_rocm()
-                                             or current_platform.is_cuda()):
-            # Currently only ROCm accepts kv-cache scaling factors
-            # via quantization_param_path and this will be deprecated
-            # in the future.
-            if self.model_config.quantization_param_path is not None:
-                if callable(getattr(self.model, "load_kv_cache_scales", None)):
-                    warnings.warn(
-                        "Loading kv cache scaling factor from JSON is "
-                        "deprecated and will be removed. Please include "
-                        "kv cache scaling factors in the model checkpoint.",
-                        FutureWarning,
-                        stacklevel=2)
-                    self.model.load_kv_cache_scales(
-                        self.model_config.quantization_param_path)
-                    logger.info("Loaded KV cache scaling factors from %s",
-                                self.model_config.quantization_param_path)
-                else:
-                    raise RuntimeError(
-                        "Using FP8 KV cache and scaling factors provided but "
-                        "model %s does not support loading scaling factors.",
-                        self.model.__class__)
-            else:
-                logger.warning(
-                    "Using FP8 KV cache but no scaling factors "
-                    "provided. Defaulting to scaling factors of 1.0. "
-                    "This may lead to less accurate results!")
-
         if self.vllm_config.compilation_config.level ==\
             CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
             backend = self.vllm_config.compilation_config.init_backend(
@@ -1348,6 +1320,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     dtype=self.model_config.dtype,
                     device=self.device)
 
+            # Disable KV Scale Calculation for dummy data during profile run
+            if model_input.attn_metadata is not None:
+              model_input.attn_metadata.enable_kv_scales_calculation = False
+
             self.execute_model(model_input, kv_caches, intermediate_tensors)
             torch.cuda.synchronize()
             return
@@ -1491,6 +1467,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             batch_size,
                             is_encoder_decoder_model=self.model_config.
                             is_encoder_decoder))
+
+                    # Disable KV Scale Calculation for graph capture
+                    attn_metadata.enable_kv_scales_calculation = False
 
                     if self.lora_config:
                         lora_mapping = LoRAMapping(

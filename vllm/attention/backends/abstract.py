@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
                     Protocol, Set, Tuple, Type, TypeVar)
 
@@ -128,6 +128,16 @@ class AttentionMetadata:
     multi_modal_placeholder_index_maps: Optional[Dict[
         str, MultiModalPlaceholderMap.IndexMap]]
 
+
+    # Enable/disable KV scales calculation. This is so that we can disable the
+    # calculation until after prefill and cuda graph capture.
+    enable_kv_scales_calculation: bool = field(init=False,
+                                               default_factory=lambda: True)
+
+    # Enable/disable KV scales calculation. This is so that we can disable the
+    # calculation until after prefill and cuda graph capture.
+    enable_kv_scales_calculation: bool
+
     @property
     @abstractmethod
     def prefill_metadata(self) -> Optional["AttentionMetadata"]:
@@ -225,8 +235,8 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
 
 class AttentionLayer(Protocol):
 
-    _k_scale: float
-    _v_scale: float
+    _k_scale: torch.Tensor 
+    _v_scale: torch.Tensor 
 
     def forward(
         self,
@@ -267,5 +277,6 @@ class AttentionImpl(ABC, Generic[T]):
         kv_cache: torch.Tensor,
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
+        fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]] = None,
     ) -> torch.Tensor:
         raise NotImplementedError

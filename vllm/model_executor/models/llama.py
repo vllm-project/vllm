@@ -26,11 +26,12 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
+import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -38,15 +39,17 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils import is_navi
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
@@ -81,14 +84,27 @@ class LlamaMLP(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
         )
+        self.use_fp8 = (isinstance(quant_config, Fp8Config)
+                        if current_platform.is_rocm() and not is_navi() else
+                        False)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        x, _ = self.gate_up_proj(x)
-        x = self.act_fn(x)
+        if current_platform.is_rocm() and x.shape[0] == 1 and x.shape[1] == 1:
+            out = torch.empty(x.shape[0],
+                              self.gate_up_proj.weight.shape[0] // 2,
+                              dtype=x.dtype,
+                              device=x.device)
+            ops.LLMM_Silu(self.gate_up_proj.weight, x.view(-1, x.size(-1)),
+                          out, 8)
+            x = out.view(x.shape[0], x.shape[1], out.shape[1])
+        else:
+            x, _ = self.gate_up_proj(x)
+            x = self.act_fn(
+                x, self.down_proj.input_scale if self.use_fp8 else None)
         x, _ = self.down_proj(x)
         return x
 
@@ -179,6 +195,12 @@ class LlamaAttention(nn.Module):
         else:
             sliding_window = None
 
+        # For CUDA devices and Navi4x, attn_fp8 will be set to false.
+        self.attn_fp8_out = envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT \
+                        and current_platform.is_rocm() \
+                        and not is_navi() \
+                        and isinstance(quant_config, Fp8Config)
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -200,7 +222,9 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(
+            q, k, v, kv_cache, attn_metadata,
+            self.o_proj.input_scale if self.attn_fp8_out else None)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -216,6 +240,9 @@ class LlamaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        self.use_fp8 = (isinstance(quant_config, Fp8Config)
+                        if current_platform.is_rocm() and not is_navi() else
+                        False)
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
@@ -270,20 +297,23 @@ class LlamaDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
+        scale = None if not self.use_fp8 else \
+            self.self_attn.qkv_proj.input_scale
         if residual is None:
             residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+            hidden_states = self.input_layernorm(hidden_states, None, scale)
         else:
             hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+                hidden_states, residual, scale)
         hidden_states = self.self_attn(positions=positions,
                                        hidden_states=hidden_states,
                                        kv_cache=kv_cache,
                                        attn_metadata=attn_metadata)
 
         # Fully Connected
+        scale = None if not self.use_fp8 else self.mlp.gate_up_proj.input_scale
         hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+            hidden_states, residual, scale)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -440,32 +470,6 @@ class LlamaModel(nn.Module):
             loaded_params.add(name)
         return loaded_params
 
-    # If this function is called, it should always initialize KV cache scale
-    # factors (or else raise an exception). Thus, handled exceptions should
-    # make sure to leave KV cache scale factors in a known good (dummy) state
-    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        for layer_idx, scaling_factor in kv_cache_scales_loader(
-                quantization_param_path, tp_rank, tp_size,
-                self.config.num_hidden_layers,
-                self.config.__class__.model_type):
-            if not isinstance(self.layers[layer_idx], nn.Identity):
-                layer_self_attn = self.layers[layer_idx].self_attn
-
-            if current_platform.is_rocm():
-                # The scaling factor convention we are assuming is
-                # quantized_value * scaling_factor ~= true_value
-                # which is consistent with the practice of setting
-                # scaling_factor = tensor_amax / FPtype_max
-                scaling_factor *= 2
-            if hasattr(layer_self_attn.attn, "_k_scale"):
-                layer_self_attn.attn._k_scale = scaling_factor
-                layer_self_attn.attn._v_scale = scaling_factor
-            else:
-                raise RuntimeError("Self attention has no KV cache scaling "
-                                   "factor attribute!")
-
 
 class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
@@ -592,9 +596,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return loader.load_weights(
             self.maybe_remap_mistral(name, loaded_weight)
             for name, loaded_weight in weights)
-
-    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
-        self.model.load_kv_cache_scales(quantization_param_path)
 
     # This function is used to remap the mistral format as
     # used by Mistral and Llama <=2
