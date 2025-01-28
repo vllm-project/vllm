@@ -18,7 +18,6 @@ from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
                                                      Tekkenizer)
 
 from vllm.logger import init_logger
-from vllm.utils import is_list_of
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
@@ -28,7 +27,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class Encoding:
-    input_ids: Union[List[int], List[List[int]]]
+    input_ids: List[int]
 
 
 def maybe_serialize_tool_calls(request: ChatCompletionRequest):
@@ -224,25 +223,17 @@ class MistralTokenizer:
 
     def __call__(
         self,
-        prompt: Union[str, List[str], List[int]],
+        prompt: str,
         add_special_tokens: bool = False,
         truncation: bool = False,
         max_length: Optional[int] = None,
     ):
-        input_ids: Union[List[int], List[List[int]]]
-        # For List[str], original prompt text
-        if is_list_of(prompt, str):
-            input_ids_: List[List[int]] = []
-            for p in prompt:
-                each_input_ids = self.encode_one(p, truncation, max_length)
-                input_ids_.append(each_input_ids)
-            input_ids = input_ids_
-        # For List[int], apply chat template output, already tokens.
-        elif is_list_of(prompt, int):
-            input_ids = prompt
-        # For str, single prompt text
-        else:
-            input_ids = self.encode_one(prompt, truncation, max_length)
+        # Mistral Tokenizers should not add special tokens
+        input_ids = self.encode(prompt)
+
+        if truncation:
+            input_ids = input_ids[:max_length]
+
         return Encoding(input_ids=input_ids)
 
     def get_vocab(self) -> Dict[str, int]:
@@ -253,19 +244,6 @@ class MistralTokenizer:
     def get_added_vocab(self) -> Dict[str, int]:
         # Mistral tokenizers have no added vocabulary
         return {}
-
-    def encode_one(
-        self,
-        prompt: str,
-        truncation: bool = False,
-        max_length: Optional[int] = None,
-    ) -> List[int]:
-        # Mistral Tokenizers should not add special tokens
-        input_ids = self.encode(prompt)
-
-        if truncation:
-            input_ids = input_ids[:max_length]
-        return input_ids
 
     def encode(self, prompt: str) -> List[int]:
         # `encode` should only be used for prompt completion

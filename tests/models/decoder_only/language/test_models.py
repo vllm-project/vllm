@@ -73,13 +73,10 @@ def test_models(
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
-
         # This test is for verifying whether the model's extra_repr
         # can be printed correctly.
-        def print_model(model):
-            print(model)
-
-        vllm_model.apply_model(print_model)
+        print(vllm_model.model.llm_engine.model_executor.driver_worker.
+              model_runner.model)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,

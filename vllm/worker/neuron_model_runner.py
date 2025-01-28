@@ -113,9 +113,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
             raise NotImplementedError(
                 "Supports only Transformer-NeuronX based models.")
 
-    def get_model(self) -> nn.Module:
-        return self.model
-
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],

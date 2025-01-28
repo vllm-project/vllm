@@ -251,7 +251,8 @@ def unified_attention(
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
+    return self.impl.forward(query, key, value, kv_cache, attn_metadata,
+                             self._k_scale, self._v_scale)
 
 
 def unified_attention_fake(
@@ -283,12 +284,13 @@ def unified_attention_with_output(
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    self.impl.forward(self,
-                      query,
+    self.impl.forward(query,
                       key,
                       value,
                       kv_cache,
                       attn_metadata,
+                      self._k_scale,
+                      self._v_scale,
                       output=output)
 
 

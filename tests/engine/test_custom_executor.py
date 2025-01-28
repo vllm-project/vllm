@@ -51,9 +51,7 @@ def test_custom_executor(model, tmp_path):
         assert not os.path.exists(".marker")
 
         engine_args = EngineArgs(
-            model=model,
-            distributed_executor_backend=CustomUniExecutor,
-        )
+            model=model, distributed_executor_backend=CustomUniExecutor)
         engine = LLMEngine.from_engine_args(engine_args)
         sampling_params = SamplingParams(max_tokens=1)
 

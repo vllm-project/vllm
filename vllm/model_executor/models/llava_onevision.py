@@ -554,12 +554,10 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
         for input_key in kwargs:
-            if input_key in ("pixel_values",
-                             "image_embeds") and "images" not in modalities:
+            if input_key == "pixel_values" and "images" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(
                     **kwargs)
-            if input_key in ("pixel_values_videos",
-                             "video_embeds") and "videos" not in modalities:
+            if input_key == "pixel_values_videos" and "videos" not in modalities:  # noqa E501
                 modalities["videos"] = self._parse_and_validate_video_input(
                     **kwargs)
 
