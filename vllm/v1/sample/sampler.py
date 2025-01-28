@@ -145,6 +145,7 @@ class Sampler(nn.Module):
         topk_indices = torch.cat((token_ids, topk_indices), dim=1)
         topk_logprobs = torch.cat((sampled_logprobs, topk_logprobs), dim=1)
 
+        # NOTE: returned tensors are unsynchronized
         return topk_logprobs.to(device='cpu',
                                 non_blocking=True), topk_indices.to(
                                     device='cpu', non_blocking=True)

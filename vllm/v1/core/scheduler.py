@@ -251,7 +251,7 @@ class Scheduler:
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if (num_computed_tokens + num_new_tokens < request.num_tokens):
+                if num_computed_tokens + num_new_tokens < request.num_tokens:
                     assert not partial_req_id
                     partial_req_id = request.request_id
 
