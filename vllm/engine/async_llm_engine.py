@@ -29,7 +29,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
@@ -559,11 +559,9 @@ async def build_guided_decoding_logits_processor_async(
         sampling_params.logits_processors.append(processor)
 
     # Unset guided decoding params after constructing the lp from them
-    # but keep a mostly-empty GuidedDeodingParams object in the sampling params
-    # so we can detect elsewhere that guided decoding is use for this request.
-    # We can just keep which backend is in use so it's not empty.
-    sampling_params.guided_decoding = GuidedDecodingParams(
-        backend=guided_decoding.backend)
+    sampling_params.guided_decoding = None
+    # and leave behind an easy way to detect that guided decoding is in use
+    sampling_params.guided_decoding_in_use = True
 
     return sampling_params
 

@@ -744,7 +744,7 @@ class LLMEngine:
         features = FeatureUsage(self._base_features)
         # Add any additional features enabled at the request level
         if isinstance(params, SamplingParams):
-            if params.guided_decoding:
+            if params.using_guided_decoding():
                 features.add(FEATURES.STRUCTURED_OUTPUT)
             if params.logits_processors:
                 features.add(FEATURES.LOGITS_PROCESSORS)
@@ -1995,6 +1995,8 @@ class LLMEngine:
 
             # Unset so this doesn't get passed down to the model
             sampling_params.guided_decoding = None
+            # and leave behind a hint that guided decoding is in use
+            sampling_params.guided_decoding_in_use = True
 
         if (sampling_params.logit_bias or sampling_params.allowed_token_ids):
             tokenizer = self.get_tokenizer(lora_request=lora_request)

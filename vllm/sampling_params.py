@@ -209,6 +209,9 @@ class SamplingParams(
     logit_bias: Optional[Dict[int, float]] = None
     allowed_token_ids: Optional[List[int]] = None
 
+    # guided decoding config has already been converted to a logits processor
+    guided_decoding_in_use: bool = False
+
     @staticmethod
     def from_optional(
         n: Optional[int] = 1,
@@ -448,6 +451,9 @@ class SamplingParams(
     @property
     def all_stop_token_ids(self) -> Set[int]:
         return self._all_stop_token_ids
+
+    def using_guided_decoding(self) -> bool:
+        return self.guided_decoding is not None or self.guided_decoding_in_use
 
     def clone(self) -> "SamplingParams":
         """Deep copy, but maybe not the LogitsProcessor objects.
