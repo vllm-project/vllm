@@ -383,9 +383,8 @@ class _ModelRegistry:
 
         normalized_arch = []
         for model in architectures:
-            model = self.models.get(model)
-            if model is None:
-                model = self.models[next(iter(_FALLBACK_MODEL))]
+            if not hasattr(self.models, model):
+                model = "TransformersModel"
             normalized_arch.append(model)
         return normalized_arch
 
