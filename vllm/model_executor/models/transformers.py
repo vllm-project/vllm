@@ -50,7 +50,7 @@ def vllm_flash_attention_forward(_module,
                                  query_length: int = None,
                                  kv_caches: torch.Tensor = None,
                                  attn_metadata: AttentionMetadata = None,
-                                 attention_instances=None,
+                                 attention_instances: Attention=None,
                                  **kwargs):
     layer_idx = _module.layer_idx
     hidden = query.shape[-2]
@@ -81,7 +81,7 @@ class HFRowParallelLinear(RowParallelLinear):
         return super().forward(input)[0]
 
 
-def replace_tp_linear_class(orig_module: nn.Linear, style: str):
+def replace_tp_linear_class(orig_module: nn.Linear, style: str, quant_config):
     """
     In model configurations, we use a neutral type (string) to specify parallel
     styles, here we use it to translate nn.Linear into vllm-style tp Linear.
@@ -96,9 +96,9 @@ def replace_tp_linear_class(orig_module: nn.Linear, style: str):
     bias = orig_module.bias is not None
 
     if style == "colwise":
-        return HFColumnParallelLinear(input_size, output_size, bias)
+        return HFColumnParallelLinear(input_size, output_size, bias, quant_config=quant_config)
     elif style == "rowwise":
-        return HFRowParallelLinear(input_size, output_size, bias)
+        return HFRowParallelLinear(input_size, output_size, bias, quant_config=quant_config)
     # We don't consider colwise_rep since it's used in lm_head
     else:
         raise ValueError(f"Unsupported parallel style value: {style}")
@@ -106,6 +106,7 @@ def replace_tp_linear_class(orig_module: nn.Linear, style: str):
 
 class TransformersModel(nn.Module, SupportsLoRA):
     embedding_padding_modules = ["lm_head"]
+    packed_modules_mapping = {}
 
     # TODO Add support for bnb and LORA
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -116,12 +117,14 @@ class TransformersModel(nn.Module, SupportsLoRA):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        self.quant_config = quant_config
         self.config = config
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
 
         self.model: PreTrainedModel = AutoModel.from_config(
             self.config,
+            attn_implementation="vllm",
             torch_dtype=vllm_config.model_config.dtype,
             trust_remote_code=vllm_config.model_config.trust_remote_code,
         )
@@ -141,7 +144,7 @@ class TransformersModel(nn.Module, SupportsLoRA):
                 num_kv_heads=divide(config.num_key_value_heads, tp_size),
                 cache_config=cache_config,
                 quant_config=quant_config,
-                prefix=maybe_prefix(prefix, f"{i}.attn"))
+                prefix=f"model.layers.{i}.self_attn")
             for i in range(config.num_hidden_layers)
         ]
         self.config._attn_implementation_internal = "vllm"
@@ -178,7 +181,7 @@ class TransformersModel(nn.Module, SupportsLoRA):
             for pattern, style in self.config.base_model_tp_plan.items():
                 if re.match(pattern, qual_name) and isinstance(
                         child_module, nn.Linear):
-                    new_module = replace_tp_linear_class(child_module, style)
+                    new_module = replace_tp_linear_class(child_module, style, self.quant_config)
                     setattr(module, child_name, new_module)
                     self.log_replacement(qual_name, child_module, new_module)
             else:
@@ -195,18 +198,6 @@ class TransformersModel(nn.Module, SupportsLoRA):
         self.log_replacement("input embedding",
                              self.model.get_input_embeddings(), new_module)
         self.model.set_input_embeddings(new_module)
-
-    def _autoset_attn_implementation(
-        self,
-        config,
-        use_flash_attention_2: bool = False,
-        torch_dtype: Optional[torch.dtype] = None,
-        device_map: Optional[Union[str, Dict[str, int]]] = None,
-        check_device_map: bool = True,
-    ):
-        config._attn_implementation = "vllm"
-        config._attn_implementation_autoset = True
-        return config
 
     def forward(
         self,
