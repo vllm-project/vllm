@@ -40,7 +40,10 @@ def _test_processing_correctness(
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
     ctx = InputProcessingContext(
         model_config,
-        tokenizer=cached_get_tokenizer(model_config.tokenizer),
+        tokenizer=cached_get_tokenizer(
+            model_config.tokenizer,
+            trust_remote_code=model_info.trust_remote_code,
+        ),
     )
     # Ensure that it can fit all of the data
     cache = ProcessingCache(capacity=1 << 30)
