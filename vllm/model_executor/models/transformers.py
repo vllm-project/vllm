@@ -41,25 +41,30 @@ from .utils import maybe_prefix
 logger = init_logger(__name__)
 
 
-def vllm_flash_attention_forward(_module,
-                                 query: torch.Tensor,
-                                 key: torch.Tensor,
-                                 value: torch.Tensor,
-                                 attention_mask: torch.Tensor,
-                                 query_length: int = None,
-                                 kv_caches: torch.Tensor = None,
-                                 attn_metadata: AttentionMetadata = None,
-                                 attention_instances: Attention = None,
-                                 **kwargs):
-    layer_idx = _module.layer_idx
+def vllm_flash_attention_forward(
+        # Transformers args
+        module: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: torch.Tensor,
+        # Transformers kwargs
+        scaling: float = None,
+        # vLLM kwargs
+        attn_metadata: AttentionMetadata = None,
+        attention_instances: list[Attention] = None,
+        **kwargs):
+    self_attn = attention_instances[module.layer_idx]
+    if scaling is not None:
+        self_attn.impl.scale = float(scaling)
     hidden = query.shape[-2]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    return attention_instances[layer_idx].forward(
+    return self_attn.forward(
         query,
         key,
         value,
-        kv_cache=kv_caches[layer_idx],
+        kv_cache=None,  # argument not used
         attn_metadata=attn_metadata), None
 
 
@@ -142,10 +147,11 @@ class TransformersModel(nn.Module, SupportsLoRA):
         tp_size = get_tensor_model_parallel_world_size()
         self.attention_instances = [
             Attention(
-                divide(config.num_attention_heads, tp_size),
-                config.head_dim,
-                config.head_dim**
-                -0.5,  # ish, the scaling is different for every attn layer
+                num_heads=divide(config.num_attention_heads, tp_size),
+                head_size=config.head_dim,
+                # NOTE: We use Llama scale as default, if it's set by
+                # Transformers, it's updated in vllm_flash_attention_forward
+                scale=config.head_dim**-0.5,
                 num_kv_heads=divide(config.num_key_value_heads, tp_size),
                 cache_config=cache_config,
                 quant_config=quant_config,
@@ -208,7 +214,7 @@ class TransformersModel(nn.Module, SupportsLoRA):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: List[torch.Tensor],  # argument not used
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -216,7 +222,6 @@ class TransformersModel(nn.Module, SupportsLoRA):
             input_ids[None, ...],
             use_cache=False,
             position_ids=positions[None, ...],
-            kv_caches=kv_caches,
             attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             attention_instances=self.attention_instances,
