@@ -42,9 +42,9 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 
 ### Transformers fallback
 
-After the merge of <gh-pr:11330>, `vllm` can fallback to models that are avaialble in `transformers`. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
+After the merge of <gh-pr:11330>, `vllm` can fallback to models that are available in `transformers`. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
 
-To check if the backend is `transformers`, you can simply do this: 
+To check if the backend is `transformers`, you can simply do this:
 
 ```python 
 from vllm import LLM
@@ -52,7 +52,7 @@ llm = LLM(model=..., task="generate")  # Name or path of your model
 llm.apply_model(lambda model: print(model.__class__))
 ```
 
-If it is `TransformersModel` then it means it's based on `transformers`! 
+If it is `TransformersModel` then it means it's based on `transformers`!
 
 ### ModelScope
 
@@ -759,7 +759,7 @@ See [this page](#generative-models) for more information on how to use generativ
   - `Qwen/Qwen-VL`, `Qwen/Qwen-VL-Chat`, etc.
   - ✅︎
   - ✅︎
-  -
+  - ✅︎
 * - `Qwen2AudioForConditionalGeneration`
   - Qwen2-Audio
   - T + A<sup>+</sup>

@@ -7,8 +7,6 @@ from typing import Type
 
 import pytest
 
-from vllm.model_executor.models import ModelRegistry
-
 from ..conftest import HfRunner, VllmRunner
 from ..utils import multi_gpu_test
 from .utils import check_logprobs_close
