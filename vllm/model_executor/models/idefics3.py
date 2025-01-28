@@ -19,14 +19,12 @@ from typing import (Dict, Iterable, List, Literal, Mapping, NamedTuple,
 
 import torch
 import torch.utils.checkpoint
-from PIL import Image
 from torch import nn
-from transformers import BatchFeature, Idefics3Config, Idefics3ImageProcessor, Idefics3Processor
+from transformers import (BatchFeature, Idefics3Config, Idefics3ImageProcessor,
+                          Idefics3Processor)
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -36,16 +34,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.parse import ImageProcessorItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo,
+                                        MultiModalDataItems,
                                         MultiModalFieldConfig,
-                                        MultiModalDataItems, ProcessorInputs,
                                         PromptReplacement)
-from vllm.sequence import IntermediateTensors, SequenceData
-from vllm.transformers_utils.processor import cached_get_processor
-from vllm.utils import is_list_of
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.sequence import IntermediateTensors
 
 # yapf: disable
 from .idefics2_vision_model import (
@@ -94,313 +91,22 @@ class Idefics3ProcessorSize(NamedTuple):
 ImageInputs = Union[Idefics3ImagePixelInputs, Idefics3ImageEmbeddingInputs]
 
 
-def get_mm_processor_kwargs(size: Optional[Dict[str, int]] = None) -> Dict:
-    mm_processor_kwargs = {}
-    if size:
-        mm_processor_kwargs["size"] = Idefics3ProcessorSize(**size)
-    return mm_processor_kwargs
+class Idefics3ProcessingInfo(BaseProcessingInfo):
 
-
-def input_mapper_for_idefics3(
-    ctx: InputContext,
-    data: object,
-    *,
-    size: Optional[Dict[str, int]] = None,
-):
-    model_config = ctx.model_config
-    mm_processor_kwargs = get_mm_processor_kwargs(size)
-    image_processor = cached_get_image_processor(
-        model_config.model,
-        trust_remote_code=model_config.trust_remote_code,
-        **mm_processor_kwargs)
-    if image_processor is None:
-        raise RuntimeError("No HuggingFace processor is available "
-                           "to process the image object")
-
-    if isinstance(data, Image.Image):
-        images = [[data]]
-    elif is_list_of(data, Image.Image):
-        images = [data]
-    else:
-        raise TypeError(f"Invalid image type: {type(data)}")
-
-    try:
-        batch_data = image_processor(images,
-                                     return_tensors="pt",
-                                     return_row_col_info=True).data
-    except Exception:
-        logger.error("Failed to process image (%s)", data)
-        raise
-
-    return MultiModalKwargs(batch_data)
-
-
-def _resize_output_size(height: int,
-                        width: int,
-                        max_len: Optional[int] = None,
-                        min_len: Optional[int] = 1,
-                        max_size: Optional[int] = None) -> Tuple[int, int]:
-    # Set default value for max_len if not provided
-    max_len = max(height, width) if max_len is None else max_len
-    aspect_ratio = width / height
-
-    # Handle the maximum size constraint
-    if max_size is not None:
-        max_len = min(max_len, max_size)
-
-    # Adjust dimensions according to the aspect ratio
-    if width >= height:
-        width = max_len
-        height = int(width / aspect_ratio)
-    else:
-        height = max_len
-        width = int(height * aspect_ratio)
-
-    # Ensure both width and height are even (if needed)
-    height += 1 if height % 2 != 0 else 0
-    width += 1 if width % 2 != 0 else 0
-
-    # Ensure dimensions are not smaller than the minimum length
-    height = max(height, min_len)
-    width = max(width, min_len)
-
-    return height, width
-
-
-def _get_resize_output_image_size(
-    image_size: Tuple[int, int],
-    resolution_max_side: int,
-    max_image_size: int = 1820,
-) -> Tuple[int, int]:
-    if resolution_max_side > max_image_size:
-        raise ValueError(
-            "`resolution_max_side` cannot be larger than `max_image_size`")
-
-    height, width = image_size
-
-    # Find the output size, when rescaling the longest edge to max_len and
-    # preserving the aspect ratio
-    height, width = _resize_output_size(height,
-                                        width,
-                                        max_len=resolution_max_side)
-
-    return height, width
-
-
-def _prompt_split_image(image_seq_len: int, image_rows: int, image_cols: int,
-                        fake_token_around_image: str, image_token: str,
-                        global_img_token: str) -> str:
-    """
-    Prompt with expanded image tokens for when the image is split 
-    into patches.
-    """
-    text_split_images = ""
-    for n_h in range(image_rows):
-        for n_w in range(image_cols):
-            text_split_images += (fake_token_around_image +
-                                  f"<row_{n_h + 1}_col_{n_w + 1}>" +
-                                  image_token * image_seq_len)
-        text_split_images += "\n"
-
-    text_split_images += "\n" + _prompt_single_image(
-        image_seq_len=image_seq_len,
-        fake_token_around_image=fake_token_around_image,
-        image_token=image_token,
-        global_img_token=global_img_token)
-    return text_split_images
-
-
-def _prompt_single_image(image_seq_len: int, fake_token_around_image: str,
-                         image_token: str, global_img_token: str):
-    """Prompt with expanded image tokens for a single image."""
-    return (fake_token_around_image + global_img_token +
-            image_token * image_seq_len + fake_token_around_image)
-
-
-def _get_image_prompt_string(image_rows: int, image_cols: int,
-                             image_seq_len: int, fake_token_around_image: str,
-                             image_token: str, global_img_token: str):
-    if image_rows == 0 and image_cols == 0:
-        return _prompt_single_image(
-            image_seq_len=image_seq_len,
-            fake_token_around_image=fake_token_around_image,
-            image_token=image_token,
-            global_img_token=global_img_token,
-        )
-    return _prompt_split_image(image_seq_len, image_rows, image_cols,
-                               fake_token_around_image, image_token,
-                               global_img_token)
-
-
-def input_processor_for_idefics3(ctx: InputContext,
-                                 inputs: DecoderOnlyInputs,
-                                 *,
-                                 size: Optional[Dict[str, int]] = None):
-    multi_modal_data = inputs.get("multi_modal_data")
-    if multi_modal_data is None or "image" not in multi_modal_data:
-        return inputs
-
-    model_config = ctx.model_config
-    mm_processor_kwargs = get_mm_processor_kwargs(size)
-    processor = cached_get_processor(model_config.model, **mm_processor_kwargs)
-    image_processor = processor.image_processor
-    tokenizer = processor.tokenizer
-    size = image_processor.size['longest_edge']
-    max_image_size = image_processor.max_image_size['longest_edge']
-
-    image_data = multi_modal_data["image"]
-    if isinstance(image_data, Image.Image):
-        image_list = [image_data]
-    elif is_list_of(image_data, Image.Image):
-        image_list = image_data
-    else:
-        raise TypeError(f"Invalid image type: {type(image_data)}")
-
-    image_rows = []
-    image_cols = []
-    for image in image_list:
-        height, width = _get_resize_output_image_size(image.size, size)
-
-        rows = math.ceil(height / max_image_size)
-        cols = math.ceil(width / max_image_size)
-        image_rows.append(rows)
-        image_cols.append(cols)
-    image_rows = [image_rows]
-    image_cols = [image_cols]
-
-    n_images_in_text = []
-
-    text = inputs.get("prompt")
-    if text is None:
-        prompt_token_ids = inputs.get("prompt_token_ids", [])
-        assert prompt_token_ids
-        text = tokenizer.decode(prompt_token_ids)
-
-    if isinstance(text, str):
-        text = [text]
-    elif not isinstance(text, list) and not isinstance(text[0], str):
-        raise ValueError("Invalid input text. Please provide a string, "
-                         "or a list of strings")
-
-    fake_image_token = processor.fake_image_token.content
-    image_token = processor.image_token.content
-    global_img_token = processor.global_image_tag
-
-    prompt_strings = []
-    for sample, sample_rows, sample_cols in zip(text, image_rows, image_cols):
-        n_images_in_text.append(sample.count(image_token))
-
-        # Replace the image token with fake tokens around the expanded
-        # image token sequence of length `image_seq_len`
-        image_prompt_strings = []
-        for n_rows, n_cols in zip(sample_rows, sample_cols):
-            image_prompt_string = _get_image_prompt_string(
-                n_rows,
-                n_cols,
-                processor.image_seq_len,
-                image_token=image_token,
-                fake_token_around_image=fake_image_token,
-                global_img_token=global_img_token,
-            )
-            image_prompt_strings.append(image_prompt_string)
-
-        split_sample = sample.split(image_token)
-        if len(split_sample) == 0:
-            raise ValueError("The image token should be present in the text.")
-
-        # Place in the image prompt strings where the image tokens are
-        sample = split_sample[0]
-        for i, image_prompt_string in enumerate(image_prompt_strings):
-            sample += image_prompt_string + split_sample[i + 1]
-        prompt_strings.append(sample)
-
-    prompt_token_ids = tokenizer(text=prompt_strings[0]).input_ids
-
-    return token_inputs(
-        prompt_token_ids=prompt_token_ids,
-        prompt=prompt_strings[0],
-        multi_modal_data=multi_modal_data,
-    )
-
-
-def _get_max_num_image_patch(image_processor: Idefics3ImageProcessor) -> int:
-    size = image_processor.size['longest_edge']
-    max_image_size = image_processor.max_image_size['longest_edge']
-    resized_height, resized_width = size, size
-
-    grid_h = resized_height // max_image_size
-    grid_w = resized_width // max_image_size
-    return (grid_h * grid_w + 1)
-
-
-def get_max_idefics3_image_tokens(ctx: InputContext,
-                                  *,
-                                  size: Optional[Dict[str,
-                                                      int]] = None) -> int:
-    model_config = ctx.model_config
-    mm_processor_kwargs = get_mm_processor_kwargs(size)
-    processor = cached_get_processor(model_config.model, **mm_processor_kwargs)
-    image_seq_len = processor.image_seq_len
-    image_processor = processor.image_processor
-
-    max_num_image_patches = _get_max_num_image_patch(image_processor)
-
-    return max_num_image_patches * image_seq_len
-
-
-def dummy_data_for_idefics3(
-        ctx: InputContext,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        *,
-        size: Optional[Dict[str, int]] = None) -> DummyData:
-    hf_config = ctx.get_hf_config()
-    num_images = mm_counts["image"]
-
-    mm_processor_kwargs = get_mm_processor_kwargs(size)
-    processor = cached_get_processor(ctx.model_config.model,
-                                     **mm_processor_kwargs)
-    max_num_image_patches = _get_max_num_image_patch(processor.image_processor)
-    image_seq_len = processor.image_seq_len
-    max_llm_image_tokens = max_num_image_patches * image_seq_len * num_images
-
-    if seq_len - max_llm_image_tokens < 0:
-        raise RuntimeError(
-            f"Idefics3 cannot process {num_images} images in a prompt, "
-            "please increase max_model_len or reduce image limit by "
-            "--limit-mm-per-prompt.")
-
-    seq_data = SequenceData.from_prompt_token_counts(
-        (hf_config.image_token_id, max_llm_image_tokens),
-        (0, seq_len - max_llm_image_tokens))
-
-    width = height = hf_config.vision_config.image_size
-    image = Image.new("RGB", (width, height), color=0)
-    mm_data = {"image": [image] if num_images == 1 else [image] * num_images}
-
-    return DummyData(seq_data, mm_data)
-
-
-class Idefics3MultimodalProcessor(BaseMultiModalProcessor):
-
-    def _get_hf_processor(
-        self,
-        *,
-        size: Optional[Dict[str, int]] = None,
-    ) -> Idefics3Processor:
+    def get_hf_processor(
+            self,
+            *,
+            size: Optional[Dict[str, int]] = None) -> Idefics3Processor:
         if size is not None:
             size = Idefics3ProcessorSize(longest_edge=size['longest_edge'])
-            return self.ctx.get_hf_processor(size=size)
-        return self.ctx.get_hf_processor()
-
-    def _get_image_processor(self) -> Idefics3ImageProcessor:
-        return self._get_hf_processor().image_processor
+            return self.ctx.get_hf_processor(Idefics3Processor, size=size)
+        return self.ctx.get_hf_processor(Idefics3Processor)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        hf_processor = self._get_hf_processor()
+        hf_processor = self.get_hf_processor()
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
         grid_w, grid_h = self._get_image_feature_grid_size(
             image_width=image_processor.size['longest_edge'],
@@ -448,7 +154,9 @@ class Idefics3MultimodalProcessor(BaseMultiModalProcessor):
         image_height: int,
         resolution_max_side: int,
     ) -> tuple[int, int]:
-        max_image_size = self._get_image_processor().size['longest_edge']
+        hf_processor = self.get_hf_processor()
+        image_processor: Idefics3ImageProcessor = hf_processor.image_processor
+        max_image_size = image_processor.size['longest_edge']
         if resolution_max_side > max_image_size:
             raise ValueError(
                 "`resolution_max_side` cannot be larger than `max_image_size`")
@@ -457,10 +165,9 @@ class Idefics3MultimodalProcessor(BaseMultiModalProcessor):
 
         # Find the output size, when rescaling the longest edge to max_len and
         # preserving the aspect ratio
-        height, width = _resize_output_size(height,
-                                            width,
-                                            max_len=resolution_max_side)
-
+        height, width = self._resize_output_size(height=height,
+                                                 width=width,
+                                                 max_len=resolution_max_side)
         return height, width
 
     def _get_image_feature_grid_size(
@@ -469,17 +176,68 @@ class Idefics3MultimodalProcessor(BaseMultiModalProcessor):
         image_width: int,
         image_height: int,
     ) -> tuple[int, int]:
-        image_processor = self._get_image_processor()
+        hf_processor = self.get_hf_processor()
+        image_processor: Idefics3ImageProcessor = hf_processor.image_processor
         max_image_size = image_processor.max_image_size['longest_edge']
+        size = image_processor.size['longest_edge']
+
         resized_height, resized_width = self._get_resize_output_image_size(
             image_width=image_width,
             image_height=image_height,
-            resolution_max_side=max_image_size,
+            resolution_max_side=size,
         )
 
-        grid_h = resized_height // max_image_size
-        grid_w = resized_width // max_image_size
+        grid_h = math.ceil(resized_height / max_image_size)
+        grid_w = math.ceil(resized_width / max_image_size)
         return grid_w, grid_h
+
+
+class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]
+                                 ):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+        hf_processor = self.info.get_hf_processor()
+        image_processor: Idefics3ImageProcessor = hf_processor.image_processor
+        longest_edge = image_processor.max_image_size['longest_edge']
+        image_token: str = hf_processor.image_token.content
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=longest_edge,
+                                   height=longest_edge,
+                                   num_images=num_images)
+        }
+
+        return ProcessorInputs(
+            prompt_text=image_token * num_images,
+            mm_data=mm_data,
+        )
+
+
+class Idefics3MultimodalProcessor(
+        BaseMultiModalProcessor[Idefics3ProcessingInfo]):
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if "size" in mm_kwargs:
+            mm_kwargs["size"] = Idefics3ProcessorSize(**mm_kwargs["size"])
+        if mm_data:
+            return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+        else:
+            tokenizer = self.info.get_tokenizer()
+            processed_outputs = tokenizer(prompt,
+                                          add_special_tokens=True,
+                                          return_tensors="pt")
+        return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -498,7 +256,7 @@ class Idefics3MultimodalProcessor(BaseMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_processor = self._get_hf_processor()
+        hf_processor = self.info.get_hf_processor()
 
         image_token = hf_processor.image_token.content
         fake_image_token = hf_processor.fake_image_token.content
@@ -513,14 +271,15 @@ class Idefics3MultimodalProcessor(BaseMultiModalProcessor):
             images = mm_items.get_items("image", ImageProcessorItems)
 
             image_size = images.get_image_size(item_idx)
-            grid_w, grid_h = self._get_image_feature_grid_size(
+            grid_w, grid_h = self.info._get_image_feature_grid_size(
                 image_width=image_size.width,
                 image_height=image_size.height,
             )
+
             if grid_w == 1 and grid_h == 1:
                 image_placeholder = global_img_placeholder
             else:
-                tiles_placeholder = sum(
+                tiles_placeholder = "".join(
                     tile_img_placeholder.format(n_h=i + 1, n_w=j + 1)
                     for i in range(grid_h) for j in range(grid_w))
                 image_placeholder = (tiles_placeholder + "\n\n" +
@@ -790,10 +549,10 @@ class Idefics3Model(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_idefics3)
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_idefics3_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_idefics3)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_idefics3)
+@MULTIMODAL_REGISTRY.register_processor(
+    Idefics3MultimodalProcessor,
+    info=Idefics3ProcessingInfo,
+    dummy_inputs=Idefics3DummyInputsBuilder)
 class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                        SupportsLoRA):
     packed_modules_mapping = {
