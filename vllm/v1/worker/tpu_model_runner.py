@@ -556,9 +556,6 @@ class TPUModelRunner(ModelRunnerBase):
             assert self.model is not None
             self.model(token_ids, position_ids, None, kv_caches)
 
-    def profile_run(self) -> None:
-        raise NotImplementedError()
-
     def capture_model(self) -> None:
         """Compile the model."""
 
