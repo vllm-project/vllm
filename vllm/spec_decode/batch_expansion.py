@@ -290,8 +290,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         target_sampler_output: SamplerOutput,
         proposals: SpeculativeProposals,
         num_scoring_tokens: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
-               Optional[torch.Tensor]]:
+    ) -> SpeculativeScores:
         """Contract the expanded batch back into its original size.
         This maps the scores of speculative tokens back to their original
         sequences.
