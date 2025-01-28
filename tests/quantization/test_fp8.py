@@ -90,13 +90,25 @@ def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
                 assert attn._k_scale == 1.0
                 assert attn._v_scale == 1.0
 
-            if current_platform.has_device_capability(89) and not force_marlin:
-                # For GPUs with hardware support, we keep weights in fp8
-                assert fc1.weight.dtype == torch.float8_e4m3fn
-            else:
-                # For GPUs without hardware support, we pack the fp8 weights
-                # for weight-only quantization using Marlin kernels
-                assert fc1.weight.dtype == torch.int32
+            if current_platform.is_cuda():
+                if current_platform.has_device_capability(
+                        89) and not force_marlin:
+                    # For GPUs with hardware support, we keep weights in fp8
+                    assert fc1.weight.dtype == torch.float8_e4m3fn
+                else:
+                    # For GPUs without hardware support, we pack the fp8 weights
+                    # for weight-only quantization using Marlin kernels
+                    assert fc1.weight.dtype == torch.int32
+            elif current_platform.is_rocm():
+                # Only MI300 and above support quantization='fp8'
+                if current_platform.has_device_capability(
+                        94) and not force_marlin:
+                    # For GPUs with hardware support, we keep weights in fp8
+                    assert fc1.weight.dtype == torch.float8_e4m3fnuz
+                else:
+                    pytest.skip()
+            else:  # other platform
+                pytest.skip()
 
         llm.apply_model(check_model)
 
