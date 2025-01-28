@@ -247,8 +247,8 @@ class Scheduler:
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                has_partial_request = (num_computed_tokens + num_new_tokens <
-                                       request.num_tokens)
+                has_partial_request = (num_computed_tokens + num_new_tokens
+                                       < request.num_tokens)
 
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
