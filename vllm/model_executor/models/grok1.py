@@ -37,6 +37,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -197,7 +198,9 @@ class Grok1DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.use_fp8 = isinstance(quant_config, Fp8Config)
+        self.use_fp8 = isinstance(
+            quant_config, Fp8Config) or (isinstance(quant_config, QuarkConfig)
+                                         and quant_config.is_fp8_w8a8())
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
         self.attn = Grok1Attention(hidden_size=self.hidden_size,
