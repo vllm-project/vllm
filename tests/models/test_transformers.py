@@ -46,8 +46,8 @@ def check_implementation(
 @pytest.mark.parametrize(
     "model,model_impl",
     [
-        ("openai-community/gpt2", "transformers"),
         ("ArthurZ/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
+        ("openai-community/gpt2", "transformers"),
         ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
     ])  # trust_remote_code=True by default
 def test_models(hf_runner, vllm_runner, example_prompts, model,

@@ -132,7 +132,9 @@ class TransformersModel(nn.Module, SupportsLoRA):
         self.unpadded_vocab_size = config.vocab_size
 
         self.model: PreTrainedModel = AutoModel.from_config(
-            self.config, torch_dtype=vllm_config.model_config.dtype)
+            self.config,
+            torch_dtype=vllm_config.model_config.dtype,
+            trust_remote_code=vllm_config.model_config.trust_remote_code)
 
         # MLP modifications
         self.tensor_parallelize(self.model)

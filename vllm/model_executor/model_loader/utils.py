@@ -56,9 +56,9 @@ def get_model_architecture(
             continue
         custom_module = None
         if hasattr(model_config.hf_config, "auto_map"):
-            custom_module = vllm_supported_archs[arch]
-            custom_module = transformers.dynamic_module_utils.get_class_in_module(
-                arch, model_config.hf_config.auto_map["AutoModel"])
+            custom_module = transformers.dynamic_module_utils.get_class_from_dynamic_module(
+                model_config.hf_config.auto_map["AutoModel"],
+                model_config.model)
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
             if not is_transformers_impl_compatible(arch, custom_module):
                 raise ValueError(
@@ -66,7 +66,7 @@ def get_model_architecture(
                     "with vLLM.", arch)
             architectures[i] = "TransformersModel"
         if (model_config.model_impl == ModelImpl.AUTO
-              and arch not in vllm_supported_archs):
+                and arch not in vllm_supported_archs):
             if not is_transformers_impl_compatible(arch, custom_module):
                 raise ValueError(
                     "%s has no vLLM implementation and the Transformers "
