@@ -345,9 +345,7 @@ class GPUModelRunner:
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens = []
         max_num_scheduled_tokens = 0
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            if i == num_reqs:
-                break
+        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_scheduled_tokens.append(num_tokens)

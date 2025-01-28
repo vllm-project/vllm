@@ -59,9 +59,19 @@ def test_multiple_stop_tokens(scheduler):
     assert result is True
     assert request.status == RequestStatus.FINISHED_STOPPED
     assert request.request_id in scheduler.finished_req_ids
-    # Should be cropped at the first stop token
     assert len(request.output_token_ids) == 1
     assert list(request.output_token_ids) == [EOS_TOKEN_ID]
+
+    # EOS token is generated in the middle of the output tokens
+    request = _create_test_request("test1", 100, stop_token_ids=[42, 43, 44])
+    scheduler.requests[request.request_id] = request
+    request.append_output_token_ids([1, 2, 3, 4, 5, EOS_TOKEN_ID, 7, 43, 5])
+    result = scheduler._check_stop(request)
+    assert result is True
+    assert request.status == RequestStatus.FINISHED_STOPPED
+    assert request.request_id in scheduler.finished_req_ids
+    assert len(request.output_token_ids) == 6
+    assert list(request.output_token_ids) == [1, 2, 3, 4, 5, EOS_TOKEN_ID]
 
     # Stop token, 43 is one of the stop tokens
     request = _create_test_request("test1", 100, stop_token_ids=[42, 43, 44])
@@ -88,6 +98,5 @@ def test_multiple_stop_tokens(scheduler):
     assert result is True
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
     assert request.request_id in scheduler.finished_req_ids
-    # Should be cropped at the first stop token
     assert len(request.output_token_ids) == max_tokens
     assert list(request.output_token_ids) == output_token_ids[:max_tokens]
