@@ -60,13 +60,6 @@ prompt_data = {
     ]
 }
 
-tiles_data = {
-    TEXT_ONLY: None,
-    IMAGE_AT_BEG: [2, 2],
-    IMAGE_AT_MIDDLE: [2, 2],
-    TWO_IMAGES: [2, 2],
-}
-
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
                                          Optional[SampleLogprobs]],
