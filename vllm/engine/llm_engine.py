@@ -28,9 +28,7 @@ from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
-from vllm.features import (FEATURE_BEST_OF, FEATURE_SPEC_DECODE,
-                           FEATURE_STRUCTURED_OUTPUT, FeaturesIncompatible,
-                           FeatureUsage)
+from vllm.features import FEATURES, FeaturesIncompatible, FeatureUsage
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
@@ -410,7 +408,9 @@ class LLMEngine:
         # Initialize the base feature set in use based on engine-wide config.
         self._base_features = FeatureUsage()
         if vllm_config.speculative_config:
-            self._base_features.add(FEATURE_SPEC_DECODE)
+            self._base_features.add(FEATURES.SPEC_DECODE)
+        if self.scheduler_config.num_scheduler_steps > 1:
+            self._base_features.add(FEATURES.MULTI_STEP)
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -745,20 +745,14 @@ class LLMEngine:
         # Add any additional features enabled at the request level
         if isinstance(params, SamplingParams):
             if params.guided_decoding:
-                features.add(FEATURE_STRUCTURED_OUTPUT)
+                features.add(FEATURES.STRUCTURED_OUTPUT)
+            if params.logits_processors:
+                features.add(FEATURES.LOGITS_PROCESSORS)
             if params.n > 1:
-                features.add(FEATURE_BEST_OF)
+                features.add(FEATURES.BEST_OF)
         # Ensure features are compatible
         if not features.compatible():
             raise FeaturesIncompatible(features.conflicts())
-
-        # TODO: Rework this using the generic FeatureUsage interface
-        if isinstance(params, SamplingParams) \
-            and (params.guided_decoding or params.logits_processors) \
-            and self.scheduler_config.num_scheduler_steps > 1:
-            raise ValueError(
-                "Guided decoding and logits processors are not supported "
-                "in multi-step decoding")
 
         if arrival_time is None:
             arrival_time = time.time()

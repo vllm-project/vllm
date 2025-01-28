@@ -5,7 +5,7 @@ from typing import Dict, Optional
 #
 # To add a new feature:
 #
-# 1) Reserve a bit by defining a new constant, FEATURE_<NAME>, with a value of
+# 1) Reserve a bit by defining a new constant in FEATURES with a value of
 #    1 << n, where n is the next available bit in the range 0-63.
 #
 # 2) Add a string representation of the feature to FEATURE_STR.
@@ -22,23 +22,42 @@ from typing import Dict, Optional
 # https://docs.vllm.ai/en/latest/features/compatibility_matrix.html
 #
 
+
 # This range must not go above 63 as they represent the bits in the feature
 # usage bit field. The implementation will have to change if we need to
 # calculate compatibility between more than 64 features.
-FEATURE_SPEC_DECODE: int = 1 << 0
-FEATURE_STRUCTURED_OUTPUT: int = 1 << 1
-FEATURE_BEST_OF: int = 1 << 2
+class FEATURES:
+    """Feature bitfield definitions"""
+    SPEC_DECODE: int = 1 << 0
+    STRUCTURED_OUTPUT: int = 1 << 1
+    BEST_OF: int = 1 << 2
+    LOGITS_PROCESSORS: int = 1 << 3
+    MULTI_STEP: int = 1 << 4
+
 
 FEATURE_STR: Dict[int, str] = {
-    FEATURE_SPEC_DECODE: 'SPEC_DECODE',
-    FEATURE_STRUCTURED_OUTPUT: 'STRUCTURED_OUTPUT',
-    FEATURE_BEST_OF: 'BEST_OF',
+    FEATURES.SPEC_DECODE: 'SPEC_DECODE',
+    FEATURES.STRUCTURED_OUTPUT: 'STRUCTURED_OUTPUT',
+    FEATURES.BEST_OF: 'BEST_OF',
+    FEATURES.LOGITS_PROCESSORS: 'LOGITS_PROCESSORS',
+    FEATURES.MULTI_STEP: 'MULTI_STEP',
 }
 
 INCOMPATIBILITY_MATRIX: Dict[int, int] = {
-    FEATURE_SPEC_DECODE: FEATURE_STRUCTURED_OUTPUT | FEATURE_BEST_OF,
-    FEATURE_STRUCTURED_OUTPUT: FEATURE_SPEC_DECODE,
-    FEATURE_BEST_OF: FEATURE_SPEC_DECODE,
+    FEATURES.SPEC_DECODE: (FEATURES.STRUCTURED_OUTPUT
+                           | FEATURES.BEST_OF
+                           | FEATURES.MULTI_STEP
+                           | FEATURES.LOGITS_PROCESSORS),
+    FEATURES.STRUCTURED_OUTPUT: (FEATURES.SPEC_DECODE
+                                 | FEATURES.MULTI_STEP),
+    FEATURES.BEST_OF: (FEATURES.SPEC_DECODE
+                       | FEATURES.MULTI_STEP),
+    FEATURES.LOGITS_PROCESSORS: (FEATURES.SPEC_DECODE
+                                 | FEATURES.MULTI_STEP),
+    FEATURES.MULTI_STEP: (FEATURES.SPEC_DECODE
+                          | FEATURES.BEST_OF
+                          | FEATURES.STRUCTURED_OUTPUT
+                          | FEATURES.LOGITS_PROCESSORS),
 }
 
 
