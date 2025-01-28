@@ -43,16 +43,17 @@ def check_implementation(
 @pytest.mark.parametrize(
     "model,model_impl",
     [
-        ("openai-community/gpt2", "transformers"),
-        ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
         ("meta-llama/Llama-3.2-1B-Instruct", "transformers"),
+        ("openai-community/gpt2", "transformers"),x
         ("ArthurZ/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
+        ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
     ])  # trust_remote_code=True by default
 def test_models(hf_runner, vllm_runner, example_prompts, model,
                 model_impl) -> None:
 
     maybe_raises = nullcontext()
     if model == "openai-community/gpt2" and model_impl == "transformers":
+        # Model is not backend compatible
         maybe_raises = pytest.raises(
             ValueError,
             match="The Transformers implementation.*not compatible with vLLM")

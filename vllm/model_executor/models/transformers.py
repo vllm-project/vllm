@@ -56,6 +56,7 @@ def vllm_flash_attention_forward(_module,
     hidden = query.shape[-2]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
+    print("THE LAYER:", layer_idx)
     return attention_instances[layer_idx].forward(
         query,
         key,
@@ -185,21 +186,16 @@ class TransformersModel(nn.Module, SupportsLoRA):
                 self.tensor_parallelize(child_module, prefix=f"{qual_name}.")
 
     def replace_vocab_embed_class(self, module: nn.Module):
-        # Sorted by most frequently use (most frequent first)
-        vocab_embed_names = ("embed_tokens", "word_embeddings", "wte",
-                             "embed_in")
-        for vocab_embed_name in vocab_embed_names:
-            if hasattr(module, vocab_embed_name):
-                old_module = getattr(module, vocab_embed_name)
-                new_module = VocabParallelEmbedding(
-                    self.vocab_size,
-                    self.config.hidden_size,
-                    org_num_embeddings=self.config.vocab_size,
-                    quant_config=None,
-                )
-                setattr(module, vocab_embed_name, new_module)
-                self.log_replacement(vocab_embed_name, old_module, new_module)
-                break
+        # Use native set inpt embeddings
+        new_module = VocabParallelEmbedding(
+            self.vocab_size,
+            self.config.hidden_size,
+            org_num_embeddings=self.config.vocab_size,
+            quant_config=None,
+        )
+        self.log_replacement("input embedding",
+                             self.model.get_input_embeddings(), new_module)
+        self.model.set_input_embeddings(new_module)
 
     def _autoset_attn_implementation(
         self,
