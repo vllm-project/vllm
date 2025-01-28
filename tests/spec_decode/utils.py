@@ -9,6 +9,7 @@ import torch
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.utils import set_random_seed
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SequenceData, SequenceGroupMetadata, SequenceOutput)
@@ -277,7 +278,10 @@ def create_batch(batch_size,
 
 
 def maybe_enable_chunked_prefill(prefill_chunk_size, llm_kwargs):
-    if prefill_chunk_size > 0:
+    if prefill_chunk_size > 0 and current_platform.is_hpu():
+        import pytest
+        pytest.skip('Chunked prefill is not supported on HPU')
+    elif prefill_chunk_size > 0:
         llm_kwargs.update(
             **{
                 "enable_chunked_prefill": True,
