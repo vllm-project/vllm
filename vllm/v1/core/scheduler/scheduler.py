@@ -1,27 +1,26 @@
 from collections import deque
-from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
-                    Tuple, Union)
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.scheduler.interface import (NewRequestData,
+                                              ResumedRequestData,
+                                              RunningRequestData,
+                                              SchedulerInterface,
+                                              SchedulerOutput)
+from vllm.v1.core.scheduler.utils import check_stop
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
-if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalKwargs
-    from vllm.multimodal.base import PlaceholderRange
-
 logger = init_logger(__name__)
 
 
-class Scheduler:
+class Scheduler(SchedulerInterface):
 
     def __init__(
         self,
@@ -446,7 +445,9 @@ class Scheduler:
 
                 # Check for stop and update request state.
                 # This must be called before me make the EngineCoreOutput.
-                stopped = self._check_stop(request)
+                stopped = check_stop(request, self.max_model_len)
+                if stopped:
+                    self._free_request(request)
 
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
@@ -467,28 +468,6 @@ class Scheduler:
             outputs=outputs,
             scheduler_stats=self.make_stats(),
         )
-
-    def _check_stop(self, request: Request) -> bool:
-        if (request.num_tokens >= self.max_model_len
-                or request.num_output_tokens >= request.max_tokens):
-            request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-            self._free_request(request)
-            return True
-
-        sampling_params = request.sampling_params
-        last_token_id = request.output_token_ids[-1]
-        if (not sampling_params.ignore_eos
-                and last_token_id == request.eos_token_id):
-            request.status = RequestStatus.FINISHED_STOPPED
-            self._free_request(request)
-            return True
-
-        if last_token_id in (sampling_params.stop_token_ids or ()):
-            request.status = RequestStatus.FINISHED_STOPPED
-            request.stop_reason = last_token_id
-            self._free_request(request)
-            return True
-        return False
 
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
@@ -543,95 +522,3 @@ class Scheduler:
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
         )
-
-
-@dataclass
-class NewRequestData:
-
-    req_id: str
-    prompt_token_ids: List[int]
-    prompt: Optional[str]
-    mm_inputs: List["MultiModalKwargs"]
-    mm_hashes: List[str]
-    mm_positions: List["PlaceholderRange"]
-    sampling_params: SamplingParams
-    block_ids: List[int]
-    num_computed_tokens: int
-
-    @classmethod
-    def from_request(
-        cls,
-        request: Request,
-        block_ids: List[int],
-        num_computed_tokens: int,
-    ) -> "NewRequestData":
-        return cls(
-            req_id=request.request_id,
-            prompt_token_ids=request.prompt_token_ids,
-            prompt=request.prompt,
-            mm_inputs=request.mm_inputs,
-            mm_hashes=request.mm_hashes,
-            mm_positions=request.mm_positions,
-            sampling_params=request.sampling_params,
-            block_ids=block_ids,
-            num_computed_tokens=num_computed_tokens,
-        )
-
-
-@dataclass
-class ResumedRequestData:
-
-    req_id: str
-    block_ids: List[int]
-    num_computed_tokens: int
-
-    @classmethod
-    def from_request(
-        cls,
-        request: Request,
-        block_ids: List[int],
-        num_computed_tokens: int,
-    ) -> "ResumedRequestData":
-        return cls(
-            req_id=request.request_id,
-            block_ids=block_ids,
-            num_computed_tokens=num_computed_tokens,
-        )
-
-
-@dataclass
-class RunningRequestData:
-
-    req_id: str
-    new_block_ids: List[int]
-    num_computed_tokens: int
-
-    @classmethod
-    def from_request(
-        cls,
-        request: Request,
-        new_block_ids: List[int],
-        num_computed_tokens: int,
-    ) -> "RunningRequestData":
-        return cls(
-            req_id=request.request_id,
-            new_block_ids=new_block_ids,
-            num_computed_tokens=num_computed_tokens,
-        )
-
-
-@dataclass
-class SchedulerOutput:
-
-    scheduled_new_reqs: List[NewRequestData]
-    scheduled_resumed_reqs: List[ResumedRequestData]
-    scheduled_running_reqs: List[RunningRequestData]
-
-    num_scheduled_tokens: Dict[str, int]
-    total_num_scheduled_tokens: int
-    scheduled_encoder_inputs: Dict[str, List[int]]
-    num_common_prefix_blocks: int
-
-    preempted_req_ids: Set[str]
-    finished_req_ids: Set[str]
-    free_encoder_input_ids: List[Tuple[str, int]]
