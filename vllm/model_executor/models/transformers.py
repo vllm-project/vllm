@@ -152,7 +152,6 @@ class TransformersModel(nn.Module, SupportsLoRA):
                 prefix=f"model.layers.{i}.self_attn")
             for i in range(config.num_hidden_layers)
         ]
-        self.config._attn_implementation_internal = "vllm"
 
         # Model modifications
         self.replace_vocab_embed_class(self.model)
