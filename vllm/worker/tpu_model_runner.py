@@ -190,6 +190,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     num_decode_tokens=0,
                     slot_mapping=slot_mapping,
                     multi_modal_placeholder_index_maps=None,
+                    enable_kv_scales_calculation=False,
                     block_tables=None,
                     context_lens=None,
                     effective_query_lens=None,
@@ -208,6 +209,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     num_decode_tokens=0,
                     slot_mapping=slot_mapping,
                     multi_modal_placeholder_index_maps=None,
+                    enable_kv_scales_calculation=False,
                     block_tables=block_tables,
                     context_lens=context_lens,
                     effective_query_lens=effective_query_lens,
@@ -239,6 +241,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 num_decode_tokens=batch_size * seq_len,
                 slot_mapping=slot_mapping,
                 multi_modal_placeholder_index_maps=None,
+                enable_kv_scales_calculation=False,
                 block_tables=block_tables,
                 context_lens=context_lens,
             )
@@ -313,8 +316,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     logger.info("batch_size: %d, seq_len: %d", batch_size,
                                 seq_len)
                     num_tokens = batch_size * seq_len
-                    if (num_tokens >=
-                            self.scheduler_config.max_num_batched_tokens):
+                    if (num_tokens
+                            >= self.scheduler_config.max_num_batched_tokens):
                         break
                     seq_len = seq_len * 2
             end = time.time()
@@ -425,6 +428,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=False,
             block_tables=block_tables,
             context_lens=context_lens,
             effective_query_lens=prompt_lens,
@@ -496,6 +500,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_decode_tokens=batch_size,
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=False,
             block_tables=block_tables,
             context_lens=context_lens,
         )
