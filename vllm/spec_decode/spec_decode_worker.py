@@ -870,10 +870,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             accepted_index = accepted_token_ids + 1  # Convert -1 to 0
             accepted_index = accepted_index.count_nonzero(dim=1).add_(-1)  # b
             # Drop non-terminal prefill chunks hidden states.
-            hidden_states = hidden_states[
-                accepted_index != VLLM_INVALID_TOKEN_ID]
-            accepted_index = accepted_index[
-                accepted_index != VLLM_INVALID_TOKEN_ID]
+            hidden_states = hidden_states[accepted_index !=
+                                          VLLM_INVALID_TOKEN_ID]
+            accepted_index = accepted_index[accepted_index !=
+                                            VLLM_INVALID_TOKEN_ID]
             assert len(accepted_index) == hidden_states.shape[0] == len(
                 terminal_metadata)
             index = accepted_index[:, None, None].expand(-1, 1,
