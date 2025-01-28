@@ -140,7 +140,7 @@ class ExampleParser(ReasoningParser):
 After defining the reasoning parser, you can use it by specifying the `--reasoning-parser` flag when making a request to the chat completion endpoint.
 
 ```bash
-vllm serve model_tag \
+vllm serve <model_tag> \
     --enable-reasoning --reasoning-parser example
 ```
 
