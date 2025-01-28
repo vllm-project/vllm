@@ -55,6 +55,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
 
+  // Activation function used in SwiGLU.
+  ops.def("scaled_silu_and_mul(Tensor! out, Tensor input, Tensor scale) -> ()");
+  ops.impl("scaled_silu_and_mul", torch::kCUDA, &scaled_silu_and_mul);
+
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);
 

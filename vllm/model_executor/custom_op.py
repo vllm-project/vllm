@@ -35,6 +35,7 @@ class CustomOp(nn.Module):
 
     def forward_hip(self, *args, **kwargs):
         # By default, we assume that HIP ops are compatible with CUDA ops.
+        print(f"type(self)={type(self)}")
         return self.forward_cuda(*args, **kwargs)
 
     def forward_xpu(self, *args, **kwargs):

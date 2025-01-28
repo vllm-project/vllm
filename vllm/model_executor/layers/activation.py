@@ -74,11 +74,21 @@ class SiluAndMul(CustomOp):
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
 
-    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_cuda(self,
+                     x: torch.Tensor,
+                     scale: Optional[torch.Tensor] = None) -> torch.Tensor:
+
         d = x.shape[-1] // 2
         output_shape = (x.shape[:-1] + (d, ))
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        self.op(out, x)
+        if scale is None:
+            out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+            self.op(out, x)
+        else:
+            # for scaled fp8 output
+            out = torch.empty(output_shape,
+                              dtype=torch.float8_e4m3fnuz,
+                              device=x.device)
+            torch.ops._C.scaled_silu_and_mul(out, x, scale)
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:

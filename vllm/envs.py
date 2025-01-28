@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     Q_SCALE_CONSTANT: int = 20
     K_SCALE_CONSTANT: int = 20
     V_SCALE_CONSTANT: int = 10
+    VLLM_FP8_PADDING: bool = True
 
 
 def get_default_cache_root():
@@ -504,6 +505,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # for FP8 KV Cache and attention
     "V_SCALE_CONSTANT":
     lambda: int(os.getenv("V_SCALE_CONSTANT", "10")),
+
+    # Pad the weight for moe kernel or not
+    "VLLM_FP8_PADDING":
+    lambda: bool(int(os.getenv("VLLM_FP8_PADDING", "1"))),
 
 }
 

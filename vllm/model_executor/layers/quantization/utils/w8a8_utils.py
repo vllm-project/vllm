@@ -94,6 +94,7 @@ def apply_fp8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
+    out_dtype: Optional[torch.dtype] = None,
     input_scale: Optional[torch.Tensor] = None,
     input_scale_ub: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
@@ -107,6 +108,9 @@ def apply_fp8_linear(
     # View input as 2D matrix for fp8 methods
     input_2d = input.view(-1, input.shape[-1])
     output_shape = [*input.shape[:-1], weight.shape[1]]
+
+    if out_dtype is None:
+        out_dtype = input.dtype
 
     # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
     if cutlass_fp8_supported:
@@ -131,11 +135,14 @@ def apply_fp8_linear(
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
         # This could change in the future.
-        qinput, x_scale = ops.scaled_fp8_quant(
-            input_2d,
-            input_scale,
-            num_token_padding=17,
-            use_per_token_if_dynamic=use_per_token_if_dynamic)
+        if input.dtype != torch.float8_e4m3fnuz:
+            qinput, x_scale = ops.scaled_fp8_quant(
+                input_2d,
+                input_scale,
+                num_token_padding=17,
+                use_per_token_if_dynamic=use_per_token_if_dynamic)
+        else:
+            qinput, x_scale = input_2d, input_scale
 
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
@@ -144,7 +151,7 @@ def apply_fp8_linear(
             # Fused GEMM_DQ
             output = torch._scaled_mm(qinput,
                                       weight,
-                                      out_dtype=input.dtype,
+                                      out_dtype=out_dtype,
                                       scale_a=x_scale,
                                       scale_b=weight_scale,
                                       bias=bias)

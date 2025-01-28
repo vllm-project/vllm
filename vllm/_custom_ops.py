@@ -160,6 +160,18 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def scaled_rms_norm(out: torch.Tensor, input: torch.Tensor,
+                    weight: torch.Tensor, scale: torch.Tensor,
+                    epsilon: float) -> None:
+    torch.ops._C.rms_norm_static_fp8_quant(out, input, weight, scale, epsilon)
+
+
+def scaled_fused_add_rms_norm(out: torch.Tensor, input: torch.Tensor,
+                              residual: torch.Tensor, weight: torch.Tensor,
+                              scale: torch.Tensor, epsilon: float) -> None:
+    torch.ops._C.fused_add_rms_norm_static_fp8_quant(out, input, residual,
+                                                     weight, scale, epsilon)
+
 def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
                            input_tokens: torch.Tensor,
                            sampled_token_ids: torch.Tensor,
