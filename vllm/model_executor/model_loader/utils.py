@@ -26,12 +26,13 @@ def set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(old_dtype)
 
 
-def is_transformers_impl_compatible(arch: str) -> bool:
-    arch: transformers.PreTrainedModel = getattr(transformers, arch)
-    if hasattr(arch, "supports_backend"):
-        return arch.is_backend_compatible()
+def is_transformers_impl_compatible(arch: str, module=None) -> bool:
+    if module is None:
+        module: transformers.PreTrainedModel = getattr(transformers, arch)
+    if hasattr(module, "supports_backend"):
+        return module.is_backend_compatible()
     else:
-        return arch._supports_flex_attn
+        return module._supports_flex_attn
 
 
 def get_model_architecture(
@@ -53,15 +54,20 @@ def get_model_architecture(
     for i, arch in enumerate(architectures):
         if arch == "TransformersModel":
             continue
+        custom_module = None
+        if hasattr(model_config.hf_config, "auto_map"):
+            custom_module = vllm_supported_archs[arch]
+            custom_module = transformers.dynamic_module_utils.get_class_in_module(
+                arch, model_config.hf_config.auto_map["AutoModel"])
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
-            if not is_transformers_impl_compatible(arch):
+            if not is_transformers_impl_compatible(arch, custom_module):
                 raise ValueError(
                     "The Transformers implementation of %s is not compatible "
                     "with vLLM.", arch)
             architectures[i] = "TransformersModel"
         if (model_config.model_impl == ModelImpl.AUTO
-                and arch not in vllm_supported_archs):
-            if not is_transformers_impl_compatible(arch):
+              and arch not in vllm_supported_archs):
+            if not is_transformers_impl_compatible(arch, custom_module):
                 raise ValueError(
                     "%s has no vLLM implementation and the Transformers "
                     "implementationis not compatible with vLLM.", arch)

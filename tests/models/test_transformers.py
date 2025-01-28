@@ -16,23 +16,6 @@ from .utils import check_logprobs_close
 # Delete Llama from registry so we can pretend vLLM doesn't support it
 del ModelRegistry.models["LlamaForCausalLM"]
 
-# Code used to generate the ilama model:
-# from transformers import AutoConfig, AutoModel, LlamaConfig, LlamaModel
-#
-# class IlamaConfig(LlamaConfig):
-#     model_type = "iiama"
-
-# class IlamaModel(LlamaModel):
-#     config_class = IlamaConfig
-
-# AutoConfig.register("iiama", IlamaConfig)
-# AutoModel.register(IlamaConfig, IlamaModel)
-
-# base_model = LlamaModel.from_pretrained("meta-llama/Llama-3.2-1B", torch_dtype="auto")
-# remote_model = IlamaModel._from_config(base_model.config)
-# remote_model.load_state_dict(base_model.state_dict())
-# remote_model.push_to_hub("ArthurZ/Ilama-3.2-1B")
-
 
 def check_implementation(
     hf_runner: Type[HfRunner],
@@ -62,12 +45,11 @@ def check_implementation(
 
 @pytest.mark.parametrize(
     "model,model_impl",
-        [
-            ("openai-community/gpt2", "transformers"),
-            ("ArthurZ/Ilama-3.2-1B", "auto"),
-            ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
-        ]
-    )  # trust_remote_code=True by default
+    [
+        ("openai-community/gpt2", "transformers"),
+        ("ArthurZ/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
+        ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
+    ])  # trust_remote_code=True by default
 def test_models(hf_runner, vllm_runner, example_prompts, model,
                 model_impl) -> None:
 
