@@ -713,12 +713,30 @@ class OpenAIServingChat(OpenAIServing):
             # call. The same is not true for named function calls
             auto_tools_called = False
 
+            if should_stream_with_reasoning_parsing and \
+                self.reasoning_parser is not None:
+                try:
+                    reasoning_parser = self.reasoning_parser(tokenizer)
+                except RuntimeError as e:
+                    logger.exception("Error in reasoning parser creation.")
+                    return self.create_error_response(str(e))
+
+                reasoning_content, content = (
+                    reasoning_parser.extract_reasoning_content(
+                        output.text, request=request))
+
+                if reasoning_content:
+                    message = ChatMessage(role=role,
+                                          content=content,
+                                          reasoning_content=reasoning_content)
+                else:
+                    message = ChatMessage(role=role, content=output.text)
+
             # if auto tools are not enabled, and a named tool choice using
             #   outlines is not being used
-            if (not self.enable_auto_tools
-                    or not self.tool_parser) and not isinstance(
-                        request.tool_choice,
-                        ChatCompletionNamedToolChoiceParam):
+            elif (not self.enable_auto_tools
+                  or not self.tool_parser) and not isinstance(
+                      request.tool_choice, ChatCompletionNamedToolChoiceParam):
                 message = ChatMessage(role=role, content=output.text)
 
             # if the request uses tools and specified a tool choice
@@ -768,24 +786,6 @@ class OpenAIServingChat(OpenAIServing):
                     # the type to make it later.
                     message = ChatMessage(role=role, content=output.text)
 
-            elif should_stream_with_reasoning_parsing  and \
-                self.reasoning_parser is not None:
-                try:
-                    reasoning_parser = self.reasoning_parser(tokenizer)
-                except RuntimeError as e:
-                    logger.exception("Error in reasoning parser creation.")
-                    return self.create_error_response(str(e))
-
-                reasoning_content, content = (
-                    reasoning_parser.extract_reasoning_content(
-                        output.text, request=request))
-
-                if reasoning_content:
-                    message = ChatMessage(role=role,
-                                          content=content,
-                                          reasoning_content=reasoning_content)
-                else:
-                    message = ChatMessage(role=role, content=output.text)
             # undetermined case that is still important to handle
             else:
                 logger.error(
