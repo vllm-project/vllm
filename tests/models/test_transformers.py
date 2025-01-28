@@ -48,7 +48,7 @@ def check_implementation(
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-    with hf_runner(model, **kwargs) as hf_model:
+    with hf_runner(model, trust_remote_code=True) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
@@ -62,9 +62,12 @@ def check_implementation(
 
 @pytest.mark.parametrize(
     "model,model_impl",
-    [("openai-community/gpt2", "transformers"),
-     ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
-     ("ArthurZ/Ilama-3.2-1B", "auto")])  # trust_remote_code=True by default
+        [
+            ("openai-community/gpt2", "transformers"),
+            ("ArthurZ/Ilama-3.2-1B", "auto"),
+            ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
+        ]
+    )  # trust_remote_code=True by default
 def test_models(hf_runner, vllm_runner, example_prompts, model,
                 model_impl) -> None:
 
