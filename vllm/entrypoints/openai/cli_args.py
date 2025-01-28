@@ -211,7 +211,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "``--tool-call-parser`` to specify which parser to use.")
     parser.add_argument(
         "--enable-reasoning",
-        type=bool,
+        action="store_true",
         default=False,
         help="Whether to enable reasoning_content for the model."
         "If enabled, the model will be able to generate reasoning content.")
@@ -292,7 +292,7 @@ def validate_parsed_serve_args(args: argparse.Namespace):
 
     # Ref https://api-docs.deepseek.com/guides/reasoning_model
     # tool call and reasoning cannot be enabled at the same time.
-    if args.enable_auto_tool_choice and args.enable_auto_tool_choice:
+    if args.enable_auto_tool_choice and args.enable_reasoning:
         raise TypeError(
             "Error: --enable-auto-tool-choice and "
             "--enable-reasoning cannot be enabled at the same time")

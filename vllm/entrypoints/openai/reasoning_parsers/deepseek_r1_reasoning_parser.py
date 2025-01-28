@@ -72,8 +72,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 end_index = delta_text.find(self.think_end_token)
                 reasoning_content = delta_text[:end_index]
                 content = delta_text[end_index + len(self.think_end_token):]
-                return DeltaMessage(reasoning_content,
-                                    content if content else None)
+                return DeltaMessage(reasoning_content=reasoning_content,
+                                    content=content if content else None)
             elif self.think_end_token_id in previous_token_ids:
                 # <think> in previous, </think> in previous,
                 # reasoning content continues
@@ -92,8 +92,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                                                len(self.think_start_token
                                                    ):end_index]
                 content = delta_text[end_index + len(self.think_end_token):]
-                return DeltaMessage(reasoning_content,
-                                    content if content else None)
+                return DeltaMessage(reasoning_content=reasoning_content,
+                                    content=content if content else None)
             else:
                 # <think> in delta, no </think> in delta,
                 # reasoning content continues
