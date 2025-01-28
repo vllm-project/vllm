@@ -31,7 +31,7 @@ def check_implementation(
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-    with hf_runner(model, trust_remote_code=True) as hf_model:
+    with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
