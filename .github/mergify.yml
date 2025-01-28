@@ -61,6 +61,17 @@ pull_request_rules:
       add:
         - structured-output
 
+- name: label-v1
+  description: Automatically apply v1 label
+  conditions:
+    - or:
+      - files~=^vllm/v1/
+      - files~=^tests/v1/
+  actions:
+    label:
+      add:
+        - v1
+
 - name: ping author on conflicts and add 'needs-rebase' label
   conditions:
       - conflict
