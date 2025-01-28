@@ -387,7 +387,7 @@ class _ModelRegistry:
             if model is None:
                 model = self.models[next(iter(_FALLBACK_MODEL))]
             normalized_arch.append(model)
-        return normalized_arch 
+        return normalized_arch
 
     def inspect_model_cls(
         self,

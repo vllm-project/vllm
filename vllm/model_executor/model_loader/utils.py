@@ -34,7 +34,6 @@ def is_transformers_impl_compatible(arch: str) -> bool:
         return arch._supports_flex_attn
 
 
-
 def get_model_architecture(
         model_config: ModelConfig) -> Tuple[Type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
