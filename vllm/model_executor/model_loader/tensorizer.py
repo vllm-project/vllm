@@ -298,8 +298,8 @@ class TensorizerAgent:
         to allow for adapter added tokens."""
         for child in self.model.modules():
             if (isinstance(child, VocabParallelEmbedding)
-                    and child.weight.shape[0] <
-                    child.num_embeddings_per_partition):
+                    and child.weight.shape[0]
+                    < child.num_embeddings_per_partition):
                 new_weight = torch.empty(child.num_embeddings_per_partition,
                                          child.embedding_dim,
                                          dtype=child.weight.dtype,
