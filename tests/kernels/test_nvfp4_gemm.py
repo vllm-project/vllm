@@ -141,7 +141,7 @@ def get_ref_results(a_fp4, b_fp4, a_sf, b_sf, a_global_scale, b_global_scale,
 @torch.inference_mode()
 def test_nvfp4_gemm(
     dtype: torch.dtype,
-    shape: tuple[int, int],
+    shape: tuple[int, int, int],
     seed: int,
     device: str,
 ) -> None:
