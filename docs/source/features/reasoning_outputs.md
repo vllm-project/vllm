@@ -1,6 +1,6 @@
-(reasoning-models)=
+(reasoning-outputs)=
 
-# Reasoning Models
+# Reasoning Outputs
 
 vLLM offers support for reasoning models like [DeepSeek R1](https://huggingface.co/deepseek-ai/DeepSeek-R1), which are designed to generate outputs containing both reasoning steps and final conclusions.
 
