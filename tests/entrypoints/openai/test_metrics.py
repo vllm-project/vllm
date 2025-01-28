@@ -202,6 +202,12 @@ EXPECTED_METRICS_V1 = [
     "vllm:num_requests_waiting",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
+    "vllm:request_prompt_tokens_sum",
+    "vllm:request_prompt_tokens_bucket",
+    "vllm:request_prompt_tokens_count",
+    "vllm:request_generation_tokens_sum",
+    "vllm:request_generation_tokens_bucket",
+    "vllm:request_generation_tokens_count",
 ]
 
 

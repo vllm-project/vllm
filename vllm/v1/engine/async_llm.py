@@ -53,8 +53,7 @@ class AsyncLLM(EngineClient):
         self.log_stats = log_stats
         self.stat_loggers: List[StatLoggerBase] = [
             LoggingStatLogger(),
-            PrometheusStatLogger(labels=dict(
-                model_name=self.model_config.served_model_name)),
+            PrometheusStatLogger(vllm_config.model_config),
         ]
 
         # Tokenizer (+ ensure liveness if running in another process).
