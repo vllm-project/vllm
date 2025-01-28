@@ -13,6 +13,7 @@ einops # required for MPT, qwen-vl and Mamba
 httpx
 librosa # required for audio tests
 vector_quantize_pytorch # required for minicpmo_26 test
+vocos # required for minicpmo_26 test
 peft
 pqdm
 ray[adag]==2.40.0

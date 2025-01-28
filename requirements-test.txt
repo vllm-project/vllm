@@ -106,12 +106,17 @@ dnspython==2.7.0
 docutils==0.16
     # via awscli
 einops==0.8.0
-    # via -r requirements-test.in
+    # via
+    #   -r requirements-test.in
+    #   encodec
     #   vector-quantize-pytorch
+    #   vocos
 einx==0.3.0
     # via vector-quantize-pytorch
 email-validator==2.2.0
     # via pydantic
+encodec==0.1.1
+    # via vocos
 evaluate==0.4.3
     # via lm-eval
 fastparquet==2024.11.0
@@ -164,6 +169,7 @@ huggingface-hub==0.26.2
     #   timm
     #   tokenizers
     #   transformers
+    #   vocos
 idna==3.10
     # via
     #   anyio
@@ -267,6 +273,7 @@ numpy==1.26.4
     #   datasets
     #   decord
     #   einx
+    #   encodec
     #   evaluate
     #   fastparquet
     #   genai-perf
@@ -289,6 +296,7 @@ numpy==1.26.4
     #   torchvision
     #   transformers
     #   tritonclient
+    #   vocos
 nvidia-cublas-cu12==12.4.5.8
     # via
     #   nvidia-cudnn-cu12
@@ -461,6 +469,7 @@ pyyaml==6.0.2
     #   responses
     #   timm
     #   transformers
+    #   vocos
 ray[adag]==2.40.0
     # via -r requirements-test.in
 redis==5.2.0
@@ -523,6 +532,7 @@ scipy==1.13.1
     #   scikit-learn
     #   sentence-transformers
     #   statsmodels
+    #   vocos
 sentence-transformers==3.2.1
     # via -r requirements-test.in
 sentencepiece==0.2.0
@@ -576,6 +586,7 @@ torch==2.5.1
     #   -r requirements-test.in
     #   accelerate
     #   bitsandbytes
+    #   encodec
     #   lm-eval
     #   peft
     #   sentence-transformers
@@ -584,8 +595,12 @@ torch==2.5.1
     #   torchaudio
     #   torchvision
     #   vector-quantize-pytorch
+    #   vocos
 torchaudio==2.5.1
-    # via -r requirements-test.in
+    # via
+    #   -r requirements-test.in
+    #   encodec
+    #   vocos
 torchvision==0.20.1
     # via timm
 tqdm==4.66.6
@@ -641,6 +656,8 @@ urllib3==2.2.3
     #   responses
     #   tritonclient
 vector-quantize-pytorch==1.21.2
+    # via -r requirements-test.in
+vocos==0.1.0
     # via -r requirements-test.in
 word2number==1.1
     # via lm-eval
