@@ -1,7 +1,7 @@
 import argparse
 import dataclasses
-import time
 import os
+import time
 from typing import List
 
 import numpy as np
@@ -16,12 +16,13 @@ from vllm.utils import FlexibleArgumentParser
 DURATION_MS = int(os.getenv("VLLM_TPU_PROFILE_DURATION_MS", 3000))
 DELAY_MS = int(os.getenv("VLLM_TPU_PROFILE_DELAY_MS", 0))
 
+
 def main(args: argparse.Namespace):
     print(args)
 
     engine_args = EngineArgs.from_cli_args(args)
     llm = LLM(**dataclasses.asdict(engine_args))
-    server = xp.start_server(9012)
+    _ = xp.start_server(9012)
 
     sampling_params = SamplingParams(
         temperature=0.0,
@@ -69,6 +70,7 @@ def main(args: argparse.Namespace):
 
     return
 
+
 if __name__ == '__main__':
     parser = FlexibleArgumentParser(
         description='Benchmark the latency of processing a single batch of '
@@ -88,9 +90,11 @@ if __name__ == '__main__':
         '--profile-result-dir',
         type=str,
         default="profiles",
-        help=('path to save the pytorch profiler output. Can be visualized '
-              'with ui.perfetto.dev or Tensorboard '
-              '(https://cloud.google.com/tpu/docs/pytorch-xla-performance-profiling-tpu-vm).'))
+        help=
+        ('path to save the pytorch profiler output. Can be visualized '
+         'with ui.perfetto.dev or Tensorboard '
+         '(https://cloud.google.com/tpu/docs/pytorch-xla-performance-profiling-tpu-vm).'
+         ))
 
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
