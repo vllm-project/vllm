@@ -213,7 +213,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--enable-reasoning",
         action="store_true",
         default=False,
-        help="Whether to enable reasoning_content for the model."
+        help="Whether to enable reasoning_content for the model. "
         "If enabled, the model will be able to generate reasoning content.")
 
     valid_reasoning_parsers = ReasoningParserManager.reasoning_parsers.keys()
