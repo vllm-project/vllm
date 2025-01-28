@@ -48,6 +48,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         scale: float,
     ):
+        if self.no_lora:
+            return
         bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
 
     def _expand_prefill(
@@ -75,6 +77,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         w_t_all: torch.Tensor,
         add_inputs: bool,
     ):
+        if self.no_lora:
+            return
         bgmv_expand(x, w_t_all, y, self.token_lora_indices, add_inputs)
 
     def _expand_slice_prefill(
@@ -108,6 +112,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         y_slice_size: int,
         add_inputs: bool,
     ):
+        if self.no_lora:
+            return
         bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset,
                           y_slice_size, add_inputs)
 
