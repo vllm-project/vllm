@@ -150,10 +150,9 @@ class TransformersModel(nn.Module, SupportsLoRA):
                 num_kv_heads=divide(config.num_key_value_heads, tp_size),
                 cache_config=cache_config,
                 quant_config=quant_config,
-                prefix=f"model.layers.{i}.self_attn")
+                prefix=f"{i}.attn")
             for i in range(config.num_hidden_layers)
         ]
-        self.config._attn_implementation_internal = "vllm"
 
         # Model modifications
         self.replace_vocab_embed_class(self.model)

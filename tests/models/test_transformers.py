@@ -63,7 +63,8 @@ def test_models(hf_runner, vllm_runner, example_prompts, model,
                              vllm_runner,
                              example_prompts,
                              model,
-                             model_impl=model_impl)
+                             model_impl=model_impl, enforce_eager=True
+)
 
 
 @multi_gpu_test(num_gpus=2)
