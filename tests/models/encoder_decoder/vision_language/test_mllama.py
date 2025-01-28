@@ -37,6 +37,36 @@ models = [
     "meta-llama/Llama-3.2-11B-Vision-Instruct",
 ]
 
+# Indices for inputs
+TEXT_ONLY = '0'
+IMAGE_AT_BEG = '1'
+IMAGE_AT_MIDDLE = '2'
+TWO_IMAGES = '3'
+
+# Input tokenized
+prompt_data = {
+    # Tell me a story
+    TEXT_ONLY: [41551, 757, 264, 3446],
+    # <|image|> What's the content of this image
+    IMAGE_AT_BEG:
+    [MLLAMA_IMAGE_TOKEN_ID, 3639, 596, 279, 2262, 315, 420, 2217, 220],
+    # Hello <|image|>What' the content of this image
+    IMAGE_AT_MIDDLE:
+    [9906, 220, MLLAMA_IMAGE_TOKEN_ID, 3923, 6, 279, 2262, 315, 420, 2217],
+    #<|image|>Is there a duck in this image?<|image|>What's the animal in this image? # noqa: E501
+    TWO_IMAGES: [
+        MLLAMA_IMAGE_TOKEN_ID, 3957, 1070, 264, 37085, 304, 420, 2217, 30,
+        MLLAMA_IMAGE_TOKEN_ID, 3923, 596, 279, 10065, 304, 420, 2217, 30
+    ]
+}
+
+tiles_data = {
+    TEXT_ONLY: None,
+    IMAGE_AT_BEG: [2, 2],
+    IMAGE_AT_MIDDLE: [2, 2],
+    TWO_IMAGES: [2, 2],
+}
+
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
                                          Optional[SampleLogprobs]],
@@ -433,12 +463,6 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
                                             images=images)
 
 
-TEXT_ONLY = '0'
-IMAGE_AT_BEG = '1'
-IMAGE_AT_MIDDLE = '2'
-TWO_IMAGES = '3'
-
-
 @pytest.mark.core_model
 @pytest.mark.parametrize(
     "input_indices_and_output",
@@ -455,33 +479,10 @@ TWO_IMAGES = '3'
 def test_get_cross_attention_mask(input_indices_and_output) -> None:
 
     input_indices, expected_output = input_indices_and_output
-    data = {
-        # Tell me a story
-        TEXT_ONLY: [41551, 757, 264, 3446],
-        # <|image|> What's the content of this image
-        IMAGE_AT_BEG:
-        [MLLAMA_IMAGE_TOKEN_ID, 3639, 596, 279, 2262, 315, 420, 2217, 220],
-        # Hello <|image|>What' the content of this image
-        IMAGE_AT_MIDDLE:
-        [9906, 220, MLLAMA_IMAGE_TOKEN_ID, 3923, 6, 279, 2262, 315, 420, 2217],
-        #<|image|>Is there a duck in this image?<|image|>What's the animal in this image? # noqa: E501
-        TWO_IMAGES: [
-            MLLAMA_IMAGE_TOKEN_ID, 3957, 1070, 264, 37085, 304, 420, 2217, 30,
-            MLLAMA_IMAGE_TOKEN_ID, 3923, 596, 279, 10065, 304, 420, 2217, 30
-        ]
-    }
 
-    tiles_data = {
-        TEXT_ONLY: None,
-        IMAGE_AT_BEG: [2, 2],
-        IMAGE_AT_MIDDLE: [2, 2],
-        TWO_IMAGES: [2, 2],
-    }
-
-    sequences = [torch.tensor(data[i]) for i in input_indices]
-    num_tiles = [
-        tiles_data[i] for i in input_indices if tiles_data[i] is not None
-    ]
+    sequences = [torch.tensor(prompt_data[i]) for i in input_indices]
+    num_tiles = [[2, 2] if i != TEXT_ONLY else [] for i in input_indices
+                 if i != TEXT_ONLY]
     input = torch.cat(sequences)
 
     seq_lens = [len(s) for s in sequences]
@@ -522,3 +523,60 @@ def test_get_cross_attention_mask(input_indices_and_output) -> None:
         assert cross_attention_mask.shape == expected_cross_attention_mask
     else:
         assert cross_attention_mask is None
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize(
+    "input_indices",
+    [[TEXT_ONLY], [IMAGE_AT_BEG], [TEXT_ONLY, IMAGE_AT_BEG], [IMAGE_AT_MIDDLE],
+     [TEXT_ONLY, IMAGE_AT_MIDDLE], [TEXT_ONLY, IMAGE_AT_BEG, IMAGE_AT_MIDDLE],
+     [IMAGE_AT_MIDDLE, TEXT_ONLY], [TWO_IMAGES], [TEXT_ONLY, TWO_IMAGES]])
+def test_get_full_text_row_masked_out_mask(input_indices) -> None:
+
+    sequences = [torch.tensor(prompt_data[i]) for i in input_indices]
+
+    seq_lens = [len(s) for s in sequences]
+
+    num_prefill_tokens = sum(seq_lens)
+
+    # TEXT_ONLY is zero, so it will be masked out,
+    # other instances should not be.
+    encoder_seq_lens = [int(i) for i in input_indices]
+
+    attn_data = FlashAttentionMetadata(
+        seq_lens=seq_lens,
+        encoder_seq_lens=encoder_seq_lens,
+        num_prefill_tokens=num_prefill_tokens,
+        # Dummy values
+        enable_kv_scales_calculation=False,
+        num_prefills=0,
+        num_decode_tokens=0,
+        slot_mapping=0,
+        multi_modal_placeholder_index_maps=None,
+        seq_lens_tensor=0,
+        max_prefill_seq_len=0,
+        max_decode_seq_len=0,
+        context_lens_tensor=None,
+        block_tables=None,
+        use_cuda_graph=False,
+    )
+
+    dummy: dict[str, str] = {}
+
+    full_text_row_masked_out_mask = MllamaForConditionalGeneration\
+        .get_full_text_row_masked_out_mask(dummy,
+                                  attn_data,
+                                  torch.get_default_device())
+
+    full_text_row_masked_out_mask = full_text_row_masked_out_mask.squeeze()
+    full_text_row_masked_out_mask = full_text_row_masked_out_mask.tolist()
+
+    idx = 0
+    assert len(full_text_row_masked_out_mask) == num_prefill_tokens
+    for i, seq_len in enumerate(seq_lens):
+        must_be_masked = input_indices[i] != TEXT_ONLY
+        for _ in range(seq_len):
+            assert full_text_row_masked_out_mask[idx] == must_be_masked, \
+                f"full_text_row_masked_out_mask[{idx}] must be " \
+                f"'{must_be_masked}' "
+            idx += 1
