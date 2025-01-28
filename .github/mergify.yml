@@ -59,7 +59,7 @@ pull_request_rules:
   actions:
     label:
       add:
-        - structured-output
+        - speculative-decoding
 
 - name: label-v1
   description: Automatically apply v1 label
