@@ -135,14 +135,6 @@ class Attention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        if current_platform.is_hpu() and self.use_direct_call:
-            forward_context: ForwardContext = get_forward_context()
-            attn_metadata = forward_context.attn_metadata
-            kv_cache = self.kv_cache[forward_context.virtual_engine]
-            return self.impl.forward(query, key, value, kv_cache,
-                                     attn_metadata, self._k_scale,
-                                     self._v_scale)
-
         if self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
@@ -251,8 +243,7 @@ def unified_attention(
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                             self._k_scale, self._v_scale)
+    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
 
 def unified_attention_fake(
@@ -284,13 +275,12 @@ def unified_attention_with_output(
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    self.impl.forward(query,
+    self.impl.forward(self,
+                      query,
                       key,
                       value,
                       kv_cache,
                       attn_metadata,
-                      self._k_scale,
-                      self._v_scale,
                       output=output)
 
 

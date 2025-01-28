@@ -19,6 +19,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
 import torch
+import torch.nn as nn
 import vllm_hpu_extension.environment as environment
 from vllm_hpu_extension.bucketing import HPUBucketingContext
 from vllm_hpu_extension.flags import enabled_flags
@@ -816,6 +817,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             HpuModelAdapter(*args, **kwargs), disable_tensor_cache=True
         ) if htorch.utils.internal.is_lazy() else HpuModelAdapter(
             *args, **kwargs)
+
+    def get_model(self) -> nn.Module:
+        if isinstance(self.model, HpuModelAdapter):
+            return self.model.model
+        return self.model
 
     def _use_graphs(self, batch_size, seq_len, is_prompt):
         if self.enforce_eager:

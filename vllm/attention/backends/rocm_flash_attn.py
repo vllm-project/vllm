@@ -7,6 +7,7 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
@@ -414,13 +415,12 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
@@ -458,8 +458,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                k_scale,
-                v_scale,
+                layer._k_scale,
+                layer._v_scale,
             )
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
@@ -567,8 +567,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                     self.sliding_window[0],
-                    k_scale,
-                    v_scale,
+                    layer._k_scale,
+                    layer._v_scale,
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -613,8 +613,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    k_scale,
-                    v_scale,
+                    layer._k_scale,
+                    layer._v_scale,
                 )
             else:
                 output[num_prefill_tokens:] = PagedAttention.forward_decode(
@@ -628,8 +628,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.num_kv_heads,
                     self.scale,
                     self.alibi_slopes,
-                    k_scale,
-                    v_scale,
+                    layer._k_scale,
+                    layer._v_scale,
                 )
 
         # Reshape the output tensor.

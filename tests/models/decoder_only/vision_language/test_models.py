@@ -10,7 +10,6 @@ from typing import Type
 import pytest
 from transformers import AutoModelForVision2Seq
 from transformers import __version__ as TRANSFORMERS_VERSION
-from transformers.utils import is_flash_attn_2_available
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
@@ -140,9 +139,7 @@ VLM_TEST_SETTINGS = {
     #### Extended model tests
     "aria": VLMTestInfo(
         models=["rhymes-ai/Aria"],
-        tokenizer_mode="slow",
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        dtype="bfloat16",
         prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
         img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
         max_model_len=4096,
@@ -158,8 +155,8 @@ VLM_TEST_SETTINGS = {
         max_tokens=64,
         marks=[
             pytest.mark.skipif(
-                not is_flash_attn_2_available(),
-                reason="Model needs flash-attn for numeric convergence.",
+                TRANSFORMERS_VERSION < "4.48.0",
+                reason="HF model requires transformers>=4.48.0",
             ),
             large_gpu_mark(min_gb=64),
         ],
@@ -190,7 +187,7 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
     ),
     "deepseek_vl_v2": VLMTestInfo(
-        models=["deepseek-ai/deepseek-vl2-tiny"],
+        models=["Isotr0py/deepseek-vl2-tiny"], # model repo using dynamic module
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|User|>: {img_prompt}\n\n<|Assistant|>: ", # noqa: E501
         max_model_len=4096,
