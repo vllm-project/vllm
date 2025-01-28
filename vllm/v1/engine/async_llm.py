@@ -305,7 +305,8 @@ class AsyncLLM(EngineClient):
             return
 
         for logger in self.stat_loggers:
-            logger.log(scheduler_stats=scheduler_stats)
+            logger.log(scheduler_stats=scheduler_stats,
+                       iteration_stats=iteration_stats)
 
     def encode(
         self,
