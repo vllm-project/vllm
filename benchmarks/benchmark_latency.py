@@ -53,6 +53,7 @@ def main(args: argparse.Namespace):
                          use_tqdm=False,
                          lora_request=lora_request)
         else:
+
             llm.beam_search(
                 dummy_prompts,
                 BeamSearchParams(
