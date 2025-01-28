@@ -30,12 +30,13 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b_scales,
                             std::optional<torch::Tensor> const& bias);
 
-void cutlass_grouped_mm_sm90(c10::List<at::Tensor> const& out_tensors,
+void cutlass_grouped_mm_sm90(torch::Tensor& out_tensors,
                              torch::Tensor const& a_tensors,
-                             c10::List<at::Tensor> const& b_tensors,
-                             c10::List<at::Tensor> const& a_scales,
-                             c10::List<at::Tensor> const& b_scales,
-                             torch::Tensor const& expert_offsets);
+                             torch::Tensor const& b_tensors,
+                             torch::Tensor const& a_scales,
+                             torch::Tensor const& b_scales,
+                             torch::Tensor const& expert_offsets,
+                             torch::Tensor const& problem_sizes);
 
 
 void compute_expert_offsets_caller(torch::Tensor& trg_a_ptrs,
@@ -158,14 +159,15 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
       version_num);
 }
 
-void cutlass_grouped_mm(c10::List<at::Tensor> const& out_tensors,
+void cutlass_grouped_mm(torch::Tensor& out_tensors,
                         torch::Tensor const& a_tensors,
-                        c10::List<at::Tensor> const& b_tensors,
-                        c10::List<at::Tensor> const& a_scales,
-                        c10::List<at::Tensor> const& b_scales,
-                        torch::Tensor const& expert_offsets) {
+                        torch::Tensor const& b_tensors,
+                        torch::Tensor const& a_scales,
+                        torch::Tensor const& b_scales,
+                        torch::Tensor const& expert_offsets,
+                        torch::Tensor const& problem_sizes) {
   cutlass_grouped_mm_sm90(out_tensors, a_tensors, b_tensors, a_scales,
-                          b_scales, expert_offsets);
+                          b_scales, expert_offsets, problem_sizes);
 }
 
 void compute_expert_offsets(torch::Tensor& trg_a_ptrs,

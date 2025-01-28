@@ -8,7 +8,7 @@ from typing import Optional, Type
 import pytest
 import torch
 
-from tests.kernels.utils import opcheck
+from tests.kernels.utils import opcheck, stack_and_dev
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
@@ -458,7 +458,7 @@ def test_cutlass_support_opcheck():
 
 
 # TODO add bias
-@pytest.mark.parametrize("num_groups", [8])
+@pytest.mark.parametrize("num_groups", [8, 64])
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [False])
@@ -483,15 +483,23 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
                                  device=device,
                                  dtype=torch.int32)
 
+    problem_sizes = torch.zeros((num_groups, 3),
+                                 device=device,
+                                 dtype=torch.int32)
+
     alignment = 16  # 128 // 8
     # For variation, each group has dimensions
     # (m_g = m/(g+1), n_g = n/(g+1), k_g = k/(g+1))
     n_g = alignment * random.randint(1, 64)
     k_g = alignment * random.randint(1, 64)
+    # one_b = to_fp8(torch.randn((n_g, k_g), device=device))
     for g in range(num_groups):
         m_g = alignment * random.randint(1, 64)
 
         expert_offsets[g + 1] = expert_offsets[g] + m_g
+        problem_sizes[g][0] = m_g
+        problem_sizes[g][1] = n_g
+        problem_sizes[g][2] = k_g
 
         m_a_scales = m_g if per_act_token else 1
         n_b_scales = n_g if per_out_ch else 1
@@ -501,6 +509,7 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
         # Create group-specific A and B (FP8) and output (FP16/FP32)
         a_g = to_fp8(torch.randn((m_g, k_g), device=device))
         b_g = to_fp8(torch.randn((n_g, k_g), device=device).t())
+        # b_g = one_b.clone().t()
         c_g = torch.zeros((m_g, n_g), device=device, dtype=out_dtype)
         # Set up A/B scales
         scale_a = torch.randn((m_a_scales, 1),
@@ -516,6 +525,8 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
         a_scales_tensors.append(scale_a)
         b_scales_tensors.append(scale_b)
 
+        print(b_g.stride())
+
         # Compute baseline result for this group
         baseline_g = baseline_scaled_mm(a_g, b_g, scale_a, scale_b, out_dtype,
                                         None)
@@ -524,17 +535,49 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
     a_tensors_stacked = torch.empty((expert_offsets[num_groups], k_g),
                                     device=device,
                                     dtype=torch.float8_e4m3fn)
+    b_tensors_stacked = torch.empty((n_g * num_groups, k_g),
+                                    device=device,
+                                    dtype=torch.float8_e4m3fn)
     for g in range(num_groups):
         a_tensors_stacked[expert_offsets[g]:expert_offsets[g +
                                                            1]] = a_tensors[g]
+        b_tensors_stacked[g*n_g:(g+1)*n_g, :] = b_tensors[g].t()
+    b_tensors_stacked = b_tensors_stacked.t()
 
-    torch.ops._C.cutlass_grouped_mm(out_tensors, a_tensors_stacked, b_tensors,
-                                    a_scales_tensors, b_scales_tensors,
-                                    expert_offsets)
+    a_scales_tensors_stacked = torch.empty(
+        (expert_offsets[num_groups] if per_act_token else num_groups, 1),
+        device=device,
+        dtype=torch.float32)
+    if per_act_token:
+        for g in range(num_groups):
+            a_scales_tensors_stacked[expert_offsets[g]:expert_offsets[g +
+                                                    1]] = a_scales_tensors[g]
+    else:
+        for g in range(num_groups):
+            a_scales_tensors_stacked[g] = a_scales_tensors[g]
+
+    b_scales_tensors_stacked = torch.empty(
+                                (num_groups, n_b_scales),
+                                device=device,
+                                dtype=torch.float32)
+    for g in range(num_groups):
+        b_scales_tensors_stacked[g] = b_scales_tensors[g]
+
+    out_tensors_stacked = torch.zeros((expert_offsets[num_groups], n_g),
+                                    device=device,
+                                    dtype=out_dtype)
+
+    torch.ops._C.cutlass_grouped_mm(out_tensors_stacked, a_tensors_stacked,
+                                    b_tensors_stacked,
+                                    a_scales_tensors_stacked,
+                                    b_scales_tensors_stacked,
+                                    expert_offsets, problem_sizes)
 
     # Validate each group's result against the baseline
-    for c_g, baseline_g in zip(out_tensors, baseline_tensors):
-        print(baseline_g)
-        print(c_g)
+    for g in range(num_groups):
+        baseline = baseline_tensors[g]
+        c = out_tensors_stacked[expert_offsets[g]:expert_offsets[g + 1]]
+        print(baseline)
+        print(c)
         print("*")
-        torch.testing.assert_close(c_g, baseline_g, rtol=1e-2, atol=5e-2)
+        torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-2)

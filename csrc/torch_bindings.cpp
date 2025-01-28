@@ -323,10 +323,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // CUTLASS w8a8 grouped GEMM // TODO complete this
   ops.def(
-      "cutlass_grouped_mm(Tensor![] out_tensors,"
+      "cutlass_grouped_mm(Tensor! out_tensors,"
       "                   Tensor a_tensors,"
-      "                   Tensor[] b_tensors, Tensor[] a_scales, "
-      "                   Tensor[] b_scales, Tensor expert_offsets) -> ()");
+      "                   Tensor b_tensors, Tensor a_scales, "
+      "                   Tensor b_scales, Tensor expert_offsets, "
+      "                   Tensor problem_sizes) -> ()");
   ops.impl("cutlass_grouped_mm", torch::kCUDA, &cutlass_grouped_mm);
 
   ops.def(
