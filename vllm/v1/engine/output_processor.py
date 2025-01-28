@@ -27,6 +27,7 @@ class RequestState:
         prompt: Optional[str],
         prompt_token_ids: List[int],
         detokenizer: IncrementalDetokenizer,
+        arrival_time: float,
         queue: Optional[asyncio.Queue[RequestOutput]],
     ):
         self.request_id = request_id
@@ -37,7 +38,7 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
 
-        self.stats = RequestStateStats()
+        self.stats = RequestStateStats(last_token_time=arrival_time)
 
     @classmethod
     def from_new_request(
@@ -54,6 +55,7 @@ class RequestState:
                 tokenizer=tokenizer,
                 request=request,
             ),
+            arrival_time=request.arrival_time,
             queue=queue,
         )
 
