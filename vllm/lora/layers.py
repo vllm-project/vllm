@@ -220,8 +220,10 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                                 lora_b.T, non_blocking=True)
         if embeddings_tensor is not None:
             self.embeddings_tensors[
-                index, :embeddings_tensor.shape[0], :embeddings_tensor.
-                shape[1], ].copy_(embeddings_tensor, non_blocking=True)
+                index,
+                :embeddings_tensor.shape[0],
+                :embeddings_tensor.shape[1],
+            ].copy_(embeddings_tensor, non_blocking=True)
             if self.embeddings_slice is not None:
                 # TODO(yard1): Optimize this copy, we don't need to copy
                 # everything, just the modified part
@@ -1024,8 +1026,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                                 lora_b.T, non_blocking=True)
         if embeddings_tensor is not None:
             self.embeddings_tensors[
-                index, :embeddings_tensor.shape[0], :embeddings_tensor.
-                shape[1], ] = embeddings_tensor
+                index,
+                :embeddings_tensor.shape[0],
+                :embeddings_tensor.shape[1],
+            ] = embeddings_tensor
 
     def _get_logits(
         self,

@@ -1,6 +1,6 @@
 import os
 from contextlib import contextmanager
-from functools import lru_cache
+from functools import cache
 from typing import Generator, Optional, Type
 
 import torch
@@ -100,7 +100,7 @@ def get_attn_backend(
     )
 
 
-@lru_cache(maxsize=None)
+@cache
 def _cached_get_attn_backend(
     head_size: int,
     dtype: torch.dtype,

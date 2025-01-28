@@ -73,8 +73,8 @@ def requantize_with_max_scale(
     # from disk in this case. Skip requantization in this case (since)
     # we already are quantized with the single scale.
     # * Sample Model: nm-testing/Phi-3-mini-128k-instruct-FP8
-    unfused_module_in_checkpoint = (weight_scale[-1] > torch.finfo(
-        torch.float8_e4m3fn).min)
+    unfused_module_in_checkpoint = (weight_scale[-1]
+                                    > torch.finfo(torch.float8_e4m3fn).min)
 
     # If unfused checkpoint, need requanize with the single scale.
     if unfused_module_in_checkpoint:

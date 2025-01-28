@@ -166,7 +166,8 @@ class SamplingMetadata:
             pin_memory=pin_memory,
         )
         categorized_sample_indices = {
-            t: async_tensor_h2d(
+            t:
+            async_tensor_h2d(
                 seq_ids,
                 dtype=torch.int,
                 target_device=device,
@@ -198,8 +199,12 @@ def _prepare_seq_groups(
     device: str,
     generators: Optional[Dict[str, torch.Generator]] = None,
     cache: Optional[SamplingMetadataCache] = None,
-) -> Tuple[List[SequenceGroupToSample], List[int], Dict[SamplingType,
-                                                        List[int]], int, ]:
+) -> Tuple[
+        List[SequenceGroupToSample],
+        List[int],
+        Dict[SamplingType, List[int]],
+        int,
+]:
     """Prepare sequence groups and indices for sampling.
 
     Args:

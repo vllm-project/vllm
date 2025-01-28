@@ -1365,8 +1365,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         # For 1) text-only prefill and decode, 2) image-present decode.
         if image_inputs is None:
             full_text_row_masked_out_mask = (
-                attn_metadata.encoder_seq_lens_tensor != 0).reshape(-1, 1).to(
-                    input_ids.device)
+                attn_metadata.encoder_seq_lens_tensor
+                != 0).reshape(-1, 1).to(input_ids.device)
             skip_cross_attention = max(attn_metadata.encoder_seq_lens) == 0
 
         # For image-present prefill.

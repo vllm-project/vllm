@@ -316,8 +316,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     logger.info("batch_size: %d, seq_len: %d", batch_size,
                                 seq_len)
                     num_tokens = batch_size * seq_len
-                    if (num_tokens >=
-                            self.scheduler_config.max_num_batched_tokens):
+                    if (num_tokens
+                            >= self.scheduler_config.max_num_batched_tokens):
                         break
                     seq_len = seq_len * 2
             end = time.time()

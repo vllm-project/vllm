@@ -104,11 +104,11 @@ class Top1Proposer(SpeculativeProposer):
             sampler_transposed=transposed,
         )
 
-        proposals = SpeculativeProposals(
-            proposal_token_ids=proposal_tokens,
-            proposal_probs=proposal_probs,
-            proposal_lens=proposal_lens,
-            no_proposals=maybe_sampler_output is None)
+        proposals = SpeculativeProposals(proposal_token_ids=proposal_tokens,
+                                         proposal_probs=proposal_probs,
+                                         proposal_lens=proposal_lens,
+                                         no_proposals=maybe_sampler_output
+                                         is None)
         return proposals
 
     def _split_by_proposal_len(

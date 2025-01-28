@@ -81,8 +81,8 @@ class MLPSpeculator(nn.Module):
 
         if self.tie_weights:
             assert (
-                self.n_predict >
-                1), "You cannot tie weights between stages when only 1 exists"
+                self.n_predict > 1
+            ), "You cannot tie weights between stages when only 1 exists"
             embedding = VocabParallelEmbedding(
                 config.vocab_size,
                 self.inner_dim,

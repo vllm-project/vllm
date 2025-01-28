@@ -72,9 +72,10 @@ def block_quant_to_tensor_quant(
     x_dq_block = x_q_block.to(torch.float32)
 
     x_dq_block_tiles = [[
-        x_dq_block[j * block_n:min((j + 1) * block_n, n),
-                   i * block_k:min((i + 1) * block_k, k), ]
-        for i in range(k_tiles)
+        x_dq_block[
+            j * block_n:min((j + 1) * block_n, n),
+            i * block_k:min((i + 1) * block_k, k),
+        ] for i in range(k_tiles)
     ] for j in range(n_tiles)]
 
     for i in range(k_tiles):

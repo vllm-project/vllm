@@ -314,9 +314,9 @@ def test_compressed_tensors_2of4_quant_int8(vllm_runner, args_2of4):
 
 
 @pytest.mark.skip(reason="2of4 sparse w16a16 CUTLASS produces bad output.")
-@pytest.mark.skipif(not sparse_cutlass_supported(),
-                    reason="2of4 Sparse is not yet supported on this GPU type."
-                    )
+@pytest.mark.skipif(
+    not sparse_cutlass_supported(),
+    reason="2of4 Sparse is not yet supported on this GPU type.")
 @pytest.mark.parametrize(
     "args_2of4",
     [("nm-testing/TinyLlama-1.1B-Chat-v1.0-2of4-Sparse-Dense-Compressor")])
