@@ -995,7 +995,7 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_kernel(
     scalar_t* __restrict__ out,    // [num_seqs, num_heads, max_num_partitions,
                                    // head_size]
     OUTT* __restrict__ final_out,  // [num_seqs, num_heads, head_size]
-    int max_ctx_blocks, const float* k_scale_ptr, const float* v_scale_ptr,
+    int max_ctx_blocks, const float* k_scale, const float* v_scale,
     const float* __restrict__ fp8_out_scale_ptr) {
   UNREACHABLE_CODE
 }

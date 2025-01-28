@@ -78,6 +78,12 @@ class Attention(nn.Module):
         self._v_scale = torch.tensor(1.0, dtype=torch.float32)
         self._q_scale = torch.tensor(1.0, dtype=torch.float32)
         self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
+
+        # We also keep the float32 versions of k/v_scale for attention
+        # backends that don't support tensors (Flashinfer)
+        self._k_scale_float = torch.tensor(1.0, dtype=torch.float32)
+        self._v_scale_float = torch.tensor(1.0, dtype=torch.float32)
+
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
         if quant_method is not None:
@@ -111,11 +117,11 @@ class Attention(nn.Module):
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
 
-        # For cuda and cpu platforms, we control how
+        # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
         # opaque custom op. For other platforms, we directly call them
         # and let torch.compile handle them.
-        self.use_direct_call = not current_platform.is_cuda(
+        self.use_direct_call = not current_platform.is_cuda_alike(
         ) and not current_platform.is_cpu()
 
         self.use_output = attn_backend.accept_output_buffer
@@ -180,6 +186,8 @@ class Attention(nn.Module):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
         self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+        self._k_scale_float = self._k_scale.item()
+        self._v_scale_float = self._v_scale.item()
         # We only calculate the scales once
         self.calculate_kv_scales = False
 
@@ -208,6 +216,9 @@ class MultiHeadAttention(nn.Module):
         self.scale = scale
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+
         dtype = torch.get_default_dtype()
         attn_backend = get_attn_backend(head_size,
                                         dtype,
@@ -219,7 +230,8 @@ class MultiHeadAttention(nn.Module):
             backend = _Backend.XFORMERS
 
         self.attn_backend = backend if backend in {
-            _Backend.TORCH_SDPA, _Backend.XFORMERS
+            _Backend.TORCH_SDPA,
+            _Backend.XFORMERS,
         } else _Backend.TORCH_SDPA
 
     def forward(
@@ -229,13 +241,18 @@ class MultiHeadAttention(nn.Module):
         value: torch.Tensor,
     ) -> torch.Tensor:
         """Input shape: batch_size x seq_len x hidden_size"""
-        # TODO(Isotr0py): Use existing backend implementations and support FA2
+        # TODO(Isotr0py): Use existing backend implementations and support FA3
         bsz, q_len, _ = query.size()
         kv_len = key.size(1)
 
         query = query.view(bsz, q_len, self.num_heads, self.head_size)
         key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
         value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+
+        if (num_repeat := self.num_queries_per_kv) > 1:
+            # Handle MQA and GQA
+            key = torch.repeat_interleave(key, num_repeat, dim=2)
+            value = torch.repeat_interleave(value, num_repeat, dim=2)
 
         if self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops

@@ -114,7 +114,7 @@ def _initialize_model(
     all_params = [param.name for param in signatures.parameters.values()]
     if "vllm_config" in all_params and "prefix" in all_params:
         # new-style model class
-        with set_current_vllm_config(vllm_config):
+        with set_current_vllm_config(vllm_config, check_compile=True):
             return model_class(vllm_config=vllm_config, prefix=prefix)
 
     msg = ("vLLM model class should accept `vllm_config` and `prefix` as "
@@ -142,7 +142,7 @@ def _initialize_model(
         kwargs["lora_config"] = vllm_config.lora_config
     if "scheduler_config" in all_params:
         kwargs["scheduler_config"] = vllm_config.scheduler_config
-    with set_current_vllm_config(vllm_config):
+    with set_current_vllm_config(vllm_config, check_compile=True):
         return model_class(**kwargs)
 
 
@@ -1076,8 +1076,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # weight tensor. So TP does not work with pre_quantized bnb models.
         if pre_quant and get_tensor_model_parallel_world_size() > 1:
             raise ValueError(
-                "Prequant BitsAndBytes models with TP is not supported."
-                "Please try with PP.")
+                "Prequant BitsAndBytes models with tensor parallelism is not "
+                "supported. Please try with pipeline parallelism.")
 
         load_8bit = False
         if pre_quant:
