@@ -383,7 +383,7 @@ class _ModelRegistry:
 
         normalized_arch = []
         for model in architectures:
-            if not hasattr(self.models, model):
+            if model not in self.models:
                 model = "TransformersModel"
             normalized_arch.append(model)
         return normalized_arch
