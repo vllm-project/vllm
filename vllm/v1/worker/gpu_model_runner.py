@@ -812,7 +812,7 @@ class GPUModelRunner:
         # prompt separately. Prompt logprobs are rare (used for eval),
         # and few prefills per batch, so prioritize simple over optimal.
         prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
-        if len(self.input_batch.num_prompt_logprobs) > 0:
+        if self.input_batch.num_prompt_logprobs:
             # Prompt token ids are required for computing prompt logprobs
             assert input_ids is not None
         for (request_id, num_prompt_logprobs
