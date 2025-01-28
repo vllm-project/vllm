@@ -111,7 +111,7 @@ def _flash_attention_core(
             is None), "continuous_batching_mask does not support logit_bias!"
 
     # mask are used to only apply computation to the lower half of the matrix,
-    # which reduce the arthimetic intensity by half
+    # which reduce the arithmetic intensity by half
     forward_mask = (q_tile_idx * B_P_SIZE >= local_k_large_tile_idx *
                     LARGE_TILE_SZ if use_causal_mask else None)
 
