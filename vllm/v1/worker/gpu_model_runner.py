@@ -11,23 +11,18 @@ import torch.distributed
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
-from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import group_mm_inputs_by_modality
-from vllm.sampling_params import SamplingType
 from vllm.utils import DeviceMemoryProfiler, cdiv
 from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
-from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import bind_kv_cache
-from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.model_runner_base import ExecutionMode, ModelRunnerBase
 
 if TYPE_CHECKING:
@@ -45,40 +40,8 @@ class GPUModelRunner(ModelRunnerBase):
     ):
         super().__init__(vllm_config, device)
 
-        # Persistent batch.
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
-            device=self.device,
-            pin_memory=self.pin_memory,
-            vocab_size=self.model_config.get_vocab_size(),
-        )
-
-        # Request states.
-        self.requests: Dict[str, CachedRequestState] = {}
-
         # KV caches for forward pass
         self.kv_caches: List[torch.Tensor] = []
-
-        # Multi-modal data support
-        self.input_registry = INPUT_REGISTRY
-        self.mm_registry = MULTIMODAL_REGISTRY
-
-        # NOTE: Initialized input mapper is only used for processing dummy
-        # multimodal data into multimodal kwargs for GPU memory profiling.
-        self.mm_input_mapper_profiling = MMInputMapperClient(self.model_config)
-        self.mm_input_mapper_profiling.use_cache = False
-
-        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
-            model_config=self.model_config,
-            scheduler_config=self.scheduler_config,
-        )
-        self.max_num_encoder_input_tokens = encoder_compute_budget
-        self.encoder_cache_size = encoder_cache_size
-
-        # req_id -> (input_id -> encoder_output)
-        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
