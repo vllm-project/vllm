@@ -90,3 +90,4 @@ repos:
     entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
     language: system
     verbose: true
+    pass_filenames: false
