@@ -1,7 +1,7 @@
 from vllm import LLM, SamplingParams
 
 prompts = [
-    "The future of AI is",
+    "Can you repeat the sentence ten times, this is a sentence?",
     "This is a basic spec decode test",
 ]
 # Only support greedy for now
