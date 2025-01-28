@@ -1007,6 +1007,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                 tgt_sizes_flat += mm_data[modality]["tgt_sizes"][b][
                     slice_start_idx:slice_end_idx]
                 mm_counts[modality] += 1
+                mm_slice_counts[modality] += num_slices
 
         # NOTE: Input IDs does not contain image tokens during memory profiling,
         # so we allow it to be empty
