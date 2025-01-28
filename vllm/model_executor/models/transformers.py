@@ -42,17 +42,6 @@ from .utils import maybe_prefix
 logger = init_logger(__name__)
 
 
-class VllmKwargsForCausalLM(TypedDict, total=False):
-    """
-    Keyword arguments for Flash Attention with Compile.
-    Attributes:
-        kv_cache
-        maxattn_metadata_length
-    """
-    kv_cache: torch.Tensor
-    attn_metadata: AttentionMetadata
-
-
 def vllm_flash_attention_forward(_module,
                                  query: torch.Tensor,
                                  key: torch.Tensor,
