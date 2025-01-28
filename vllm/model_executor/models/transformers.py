@@ -50,7 +50,7 @@ def vllm_flash_attention_forward(_module,
                                  query_length: int = None,
                                  kv_caches: torch.Tensor = None,
                                  attn_metadata: AttentionMetadata = None,
-                                 attention_instances: Attention=None,
+                                 attention_instances: Attention = None,
                                  **kwargs):
     layer_idx = _module.layer_idx
     hidden = query.shape[-2]
@@ -96,9 +96,15 @@ def replace_tp_linear_class(orig_module: nn.Linear, style: str, quant_config):
     bias = orig_module.bias is not None
 
     if style == "colwise":
-        return HFColumnParallelLinear(input_size, output_size, bias, quant_config=quant_config)
+        return HFColumnParallelLinear(input_size,
+                                      output_size,
+                                      bias,
+                                      quant_config=quant_config)
     elif style == "rowwise":
-        return HFRowParallelLinear(input_size, output_size, bias, quant_config=quant_config)
+        return HFRowParallelLinear(input_size,
+                                   output_size,
+                                   bias,
+                                   quant_config=quant_config)
     # We don't consider colwise_rep since it's used in lm_head
     else:
         raise ValueError(f"Unsupported parallel style value: {style}")
@@ -181,7 +187,8 @@ class TransformersModel(nn.Module, SupportsLoRA):
             for pattern, style in self.config.base_model_tp_plan.items():
                 if re.match(pattern, qual_name) and isinstance(
                         child_module, nn.Linear):
-                    new_module = replace_tp_linear_class(child_module, style, self.quant_config)
+                    new_module = replace_tp_linear_class(
+                        child_module, style, self.quant_config)
                     setattr(module, child_name, new_module)
                     self.log_replacement(qual_name, child_module, new_module)
             else:
