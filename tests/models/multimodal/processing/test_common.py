@@ -38,7 +38,6 @@ def _test_processing_correctness(
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
-
     ctx = InputProcessingContext(
         model_config,
         tokenizer=cached_get_tokenizer(model_config.tokenizer),
@@ -150,7 +149,7 @@ def _test_processing_correctness(
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
     "TIGER-Lab/Mantis-8B-siglip-llama3",
     "mistral-community/pixtral-12b",
-    "Qwen/Qwen-VL",
+    "Qwen/Qwen-VL-Chat",
     "Qwen/Qwen2-VL-2B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
     "fixie-ai/ultravox-v0_3",
