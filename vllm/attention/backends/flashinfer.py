@@ -23,6 +23,7 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionState, AttentionType)
@@ -218,6 +219,7 @@ class FlashInferState(AttentionState):
             num_prefills=0,
             slot_mapping=self._graph_slot_mapping[:batch_size],
             multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=False,
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
             max_prefill_seq_len=0,
@@ -256,7 +258,12 @@ class FlashInferState(AttentionState):
     def begin_forward(self, model_input):
         assert not self._is_graph_capturing
         state = self
-        if model_input.attn_metadata.use_cuda_graph:
+        use_cuda_graph = model_input.attn_metadata.use_cuda_graph
+        is_decode = model_input.attn_metadata.num_prefills == 0
+        # In case of multistep chunked-prefill, there might be prefill requests
+        # scheduled while CUDA graph mode is enabled. We don't run graph in that
+        # case.
+        if use_cuda_graph and is_decode:
             batch_size = model_input.input_tokens.shape[0]
             state = (self.runner.graph_runners[model_input.virtual_engine]
                      [batch_size].attn_state)
@@ -429,10 +436,24 @@ class FlashInferMetadata(AttentionMetadata):
         Update metadata in-place to advance one decode step.
         """
 
-        assert not turn_prefills_into_decodes, \
-            ("Chunked prefill is not supported with flashinfer yet."
-             "turn_prefills_into_decodes is a Multi-Step + Chunked-Prefill "
-             "specific parameter.")
+        if turn_prefills_into_decodes:
+            # When Multi-Step is enabled with Chunked-Prefill, prefills and
+            # decodes are scheduled together. In the first step, all the
+            # prefills turn into decodes. This update reflects that
+            # conversion.
+            assert self.num_decode_tokens + self.num_prefills == num_seqs
+            # Flashinfer doesn't support speculative decoding + chunked-prefill
+            # + multi-step scheduling yet.
+            assert self.decode_query_len == 1
+            self.num_decode_tokens += self.num_prefills
+            self.num_prefills = 0
+            self.num_prefill_tokens = 0
+            self.max_prefill_seq_len = 0
+            self.max_query_len = 1
+
+            self.slot_mapping = self.slot_mapping[:num_seqs]
+        else:
+            assert self.seq_lens_tensor is not None
 
         assert num_seqs > 0
         assert num_queries > 0
@@ -468,6 +489,14 @@ class FlashInferMetadata(AttentionMetadata):
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
+
+        self.input_builder = input_builder
+        self.runner = input_builder.runner
+
+        self.sliding_window = input_builder.sliding_window
+        self.block_size = input_builder.block_size
+
+    def prepare(self):
         self.slot_mapping: List[int] = []
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
@@ -479,12 +508,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
-
-        self.input_builder = input_builder
-        self.runner = input_builder.runner
-
-        self.sliding_window = input_builder.sliding_window
-        self.block_size = input_builder.block_size
 
         # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
         # for the precise definition of the following fields.
@@ -711,6 +734,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
+            enable_kv_scales_calculation=False,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             max_prefill_seq_len=max_prefill_seq_len,
@@ -773,13 +797,12 @@ class FlashInferImpl(AttentionImpl):
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
@@ -807,8 +830,8 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache[:, 1],
                 attn_metadata.slot_mapping.flatten(),
                 kv_cache_dtype,
-                k_scale,
-                v_scale,
+                layer._k_scale,
+                layer._v_scale,
             )
             # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
             # to process the cache when the kv_cache_dtype is fp8
@@ -867,8 +890,8 @@ class FlashInferImpl(AttentionImpl):
                     kv_cache,
                     logits_soft_cap=logits_soft_cap,
                     causal=True,
-                    k_scale=k_scale,
-                    v_scale=v_scale,
+                    k_scale=layer._k_scale_float,
+                    v_scale=layer._v_scale_float,
                     window_left=window_left)
         if decode_meta := attn_metadata.decode_metadata:
             assert decode_meta is not None
@@ -878,8 +901,8 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache,
                 sm_scale=softmax_scale,
                 logits_soft_cap=logits_soft_cap,
-                k_scale=k_scale,
-                v_scale=v_scale,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
                 window_left=window_left)
 
         if prefill_output is None and decode_output is not None:

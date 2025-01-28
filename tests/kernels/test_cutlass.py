@@ -2,8 +2,7 @@
 
 Run `pytest tests/kernels/test_cutlass.py`.
 """
-import random
-from typing import Optional, Type
+from typing import Type
 
 import pytest
 import torch
@@ -11,6 +10,8 @@ import torch
 from tests.kernels.utils import opcheck, stack_and_dev
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+
+from .utils import baseline_scaled_mm, to_fp8, to_int8
 
 MNK_FACTORS = [
     (1, 256, 128),
@@ -42,33 +43,8 @@ capability = current_platform.get_device_capability()
 capability = capability[0] * 10 + capability[1]
 
 
-def to_fp8(tensor: torch.Tensor):
-    finfo = torch.finfo(torch.float8_e4m3fn)
-    return torch.round(tensor.clamp(
-        min=finfo.min, max=finfo.max)).to(dtype=torch.float8_e4m3fn)
-
-
-def to_int8(tensor: torch.Tensor):
-    return torch.round(tensor.clamp(min=-128, max=127)).to(dtype=torch.int8)
-
-
 def rand_int8(shape: tuple, device: str = "cuda"):
     return to_int8(torch.rand(shape, device=device) * 255 - 128)
-
-
-def baseline_scaled_mm(a: torch.Tensor,
-                       b: torch.Tensor,
-                       scale_a: torch.Tensor,
-                       scale_b: torch.Tensor,
-                       out_dtype: Type[torch.dtype],
-                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    print(a.shape, b.shape, scale_a.shape, scale_b.shape)
-    output = (scale_a * (scale_b * (torch.mm(
-        a.to(dtype=torch.float32), b.to(dtype=torch.float32))))).to(out_dtype)
-    if bias is not None:
-        output = output + bias
-
-    return output
 
 
 def cutlass_fp8_gemm_helper(m: int,

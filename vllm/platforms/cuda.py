@@ -77,6 +77,8 @@ class CudaPlatformBase(Platform):
     device_name: str = "cuda"
     device_type: str = "cuda"
     dispatch_key: str = "CUDA"
+    ray_device_key: str = "GPU"
+    device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
     @classmethod
     def get_device_capability(cls,
@@ -140,6 +142,13 @@ class CudaPlatformBase(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
+
+    @classmethod
+    def get_current_memory_usage(cls,
+                                 device: Optional[torch.types.Device] = None
+                                 ) -> float:
+        torch.cuda.reset_peak_memory_stats(device)
+        return torch.cuda.max_memory_allocated(device)
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
@@ -215,6 +224,10 @@ class CudaPlatformBase(Platform):
 
         logger.info("Using Flash Attention backend.")
         return "vllm.attention.backends.flash_attn.FlashAttentionBackend"
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 
 
 # NVML utils

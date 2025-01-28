@@ -307,7 +307,7 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
      - ✅
      - ?
      - ?
-     - ✅
+     - [✗](gh-issue:11484)
      - ✅
      - ✗
      - ?
@@ -322,7 +322,9 @@ Check the '✗' with links to see tracking issue for unsupported feature/hardwar
 
 ```
 
-### Feature x Hardware
+(feature-x-hardware)=
+
+## Feature x Hardware
 
 ```{list-table}
    :header-rows: 1
