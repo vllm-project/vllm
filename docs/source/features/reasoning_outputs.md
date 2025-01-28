@@ -10,7 +10,7 @@ Reasoning models return a additional `reasoning_content` field in their outputs,
 
 vLLM currently supports the following reasoning models:
 
-- [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d)
+- [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) (`deepseek_r1`)
 
 ## Quickstart
 
