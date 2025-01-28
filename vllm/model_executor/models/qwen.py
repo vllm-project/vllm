@@ -4,16 +4,20 @@
 # LICENSE: https://huggingface.co/Qwen/Qwen-7B/blob/main/LICENSE
 """Inference-only QWen model compatible with HuggingFace weights."""
 
+import copy
 import math
-from functools import partial
-from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Set, Tuple, TypedDict, Union)
+import unicodedata
+from functools import lru_cache, partial
+from typing import (AbstractSet, Any, Callable, Collection, Dict, Iterable,
+                    List, Literal, Mapping, Optional, Set, Tuple, TypedDict,
+                    Union)
 
 import torch
 from torch import nn
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
-from transformers import BatchFeature, PretrainedConfig, TensorType
+from transformers import (BatchFeature, PretrainedConfig, PreTrainedTokenizer,
+                          TensorType)
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
@@ -48,7 +52,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacementDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (flatten_bn, is_pp_missing_parameter,
@@ -627,7 +630,6 @@ def build_normalization_transform(image_size: int) -> transforms.Compose:
     Returns:
         Callable transform for normalizing and resizing one RGB image.
     """
-    # Defined at: https://huggingface.co/Qwen/Qwen-VL/blob/main/visual.py#L354
     return transforms.Compose([
         transforms.Resize((image_size, image_size),
                           interpolation=InterpolationMode.BICUBIC),
@@ -636,12 +638,75 @@ def build_normalization_transform(image_size: int) -> transforms.Compose:
     ])
 
 
+@lru_cache(maxsize=1)
+def _get_tokenizer_without_image_pad(
+        tokenizer: PreTrainedTokenizer) -> PreTrainedTokenizer:
+    """
+    The logic of adding image pad tokens should only be applied in
+    :class:`QWenVLProcessor`, so they are patched out here.
+
+    The definition of the wrapped tokenizer can be found here:
+    https://huggingface.co/Qwen/Qwen-VL/blob/main/tokenization_qwen.py
+    """
+    new_tokenizer = copy.deepcopy(tokenizer)
+
+    class TokenizerWithoutImagePad(tokenizer.__class__):  # type: ignore
+
+        def tokenize(
+            self,
+            text: str,
+            allowed_special: Union[AbstractSet[str], str] = "all",
+            disallowed_special: Union[Collection[str], str] = (),
+            **kwargs,
+        ) -> list[Union[bytes, str]]:
+            text = unicodedata.normalize("NFC", text)
+
+            return [
+                self.decoder[t] for t in self.tokenizer.encode(
+                    text,
+                    allowed_special=allowed_special,
+                    disallowed_special=disallowed_special,
+                )
+            ]
+
+        def _decode(
+            self,
+            token_ids: Union[int, List[int]],
+            skip_special_tokens: bool = False,
+            errors: Optional[str] = None,
+            **kwargs,
+        ) -> str:
+            if isinstance(token_ids, int):
+                token_ids = [token_ids]
+
+            return self.tokenizer.decode(
+                token_ids,
+                errors=errors or self.errors,
+            )
+
+    TokenizerWithoutImagePad.__name__ = \
+        f"{tokenizer.__class__.__name__}WithoutImagePad"
+
+    new_tokenizer.__class__ = TokenizerWithoutImagePad
+    return new_tokenizer
+
+
 class QWenVLProcessor:
+    """
+    This model doesn't define its own HF processor,
+    so we implement our own one here.
+
+    We call the wrapped tokenizer to automatically insert image pad tokens:
+    https://huggingface.co/Qwen/Qwen-VL/blob/main/tokenization_qwen.py#L245
+
+    The image processor is defined here:
+    https://huggingface.co/Qwen/Qwen-VL/blob/main/visual.py#L354
+    """
 
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: PreTrainedTokenizer,
     ) -> None:
         super().__init__()
 
@@ -696,11 +761,17 @@ class QWenVLProcessor:
 
 class QWenVLProcessingInfo(BaseProcessingInfo):
 
+    def get_tokenizer(self) -> PreTrainedTokenizer:
+        tokenizer = self.ctx.tokenizer
+        assert isinstance(tokenizer, PreTrainedTokenizer)
+
+        return _get_tokenizer_without_image_pad(tokenizer)
+
     def get_hf_processor(self) -> QWenVLProcessor:
-        return QWenVLProcessor(
-            self.get_hf_config(),
-            self.get_tokenizer(),
-        )
+        tokenizer = self.ctx.tokenizer
+        assert isinstance(tokenizer, PreTrainedTokenizer)
+
+        return QWenVLProcessor(self.get_hf_config(), tokenizer)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
