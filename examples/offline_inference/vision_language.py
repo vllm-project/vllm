@@ -322,12 +322,12 @@ def run_minicpmv_base(question: str, modality: str, model_name):
     return llm, prompt, stop_token_ids
 
 
-def run_minicpmv(question: str, modality: str):
-    return run_minicpmv_base(question, modality, "openbmb/MiniCPM-V-2_6")
-
-
 def run_minicpmo(question: str, modality: str):
     return run_minicpmv_base(question, modality, "openbmb/MiniCPM-o-2_6")
+
+
+def run_minicpmv(question: str, modality: str):
+    return run_minicpmv_base(question, modality, "openbmb/MiniCPM-V-2_6")
 
 
 # LLama 3.2
@@ -545,8 +545,8 @@ model_example_map = {
     "llava-next-video": run_llava_next_video,
     "llava-onevision": run_llava_onevision,
     "mantis": run_mantis,
-    "minicpmv": run_minicpmv,
     "minicpmo": run_minicpmo,
+    "minicpmv": run_minicpmv,
     "mllama": run_mllama,
     "molmo": run_molmo,
     "NVLM_D": run_nvlm_d,
