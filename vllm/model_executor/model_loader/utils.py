@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple, Type
 import torch
 import transformers
 from torch import nn
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from vllm.config import ModelConfig, ModelImpl
 from vllm.logger import init_logger
@@ -56,7 +57,7 @@ def get_model_architecture(
             continue
         custom_module = None
         if hasattr(model_config.hf_config, "auto_map"):
-            custom_module = transformers.dynamic_module_utils.get_class_from_dynamic_module(
+            custom_module = get_class_from_dynamic_module(
                 model_config.hf_config.auto_map["AutoModel"],
                 model_config.model)
         if model_config.model_impl == ModelImpl.TRANSFORMERS:

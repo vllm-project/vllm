@@ -13,7 +13,7 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 import re
-from typing import Dict, Iterable, List, Optional, Set, Tuple, TypedDict, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -25,7 +25,6 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
 from vllm.logger import init_logger
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -195,7 +194,7 @@ class TransformersModel(nn.Module, SupportsLoRA):
                 self.tensor_parallelize(child_module, prefix=f"{qual_name}.")
 
     def replace_vocab_embed_class(self, module: nn.Module):
-        # Use native set inpt embeddings
+        # Use native set input embeddings
         new_module = VocabParallelEmbedding(
             self.vocab_size,
             self.config.hidden_size,
