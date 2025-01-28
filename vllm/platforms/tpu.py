@@ -101,17 +101,10 @@ class TpuPlatform(Platform):
 
         # Adjust scheduler config for V1
         # TODO: Add support for these
-        if envs.VLLM_USE_V1:
-            if vllm_config.cache_config.enable_prefix_caching:
-                logger.warning("[V1][TPU] Disable prefix caching")
-                vllm_config.cache_config.enable_prefix_caching = False
+        if envs.VLLM_USE_V1 and vllm_config.cache_config.enable_prefix_caching:
+            logger.warning("[V1][TPU] Disable prefix caching")
+            vllm_config.cache_config.enable_prefix_caching = False
 
-            if vllm_config.scheduler_config.chunked_prefill_enabled:
-                logger.warning("[V1][TPU] Disable chunked prefill")
-                vllm_config.scheduler_config.chunked_prefill_enabled = False
-
-        assert not vllm_config.scheduler_config.chunked_prefill_enabled, (
-            "Chunked prefill is not yet supported for TPU backend")
         assert not vllm_config.speculative_config, (
             "Speculative decoding is not yet supported for TPU backend")
 
