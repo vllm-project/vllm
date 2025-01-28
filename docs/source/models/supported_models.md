@@ -748,7 +748,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `Qwen/Qwen-VL`, `Qwen/Qwen-VL-Chat`, etc.
   * ✅︎
   * ✅︎
-  *
+  * ✅︎
 - * `Qwen2AudioForConditionalGeneration`
   * Qwen2-Audio
   * T + A<sup>+</sup>
