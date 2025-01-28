@@ -1,3 +1,5 @@
+from typing import List
+
 import pytest
 from transformers import AutoTokenizer
 
@@ -128,7 +130,7 @@ def test_reasoning(
     tokenizer.add_tokens([start_token, end_token])
     output = tokenizer.tokenize(model_output)
     # decode everything to tokens
-    output_tokens = [
+    output_tokens: List[str] = [
         tokenizer.convert_tokens_to_string([token]) for token in output
     ]
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(

@@ -8,8 +8,8 @@ from vllm.entrypoints.openai.reasoning_parsers import ReasoningParser
 class StreamingReasoningReconstructor:
 
     def __init__(self):
-        self.reasoning_content: str = None
-        self.other_content: str = None
+        self.reasoning_content = None
+        self.other_content = None
 
     def append_delta(self, delta: DeltaMessage):
         print(delta)
@@ -32,7 +32,7 @@ class StreamingReasoningReconstructor:
 
 def run_reasoning_extraction(
     reasoning_parser: ReasoningParser,
-    model_output: str,
+    model_output: List[str],
     request: Union[ChatCompletionRequest, None] = None,
     streaming: bool = False,
 ) -> Tuple[Optional[str], Optional[str]]:
