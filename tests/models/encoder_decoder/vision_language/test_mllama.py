@@ -440,15 +440,18 @@ TWO_IMAGES = '3'
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize("input_indices_and_output",
-                         [([TEXT_ONLY], (None, None)),
-                          ([TEXT_ONLY, IMAGE_AT_BEG], (None, None)),
-                          ([IMAGE_AT_MIDDLE], ((10, 12), [[0, 6]])),
-                          ([TEXT_ONLY, IMAGE_AT_MIDDLE], ((14, 12), [[0, 6]])),
-                          ([TEXT_ONLY, IMAGE_AT_BEG, IMAGE_AT_MIDDLE],
-                           ((23, 24), [[0, 6], [6, 12]])),
-                          ([IMAGE_AT_MIDDLE, TEXT_ONLY],
-                           ((14, 12), [[0, 6]]))])
+@pytest.mark.parametrize(
+    "input_indices_and_output",
+    # inputs, (cross_attention_mask, kv_range_for_decode)
+    [([TEXT_ONLY], (None, None)), ([IMAGE_AT_BEG], (None, None)),
+     ([TEXT_ONLY, IMAGE_AT_BEG], (None, None)),
+     ([IMAGE_AT_MIDDLE], ((10, 12), [[0, 6]])),
+     ([TEXT_ONLY, IMAGE_AT_MIDDLE], ((14, 12), [[0, 6]])),
+     ([TEXT_ONLY, IMAGE_AT_BEG, IMAGE_AT_MIDDLE],
+      ((23, 24), [[0, 6], [6, 12]])),
+     ([IMAGE_AT_MIDDLE, TEXT_ONLY], ((14, 12), [[0, 6]])),
+     ([TWO_IMAGES], ((18, 12), [[6, 12]])),
+     ([TEXT_ONLY, TWO_IMAGES], ((22, 12), [[6, 12]]))])
 def test_get_cross_attention_mask(input_indices_and_output) -> None:
 
     input_indices, expected_output = input_indices_and_output
@@ -486,6 +489,7 @@ def test_get_cross_attention_mask(input_indices_and_output) -> None:
     attn_data = FlashAttentionMetadata(
         seq_lens=seq_lens,
         # Dummy values
+        enable_kv_scales_calculation=False,
         num_prefills=0,
         num_prefill_tokens=0,
         num_decode_tokens=0,
