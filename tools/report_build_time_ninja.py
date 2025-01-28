@@ -274,8 +274,9 @@ def SummarizeEntries(entries, extra_step_types):
     print('    {:.1f} s weighted time ({:.1f} s elapsed time sum, {:1.1f}x '
           'parallelism)'.format(length, total_cpu_time,
                                 total_cpu_time * 1.0 / length))
-    print('    %d build steps completed, average of %1.2f/s' %
-          (len(entries), len(entries) / (length)))
+    print('    {} build steps completed, average of {:1.2f}/s'.format(
+        len(entries),
+        len(entries) / (length)))
 
 
 def main():

@@ -244,7 +244,8 @@ class LogprobsProcessor:
         # Sampler uses torch.topk() which sorts so the
         # index in lists is equivalent to rank-1.
         logprobs_dict = {
-            logprob_token_ids[idx]: Logprob(
+            logprob_token_ids[idx]:
+            Logprob(
                 logprob=logprobs[idx],
                 rank=idx + 1,
                 decoded_token=decoded_tokens[idx],
