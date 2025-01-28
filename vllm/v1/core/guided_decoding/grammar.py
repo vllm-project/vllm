@@ -5,16 +5,11 @@ from typing import (TYPE_CHECKING, Any, Generic, Literal, TypeVar, get_args,
                     overload)
 
 from typing_extensions import Annotated, LiteralString
-
-from vllm.utils import LazyLoader
+import torch
+import xgrammar as xgr
 
 if TYPE_CHECKING:
-    import torch
-    import xgrammar as xgr
     from typing_extensions import Self
-else:
-    xgr = LazyLoader("xgr", globals(), "xgrammar")
-    torch = LazyLoader("torch", globals(), "torch")
 
 T = TypeVar("T", bound=Annotated[LiteralString, str])
 

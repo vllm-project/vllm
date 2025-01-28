@@ -8,24 +8,21 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, get_args
 
 from transformers import PreTrainedTokenizer
+import xgrammar as xgr
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.utils import LazyLoader
 from vllm.v1.request import GuidedDecodingKey, Request, RequestStatus
 
 from .grammar import Grammar
 
 if TYPE_CHECKING:
-    import xgrammar as xgr
     from transformers import PreTrainedTokenizer
     from typing_extensions import LiteralString
 
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
     from .grammar import XGrammar
-else:
-    xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
 
