@@ -1,7 +1,7 @@
 name: Add label on pre-commit success
 on:
     workflow_run:
-        workflows: ["pre-commit"]
+        workflows: [pre-commit]
         types: [completed]
 jobs:
     add-label-on-pre-commit-success:
