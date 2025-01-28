@@ -1,4 +1,4 @@
-# VLLM TPU Profiling
+# vLLM TPU Profiling
 
 This script is used to profile the TPU performance of vLLM for specific prefill or decode token shapes.
 
@@ -7,6 +7,8 @@ Note: an actual running server is a mix of both prefill of many shapes and decod
 We assume you are on a TPU already (this was tested on TPU v6e) and have installed vLLM according to the [installation guide](https://docs.vllm.ai/en/latest/getting_started/installation/ai_accelerator/index.html).
 
 > In all examples below, we run several warmups before (so `--enforce-eager` is okay)
+
+## Profile Examples
 
 ### Generate Prefill Trace
 
