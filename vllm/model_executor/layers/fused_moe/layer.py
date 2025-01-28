@@ -425,7 +425,6 @@ class FusedMoE(torch.nn.Module):
     def _load_w2(self,
                  expert_data: torch.Tensor,
                  shard_dim: int,
-                 shard_id: str,
                  loaded_weight: torch.tensor,
                  tp_rank: int,
                  load_full: bool = False,

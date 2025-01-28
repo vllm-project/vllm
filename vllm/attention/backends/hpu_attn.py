@@ -192,8 +192,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 value=value,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
-                k_scale=layer._k_scale,
-                v_scale=layer._v_scale,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._k_scale_float,
             )
 
         batch_size, seq_len, hidden_size = query.shape
