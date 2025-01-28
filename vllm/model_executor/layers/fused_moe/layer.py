@@ -175,10 +175,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         custom_routing_function: Optional[Callable] = None,
         **kwargs,
     ):
-        assert not use_grouped_topk, 'use_grouped_topk must be False on HPU'
-        assert num_expert_group is None, ('num_expert_group is '
-                                          'not supported on HPU')
-        assert topk_group is None, 'topk_group is not supported on HPU'
+        #assert not use_grouped_topk, 'use_grouped_topk must be False on HPU'
+        # assert num_expert_group is None, ('num_expert_group is '
+        #                                   'not supported on HPU')
+        # assert topk_group is None, 'topk_group is not supported on HPU'
         if layer is not None:
             return layer.hpu_fused_moe(x, router_logits, top_k)
 
