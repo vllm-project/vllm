@@ -56,7 +56,6 @@ def vllm_flash_attention_forward(_module,
     hidden = query.shape[-2]
     query, key, value = (x.transpose(1, 2) for x in (query, key, value))
     query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    print("THE LAYER:", layer_idx)
     return attention_instances[layer_idx].forward(
         query,
         key,
