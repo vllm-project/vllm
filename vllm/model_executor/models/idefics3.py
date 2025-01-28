@@ -14,8 +14,8 @@
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
 import math
-from typing import (Dict, Iterable, List, Literal, Mapping, NamedTuple,
-                    Optional, Set, Tuple, TypedDict, Union)
+from typing import (Dict, Iterable, List, Literal, Mapping, Optional, Set,
+                    Tuple, TypedDict, Union)
 
 import torch
 import torch.utils.checkpoint
@@ -75,19 +75,6 @@ class Idefics3ImageEmbeddingInputs(TypedDict):
     """
 
 
-class Idefics3ProcessorSize(NamedTuple):
-    """Hashable wrapper for unhashable `size` dict of Idefics3Processor."""
-    # NOTE: cached_get_processor/cached_get_image_processor uses lru_cache,
-    # we need to use NamedTuple instead of TypedDict to avoid hashing issues.
-    longest_edge: int
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._asdict() and getattr(self, key) is not None
-
-    def __getitem__(self, key: str) -> int:
-        return getattr(self, key)
-
-
 ImageInputs = Union[Idefics3ImagePixelInputs, Idefics3ImageEmbeddingInputs]
 
 
@@ -98,8 +85,8 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
             *,
             size: Optional[Dict[str, int]] = None) -> Idefics3Processor:
         if size is not None:
-            size = Idefics3ProcessorSize(longest_edge=size['longest_edge'])
             return self.ctx.get_hf_processor(Idefics3Processor, size=size)
+
         return self.ctx.get_hf_processor(Idefics3Processor)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -228,8 +215,6 @@ class Idefics3MultimodalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if "size" in mm_kwargs:
-            mm_kwargs["size"] = Idefics3ProcessorSize(**mm_kwargs["size"])
         if mm_data:
             return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
         else:

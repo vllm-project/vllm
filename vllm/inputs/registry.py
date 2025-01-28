@@ -29,6 +29,13 @@ C = TypeVar("C", bound=PretrainedConfig, default=PretrainedConfig)
 P = TypeVar("P", bound=ProcessorMixin, default=ProcessorMixin)
 
 
+class HashableDict(dict):
+    """Hashable dict for unhashable pythonic dict in mm_kwargs."""
+
+    def __hash__(self):
+        return hash(tuple(sorted(self.items())))
+
+
 @dataclass(frozen=True)
 class InputContext:
     """
@@ -97,7 +104,12 @@ class InputContext:
         if base_kwargs is None:
             base_kwargs = {}
 
+        # NOTE: cached_get_processor/cached_get_image_processor uses lru_cache,
+        # python's built-in dict is unhashable, so we need to use HashableDict.
         merged_kwargs = {**base_kwargs, **kwargs}
+        for k, v in merged_kwargs.items():
+            if isinstance(v, dict):
+                merged_kwargs[k] = HashableDict(v)
 
         if isinstance(typ, type):
             merged_kwargs["processor_cls"] = typ
