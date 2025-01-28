@@ -46,89 +46,65 @@ SHORTEST_REASONING = {
 TEST_CASES = [
     pytest.param(
         False,
-        SIMPLE_REASONING["output"],
-        SIMPLE_REASONING["reasoning_content"],
-        SIMPLE_REASONING["content"],
+        SIMPLE_REASONING,
         id="simple_streaming",
     ),
     pytest.param(
         True,
-        SIMPLE_REASONING["output"],
-        SIMPLE_REASONING["reasoning_content"],
-        SIMPLE_REASONING["content"],
+        SIMPLE_REASONING,
         id="simple_streaming",
     ),
     pytest.param(
         False,
-        COMPLETE_REASONING["output"],
-        COMPLETE_REASONING["reasoning_content"],
-        COMPLETE_REASONING["content"],
+        COMPLETE_REASONING,
         id="complete_streaming",
     ),
     pytest.param(
         True,
-        COMPLETE_REASONING["output"],
-        COMPLETE_REASONING["reasoning_content"],
-        COMPLETE_REASONING["content"],
+        COMPLETE_REASONING,
         id="complete_streaming",
     ),
     pytest.param(
         False,
-        NO_REASONING["output"],
-        NO_REASONING["reasoning_content"],
-        NO_REASONING["content"],
+        NO_REASONING,
         id="no_streaming",
     ),
     pytest.param(
         True,
-        NO_REASONING["output"],
-        NO_REASONING["reasoning_content"],
-        NO_REASONING["content"],
+        NO_REASONING,
         id="no_streaming",
     ),
     pytest.param(
         False,
-        MULTIPLE_LINES["output"],
-        MULTIPLE_LINES["reasoning_content"],
-        MULTIPLE_LINES["content"],
+        MULTIPLE_LINES,
         id="multiple_lines_streaming",
     ),
     pytest.param(
         True,
-        MULTIPLE_LINES["output"],
-        MULTIPLE_LINES["reasoning_content"],
-        MULTIPLE_LINES["content"],
+        MULTIPLE_LINES,
         id="multiple_lines_streaming",
     ),
     pytest.param(
         True,
-        SHORTEST_REASONING["output"],
-        SHORTEST_REASONING["reasoning_content"],
-        SHORTEST_REASONING["content"],
+        SHORTEST_REASONING,
         id="shortest_streaming",
     ),
     pytest.param(
         False,
-        SHORTEST_REASONING_NO_STREAMING["output"],
-        SHORTEST_REASONING_NO_STREAMING["reasoning_content"],
-        SHORTEST_REASONING_NO_STREAMING["content"],
+        SHORTEST_REASONING_NO_STREAMING,
         id="shortest_streaming",
     ),
 ]
 
 
-@pytest.mark.parametrize(
-    "streaming, model_output, expected_reasoning, expected_content",
-    TEST_CASES)
+@pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
 def test_reasoning(
     streaming: bool,
-    model_output: str,
-    expected_reasoning: str,
-    expected_content: str,
+    param_dict: dict,
 ):
     tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m")
     tokenizer.add_tokens([start_token, end_token])
-    output = tokenizer.tokenize(model_output)
+    output = tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens
     output_tokens: List[str] = [
         tokenizer.convert_tokens_to_string([token]) for token in output
@@ -140,5 +116,5 @@ def test_reasoning(
                                                   output_tokens,
                                                   streaming=streaming)
 
-    assert reasoning == expected_reasoning
-    assert content == expected_content
+    assert reasoning == param_dict["reasoning_content"]
+    assert content == param_dict["content"]
