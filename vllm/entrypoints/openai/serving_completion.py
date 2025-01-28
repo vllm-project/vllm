@@ -84,8 +84,7 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "suffix is not currently supported")
 
-        request_id = "chatcmpl-" \
-                     f"{self._base_request_id(raw_request, request.request_id)}"
+        request_id = f"cmpl-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
