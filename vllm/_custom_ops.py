@@ -628,6 +628,36 @@ def cutlass_scaled_sparse_mm(
     return out
 
 
+def cutlass_fp4_gemm(a: torch.Tensor, b: torch.Tensor, input_sf: torch.Tensor,
+                     weight_sf: torch.dtype, global_sf: torch.dtype,
+                     workspace: torch.dtype, workspace_bytes: int,
+                     out_dtype: torch.dtype) -> torch.Tensor:
+    """
+    Gemm when a and b have nvfp4 datatype(currently represented as a byte),
+    along with their respective block scales and a global scaling factor.
+    """
+    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16
+            or out_dtype is torch.float32)
+    m = a.shape[0]
+    n = b.shape[1]
+    workspace_bytes = workspace.nbytes
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+    torch.ops._C.cutlass_fp4_gemm(out, a, b, input_sf, weight_sf, global_sf,
+                                  workspace, workspace_bytes)
+    return out
+
+
+def quantize_to_fp4(input: torch.Tensor, input_sf: torch.Tensor,
+                    output_sf: torch.Tensor) -> torch.Tensor:
+    assert (input is torch.bfloat16 or input is torch.float16)
+    m = input.shape[0]
+    n = input.shape[1]
+    output = torch.empty((m, n // 2), dtype=torch.uint8, device=input.device)
+    torch.ops._C.quantize_fp4(output, input, input_sf, output_sf, False)
+    return output, output_sf
+
+
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,
