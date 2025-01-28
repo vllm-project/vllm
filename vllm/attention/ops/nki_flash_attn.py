@@ -106,8 +106,9 @@ def _flash_attention_core(
     assert (continuous_batching_mask
             is not None), "continuous_batching_mask input is required."
     if continuous_batching_mask is not None:
-        assert (logit_bias_tile is
-                None), "continuous_batching_mask does not support logit_bias!"
+        assert (
+            logit_bias_tile
+            is None), "continuous_batching_mask does not support logit_bias!"
 
     # mask are used to only apply computation to the lower half of the matrix,
     # which reduce the arthimetic intensity by half
@@ -468,9 +469,11 @@ def flash_paged_attention(
                        block_in_partition)
                 loaded_v = nl.load(value_cache[block_tables_sbuf[v_i, j], :,
                                                head_id, :])
-                cur_v_tile[partition_idx,
-                           nl.ds(block_in_partition *
-                                 block_size, block_size), :, ] = loaded_v
+                cur_v_tile[
+                    partition_idx,
+                    nl.ds(block_in_partition * block_size, block_size),
+                    :,
+                ] = loaded_v
 
         cur_mask = nl.ndarray((par_dim(B_P_SIZE), LARGE_TILE_SZ),
                               dtype=mask.dtype)
@@ -601,20 +604,30 @@ def flash_paged_attention(
             )
 
             nl.store(
-                o[batch_id, head_id * q_h_per_k_h + i_q_h,
-                  nl.ds(i * B_P_SIZE, B_P_SIZE), :, ],
+                o[
+                    batch_id,
+                    head_id * q_h_per_k_h + i_q_h,
+                    nl.ds(i * B_P_SIZE, B_P_SIZE),
+                    :,
+                ],
                 out,
             )
             # maximum and summation statistics
             if return_debug_tensors:
                 nl.store(
-                    hbm_m_buffer[batch_id, head_id * q_h_per_k_h + i_q_h,
-                                 nl.ds(i * B_P_SIZE, B_P_SIZE), ],
+                    hbm_m_buffer[
+                        batch_id,
+                        head_id * q_h_per_k_h + i_q_h,
+                        nl.ds(i * B_P_SIZE, B_P_SIZE),
+                    ],
                     m_buffer[i, i_q_h, :, :],
                 )
                 nl.store(
-                    hbm_l_buffer[batch_id, head_id * q_h_per_k_h + i_q_h,
-                                 nl.ds(i * B_P_SIZE, B_P_SIZE), ],
+                    hbm_l_buffer[
+                        batch_id,
+                        head_id * q_h_per_k_h + i_q_h,
+                        nl.ds(i * B_P_SIZE, B_P_SIZE),
+                    ],
                     l_buffer[:, i, i_q_h],
                 )
                 nl.store(
