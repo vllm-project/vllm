@@ -167,11 +167,10 @@ void cutlass_grouped_mm(torch::Tensor& out_tensors,
                         torch::Tensor const& expert_offsets,
                         torch::Tensor const& problem_sizes);
 
-void compute_expert_offsets(torch::Tensor& trg_a_ptrs,
-                                   torch::Tensor& a,
-                                   const torch::Tensor& topk_ids,
-                                   torch::Tensor& expert_offsets,
-                                   const int64_t num_experts);
+void compute_expert_offsets(torch::Tensor& trg_a_ptrs, torch::Tensor& a,
+                            const torch::Tensor& topk_ids,
+                            torch::Tensor& expert_offsets,
+                            const int64_t num_experts);
 
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,
