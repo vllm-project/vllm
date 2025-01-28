@@ -44,7 +44,7 @@ def check_implementation(
     "model,model_impl",
     [
         ("meta-llama/Llama-3.2-1B-Instruct", "transformers"),
-        ("openai-community/gpt2", "transformers"),x
+        ("openai-community/gpt2", "transformers"),
         ("ArthurZ/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
         ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
     ])  # trust_remote_code=True by default
