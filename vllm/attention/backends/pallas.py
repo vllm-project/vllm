@@ -5,6 +5,7 @@ import torch
 import torch_xla.experimental.custom_kernel  # Required to register custom ops.
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 
@@ -150,13 +151,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Tuple[torch.Tensor, torch.Tensor],
         attn_metadata: PallasMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
@@ -173,7 +173,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
-        assert k_scale == 1.0 and v_scale == 1.0
+        assert layer._k_scale == 1.0 and layer._v_scale == 1.0
         batch_size, seq_len, hidden_size = query.shape
         query = query.view(batch_size, seq_len, self.num_heads, self.head_size)
         key = key.view(batch_size, seq_len, self.num_kv_heads, self.head_size)
