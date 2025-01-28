@@ -58,7 +58,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def create_completion(
         self,
         request: CompletionRequest,
-        raw_request: Request,
+        raw_request: Optional[Request] = None,
     ) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
         """Completion API similar to OpenAI's API.
 
@@ -137,7 +137,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
-                trace_headers = (await
+                trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
 
                 if isinstance(sampling_params, BeamSearchParams):
