@@ -12,7 +12,6 @@ class StreamingReasoningReconstructor:
         self.other_content = None
 
     def append_delta(self, delta: DeltaMessage):
-        print(delta)
         # content and the reasoning content should not be present
         # at the same time
         assert delta.content is None or delta.reasoning_content is None, (
