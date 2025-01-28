@@ -157,8 +157,6 @@ class TransformersModel(nn.Module, SupportsLoRA):
 
         # Model modifications
         self.replace_vocab_embed_class(self.model)
-        # TODO: solve issue with residuals being added before/in RMSNorm ops
-        # self.replace_rms_norm_class(self.model)
 
         # ForCausalLM modifications
         self.lm_head = ParallelLMHead(config.vocab_size,
