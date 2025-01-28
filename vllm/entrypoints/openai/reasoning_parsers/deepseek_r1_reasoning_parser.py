@@ -126,4 +126,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 )
                 model_output = model_output[:start_index] + \
                                 model_output[end_index:]
+
+                if len(model_output) == 0:
+                    model_output = None
             return reasoning_content, model_output
