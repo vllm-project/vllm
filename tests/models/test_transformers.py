@@ -6,7 +6,6 @@ from contextlib import nullcontext
 from typing import Type
 
 import pytest
-from transformers import AutoConfig, AutoModel, LlamaConfig, LlamaModel
 
 from vllm.model_executor.models import ModelRegistry
 
@@ -18,6 +17,8 @@ from .utils import check_logprobs_close
 del ModelRegistry.models["LlamaForCausalLM"]
 
 # Code used to generate the ilama model:
+# from transformers import AutoConfig, AutoModel, LlamaConfig, LlamaModel
+#
 # class IlamaConfig(LlamaConfig):
 #     model_type = "iiama"
 

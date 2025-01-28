@@ -27,7 +27,7 @@ def set_default_torch_dtype(dtype: torch.dtype):
 
 
 def is_transformers_impl_compatible(arch: str) -> bool:
-    arch = getattr(transformers, arch)
+    arch: transformers.PreTrainedModel = getattr(transformers, arch)
     if hasattr(arch, "supports_backend"):
         return arch.is_backend_compatible()
     else:
