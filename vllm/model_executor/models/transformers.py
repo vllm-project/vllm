@@ -247,9 +247,10 @@ class TransformersModel(nn.Module, SupportsLoRA):
         for name, loaded_weight in weights:
             if name not in params_dict:
                 name = f"{self.model.base_model_prefix}.{name}"
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+            if name in params_dict:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+                loaded_params.add(name)
         return loaded_params
