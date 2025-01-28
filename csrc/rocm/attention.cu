@@ -907,7 +907,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads,
                                            // max_num_partitions, head_size]
     const int* __restrict__ context_lens,  // [num_seqs]
-    const int max_num_partitions){UNREACHABLE_CODE}
+    const int max_num_partitions) {
+  UNREACHABLE_CODE
+}
 
 #endif  // defined(__HIP__MI300_MI250__) TODO: Add NAVI support
 
