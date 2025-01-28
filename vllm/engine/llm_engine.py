@@ -230,7 +230,7 @@ class LLMEngine:
         )
 
         logger.info(
-            "Initializing an LLM engine (v%s) with config: %s, "
+            "Initializing a V0 LLM engine (v%s) with config: %s, "
             "use_cached_outputs=%s, ",
             VLLM_VERSION,
             vllm_config,
