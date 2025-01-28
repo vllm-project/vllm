@@ -10,10 +10,14 @@ import triton.language as tl
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.envs import VLLM_FLASH_ATTN_VERSION
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from vllm.vllm_flash_attn import (flash_attn_varlen_func,
+from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
+                                  flash_attn_varlen_func,
                                   is_fa_version_supported)
+
+logger = init_logger(__name__)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -142,6 +146,11 @@ class FlashAttentionImpl(AttentionImpl):
         if VLLM_FLASH_ATTN_VERSION is not None:
             assert VLLM_FLASH_ATTN_VERSION in [2, 3]
             self.fa_version = VLLM_FLASH_ATTN_VERSION
+
+        if not is_fa_version_supported(self.fa_version):
+            logger.error("Cannot use FA version %d is not supported due to %s",
+                         self.fa_version,
+                         fa_version_unsupported_reason(self.fa_version))
 
         assert is_fa_version_supported(self.fa_version)
 

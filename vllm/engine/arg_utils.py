@@ -100,7 +100,6 @@ class EngineArgs:
     kv_cache_dtype: str = 'auto'
     seed: int = 0
     max_model_len: Optional[int] = None
-    worker_use_ray: bool = False
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -389,10 +388,6 @@ class EngineArgs:
             'to "ray" if Ray is installed and fail otherwise. Note that tpu '
             'only supports Ray for distributed inference.')
 
-        parser.add_argument(
-            '--worker-use-ray',
-            action='store_true',
-            help='Deprecated, use ``--distributed-executor-backend=ray``.')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,
@@ -944,7 +939,9 @@ class EngineArgs:
             "Defaults to None, will use the default generation config in vLLM. "
             "If set to 'auto', the generation config will be automatically "
             "loaded from model. If set to a folder path, the generation config "
-            "will be loaded from the specified folder path.")
+            "will be loaded from the specified folder path. If "
+            "`max_new_tokens` is specified, then it sets a server-wide limit "
+            "on the number of output tokens for all requests.")
 
         parser.add_argument("--enable-sleep-mode",
                             action="store_true",
@@ -1071,7 +1068,6 @@ class EngineArgs:
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
-            worker_use_ray=self.worker_use_ray,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             tokenizer_pool_config=TokenizerPoolConfig.create_config(
