@@ -1696,7 +1696,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     # layers.
                     model_executable,
                     model_input,
-                    kv_caches=kv_caches
+                    kv_caches=kv_caches,
+                    block_size=self.block_size,
                 )
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
@@ -1855,7 +1856,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         is_prefill_run = prefill_meta is not None
 
         return self.vllm_config.kv_transfer_config.is_kv_producer and (
-            not is_profile_run) and is_prefill_run
+            not is_profile_run
+        ) and is_prefill_run and (
+            not self.vllm_config.kv_transfer_config.is_layerwise_kv_transfer)
 
 
 # NOTE: this is nn.Module so the profiler can properly capture/group

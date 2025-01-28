@@ -46,3 +46,8 @@ KVConnectorFactory.register_connector(
     "MooncakeConnector",
     "vllm.distributed.kv_transfer.kv_connector.simple_connector",
     "SimpleConnector")
+
+KVConnectorFactory.register_connector(
+    "LayerwisePyNcclConnector",
+    "vllm.distributed.kv_transfer.kv_connector.layerwise_connector",
+    "LayerwiseConnector")

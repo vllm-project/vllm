@@ -17,6 +17,9 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
+if TYPE_CHECKING:
+    from vllm.attention import AttentionMetadata
+
 logger = init_logger(__name__)
 
 
@@ -61,15 +64,31 @@ class KVTransferAgent:
             model_executable, model_input, kv_caches,
             hidden_or_intermediate_states)
 
+    def send_one_layer_kv_cache(self, layer_id: int,
+                                input_token_hash: List[str],
+                                kv_cache: torch.Tensor,
+                                attn_metadata: "AttentionMetadata",
+                                block_size: int) -> None:
+        self.connector.send_one_layer_kv_cache(layer_id, input_token_hash,
+                                               kv_cache, attn_metadata,
+                                               block_size)
+
+    def send_hidden_states(self, input_token_hash: List[str],
+                           hidden_states: torch.Tensor, attn_metadata) -> None:
+        self.connector.send_hidden_states(input_token_hash, hidden_states,
+                                          attn_metadata)
+
     def close(self) -> None:
         self.connector.close()
 
     def recv_kv_caches_and_hidden_states(
-        self, model_executable: torch.nn.Module,
+        self,
+        model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor]
+        kv_caches: List[torch.Tensor],
+        **kwargs,
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
 
         return self.connector.recv_kv_caches_and_hidden_states(
-            model_executable, model_input, kv_caches)
+            model_executable, model_input, kv_caches, **kwargs)

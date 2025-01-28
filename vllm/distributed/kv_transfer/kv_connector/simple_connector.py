@@ -147,12 +147,10 @@ class SimpleConnector(KVConnectorBase):
         self.producer_buffer.insert(input_tokens, roi, key, value, hidden)
 
     def send_kv_caches_and_hidden_states(
-        self,
-        model_executable: torch.nn.Module,
+        self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
-        hidden_or_intermediate_states: Union[torch.Tensor,
-                                             IntermediateTensors],
+        hidden_or_intermediate_states: Union[torch.Tensor, IntermediateTensors]
     ) -> None:
 
         input_tokens_tensor = model_input.input_tokens
@@ -199,9 +197,11 @@ class SimpleConnector(KVConnectorBase):
         logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
 
     def recv_kv_caches_and_hidden_states(
-        self, model_executable: torch.nn.Module,
+        self,
+        model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor]
+        kv_caches: List[torch.Tensor],
+        **kwargs,
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
 

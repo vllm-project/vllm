@@ -2635,6 +2635,13 @@ class KVTransferConfig(BaseModel):
         return self.kv_connector is not None and \
             self.kv_role in ["kv_consumer", "kv_both"]
 
+    @property
+    def is_layerwise_kv_transfer(self) -> bool:
+        # so far, only LayerwisePyNcclConnector supports layerwise kv transfer
+        return self.kv_connector is not None and self.kv_connector in [
+            "LayerwisePyNcclConnector"
+        ]
+
 
 class CompilationLevel:
     # constants for the levels of the compilation process
