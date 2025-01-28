@@ -6,6 +6,7 @@
 
 import copy
 import math
+import re
 import unicodedata
 from functools import lru_cache, partial
 from typing import (AbstractSet, Any, Callable, Collection, Dict, Iterable,
@@ -814,6 +815,37 @@ class QWenVLDummyInputsBuilder(BaseDummyInputsBuilder[QWenVLProcessingInfo]):
 
 
 class QWenVLMultiModalProcessor(BaseMultiModalProcessor[QWenVLProcessingInfo]):
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Drops anything between <img>/</img> tags; encoding with the tokenizer
+        # will automatically add the image pads for the context.
+        prompt, num_matched_images = re.subn(
+            r"(Picture \d*: <img>).*?(<\/img>\n)",
+            r"\1\2",
+            prompt,
+        )
+
+        image_data = mm_data.get("images")
+        if image_data is not None:
+            assert isinstance(image_data, list)
+
+            num_images = len(image_data)
+            if num_matched_images != num_images:
+                logger.warning(
+                    "Number of matched image placeholders %s doesn't match "
+                    "the number of expected images %s; check your placeholder "
+                    "formatting.", num_matched_images, num_images)
+
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
 
     def _get_mm_fields_config(
         self,
