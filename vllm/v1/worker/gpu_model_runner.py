@@ -791,7 +791,6 @@ class GPUModelRunner:
         hidden_states = hidden_states[:num_scheduled_tokens]
         hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(hidden_states, None)
-        logger.info("logits: %s", str(logits.shape))
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self._prepare_sampling(scheduler_output)

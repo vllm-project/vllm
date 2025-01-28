@@ -8,6 +8,38 @@ class NgramProposer:
     def __init__(self):
         pass
 
+    def propose(self, context_token_ids: ConstantList[int], n: int,
+                k: int) -> Optional[List[int]]:
+        """Proposes the next sequence of tokens based on n-gram pattern 
+        matching in the context. The function finds matches of the last n 
+        tokens in the previous context, and returns k tokens that followed 
+        that match.
+        
+        Args:
+            context_token_ids: List of token IDs representing the 
+                               context sequence.
+            n: Length of the n-gram to match.
+            k: Number of tokens follow the match. If there are less 
+               than k tokens follow the match, we will return 
+               the maximum amount of tokens until the end.
+        
+        Returns:
+            List[int]: The sequence of tokens that followed 
+                       the matched n-gram in the context.
+            None: If no matching n-gram pattern is found.
+        
+        Example:
+            If context_token_ids = [1,2,3,4,2,3], n = 2, and k = 4:
+            - The last 2 tokens [2,3] will be matched against the previous 
+              4 tokens [1,2,3,4].
+            - Finding a match of [2,3] would return the tokens that 
+              followed that pattern. Here we will return [4,2,3] because 
+              we only have three tokens after the match.
+        """
+        # TODO: Use c++ to implement the _find_subarray_kmp to
+        # improve the efficiency
+        return self._find_subarray_kmp(context_token_ids, n, k)
+
     def _kmp_lps_array(self, pattern: List[int]) -> List[int]:
         """
         Build the lps (longest proper prefix which is also suffix) 
@@ -31,36 +63,27 @@ class NgramProposer:
 
         return lps
 
-    def _find_subarray_kmp(self, X: List[int], Y: List[int],
-                           K: int) -> Optional[List[int]]:
-        """
-        Returns the subarray starting at the first occurrence of Y in X,
-        plus K subsequent elements (if available). If not found, returns None.
-        """
-        N = len(X)
-        M = len(Y)
+    def _find_subarray_kmp(self, context_token_ids: ConstantList[int], n: int,
+                           k: int) -> Optional[List[int]]:
+        context_len = len(context_token_ids)
+        assert n > 0
 
-        if M == 0:
-            # If Y is empty,
-            # let's define that it matches at index 0
-            return X[:K]
-
+        pattern = context_token_ids[-n:]
         # Precompute lps array for Y
-        lps = self._kmp_lps_array(Y)
+        lps = self._kmp_lps_array(pattern)
 
-        i = 0  # index for X
-        j = 0  # index for Y
-
-        while i < N:
-            if X[i] == Y[j]:
+        i = 0
+        j = 0
+        # -n because the last n tokens are used as pattern
+        while i < context_len - n:
+            if context_token_ids[i] == pattern[j]:
                 i += 1
                 j += 1
 
                 # If we have matched the entire Y
-                if j == M:
-                    # Found Y in X, gather the next K elements
-                    start_index = i - M  # Where the match started
-                    return X[start_index:start_index + M + K]
+                if j == n:
+                    # Found pattern in context, gather the next K elements
+                    return context_token_ids[i:i + k]
             else:
                 # Mismatch
                 if j != 0:
@@ -71,12 +94,3 @@ class NgramProposer:
 
         # Y not found
         return None
-
-    def propose(self, context_token_ids: ConstantList[int], n: int,
-                k: int) -> Optional[List[int]]:
-        ngrams = context_token_ids[-n:]
-        lookup_tokens = context_token_ids[:-n]
-        match_tokens = self._find_subarray_kmp(lookup_tokens, ngrams, k)
-        if match_tokens is None:
-            return None
-        return match_tokens[n:]

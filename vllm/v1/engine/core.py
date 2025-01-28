@@ -125,24 +125,6 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
-    def propose_tokens(self):
-        assert self.scheduler.speculative_config is not None
-        for req in self.scheduler.running:
-            # Ignore requests that are doing chunked prefill.
-            if req.num_computed_tokens < req.num_tokens - 1:
-                print("**", req.num_computed_tokens, req.num_tokens)
-                continue
-            # Ignore requests that already have spec tokens.
-            if len(req.spec_token_ids) > 0:
-                continue
-            spec_tokens = self.proposer.propose(
-                req.all_token_ids,
-                self.scheduler.speculative_config.ngram_prompt_lookup_min,
-                self.scheduler.speculative_config.num_speculative_tokens,
-            )
-            if spec_tokens:
-                req.append_spec_token_ids(spec_tokens)
-
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
@@ -164,6 +146,23 @@ class EngineCore:
 
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
+
+    def propose_tokens(self):
+        assert self.scheduler.speculative_config is not None
+        for req in self.scheduler.running:
+            # Ignore requests that are doing chunked prefill.
+            if req.num_computed_tokens < req.num_tokens - 1:
+                continue
+            # Ignore requests that already have spec tokens.
+            if len(req.spec_token_ids) > 0:
+                continue
+            spec_tokens = self.proposer.propose(
+                req.all_token_ids,
+                self.scheduler.speculative_config.ngram_prompt_lookup_min,
+                self.scheduler.speculative_config.num_speculative_tokens,
+            )
+            if spec_tokens:
+                req.append_spec_token_ids(spec_tokens)
 
 
 class EngineCoreProc(EngineCore):

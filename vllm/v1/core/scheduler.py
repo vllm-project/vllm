@@ -114,10 +114,11 @@ class Scheduler:
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
         scheduled_encoder_inputs: Dict[str, List[int]] = {}
+        encoder_budget = self.max_num_encoder_input_tokens
+
         # Spec Decode-related.
         spec_decode = False
         scheduled_spec_decode_tokens: Dict[str, List[int]] = {}
-        encoder_budget = self.max_num_encoder_input_tokens
 
         # First, schedule the RUNNING requests.
         # NOTE(woosuk): At most 1 request in the RUNNING queue is allowed to be
@@ -190,6 +191,7 @@ class Scheduler:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
 
+            # Speculative decode related.
             if request.spec_token_ids:
                 spec_decode = True
             scheduled_spec_decode_tokens[
@@ -486,10 +488,9 @@ class Scheduler:
         request.crop(num_total_token)
 
     def _check_stop(self, request: Request) -> bool:
-        """
-            Check if the request should be stopped.
-            The function should handle both single token generation or
-            multiple token generation (e.g., spec decode) per step.
+        """Check if the request should be stopped.
+        The function should handle both single token generation or
+        multiple token generation (e.g., spec decode) per step.
         """
         if (request.num_tokens >= self.max_model_len
                 or request.num_output_tokens >= request.max_tokens):

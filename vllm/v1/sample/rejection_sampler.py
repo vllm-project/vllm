@@ -12,7 +12,7 @@ class RejectionSampler(nn.Module):
 
     def sample(self, logits: torch.Tensor,
                sampling_metadata: SamplingMetadata) -> SamplerOutput:
-        # num_reqs x [num_specuated_tokens]
+        # num_reqs x [num_speculated_tokens]
         spec_token_ids = sampling_metadata.spec_token_ids
         # only argmax is supported for now
         output_token_ids_cpu = logits.argmax(dim=-1).view(-1).tolist()
