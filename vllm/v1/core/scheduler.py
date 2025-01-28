@@ -212,7 +212,6 @@ class Scheduler:
                     num_computed_tokens -= self.block_size
                     num_new_tokens = self.block_size
                     computed_blocks.pop()
-
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
