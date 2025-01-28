@@ -530,10 +530,10 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
         )
 
 
-@MULTIMODAL_REGISTRY.register_processor(MiniCPMOMultiModalProcessor,
-                                        info=MiniCPMOProcessingInfo,
-                                        dummy_inputs=MiniCPMODummyInputsBuilder
-                                        )
+@MULTIMODAL_REGISTRY.register_processor(
+    MiniCPMOMultiModalProcessor,
+    info=MiniCPMOProcessingInfo,
+    dummy_inputs=MiniCPMODummyInputsBuilder)
 class MiniCPMO(MiniCPMV2_6):
     packed_modules_mapping = {
         "qkv_proj": [

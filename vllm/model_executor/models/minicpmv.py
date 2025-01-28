@@ -719,8 +719,8 @@ class MiniCPMVMultiModalProcessor(
             "input_ids": np.array([tokenizer.encode(prompt)]),
             **{
                 key: value
-                for modality in inputs for key, value in inputs[modality].items(
-                )
+                for modality in inputs
+                for key, value in inputs[modality].items()
             },
             **{
                 f"{modality}_num_slices": num_mm_slices[modality]
@@ -795,7 +795,8 @@ class MiniCPMVMultiModalProcessor(
             prompt = self.info.get_tokenizer().decode(prompt)
         matches = re.findall(self.get_placeholder_match_pattern(), prompt)
         mm_orders = {
-            f"{modality}_orders": torch.tensor(
+            f"{modality}_orders":
+            torch.tensor(
                 [index for index, m in enumerate(matches) if m == modality])
             for modality in supported_mm_modalities
         }
@@ -1460,10 +1461,10 @@ _SUPPORT_VERSION = {
 }
 
 
-@MULTIMODAL_REGISTRY.register_processor(MiniCPMVMultiModalProcessor,
-                                        info=MiniCPMVProcessingInfo,
-                                        dummy_inputs=MiniCPMVDummyInputsBuilder
-                                        )
+@MULTIMODAL_REGISTRY.register_processor(
+    MiniCPMVMultiModalProcessor,
+    info=MiniCPMVProcessingInfo,
+    dummy_inputs=MiniCPMVDummyInputsBuilder)
 class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
     """
     Different versions of MiniCPMV use different visual encoders and LLMs,
