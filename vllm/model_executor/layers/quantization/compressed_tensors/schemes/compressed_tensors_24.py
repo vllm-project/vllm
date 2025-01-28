@@ -164,9 +164,9 @@ class CompressedTensors24(CompressedTensorsScheme):
                 bitmask=layer.bitmask,
                 layer=layer,
             )
+
             # compressed and bitmask tensors
             # are no longer needed after decompression
-            
             del layer.compressed
             del layer.bitmask
 
