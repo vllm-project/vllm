@@ -10,7 +10,7 @@ import pytest
 from vllm.model_executor.models import ModelRegistry
 
 from ..conftest import HfRunner, VllmRunner
-from ..utils import multi_gpu_marks
+from ..utils import multi_gpu_test
 from .utils import check_logprobs_close
 
 # Delete Llama from registry so we can pretend vLLM doesn't support it
@@ -60,16 +60,13 @@ def check_implementation(
     )
 
 
-@pytest.mark.parametrize("model,model_impl",
-                         [("openai-community/gpt2", "transformers"),
-                          ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
-                          ("ArthurZ/Ilama-3.2-1B", "auto", True)])
-def test_models(hf_runner,
-                vllm_runner,
-                example_prompts,
-                model,
-                model_impl,
-                trust_remote_code=None) -> None:
+@pytest.mark.parametrize(
+    "model,model_impl",
+    [("openai-community/gpt2", "transformers"),
+     ("meta-llama/Llama-3.2-1B-Instruct", "auto"),
+     ("ArthurZ/Ilama-3.2-1B", "auto")])  # trust_remote_code=True by default
+def test_models(hf_runner, vllm_runner, example_prompts, model,
+                model_impl) -> None:
 
     maybe_raises = nullcontext()
     if model == "openai-community/gpt2" and model_impl == "transformers":
@@ -82,11 +79,10 @@ def test_models(hf_runner,
                              vllm_runner,
                              example_prompts,
                              model,
-                             model_impl=model_impl,
-                             trust_remote_code=trust_remote_code)
+                             model_impl=model_impl)
 
 
-@multi_gpu_marks(num_gpus=2)
+@multi_gpu_test(num_gpus=2)
 def test_distributed(
     hf_runner,
     vllm_runner,
