@@ -184,7 +184,7 @@ class Attention(nn.Module):
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
-                forward_context: ForwardContext = get_forward_context()
+                forward_context = get_forward_context()
                 ctx_attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 return self.impl.forward(self, query, key, value,
