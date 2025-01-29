@@ -184,7 +184,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert layer._k_scale == 1.0 and layer._v_scale == 1.0
+        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         if self.attn_type == AttentionType.ENCODER_DECODER:
             return self.forward_encoder_decoder(
                 query=query,
@@ -192,8 +192,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 value=value,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
-                k_scale=layer._k_scale,
-                v_scale=layer._v_scale,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._k_scale_float,
             )
 
         batch_size, seq_len, hidden_size = query.shape

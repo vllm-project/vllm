@@ -1,7 +1,9 @@
+import os
 from typing import TYPE_CHECKING, Optional
 
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 
 from .interface import Platform, PlatformEnum, _Backend
@@ -57,6 +59,22 @@ class HpuPlatform(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
+        if (parallel_config.distributed_executor_backend == 'mp'
+                and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
+            if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD",
+                              None) is not None:
+                logger.warning("On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
+                               "might cause application hangs on exit. Using "
+                               "VLLM_WORKER_MULTIPROC_METHOD=fork anyway, "
+                               "as it was explicitly requested.")
+            else:
+                logger.warning(
+                    "On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "
+                    "might cause application hangs on exit. Setting "
+                    "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+                    "To override that behavior, please set "
+                    "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
+                os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     @classmethod
     def is_pin_memory_available(cls):

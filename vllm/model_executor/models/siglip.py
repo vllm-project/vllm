@@ -348,12 +348,10 @@ class SiglipMLP(nn.Module):
         if quant_config and quant_config.get_name() == "bitsandbytes":
             quantizable = True
         else:
-            # For other quantization, we require the hidden size to be a 
+            # For other quantization, we require the hidden size to be a
             # multiple of 64
-            quantizable = (
-                config.hidden_size % 64 == 0
-                and config.intermediate_size % 64 == 0
-            )
+            quantizable = (config.hidden_size % 64 == 0
+                           and config.intermediate_size % 64 == 0)
         self.fc1 = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
