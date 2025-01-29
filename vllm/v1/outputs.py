@@ -36,7 +36,7 @@ class ModelRunnerOutput:
     # [num_reqs, max_num_logprobs + 1]
     logprobs_cpu: Optional[List[List[float]]]
     # [num_reqs]
-    token_ranks_cpu: Optional[torch.Tensor]
+    sampled_token_ranks_cpu: Optional[List[int]]
 
     # req_id -> (prompt_logprobs_token_ids, prompt_logprobs)
     # [prompt_len, num_prompt_logprobs]

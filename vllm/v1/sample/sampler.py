@@ -46,23 +46,24 @@ class Sampler(nn.Module):
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
 
-        # TODO initiate nonblocking CPU copy here?
-
         if needs_logprobs:
             # Get sampled and topk token logprobs.
-            logprobs, logprob_token_ids, ranks = self.get_logprobs(
-                raw_logits,
-                sampling_metadata.max_num_logprobs,
-                token_ids=sampled)
+            (
+                logprobs,
+                logprob_token_ids,
+                sampled_token_ranks,
+            ) = self.get_logprobs(raw_logits,
+                                  sampling_metadata.max_num_logprobs,
+                                  token_ids=sampled)
         else:
-            logprobs, logprob_token_ids, ranks = None, None, None
+            logprobs, logprob_token_ids, sampled_token_ranks = None, None, None
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(
             sampled_token_ids=sampled,
             logprob_token_ids=logprob_token_ids,
             logprobs=logprobs,
-            sampled_token_ranks=ranks,
+            sampled_token_ranks=sampled_token_ranks,
         )
         return sampler_output
 

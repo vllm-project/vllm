@@ -52,6 +52,7 @@ class LogprobsProcessor:
         sampled_token_ids: List[int],
         token_ids_lst: List[List[int]],
         sample_logprobs_lst: List[List[float]],
+        sampled_token_ranks_lst: List[int],
     ) -> None:
         """Incorporate sample logprobs from this step, if they exist.
 
@@ -73,8 +74,9 @@ class LogprobsProcessor:
             return
         assert self.logprobs is not None
 
-        for sampled_token_id, logprobs, token_ids in zip(
-                sampled_token_ids, sample_logprobs_lst, token_ids_lst):
+        for sampled_token_id, sampled_token_rank, logprobs, token_ids in zip(
+                sampled_token_ids, sampled_token_ranks_lst,
+                sample_logprobs_lst, token_ids_lst):
 
             # Split into sampled vs top_k.
             assert sampled_token_id == token_ids[0], (
@@ -102,7 +104,8 @@ class LogprobsProcessor:
                 sample_logprob_obj = Logprob(logprob=sampled_token_logprob,
                                              decoded_token=convert_id_to_token(
                                                  self.tokenizer,
-                                                 sampled_token_id))
+                                                 sampled_token_id),
+                                             rank=sampled_token_rank)
                 pos_logprobs_dict = self._make_pos_logprob_dict(
                     topk_logprobs, topk_token_ids, decoded_tokens,
                     self.num_logprobs, (sampled_token_id, sample_logprob_obj))
@@ -115,6 +118,7 @@ class LogprobsProcessor:
         self,
         token_ids: Optional[torch.Tensor],
         prompt_logprobs: Optional[torch.Tensor],
+        prompt_token_ranks: Optional[torch.Tensor],
         prompt_token_ids_lst: List[int],
     ) -> None:
         """Incorporate prompt logprobs from this step, if they exist.
@@ -143,6 +147,7 @@ class LogprobsProcessor:
             return None
         assert prompt_logprobs is not None
         assert token_ids is not None
+        assert prompt_token_ranks is not None
         if prompt_logprobs.numel() == 0:
             # Prompt logprobs are enabled for this request but prefill
             # is finished and no more logprobs are being streamed from
@@ -174,6 +179,7 @@ class LogprobsProcessor:
                 f"{token_ids[tok_idx, 0].item()=}")
             # Split into prompt token vs top_k.
             prompt_token_logprob = prompt_logprobs[tok_idx, 0].item()
+            prompt_token_rank = prompt_token_ranks[tok_idx].item()
             topk_token_ids = token_ids[tok_idx, 1:]
             topk_logprobs = prompt_logprobs[tok_idx, 1:]
             decoded_tokens_offset = tok_idx * decoded_tokens_stride + 1
@@ -196,7 +202,8 @@ class LogprobsProcessor:
                 prompt_logprob_obj = Logprob(logprob=prompt_token_logprob,
                                              decoded_token=convert_id_to_token(
                                                  self.tokenizer,
-                                                 prompt_token_id))
+                                                 prompt_token_id),
+                                             rank=prompt_token_rank)
                 self.prompt_logprobs.append(
                     self._make_pos_logprob_dict(
                         topk_logprobs.tolist(), topk_token_ids.tolist(),
@@ -276,13 +283,14 @@ class LogprobsProcessor:
             for idx in range(num_logprobs)
         }
 
-        # Inject special token Logprob if necessary
+        # Inject special token Logprob if necessary.
+        # `rank` field must already be set.
         if special_token_id_logprob:
             special_token_id = special_token_id_logprob[0]
             special_logprob_obj = special_token_id_logprob[1]
             assert special_token_id is not None
             assert special_logprob_obj is not None
-            special_logprob_obj.rank = num_logprobs + 1
+            assert special_logprob_obj.rank is not None
             logprobs_dict[special_token_id] = special_logprob_obj
 
         return logprobs_dict
@@ -293,13 +301,13 @@ class LogprobsProcessor:
         """
 
         # 1) Make Sample Logprobs, if requested.
-        self._update_sample_logprobs(
-            output.new_token_ids,
-            output.new_logprobs_token_ids,
-            output.new_logprobs,
-        )
+        self._update_sample_logprobs(output.new_token_ids,
+                                     output.new_logprobs_token_ids,
+                                     output.new_logprobs,
+                                     output.new_sampled_token_ranks)
 
         # 4) Make Prompt Logprobs.
         self._update_prompt_logprobs(output.new_prompt_logprobs_token_ids,
                                      output.new_prompt_logprobs,
+                                     output.new_prompt_token_ranks,
                                      self.prompt_token_ids)

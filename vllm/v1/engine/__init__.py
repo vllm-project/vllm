@@ -45,7 +45,7 @@ class EngineCoreOutput(
     new_token_ids: List[int]
     new_logprobs: List[List[float]] = []
     new_logprobs_token_ids: List[List[int]] = []
-    new_token_ranks: List[torch.Tensor] = []
+    new_sampled_token_ranks: List[int] = []
     new_prompt_logprobs: Optional[torch.Tensor] = None
     new_prompt_logprobs_token_ids: Optional[torch.Tensor] = None
     new_prompt_token_ranks: Optional[torch.Tensor] = None

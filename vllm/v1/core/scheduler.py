@@ -414,7 +414,7 @@ class Scheduler:
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs_token_ids_cpu = model_runner_output.logprob_token_ids_cpu
         logprobs_cpu = model_runner_output.logprobs_cpu
-        token_ranks_cpu = model_runner_output.token_ranks_cpu
+        sampled_token_ranks_cpu = model_runner_output.sampled_token_ranks_cpu
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
@@ -463,18 +463,20 @@ class Scheduler:
                 # Extract sample logprobs if needed.
                 logprobs_token_ids: List[List[int]] = []
                 logprobs: List[List[float]] = []
+                sampled_token_ranks: List[int] = []
                 if request.sampling_params.logprobs:
                     assert logprobs_token_ids_cpu is not None
                     assert logprobs_cpu is not None
-                    assert token_ranks_cpu is not None
+                    assert sampled_token_ranks_cpu is not None
                     # Here we assume there is 1 generated token per step.
                     # Once we support generating N tokens per step the
                     # outer list should be length-N
                     logprobs_token_ids = [logprobs_token_ids_cpu[req_index]]
                     logprobs = [logprobs_cpu[req_index]]
-                    token_ranks = [token_ranks_cpu[req_index]]
+                    sampled_token_ranks = [sampled_token_ranks_cpu[req_index]]
                 else:
-                    logprobs_token_ids, logprobs, token_ranks = [], [], []
+                    (logprobs_token_ids, logprobs,
+                     sampled_token_ranks) = [], [], []
 
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
@@ -483,7 +485,7 @@ class Scheduler:
                     finish_reason=request.get_finished_reason(),
                     new_logprobs_token_ids=logprobs_token_ids,
                     new_logprobs=logprobs,
-                    new_token_ranks=token_ranks,
+                    new_sampled_token_ranks=sampled_token_ranks,
                     new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
                     new_prompt_logprobs=prompt_logprobs,
                     new_prompt_token_ranks=prompt_token_ranks,

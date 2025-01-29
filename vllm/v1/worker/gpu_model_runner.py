@@ -787,8 +787,6 @@ class GPUModelRunner:
             sampling_metadata=sampling_metadata,
         )
 
-        #TODO also copy logprobs and ranks tensors to CPU here
-
         # Compute prompt logprobs if needed.
         # NOTE(rob): for simplicity, compute prompt logprobs for each
         # prompt separately. Prompt logprobs are rare (used for eval),
@@ -874,8 +872,10 @@ class GPUModelRunner:
         if sampler_output.logprob_token_ids is not None:
             logprob_token_ids = sampler_output.logprob_token_ids.tolist()
             logprobs = sampler_output.logprobs.tolist()
+            sampled_token_ranks = sampler_output.sampled_token_ranks.tolist()
         else:
-            (logprob_token_ids, logprobs) = (None, None)
+            (logprob_token_ids, logprobs, sampled_token_ranks) = (None, None,
+                                                                  None)
         # Update with the actual token ids
         for i, req_state, seq_len in request_seq_lens:
             token_id = sampled_token_ids[i]
@@ -888,7 +888,7 @@ class GPUModelRunner:
             sampled_token_ids=sampled_token_ids,
             logprob_token_ids_cpu=logprob_token_ids,
             logprobs_cpu=logprobs,
-            token_ranks_cpu=sampler_output.sampled_token_ranks,
+            sampled_token_ranks_cpu=sampled_token_ranks,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
