@@ -207,18 +207,6 @@ class KVCacheManager:
             raise ValueError(
                 f"num_tokens must be greater than 0, got {num_tokens}")
 
-        # If a computed block of a request is an eviction candidate (in the
-        # free queue and ref_cnt == 0), it cannot be counted as a free block
-        # when allocating this request.
-        num_evictable_computed_blocks = sum(1 for blk in computed_blocks
-                                            if blk.ref_cnt == 0)
-
-        num_required_blocks = cdiv(num_tokens, self.block_size)
-        if (num_required_blocks > self.free_block_queue.num_free_blocks -
-                num_evictable_computed_blocks):
-            # Cannot allocate new blocks.
-            return None
-
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
             self._touch(computed_blocks)
@@ -226,6 +214,12 @@ class KVCacheManager:
             assert not computed_blocks, (
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
+
+        num_required_blocks = cdiv(num_tokens, self.block_size)
+        if num_required_blocks > self.free_block_queue.num_free_blocks:
+            # Cannot allocate new blocks
+            self._untouch(computed_blocks)
+            return None
 
         # Determine the number of new blocks to allocate considering
         # preallocated blocks.
@@ -470,6 +464,21 @@ class KVCacheManager:
             if block.ref_cnt == 0:
                 self.free_block_queue.remove(block)
             block.incr_ref()
+
+    def _untouch(self, blocks: List[KVCacheBlock]) -> None:
+        """Untouch a block decreases its reference count by 1, and may add
+        the block to the free queue. This is used to reverse touched blocks
+        that are hit by another request with the same prefix.
+
+        Args:
+            blocks: A list of blocks to touch.
+        """
+        for block in blocks:
+            block.decr_ref()
+            # ref_cnt=0 means this block can be added in the free list
+            # (i.e. eviction candidate).
+            if block.ref_cnt == 0:
+                self.free_block_queue.append(block)
 
     def _cache_full_blocks(
         self,
