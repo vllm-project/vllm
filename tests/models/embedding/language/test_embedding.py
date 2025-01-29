@@ -15,15 +15,18 @@ from ..utils import check_embeddings_close
         # [Encoder-only]
         pytest.param("BAAI/bge-base-en-v1.5",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
         pytest.param("intfloat/multilingual-e5-large"),
-        # [Encoder-decoder]
-        pytest.param("intfloat/e5-mistral-7b-instruct",
-                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        # [Decoder-only]
         pytest.param("BAAI/bge-multilingual-gemma2",
                      marks=[pytest.mark.core_model]),
-        pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
+        pytest.param("intfloat/e5-mistral-7b-instruct",
+                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
         pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
         pytest.param("Alibaba-NLP/gte-Qwen2-7B-instruct"),
+        pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
+        # [Encoder-decoder]
+        pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
@@ -59,10 +62,13 @@ def test_models(
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
+
         # This test is for verifying whether the model's extra_repr
         # can be printed correctly.
-        print(vllm_model.model.llm_engine.model_executor.driver_worker.
-              model_runner.model)
+        def print_model(model):
+            print(model)
+
+        vllm_model.apply_model(print_model)
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,

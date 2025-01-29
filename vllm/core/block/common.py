@@ -34,9 +34,10 @@ class RefCounter(RefCounterProtocol):
 
     def __init__(self, all_block_indices: Iterable[BlockId]):
         deduped = set(all_block_indices)
-        self._refcounts: Dict[BlockId,
-                              RefCount] = {index: 0
-                                           for index in deduped}
+        self._refcounts: Dict[BlockId, RefCount] = {
+            index: 0
+            for index in deduped
+        }
 
     def incr(self, block_id: BlockId) -> RefCount:
         assert block_id in self._refcounts
@@ -177,7 +178,8 @@ class BlockPool:
                                    token_ids=[],
                                    block_size=self._block_size,
                                    allocator=self._allocator,
-                                   block_id=None))
+                                   block_id=None,
+                                   extra_hash=None))
 
     def increase_pool(self):
         """Doubles the internal pool size
@@ -194,10 +196,15 @@ class BlockPool:
                                    token_ids=[],
                                    block_size=self._block_size,
                                    allocator=self._allocator,
-                                   block_id=None))
+                                   block_id=None,
+                                   extra_hash=None))
 
-    def init_block(self, prev_block: Optional[Block], token_ids: List[int],
-                   block_size: int, physical_block_id: Optional[int]) -> Block:
+    def init_block(self,
+                   prev_block: Optional[Block],
+                   token_ids: List[int],
+                   block_size: int,
+                   physical_block_id: Optional[int],
+                   extra_hash: Optional[int] = None) -> Block:
         if len(self._free_ids) == 0:
             self.increase_pool()
             assert len(self._free_ids) > 0
@@ -210,7 +217,8 @@ class BlockPool:
             token_ids=token_ids,
             block_size=block_size,
             allocator=block._allocator,  # type: ignore[attr-defined] 
-            block_id=physical_block_id)
+            block_id=physical_block_id,
+            extra_hash=extra_hash)
         block.pool_id = pool_id  # type: ignore[attr-defined]
         return block
 

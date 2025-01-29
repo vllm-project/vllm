@@ -136,8 +136,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             device=Device.GPU)
 
         # Use watermark to avoid frequent cache eviction.
-        if (self.num_total_gpu_blocks - num_required_blocks <
-                self.watermark_blocks):
+        if (self.num_total_gpu_blocks - num_required_blocks
+                < self.watermark_blocks):
             return AllocStatus.NEVER
         if num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks:
             return AllocStatus.OK
@@ -151,8 +151,13 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             max_block_sliding_window=self.max_block_sliding_window,
         )
         if seq.get_token_ids():
+            # NOTE: If there are any factors affecting the block besides
+            # token_ids, they should be added as input to extra_hash.
+            extra_hash = seq.extra_hash()
+
             # Add blocks to the block table only if the sequence is non empty.
-            block_table.allocate(seq.get_token_ids())
+            block_table.allocate(token_ids=seq.get_token_ids(),
+                                 extra_hash=extra_hash)
 
         return block_table
 
@@ -238,6 +243,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
             num_computed_slots=seq.data.get_num_computed_tokens(),
+            extra_hash=seq.extra_hash(),
         )
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
@@ -448,6 +454,9 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_allocator.get_prefix_cache_hit_rate(device)
+
+    def reset_prefix_cache(self) -> bool:
+        return self.block_allocator.reset_prefix_cache()
 
     def _can_swap(self,
                   seq_group: SequenceGroup,

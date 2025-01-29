@@ -18,7 +18,6 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, StoreBoolean
@@ -99,10 +98,8 @@ class EngineArgs:
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
-    quantization_param_path: Optional[str] = None
     seed: int = 0
     max_model_len: Optional[int] = None
-    worker_use_ray: bool = False
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -112,9 +109,7 @@ class EngineArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
-    # NOTE(kzawora): default block size for Gaudi should be 128
-    # smaller sizes still work, but very inefficiently
-    block_size: int = 16 if not current_platform.is_hpu() else 128
+    block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
@@ -143,7 +138,7 @@ class EngineArgs:
     tokenizer_pool_extra_config: Optional[Dict[str, Any]] = None
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
-    mm_cache_preprocessor: bool = False
+    disable_mm_preprocessor_cache: bool = False
     enable_lora: bool = False
     enable_lora_bias: bool = False
     max_loras: int = 1
@@ -170,6 +165,7 @@ class EngineArgs:
     enable_chunked_prefill: Optional[bool] = None
 
     guided_decoding_backend: str = 'xgrammar'
+    logits_processor_pattern: Optional[str] = None
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
     speculative_model_quantization: Optional[str] = None
@@ -198,6 +194,11 @@ class EngineArgs:
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
+    generation_config: Optional[str] = None
+    enable_sleep_mode: bool = False
+
+    calculate_kv_scales: Optional[bool] = None
+
     def __post_init__(self):
         if not self.tokenizer:
             self.tokenizer = self.model
@@ -206,6 +207,7 @@ class EngineArgs:
         # by user.
         if self.enable_prefix_caching is None:
             self.enable_prefix_caching = bool(envs.VLLM_USE_V1)
+
         # Override max_num_seqs if it's not set by user.
         if self.max_num_seqs is None:
             self.max_num_seqs = 256 if not envs.VLLM_USE_V1 else 1024
@@ -237,7 +239,7 @@ class EngineArgs:
             choices=get_args(TaskOption),
             help='The task to use the model for. Each vLLM instance only '
             'supports one task, even if the same model can be used for '
-            'multiple tasks. When the model only supports one task, "auto" '
+            'multiple tasks. When the model only supports one task, ``"auto"`` '
             'can be used to select it; otherwise, you must specify explicitly '
             'which task to use.')
         parser.add_argument(
@@ -249,7 +251,7 @@ class EngineArgs:
         parser.add_argument(
             '--skip-tokenizer-init',
             action='store_true',
-            help='Skip initialization of tokenizer and detokenizer')
+            help='Skip initialization of tokenizer and detokenizer.')
         parser.add_argument(
             '--revision',
             type=nullable_str,
@@ -314,6 +316,8 @@ class EngineArgs:
             '* "tensorizer" will load the weights using tensorizer from '
             'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
+            '* "runai_streamer" will load the Safetensors weights using Run:ai'
+            'Model Streamer \n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n')
         parser.add_argument(
@@ -346,17 +350,6 @@ class EngineArgs:
             help='Data type for kv cache storage. If "auto", will use model '
             'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
             'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
-        parser.add_argument(
-            '--quantization-param-path',
-            type=nullable_str,
-            default=None,
-            help='Path to the JSON file containing the KV cache '
-            'scaling factors. This should generally be supplied, when '
-            'KV cache dtype is FP8. Otherwise, KV cache scaling factors '
-            'default to 1.0, which may cause accuracy issues. '
-            'FP8_E5M2 (without scaling) is only supported on cuda version '
-            'greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
-            'supported for common inference criteria.')
         parser.add_argument('--max-model-len',
                             type=int,
                             default=EngineArgs.max_model_len,
@@ -369,15 +362,23 @@ class EngineArgs:
             choices=['outlines', 'lm-format-enforcer', 'xgrammar'],
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
-            'https://github.com/outlines-dev/outlines,'
+            'https://github.com/outlines-dev/outlines, '
             'https://github.com/mlc-ai/xgrammar, and '
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
             ' parameter.')
+        parser.add_argument(
+            '--logits-processor-pattern',
+            type=nullable_str,
+            default=None,
+            help='Optional regex pattern specifying valid logits processor '
+            'qualified names that can be passed with the `logits_processors` '
+            'extra completion argument. Defaults to None, which allows no '
+            'processors.')
         # Parallel arguments
         parser.add_argument(
             '--distributed-executor-backend',
-            choices=['ray', 'mp'],
+            choices=['ray', 'mp', 'uni', 'external_launcher'],
             default=EngineArgs.distributed_executor_backend,
             help='Backend to use for distributed model '
             'workers, either "ray" or "mp" (multiprocessing). If the product '
@@ -385,12 +386,8 @@ class EngineArgs:
             'or equal to the number of GPUs available, "mp" will be used to '
             'keep processing on a single host. Otherwise, this will default '
             'to "ray" if Ray is installed and fail otherwise. Note that tpu '
-            'and hpu only support Ray for distributed inference.')
+            'only supports Ray for distributed inference.')
 
-        parser.add_argument(
-            '--worker-use-ray',
-            action='store_true',
-            help='Deprecated, use --distributed-executor-backend=ray.')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,
@@ -419,19 +416,21 @@ class EngineArgs:
                             choices=[8, 16, 32, 64, 128],
                             help='Token block size for contiguous chunks of '
                             'tokens. This is ignored on neuron devices and '
-                            'set to max-model-len')
+                            'set to ``--max-model-len``. On CUDA devices, '
+                            'only block sizes up to 32 are supported. '
+                            'On HPU devices, block size defaults to 128.')
 
         parser.add_argument(
             "--enable-prefix-caching",
             action=argparse.BooleanOptionalAction,
             default=EngineArgs.enable_prefix_caching,
             help="Enables automatic prefix caching. "
-            "Use --no-enable-prefix-caching to disable explicitly.",
+            "Use ``--no-enable-prefix-caching`` to disable explicitly.",
         )
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
                             help='Disables sliding window, '
-                            'capping to sliding window size')
+                            'capping to sliding window size.')
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
                             default=True,
@@ -478,11 +477,12 @@ class EngineArgs:
             help='The fraction of GPU memory to be used for the model '
             'executor, which can range from 0 to 1. For example, a value of '
             '0.5 would imply 50%% GPU memory utilization. If unspecified, '
-            'will use the default value of 0.9. This is a global gpu memory '
-            'utilization limit, for example if 50%% of the gpu memory is '
-            'already used before vLLM starts and --gpu-memory-utilization is '
-            'set to 0.9, then only 40%% of the gpu memory will be allocated '
-            'to the model executor.')
+            'will use the default value of 0.9. This is a per-instance '
+            'limit, and only applies to the current vLLM instance.'
+            'It does not matter if you have another vLLM instance running '
+            'on the same GPU. For example, if you have two vLLM instances '
+            'running on the same GPU, you can set the GPU memory utilization '
+            'to 0.5 for each instance.')
         parser.add_argument(
             '--num-gpu-blocks-override',
             type=int,
@@ -524,7 +524,7 @@ class EngineArgs:
             default=None,
             type=json.loads,
             help='RoPE scaling configuration in JSON format. '
-            'For example, {"rope_type":"dynamic","factor":2.0}')
+            'For example, ``{"rope_type":"dynamic","factor":2.0}``')
         parser.add_argument('--rope-theta',
                             default=None,
                             type=float,
@@ -593,13 +593,12 @@ class EngineArgs:
             default=None,
             type=json.loads,
             help=('Overrides for the multimodal input mapping/processing, '
-                  'e.g., image processor. For example: {"num_crops": 4}.'))
+                  'e.g., image processor. For example: ``{"num_crops": 4}``.'))
         parser.add_argument(
-            '--mm-cache-preprocessor',
+            '--disable-mm-preprocessor-cache',
             action='store_true',
-            help='If true, then enables caching of the multi-modal '
-            'preprocessor/mapper. Otherwise, the mapper executes each time'
-            ', and for better performance consider enabling frontend process.')
+            help='If true, then disables caching of the multi-modal '
+            'preprocessor/mapper. (not recommended)')
 
         # LoRA related configs
         parser.add_argument('--enable-lora',
@@ -848,7 +847,7 @@ class EngineArgs:
             "of the provided names. The model name in the model "
             "field of a response will be the first name in this "
             "list. If not specified, the model name will be the "
-            "same as the `--model` argument. Noted that this name(s) "
+            "same as the ``--model`` argument. Noted that this name(s) "
             "will also be used in `model_name` tag content of "
             "prometheus metrics, if multiple names provided, metrics "
             "tag will take the first one.")
@@ -868,7 +867,7 @@ class EngineArgs:
             default=None,
             help="Valid choices are " +
             ",".join(ALLOWED_DETAILED_TRACE_MODULES) +
-            ". It makes sense to set this only if --otlp-traces-endpoint is"
+            ". It makes sense to set this only if ``--otlp-traces-endpoint`` is"
             " set. If set, it will collect detailed traces for the specified "
             "modules. This involves use of possibly costly and or blocking "
             "operations and hence might have a performance impact.")
@@ -895,13 +894,13 @@ class EngineArgs:
             type=json.loads,
             default=None,
             help="Override or set neuron device configuration. "
-            "e.g. {\"cast_logits_dtype\": \"bloat16\"}.'")
+            "e.g. ``{\"cast_logits_dtype\": \"bloat16\"}``.")
         parser.add_argument(
             '--override-pooler-config',
             type=PoolerConfig.from_json,
             default=None,
             help="Override or set the pooling method for pooling models. "
-            "e.g. {\"pooling_type\": \"mean\", \"normalize\": false}.'")
+            "e.g. ``{\"pooling_type\": \"mean\", \"normalize\": false}``.")
 
         parser.add_argument('--compilation-config',
                             '-O',
@@ -932,6 +931,33 @@ class EngineArgs:
             default="auto",
             help='The worker class to use for distributed execution.')
 
+        parser.add_argument(
+            "--generation-config",
+            type=nullable_str,
+            default=None,
+            help="The folder path to the generation config. "
+            "Defaults to None, will use the default generation config in vLLM. "
+            "If set to 'auto', the generation config will be automatically "
+            "loaded from model. If set to a folder path, the generation config "
+            "will be loaded from the specified folder path. If "
+            "`max_new_tokens` is specified, then it sets a server-wide limit "
+            "on the number of output tokens for all requests.")
+
+        parser.add_argument("--enable-sleep-mode",
+                            action="store_true",
+                            default=False,
+                            help="Enable sleep mode for the engine. "
+                            "(only cuda platform is supported)")
+
+        parser.add_argument(
+            '--calculate-kv-scales',
+            action='store_true',
+            help='This enables dynamic calculation of '
+            'k_scale and v_scale when kv-cache-dtype is fp8. '
+            'If calculate-kv-scales is false, the scales will '
+            'be loaded from the model checkpoint if available. '
+            'Otherwise, the scales will default to 1.0.')
+
         return parser
 
     @classmethod
@@ -961,7 +987,6 @@ class EngineArgs:
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,
-            quantization_param_path=self.quantization_param_path,
             enforce_eager=self.enforce_eager,
             max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
@@ -972,9 +997,12 @@ class EngineArgs:
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
-            mm_cache_preprocessor=self.mm_cache_preprocessor,
+            disable_mm_preprocessor_cache=self.disable_mm_preprocessor_cache,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
+            logits_processor_pattern=self.logits_processor_pattern,
+            generation_config=self.generation_config,
+            enable_sleep_mode=self.enable_sleep_mode,
         )
 
     def create_load_config(self) -> LoadConfig:
@@ -1018,17 +1046,15 @@ class EngineArgs:
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
 
-        if model_config.is_multimodal_model:
-            if self.enable_prefix_caching:
-                logger.warning(
-                    "--enable-prefix-caching is currently not "
-                    "supported for multimodal models and has been disabled.")
+        if (model_config.is_multimodal_model and not envs.VLLM_USE_V1
+                and self.enable_prefix_caching):
+            logger.warning("--enable-prefix-caching is currently not "
+                           "supported for multimodal models in v0 and "
+                           "has been disabled.")
             self.enable_prefix_caching = False
 
         cache_config = CacheConfig(
-            # neuron needs block_size = max_model_len
-            block_size=self.block_size if self.device != "neuron" else
-            (self.max_model_len if self.max_model_len is not None else 0),
+            block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
@@ -1037,11 +1063,11 @@ class EngineArgs:
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
             cpu_offload_gb=self.cpu_offload_gb,
+            calculate_kv_scales=self.calculate_kv_scales,
         )
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
-            worker_use_ray=self.worker_use_ray,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             tokenizer_pool_config=TokenizerPoolConfig.create_config(
@@ -1071,6 +1097,7 @@ class EngineArgs:
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)
                 use_spec_decode = self.speculative_model is not None
+                from vllm.platforms import current_platform
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
                         and not self.enable_prompt_adapter
@@ -1125,7 +1152,7 @@ class EngineArgs:
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
         )
 
-        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if self.num_scheduler_steps > 1:
             if speculative_config is not None:
@@ -1134,6 +1161,12 @@ class EngineArgs:
             if self.enable_chunked_prefill and self.pipeline_parallel_size > 1:
                 raise ValueError("Multi-Step Chunked-Prefill is not supported "
                                  "for pipeline-parallel-size > 1")
+            from vllm.platforms import current_platform
+            if current_platform.is_cpu():
+                logger.warning("Multi-Step (--num-scheduler-steps > 1) is "
+                               "currently not supported for CPUs and has been "
+                               "disabled.")
+                self.num_scheduler_steps = 1
 
         # make sure num_lookahead_slots is set the higher value depending on
         # if we are using speculative decoding or multi-step
@@ -1242,12 +1275,26 @@ class EngineArgs:
         self.enable_chunked_prefill = True
         # When no user override, set the default values based on the usage
         # context.
-        # TODO(woosuk): Tune the default values for different hardware.
-        if self.max_num_batched_tokens is None:
-            if usage_context == UsageContext.LLM_CLASS:
-                self.max_num_batched_tokens = 8192
-            elif usage_context == UsageContext.OPENAI_API_SERVER:
-                self.max_num_batched_tokens = 2048
+        # Use different default values for different hardware.
+        from vllm.platforms import current_platform
+        device_name = current_platform.get_device_name().lower()
+        if "h100" in device_name or "h200" in device_name:
+            # For H100 and H200, we use larger default values.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 8192,
+            }
+        else:
+            # TODO(woosuk): Tune the default values for other hardware.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 8192,
+                UsageContext.OPENAI_API_SERVER: 2048,
+            }
+
+        if (self.max_num_batched_tokens is None
+                and usage_context in default_max_num_batched_tokens):
+            self.max_num_batched_tokens = default_max_num_batched_tokens[
+                usage_context]
             logger.warning(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, usage_context.value)
@@ -1257,9 +1304,6 @@ class EngineArgs:
         Override the EngineConfig's configs based on the usage context for V1.
         """
         assert envs.VLLM_USE_V1, "V1 is not enabled"
-        if engine_config.model_config.is_multimodal_model:
-            # TODO (ywang96): Enable APC by default when VLM supports it.
-            assert not engine_config.cache_config.enable_prefix_caching
 
 
 @dataclass

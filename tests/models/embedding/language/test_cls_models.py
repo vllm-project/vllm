@@ -1,7 +1,4 @@
-"""Compare the outputs of HF and vLLM when using greedy sampling.
-
-This test only tests small models. Big models such as 7B should be tested from
-test_big_models.py because it could use a larger instance to run tests.
+"""Compare the classification outputs of HF and vLLM models.
 
 Run `pytest tests/models/test_cls_models.py`.
 """
@@ -27,10 +24,13 @@ def test_classification_models(
 ) -> None:
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.classify(example_prompts)
+
         # This test is for verifying whether the model's extra_repr
         # can be printed correctly.
-        print(vllm_model.model.llm_engine.model_executor.driver_worker.
-              model_runner.model)
+        def print_model(model):
+            print(model)
+
+        vllm_model.apply_model(print_model)
 
     with hf_runner(model,
                    dtype=dtype,

@@ -14,11 +14,13 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCError, RPCProcessRequest,
+                                         RPCAdapterLoadedResponse, RPCError,
+                                         RPCLoadAdapterRequest,
+                                         RPCProcessRequest,
+                                         RPCResetPrefixCacheRequest,
                                          RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
-from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
@@ -234,6 +236,10 @@ class MQLLMEngine:
                         self.start_profile()
                     else:
                         self.stop_profile()
+                elif isinstance(request, RPCLoadAdapterRequest):
+                    self._handle_load_adapter_request(request)
+                elif isinstance(request, RPCResetPrefixCacheRequest):
+                    self.reset_prefix_cache()
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -284,6 +290,20 @@ class MQLLMEngine:
         if self.log_requests:
             logger.info("Aborted request %s.", request.request_id)
 
+    def _handle_load_adapter_request(self, request: RPCLoadAdapterRequest):
+        try:
+            self.engine.add_lora(request.lora_request)
+        except BaseException as e:
+            # Send back an error if the adater fails to load
+            rpc_err = RPCError(request_id=request.request_id,
+                               is_engine_errored=False,
+                               exception=e)
+            self._send_outputs(rpc_err)
+            return
+        # Otherwise, send back the successful load message
+        self._send_outputs(
+            RPCAdapterLoadedResponse(request_id=request.request_id))
+
     def _health_check(self):
         # Send unhealthy if engine has already errored
         if self._errored_with is not None:
@@ -296,7 +316,11 @@ class MQLLMEngine:
             self._send_unhealthy(e)
 
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
-        """Send List of RequestOutput to RPCClient."""
+        """Send outputs back to the engine client. These can be:
+        - Exceptions
+        - A list of generation outputs
+        - A response from loading a lora adapter
+        """
         if outputs:
             try:
                 from ray.exceptions import RayTaskError
@@ -335,16 +359,13 @@ class MQLLMEngine:
             self._errored_with = e
 
     def start_profile(self) -> None:
-        if type(self.engine.model_executor) is GPUExecutor:
-            self.engine.model_executor.start_profile()
-        else:
-            self.engine.model_executor._run_workers("start_profile")
+        self.engine.start_profile()
 
     def stop_profile(self) -> None:
-        if type(self.engine.model_executor) is GPUExecutor:
-            self.engine.model_executor.stop_profile()
-        else:
-            self.engine.model_executor._run_workers("stop_profile")
+        self.engine.stop_profile()
+
+    def reset_prefix_cache(self) -> bool:
+        return self.engine.reset_prefix_cache()
 
 
 def signal_handler(*_) -> None:

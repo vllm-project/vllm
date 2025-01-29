@@ -65,7 +65,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     @staticmethod
     @functools.lru_cache
     def _log_prompt_logprob_unsupported_warning_once():
-        # Reminder: Please update docs/source/usage/compatibility_matrix.rst
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         logger.warning(
             "Prompt logprob is not supported by multi step workers. "
@@ -144,7 +144,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     def _process_decode_and_stop(self, seq: Sequence,
                                  sampling_params: SamplingParams) -> None:
         new_char_count = 0
-        if sampling_params.detokenize:
+        if sampling_params.detokenize and self.detokenizer:
             new_char_count = self.detokenizer.decode_sequence_inplace(
                 seq, sampling_params)
 

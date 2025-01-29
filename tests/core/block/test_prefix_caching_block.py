@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.core.utils import create_dummy_sequence
+from tests.core.utils import create_dummy_lora_sequence, create_dummy_sequence
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
@@ -796,11 +796,50 @@ class TestPrefixCachingBlockAllocator:
             block_hashes=block_hashes_seq1)
         assert len(cached_blocks) == len(blocks_seq1) - num_evicted_blocks
 
+    # Test reset prefix cache
+    @staticmethod
+    @pytest.mark.parametrize("num_blocks", [10])
+    @pytest.mark.parametrize("block_size", [16])
+    def test_reset_prefix_cache(num_blocks: int, block_size: int):
+        """This test case simulates the case of resetting the prefix cache."""
+
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
+                                                block_size=block_size)
+        token_ids = list(range(3 * block_size))
+
+        first_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids,
+            allocator=allocator,
+        )
+        second_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids,
+            allocator=allocator,
+        )
+
+        # Free each block in the first chain.
+        for block in first_chain:
+            allocator.free(block)
+
+        # Failed to reset prefix cache because some blocks are not freed yet.
+        assert not allocator.reset_prefix_cache()
+        assert allocator.get_prefix_cache_hit_rate() > 0.0
+
+        # Free each block in the second chain.
+        for block in second_chain:
+            allocator.free(block)
+
+        # Reset prefix cache.
+        assert allocator.reset_prefix_cache()
+        assert allocator.get_prefix_cache_hit_rate() == 0.0
+
     @staticmethod
     def create_immutable_chain(
         block_size: int,
         token_ids: List[int],
         allocator: PrefixCachingBlockAllocator,
+        extra_hash: Optional[int] = None,
     ) -> List[PrefixCachingBlock]:
         """Helper method which creates a chain of blocks.
         """
@@ -816,7 +855,9 @@ class TestPrefixCachingBlockAllocator:
                                         block_size:(block_number + 1) *
                                         block_size]
             prev_block = allocator.allocate_immutable_block(
-                prev_block=prev_block, token_ids=block_token_ids)
+                prev_block=prev_block,
+                token_ids=block_token_ids,
+                extra_hash=extra_hash)
             blocks.append(prev_block)
 
         return blocks
@@ -931,3 +972,61 @@ class TestComputedBlocksTracker:
         allocator.mark_blocks_as_computed([])
 
         assert tracker.get_num_cached_tokens(seq) == len(tokens)
+
+    @staticmethod
+    def test_correct_extra_hash():
+        """
+        Test that the block hash is correctly computed based on the extra hash,
+        ensuring it matches the allocator's block hash, specifically for the
+        LoRA case, and that the correct number of cached tokens is retrieved.
+        """
+        block_size = 4
+        allocator = CpuGpuBlockAllocator.create(
+            allocator_type="prefix_caching",
+            num_gpu_blocks=16,
+            num_cpu_blocks=16,
+            block_size=block_size,
+        )
+        gpu_allocator = allocator._allocators[Device.GPU]
+
+        tracker = ComputedBlocksTracker(
+            allocator=allocator,
+            block_size=block_size,
+            enable_caching=True,
+        )
+
+        tokens = list(range(block_size * 4))
+
+        # Create a dummy LoRA sequence with a specific LoRA ID.
+        lora_seq = create_dummy_lora_sequence(request_id=0,
+                                              token_ids=tokens,
+                                              block_size=block_size,
+                                              lora_int_id=1)
+
+        _ = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=tokens,
+            allocator=gpu_allocator,
+            extra_hash=lora_seq.extra_hash(),
+        )
+
+        allocator.mark_blocks_as_computed([])
+
+        # Create different dummy sequences that have the same token IDs
+        # but different LoRA IDs.
+        seq = create_dummy_sequence(request_id=1,
+                                    token_ids=tokens,
+                                    block_size=block_size)
+
+        different_lora_seq = create_dummy_lora_sequence(request_id=2,
+                                                        token_ids=tokens,
+                                                        block_size=block_size,
+                                                        lora_int_id=2)
+
+        # Due to the different LoRA IDs, corresponding blocks are not cached.
+        assert tracker.get_num_cached_tokens(seq) == 0
+        assert tracker.get_num_cached_tokens(different_lora_seq) == 0
+
+        # The number of cached tokens matches the length of the tokens
+        # for the cached LoRA sequence.
+        assert tracker.get_num_cached_tokens(lora_seq) == len(tokens)

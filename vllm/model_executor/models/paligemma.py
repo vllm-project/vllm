@@ -105,6 +105,11 @@ def input_processor_for_paligemma(ctx: InputContext,
         orig_prompt_ids.remove(hf_config.image_token_index)
 
     new_prompt = f"{image_token_str_pad}{bos_token}{orig_prompt}\n"
+
+    # The PaliGemma 2 tokenizer does not include a starting BOS token
+    if orig_prompt_ids[0] != hf_config.bos_token_id:
+        orig_prompt_ids = [hf_config.bos_token_id] + orig_prompt_ids
+
     new_token_ids = image_token_ids_pad + orig_prompt_ids + [108]  #newline
 
     # NOTE: Create a defensive copy of the original inputs
@@ -131,6 +136,17 @@ class PaliGemmaMultiModalProjector(nn.Module):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_paligemma)
 class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -149,7 +165,11 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
             projection_dim=config.vision_config.projection_dim)
 
         self.quant_config = quant_config
-        config.text_config.architectures = ["GemmaForCausalLM"]
+
+        if config.text_config.model_type == "gemma":
+            config.text_config.architectures = ["GemmaForCausalLM"]
+        else:
+            config.text_config.architectures = ["Gemma2ForCausalLM"]
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
