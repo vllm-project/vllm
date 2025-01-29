@@ -445,7 +445,7 @@ class Scheduler:
                 # TODO: Update the KV cache manager for prefix caching.
 
                 # Check for stop and update request state.
-                # This must be called before me make the EngineCoreOutput.
+                # This must be called before we make the EngineCoreOutput.
                 stopped = self._check_stop(request)
                 if stopped:
                     self._free_request(request)
