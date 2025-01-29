@@ -33,6 +33,7 @@ class FEATURES:
     BEST_OF: int = 1 << 2
     LOGITS_PROCESSORS: int = 1 << 3
     MULTI_STEP: int = 1 << 4
+    TORCH_COMPILE: int = 1 << 5
 
 
 FEATURE_STR: Dict[int, str] = {
@@ -41,13 +42,15 @@ FEATURE_STR: Dict[int, str] = {
     FEATURES.BEST_OF: 'BEST_OF',
     FEATURES.LOGITS_PROCESSORS: 'LOGITS_PROCESSORS',
     FEATURES.MULTI_STEP: 'MULTI_STEP',
+    FEATURES.TORCH_COMPILE: 'TORCH_COMPILE',
 }
 
 INCOMPATIBILITY_MATRIX: Dict[int, int] = {
     FEATURES.SPEC_DECODE: (FEATURES.STRUCTURED_OUTPUT
                            | FEATURES.BEST_OF
                            | FEATURES.MULTI_STEP
-                           | FEATURES.LOGITS_PROCESSORS),
+                           | FEATURES.LOGITS_PROCESSORS
+                           | FEATURES.TORCH_COMPILE),
     FEATURES.STRUCTURED_OUTPUT: (FEATURES.SPEC_DECODE
                                  | FEATURES.MULTI_STEP),
     FEATURES.BEST_OF: (FEATURES.SPEC_DECODE
@@ -58,6 +61,7 @@ INCOMPATIBILITY_MATRIX: Dict[int, int] = {
                           | FEATURES.BEST_OF
                           | FEATURES.STRUCTURED_OUTPUT
                           | FEATURES.LOGITS_PROCESSORS),
+    FEATURES.TORCH_COMPILE: (FEATURES.SPEC_DECODE),
 }
 
 

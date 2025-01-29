@@ -14,9 +14,9 @@ import torch
 from typing_extensions import TypeVar, deprecated
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
-                         VllmConfig)
+from vllm.config import (CompilationLevel, DecodingConfig, LoRAConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         SchedulerConfig, VllmConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
@@ -411,6 +411,10 @@ class LLMEngine:
             self._base_features.add(FEATURES.SPEC_DECODE)
         if self.scheduler_config.num_scheduler_steps > 1:
             self._base_features.add(FEATURES.MULTI_STEP)
+        if (self.vllm_config.compilation_config
+                and self.vllm_config.compilation_config.level
+                == CompilationLevel.PIECEWISE):
+            self._base_features.add(FEATURES.TORCH_COMPILE)
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
