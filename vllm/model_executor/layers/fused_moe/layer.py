@@ -173,14 +173,48 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
-        **kwargs,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None
     ):
-        #assert not use_grouped_topk, 'use_grouped_topk must be False on HPU'
-        # assert num_expert_group is None, ('num_expert_group is '
-        #                                   'not supported on HPU')
-        # assert topk_group is None, 'topk_group is not supported on HPU'
-        if layer is not None:
-            return layer.hpu_fused_moe(x, router_logits, top_k)
+        # #assert not use_grouped_topk, 'use_grouped_topk must be False on HPU'
+        # # assert num_expert_group is None, ('num_expert_group is '
+        # #                                   'not supported on HPU')
+        # # assert topk_group is None, 'topk_group is not supported on HPU'
+        # if layer is not None:
+        #     return layer.hpu_fused_moe(x, router_logits, top_k)
+        assert len(x.shape) == 2
+        import habana_frameworks.torch as htorch
+        htorch.core.mark_step()
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias)
+        # final_hidden_states = layer.hpu_fused_moe.MoeOp(
+        #     hidden_states=x,
+        #     expert_routing_table=topk_ids,
+        #     router_weights=topk_weights,
+        #     permuted_weights=True,
+        #     activation="silu",
+        # )
+        w13_list = [layer.w13_weight[i] for i in range(layer.w13_weight.shape[0])]
+        w2_list = [layer.w2_weight[i] for i in range(layer.w2_weight.shape[0])]
+        final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x,
+                                         expert_routing_table=topk_ids,
+                                         router_weights=topk_weights,
+                                         w12=w13_list,
+                                         w3=w2_list,
+                                         permuted_weights=True,
+                                         activation="silu",
+                                         experts_min=0,
+                                         experts_max=layer.MoeOp.num_experts)
+        return final_hidden_states.view(-1, x.shape[1])
 
     def forward_cpu(
         self,
