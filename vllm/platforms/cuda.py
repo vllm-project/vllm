@@ -130,7 +130,7 @@ class CudaPlatformBase(Platform):
             elif vllm_config.speculative_config:
                 if envs.VLLM_USE_V1:
                     raise NotImplementedError(
-                        "Speculative decoding is not yet support on VLLM V1.")
+                        "Speculative decoding is not yet supported on VLLM V1.")
                 else:
                     parallel_config.worker_cls = \
                         "vllm.spec_decode.spec_decode_worker.create_spec_worker"
