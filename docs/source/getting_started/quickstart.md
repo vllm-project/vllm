@@ -184,3 +184,7 @@ chat_response = client.chat.completions.create(
 )
 print("Chat response:", chat_response)
 ```
+
+## On Attention Backends
+
+Currently, vLLM supports multiple backends for efficient Attention computation, depending on target platform and accelerator architecture.   
