@@ -48,7 +48,6 @@ class Sampler(nn.Module):
 
         if needs_logprobs:
             # Get sampled and topk token logprobs.
-            # NOTE: CPU<>GPU sync happens here.
             logprobs, logprob_token_ids = self.get_logprobs(
                 raw_logits,
                 sampling_metadata.max_num_logprobs,
@@ -56,7 +55,7 @@ class Sampler(nn.Module):
         else:
             logprobs, logprob_token_ids = None, None
 
-        # NOTE: CPU-GPU synchronization happens here.
+        # These are GPU tensors.
         sampler_output = SamplerOutput(
             sampled_token_ids=sampled,
             logprob_token_ids=logprob_token_ids,
@@ -145,10 +144,7 @@ class Sampler(nn.Module):
         topk_indices = torch.cat((token_ids, topk_indices), dim=1)
         topk_logprobs = torch.cat((sampled_logprobs, topk_logprobs), dim=1)
 
-        # NOTE: returned tensors are unsynchronized
-        return topk_logprobs.to(device='cpu',
-                                non_blocking=True), topk_indices.to(
-                                    device='cpu', non_blocking=True)
+        return topk_logprobs, topk_indices
 
     def apply_penalties(
         self,

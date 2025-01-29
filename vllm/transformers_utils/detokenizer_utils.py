@@ -111,7 +111,24 @@ def convert_ids_tensor_to_tokens(
     # that they all happen independently.
     flat_token_ids = token_ids.reshape(-1,
                                        1).squeeze().to(torch.int32).tolist()
-    token_str_lst = tokenizer.convert_ids_to_tokens(flat_token_ids)
+    return convert_ids_list_to_tokens(tokenizer, flat_token_ids)
+
+
+def convert_ids_list_to_tokens(
+    tokenizer: AnyTokenizer,
+    token_ids: List[int],
+) -> List[str]:
+    """Detokenize the input ids individually.
+
+    Args:
+      tokenizer: tokenizer used by model under test
+      token_ids: convert these tokens (Python list form)
+
+    Returns:
+      Python list of token string representations
+    
+    """
+    token_str_lst = tokenizer.convert_ids_to_tokens(token_ids)
     replace_none_with_empty(token_str_lst)  # type: ignore
     return token_str_lst
 

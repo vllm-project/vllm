@@ -43,8 +43,8 @@ class EngineCoreOutput(
 
     request_id: str
     new_token_ids: List[int]
-    new_logprobs: List[torch.Tensor] = []
-    new_logprobs_token_ids: List[torch.Tensor] = []
+    new_logprobs: List[List[float]] = []
+    new_logprobs_token_ids: List[List[int]] = []
     new_prompt_logprobs: Optional[torch.Tensor] = None
     new_prompt_logprobs_token_ids: Optional[torch.Tensor] = None
     finish_reason: Optional[str] = None

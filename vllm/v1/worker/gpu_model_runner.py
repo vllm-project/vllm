@@ -869,6 +869,11 @@ class GPUModelRunner:
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
         sampled_token_ids = sampler_output.sampled_token_ids.tolist()
+        if sampler_output.logprob_token_ids is not None:
+            logprob_token_ids = sampler_output.logprob_token_ids.tolist()
+            logprobs = sampler_output.logprobs.tolist()
+        else:
+            (logprob_token_ids, logprobs) = (None, None)
         # Update with the actual token ids
         for i, req_state, seq_len in request_seq_lens:
             token_id = sampled_token_ids[i]
@@ -879,8 +884,8 @@ class GPUModelRunner:
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
-            logprob_token_ids_cpu=sampler_output.logprob_token_ids,
-            logprobs_cpu=sampler_output.logprobs,
+            logprob_token_ids_cpu=logprob_token_ids,
+            logprobs_cpu=logprobs,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
