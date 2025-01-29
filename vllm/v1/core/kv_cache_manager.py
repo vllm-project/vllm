@@ -4,14 +4,14 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
-from vllm.v1.core.hybrid_cache_manager.specialized_manager import MemoryPoolOperations, get_managers
+from vllm.v1.core.hybrid_cache_manager.specialized_manager import BlockPoolOperations, get_managers
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock, KVCacheBlocks,
                                          ReqKVCacheBlocks,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens)
-from vllm.v1.core.hybrid_cache_manager.utils import ComputedTokens, intersect_ranges
+from vllm.v1.core.hybrid_cache_manager.utils import PrefixLength, intersect_ranges
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 
@@ -62,8 +62,8 @@ class KVCacheManager:
         # TODO(Chen): add comments
         self.managers = get_managers(
             kv_cache_config,
-            MemoryPoolOperations(get_cached_block=self._get_cached_block,
-                                 get_null_block=self.get_null_block),
+            BlockPoolOperations(get_cached_block=self._get_cached_block,
+                                get_null_block=self.get_null_block),
         )
 
         # A Block pool of all kv-cache blocks.
@@ -118,7 +118,7 @@ class KVCacheManager:
             ])
 
         computed_blocks: ReqKVCacheBlocks = []  # group_id->[blocks]
-        computed_tokens: List[ComputedTokens] = []  # group_id->ComputedTokens
+        computed_tokens: List[PrefixLength] = []  # group_id->PrefixLength
         block_hashes = request.kv_block_hashes
         for i, manager in enumerate(self.managers):
             computed_tokens_i, computed_blocks_i = (
@@ -132,10 +132,7 @@ class KVCacheManager:
             # NOTE(woosuk): Since incomplete blocks are not eligible for
             # sharing, `num_computed_tokens` is always a multiple of
             # `block_size`.
-            if len(computed_tokens[0]) == 0:
-                num_computed_tokens = 0
-            else:
-                num_computed_tokens = computed_tokens[0][-1].end
+            num_computed_tokens = computed_tokens[0][-1].end
         else:
             # find the common cached prefix of all groups. This path also works
             # for the single group case, but it is less efficient.
@@ -640,8 +637,8 @@ class KVCacheManager:
     def get_null_block(self) -> KVCacheBlock:
         return self._null_block
 
-    def _get_common_computed_tokens(self,
-                                    computed_tokens: KVCacheBlocks) -> int:
+    def _get_common_computed_tokens(
+            self, computed_tokens: List[PrefixLength]) -> int:
         # TODO: add comments: the largest in the intersection, and alignment
         intersection = intersect_ranges(computed_tokens)
 
@@ -654,7 +651,7 @@ class KVCacheManager:
         num_computed_tokens = 0
         for range_ in intersection:
             aligned_end = cdiv(range_.end, alignment) * alignment
-            if aligned_end > range_.start:
+            if aligned_end >= range_.start:
                 num_computed_tokens = aligned_end
                 break
 
@@ -667,7 +664,7 @@ class KVCacheManager:
         removed_blocks = []
         for manager, req_blocks_of_group in zip(self.managers, req_blocks):
             removed_blocks.append(
-                manager.remove_dropped_blocks(req_blocks_of_group,
+                manager.remove_useless_blocks(req_blocks_of_group,
                                               num_computed_tokens))
         # TODO: better handling of free order (e.g., this order have problem
         # when different layer has different sliding window size)

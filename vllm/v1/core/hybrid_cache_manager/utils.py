@@ -3,22 +3,22 @@ from typing import List
 
 
 @dataclass
-class ComputedTokenRange:
+class PrefixLengthRange:
     """
-    (start, end]
+    [start, end]
     """
     start: int
     end: int
 
 
-ComputedTokens = List[ComputedTokenRange]
+PrefixLength = List[PrefixLengthRange]
 
 
 def intersect_two_ranges(
-        a: List[ComputedTokenRange],
-        b: List[ComputedTokenRange]) -> List[ComputedTokenRange]:
+        a: List[PrefixLengthRange],
+        b: List[PrefixLengthRange]) -> List[PrefixLengthRange]:
     """
-    Intersect two sorted lists of ComputedTokenRange intervals.
+    Intersect two sorted lists of PrefixLengthRange intervals.
     
     Args:
         a: List of intervals
@@ -34,7 +34,7 @@ def intersect_two_ranges(
         overlap_end = min(a[i].end, b[j].end)
 
         if overlap_start <= overlap_end:
-            result.append(ComputedTokenRange(overlap_start, overlap_end))
+            result.append(PrefixLengthRange(overlap_start, overlap_end))
 
         if a[i].end < b[j].end:
             i += 1
@@ -45,9 +45,9 @@ def intersect_two_ranges(
 
 
 def intersect_ranges(
-        ranges: List[List[ComputedTokenRange]]) -> List[ComputedTokenRange]:
+        ranges: List[List[PrefixLengthRange]]) -> List[PrefixLengthRange]:
     """
-    Intersect multiple lists of ComputedTokenRange intervals, each is sorted.
+    Intersect multiple lists of PrefixLengthRange intervals, each is sorted.
     
     Args:
         ranges: A list of lists of intervals 
