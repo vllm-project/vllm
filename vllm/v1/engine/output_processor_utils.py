@@ -8,6 +8,7 @@ from vllm.transformers_utils.detokenizer_utils import AnyTokenizer
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
+from vllm.v1.metrics.stats import RequestStateStats
 
 
 class RequestState:
@@ -20,6 +21,7 @@ class RequestState:
         prompt_token_ids: List[int],
         logprobs_processor: LogprobsProcessor,
         detokenizer: IncrementalDetokenizer,
+        arrival_time: float,
         queue: Optional[asyncio.Queue[RequestOutput]],
     ):
         self.request_id = request_id
@@ -31,6 +33,8 @@ class RequestState:
         self.detokenizer = detokenizer
         self.is_prefilling = True
         self.queue = queue
+
+        self.stats = RequestStateStats(last_token_time=arrival_time)
 
     @classmethod
     def from_new_request(
@@ -52,5 +56,6 @@ class RequestState:
                 tokenizer=tokenizer,
                 request=request,
             ),
+            arrival_time=request.arrival_time,
             queue=queue,
         )
