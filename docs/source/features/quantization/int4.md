@@ -1,19 +1,19 @@
-(int8)=
+(int4)=
 
-# INT8 W8A8
+# INT4 W4A16
 
-vLLM supports quantizing weights and activations to INT8 for memory savings and inference acceleration.
-This quantization method is particularly useful for reducing model size while maintaining good performance.
+vLLM supports quantizing weights and activations to INT4 for memory savings and inference acceleration.
+<!-- #TODO (Brian/Kyle) This quantization method is particularly useful for reducing model size while maintaining good performance. -->
 
-Please visit the HF collection of [quantized INT8 checkpoints of popular LLMs ready to use with vLLM](https://huggingface.co/collections/neuralmagic/int8-llms-for-vllm-668ec32c049dca0369816415).
+Please visit the HF collection of [quantized INT4 checkpoints of popular LLMs ready to use with vLLM](https://huggingface.co/collections/neuralmagic/int4-llms-for-vllm-668ec34bf3c9fa45f857df2c).
 
 :::{note}
-INT8 computation is supported on NVIDIA GPUs with compute capability > 7.5 (Turing, Ampere, Ada Lovelace, Hopper).
+INT4 computation is supported on NVIDIA GPUs with compute capability > 8.0 (Ampere, Ada Lovelace, Hopper).
 :::
 
 ## Prerequisites
 
-To use INT8 quantization with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:
+To use INT4 quantization with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:
 
 ```console
 pip install llmcompressor
@@ -78,8 +78,9 @@ from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 
 # Configure the quantization algorithms
 recipe = [
+    # TODO (Brian/Kyle) SmoothQuant is only meant for W8A8, should this be something else?
     SmoothQuantModifier(smoothing_strength=0.8),
-    GPTQModifier(targets="Linear", scheme="W8A8", ignore=["lm_head"]),
+    GPTQModifier(targets="Linear", scheme="W4A16", ignore=["lm_head"]),
 ]
 
 # Apply quantization
@@ -92,12 +93,12 @@ oneshot(
 )
 
 # Save the compressed model
-SAVE_DIR = MODEL_ID.split("/")[1] + "-W8A8-Dynamic-Per-Token"
+SAVE_DIR = MODEL_ID.split("/")[1] + "-W4A16-Dynamic-Per-Token"
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 ```
 
-This process creates a W8A8 model with weights and activations quantized to 8-bit integers.
+This process creates a W4A16 model with weights and activations quantized to 4-bit integers.
 
 ### 4. Evaluating Accuracy
 
@@ -105,14 +106,14 @@ After quantization, you can load and run the model in vLLM:
 
 ```python
 from vllm import LLM
-model = LLM("./Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token")
+model = LLM("./Meta-Llama-3-8B-Instruct-W4A16-Dynamic-Per-Token")
 ```
 
 To evaluate accuracy, you can use `lm_eval`:
 
 ```console
 $ lm_eval --model vllm \
-  --model_args pretrained="./Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token",add_bos_token=true \
+  --model_args pretrained="./Meta-Llama-3-8B-Instruct-W4A16-Dynamic-Per-Token",add_bos_token=true \
   --tasks gsm8k \
   --num_fewshot 5 \
   --limit 250 \
@@ -125,10 +126,12 @@ Quantized models can be sensitive to the presence of the `bos` token. Make sure 
 
 ## Best Practices
 
+<!-- #TODO (Brian/Kyle)
+
 - Start with 512 samples for calibration data (increase if accuracy drops)
 - Use a sequence length of 2048 as a starting point
 - Employ the chat template or instruction template that the model was trained with
-- If you've fine-tuned a model, consider using a sample of your training data for calibration
+- If you've fine-tuned a model, consider using a sample of your training data for calibration -->
 
 ## Troubleshooting and Support
 
