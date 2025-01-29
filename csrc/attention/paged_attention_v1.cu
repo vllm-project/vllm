@@ -30,7 +30,7 @@
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
-  VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                     \
+  err = VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(               \
       ((void*)vllm::paged_attention_v1_kernel<T, CACHE_T, HEAD_SIZE,        \
                                               BLOCK_SIZE, NUM_THREADS,      \
                                               KV_DTYPE, IS_BLOCK_SPARSE>),  \
@@ -96,6 +96,7 @@ void paged_attention_v1_launcher(
   dim3 block(NUM_THREADS);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  error_t err;
   switch (head_size) {
     // NOTE(woosuk): To reduce the compilation time, we only compile for the
     // head sizes that we use in the model. However, we can easily extend this
@@ -160,6 +161,9 @@ void paged_attention_v1_launcher(
       break;                                                      \
     case 32:                                                      \
       CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, 32, KV_DTYPE);        \
+      break;                                                      \
+    case 128:                                                      \
+      CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, 128, KV_DTYPE);        \
       break;                                                      \
     default:                                                      \
       TORCH_CHECK(false, "Unsupported block size: ", block_size); \
