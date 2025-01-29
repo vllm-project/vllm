@@ -208,6 +208,12 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_generation_tokens_sum",
     "vllm:request_generation_tokens_bucket",
     "vllm:request_generation_tokens_count",
+    "vllm:time_to_first_token_seconds_sum",
+    "vllm:time_to_first_token_seconds_bucket",
+    "vllm:time_to_first_token_seconds_count",
+    "vllm:time_per_output_token_seconds_sum",
+    "vllm:time_per_output_token_seconds_bucket",
+    "vllm:time_per_output_token_seconds_count",
 ]
 
 
