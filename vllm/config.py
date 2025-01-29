@@ -223,7 +223,6 @@ class ModelConfig:
                  override_pooler_config: Optional["PoolerConfig"] = None,
                  logits_processor_pattern: Optional[str] = None,
                  generation_config: Optional[str] = None) -> None:
-=======
     def __init__(
         self,
         model: str,
