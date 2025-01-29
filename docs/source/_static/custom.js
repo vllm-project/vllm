@@ -1,3 +1,4 @@
+// Add RunLLM widget
 document.addEventListener("DOMContentLoaded", function () {
     var script = document.createElement("script");
     script.type = "module";
@@ -17,6 +18,7 @@ document.addEventListener("DOMContentLoaded", function () {
     document.head.appendChild(script);
   });
 
+// Update URL search params when tab is clicked
   document.addEventListener("DOMContentLoaded", function () {
     const tabs = document.querySelectorAll(".sd-tab-label");
 
