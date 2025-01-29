@@ -190,7 +190,6 @@ class ModelConfig:
         factors.append(self.rope_theta)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
-<<<<<<< HEAD
     def __init__(self,
                  model: str,
                  task: Union[TaskOption, Literal["draft"]],
