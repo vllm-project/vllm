@@ -205,8 +205,9 @@ def fused_moe_kernel(
 
 
 def moe_align_block_size(
-        topk_ids: torch.Tensor, block_size: int,
-        num_experts: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        topk_ids: torch.Tensor, block_size: int, num_experts: int,
+        expert_map: torch.Tensor = None) \
+            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
     size for matrix multiplication.
@@ -216,6 +217,9 @@ def moe_align_block_size(
         top-k expert indices for each token.
     - block_size: The block size used in block matrix multiplication.
     - num_experts: The total number of experts.
+    - expert_map: A tensor of shape [num_experts] that maps the expert index
+        from the global space to the local expert index space of the current
+        expert parallel shard.
 
     Returns:
     - sorted_token_ids: A tensor containing the sorted token indices according
@@ -258,6 +262,8 @@ def moe_align_block_size(
                                       device=topk_ids.device)
     ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
                              expert_ids, num_tokens_post_pad)
+    if expert_map is not None:
+        expert_ids = expert_map[expert_ids]
     return sorted_ids, expert_ids, num_tokens_post_pad
 
 
@@ -551,14 +557,17 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           topk_ids: torch.Tensor,
                           use_fp8_w8a8: bool = False,
                           use_int8_w8a16: bool = False,
+                          global_num_experts: int = -1,
+                          expert_map: Optional[torch.Tensor] = None,
                           w1_scale: Optional[torch.Tensor] = None,
                           w2_scale: Optional[torch.Tensor] = None,
                           a1_scale: Optional[torch.Tensor] = None,
                           a2_scale: Optional[torch.Tensor] = None,
                           block_shape: Optional[List[int]] = None) -> None:
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
-                       use_fp8_w8a8, use_int8_w8a16, w1_scale, w2_scale,
-                       a1_scale, a2_scale, block_shape)
+                       use_fp8_w8a8, use_int8_w8a16, global_num_experts,
+                       expert_map, w1_scale, w2_scale, a1_scale, a2_scale, 
+                       block_shape)
 
 
 def inplace_fused_experts_fake(
@@ -569,6 +578,8 @@ def inplace_fused_experts_fake(
         topk_ids: torch.Tensor,
         use_fp8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         w1_scale: Optional[torch.Tensor] = None,
         w2_scale: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
@@ -593,13 +604,16 @@ def outplace_fused_experts(
         topk_ids: torch.Tensor,
         use_fp8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         w1_scale: Optional[torch.Tensor] = None,
         w2_scale: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
         block_shape: Optional[List[int]] = None) -> torch.Tensor:
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
-                              False, use_fp8_w8a8, use_int8_w8a16, w1_scale,
+                              False, use_fp8_w8a8, use_int8_w8a16, 
+                              global_num_experts, expert_map, w1_scale,
                               w2_scale, a1_scale, a2_scale, block_shape)
 
 
@@ -611,6 +625,8 @@ def outplace_fused_experts_fake(
         topk_ids: torch.Tensor,
         use_fp8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         w1_scale: Optional[torch.Tensor] = None,
         w2_scale: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
@@ -635,6 +651,8 @@ def fused_experts(hidden_states: torch.Tensor,
                   inplace: bool = False,
                   use_fp8_w8a8: bool = False,
                   use_int8_w8a16: bool = False,
+                  global_num_experts: int = -1,
+                  expert_map: Optional[torch.Tensor] = None,
                   w1_scale: Optional[torch.Tensor] = None,
                   w2_scale: Optional[torch.Tensor] = None,
                   a1_scale: Optional[torch.Tensor] = None,
@@ -679,6 +697,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                        inplace: bool = False,
                        use_fp8_w8a8: bool = False,
                        use_int8_w8a16: bool = False,
+                       global_num_experts: int = -1,
+                       expert_map: Optional[torch.Tensor] = None,
                        w1_scale: Optional[torch.Tensor] = None,
                        w2_scale: Optional[torch.Tensor] = None,
                        a1_scale: Optional[torch.Tensor] = None,
@@ -696,6 +716,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     num_tokens, _ = hidden_states.shape
     E, N, _ = w1.shape
+    if global_num_experts == -1:
+        global_num_experts = E
     top_k_num = topk_ids.shape[1]
     # We execute the fused_moe kernel in chunks to circumvent this issue:
     # https://github.com/vllm-project/vllm/issues/5938
@@ -764,7 +786,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
         # sorted_token_ids, expert_ids, num_tokens_post_padded = (
-        #     moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'], E))
+        #     moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'], 
+        #                             global_num_experts, expert_map))
 
         # invoke_fused_moe_kernel(curr_hidden_states,         # A
         #                         w1,                         # B
@@ -824,6 +847,8 @@ def fused_moe(
     custom_routing_function: Optional[Callable] = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
@@ -852,6 +877,11 @@ def fused_moe(
         products for w1 and w2. Defaults to False.
     - use_int8_w8a16 (bool): If True, use fp8 arithmetic to compute the inner
         products for w1 and w2. Defaults to False.
+    - global_num_experts (int): The total number of experts in the global
+        expert space.
+    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices 
+        from the global expert space to the local expert space of the expert 
+        parallel shard.
     - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
         w1.
     - w2_scale (Optional[torch.Tensor]): Optional scale to be used for
@@ -889,6 +919,8 @@ def fused_moe(
                          inplace=inplace,
                          use_fp8_w8a8=use_fp8_w8a8,
                          use_int8_w8a16=use_int8_w8a16,
+                         global_num_experts=global_num_experts,
+                         expert_map=expert_map,
                          w1_scale=w1_scale,
                          w2_scale=w2_scale,
                          a1_scale=a1_scale,
