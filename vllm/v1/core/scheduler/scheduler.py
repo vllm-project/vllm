@@ -202,7 +202,7 @@ class Scheduler(SchedulerInterface):
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
                 if num_new_tokens == 0:
-                    # The happens when prompt length is divisible by the block
+                    # This happens when prompt length is divisible by the block
                     # size and all blocks are cached. Now we force to recompute
                     # the last block. Note that we have to re-compute an entire
                     # block because allocate_slots() assumes num_computed_tokens
