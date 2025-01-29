@@ -99,7 +99,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 )
             else:
                 raise NotImplementedError("CPU MOE only supports x86 arch.")
-
+            
     def apply(
         self,
         layer: torch.nn.Module,
@@ -113,6 +113,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        expert_list: Optional[List[int]] = None,
         print_args = -1
     ) -> torch.Tensor:
         return self.forward(x=x,
@@ -126,6 +127,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                             custom_routing_function=custom_routing_function,
                             scoring_func=scoring_func,
                             e_score_correction_bias=e_score_correction_bias,
+                            expert_list=expert_list,
                             print_args=print_args)
 
     def forward_cuda(
@@ -141,6 +143,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        expert_list: Optional[List[int]] = None,
         print_args = -1
     ) -> torch.Tensor:
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -280,9 +283,6 @@ class FusedMoE(torch.nn.Module):
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} must be divisible by "
                 f"the expert parallel size {self.ep_size}.")
-        print(f"\033[91mCreating MoE with TP, EP, TP within EP size of:\033[0m "
-              f"{self.tp_size}, {self.ep_size}, {self.tp_size // self.ep_size}")
-        
         self.tp_size = self.tp_size // self.ep_size
         self.top_k = top_k
         self.num_experts = num_experts
@@ -298,6 +298,19 @@ class FusedMoE(torch.nn.Module):
         self.custom_routing_function = custom_routing_function
         self.scoring_func = scoring_func
         self.e_score_correction_bias = e_score_correction_bias
+        
+        ep_rank = get_tensor_model_parallel_rank() // self.tp_size
+        tp_rank = get_tensor_model_parallel_rank() % self.tp_size
+        self.expert_list = range(ep_rank * (num_experts // self.ep_size),
+                             (ep_rank + 1) * (num_experts // self.ep_size))
+        
+        print(f"\033[91mCreating MoE Layer:\033[0m"
+              f"\t\033[92mNumber of Experts:\033[0m {num_experts}, "
+              f"\t\033[92mTP Size:\033[0m {self.tp_size}, "
+              f"\t\033[92mGlobal TP Rank:\033[0m {get_tensor_model_parallel_rank()}, "
+              f"\t\033[92mTP Rank:\033[0m {tp_rank}, "
+              f"\t\033[92mEP Rank:\033[0m {ep_rank}, "
+              f"\t\033[92mExpert List:\033[0m {self.expert_list}")
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -312,7 +325,7 @@ class FusedMoE(torch.nn.Module):
 
         self.quant_method.create_weights(
             layer=self,
-            num_experts=num_experts,
+            num_experts=len(self.expert_list),
             hidden_size=hidden_size,
             intermediate_size=self.intermediate_size_per_partition,
             params_dtype=params_dtype,
@@ -416,10 +429,31 @@ class FusedMoE(torch.nn.Module):
         else:
             assert shard_id in ("w1", "w3")
             expert_data.copy_(loaded_weight)
+            
+    def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
+        if expert_id not in self.expert_list:
+            return -1
+        return self.expert_list.index(expert_id)
 
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: str, expert_id: int) -> None:
+        # print(f"\033[1m//// Weight loader Arguments "
+        #       f"(Rank {get_tensor_model_parallel_rank()}) ////\033[0m")
+        # args = locals()
+        # for arg_name, arg_value in args.items():
+        #     if isinstance(arg_value, torch.Tensor):
+        #         print(f"\033[91m{arg_name} sizes\033[0m: {arg_value.size()}")
+        #         num_elements = arg_value.numel()
+        #         if num_elements < 32*6:
+        #             print(f"\033[91m{arg_name}\033[0m: {arg_value}")
+        #     else:
+        #         print(f"\033[91m{arg_name}\033[0m: {arg_value}")
+        # print("")
+        
+        expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
+        if expert_id == -1:
+            return
 
         # compressed-tensors checkpoints with packed weights are stored flipped
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
@@ -441,7 +475,7 @@ class FusedMoE(torch.nn.Module):
         SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
 
         expert_data = param.data[expert_id]
-        tp_rank = get_tensor_model_parallel_rank()
+        tp_rank = get_tensor_model_parallel_rank() % self.tp_size
 
         # is_transposed: if the dim to shard the weight
         # should be flipped. Required by GPTQ, compressed-tensors
@@ -603,9 +637,11 @@ class FusedMoE(torch.nn.Module):
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
+            expert_list=self.expert_list,
             print_args=print_args)
 
-        if self.reduce_results and self.tp_size > 1:
+        if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+            # Default set to False. (May have to add shared expert outputs.)
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 

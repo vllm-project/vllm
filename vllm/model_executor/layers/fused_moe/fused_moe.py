@@ -696,6 +696,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     num_tokens, _ = hidden_states.shape
     E, N, _ = w1.shape
+    top_k_num = topk_ids.shape[1]
     # We execute the fused_moe kernel in chunks to circumvent this issue:
     # https://github.com/vllm-project/vllm/issues/5938
     CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
@@ -708,20 +709,20 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         try_get_optimal_moe_config,
         w1.shape,
         w2.shape,
-        topk_ids.shape[1],
+        top_k_num,
         config_dtype,
         block_shape=block_shape,
     )
 
     config = get_config_func(M)
 
-    intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
+    intermediate_cache1 = torch.empty((M, top_k_num, N),
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
-    intermediate_cache2 = torch.empty((M * topk_ids.shape[1], N // 2),
+    intermediate_cache2 = torch.empty((M * top_k_num, N // 2),
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
-    intermediate_cache3 = torch.empty((M, topk_ids.shape[1], w2.shape[1]),
+    intermediate_cache3 = torch.empty((M, top_k_num, w2.shape[1]),
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
 
@@ -762,50 +763,50 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'], E))
+        # sorted_token_ids, expert_ids, num_tokens_post_padded = (
+        #     moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'], E))
 
-        invoke_fused_moe_kernel(curr_hidden_states,
-                                w1,
-                                intermediate_cache1,
-                                a1_scale,
-                                w1_scale,
-                                curr_topk_weights,
-                                curr_topk_ids,
-                                sorted_token_ids,
-                                expert_ids,
-                                num_tokens_post_padded,
-                                False,
-                                topk_ids.shape[1],
-                                config,
-                                compute_type=compute_type,
-                                use_fp8_w8a8=use_fp8_w8a8,
-                                use_int8_w8a16=use_int8_w8a16,
-                                block_shape=block_shape)
+        # invoke_fused_moe_kernel(curr_hidden_states,         # A
+        #                         w1,                         # B
+        #                         intermediate_cache1,        # C
+        #                         a1_scale,                   # A_scale
+        #                         w1_scale,                   # B_scale
+        #                         curr_topk_weights,          # topk_weights
+        #                         curr_topk_ids,              # topk_ids
+        #                         sorted_token_ids,           # sorted_token_ids
+        #                         expert_ids,                 # expert_ids
+        #                         num_tokens_post_padded, # num_tokens_post_padded
+        #                         False,                      # mul_routed_weight
+        #                         top_k_num,          # top_k
+        #                         config,                     # config
+        #                         compute_type=compute_type,  
+        #                         use_fp8_w8a8=use_fp8_w8a8,  
+        #                         use_int8_w8a16=use_int8_w8a16,
+        #                         block_shape=block_shape)
 
-        torch.ops._C.silu_and_mul(intermediate_cache2,
-                                  intermediate_cache1.view(-1, N))
+        # torch.ops._C.silu_and_mul(intermediate_cache2,
+        #                           intermediate_cache1.view(-1, N))
 
-        invoke_fused_moe_kernel(intermediate_cache2,
-                                w2,
-                                intermediate_cache3,
-                                a2_scale,
-                                w2_scale,
-                                curr_topk_weights,
-                                curr_topk_ids,
-                                sorted_token_ids,
-                                expert_ids,
-                                num_tokens_post_padded,
-                                True,
-                                1,
-                                config,
-                                compute_type=compute_type,
-                                use_fp8_w8a8=use_fp8_w8a8,
-                                use_int8_w8a16=use_int8_w8a16,
-                                block_shape=block_shape)
+        # invoke_fused_moe_kernel(intermediate_cache2,
+        #                         w2,
+        #                         intermediate_cache3,
+        #                         a2_scale,
+        #                         w2_scale,
+        #                         curr_topk_weights,
+        #                         curr_topk_ids,
+        #                         sorted_token_ids,
+        #                         expert_ids,
+        #                         num_tokens_post_padded,
+        #                         True,
+        #                         1,
+        #                         config,
+        #                         compute_type=compute_type,
+        #                         use_fp8_w8a8=use_fp8_w8a8,
+        #                         use_int8_w8a16=use_int8_w8a16,
+        #                         block_shape=block_shape)
 
-        ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
-                    out_hidden_states[begin_chunk_idx:end_chunk_idx])
+        # ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
+        #             out_hidden_states[begin_chunk_idx:end_chunk_idx])
     return out_hidden_states
 
 # Deepseek V1
