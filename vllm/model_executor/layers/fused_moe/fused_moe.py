@@ -599,7 +599,10 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
 
 
 def get_config_file_name(E: int, N: int, dtype: Optional[str]) -> str:
-    device_name = current_platform.get_device_name().replace(" ", "_")
+    device_name = current_platform.get_device_name()
+    if isinstance(device_name, bytes):
+        device_name = device_name.decode('utf-8')
+    device_name = device_name.replace(" ", "_")
     dtype_selector = "" if not dtype else f",dtype={dtype}"
     return f"E={E},N={N},device_name={device_name}{dtype_selector}.json"
 
