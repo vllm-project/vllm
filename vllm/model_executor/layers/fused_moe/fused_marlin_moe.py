@@ -198,7 +198,7 @@ def fused_marlin_moe(
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
-    assert hidden_states.dtype == torch.float16
+    assert hidden_states.dtype == torch.float16, "Please cast your model to float16"
     assert num_bits in [4, 8]
 
     has_no_act_order = (g_idx1 is None and g_idx2 is None
