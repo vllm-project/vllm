@@ -261,7 +261,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
 
     # if set, vllm will call logits processors in a thread pool with this many
-    # threads.
+    # threads. This is useful when using custom logits processors that either
+    # (a) launch additional CUDA kernels or (b) do significant CPU-bound work
+    # while not holding the python GIL, or both.
     "VLLM_LOGITS_PROCESSOR_THREADS":
     lambda: int(os.getenv("VLLM_LOGITS_PROCESSOR_THREADS", "0"))
     if "VLLM_LOGITS_PROCESSOR_THREADS" in os.environ else None,

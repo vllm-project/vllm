@@ -154,12 +154,12 @@ def _apply_logits_processors(
                     logits_row_ids_and_logits_row_futures.append(
                         (logits_row_idx,
                          _logits_processor_threadpool.submit(
-                             _apply_logics_processors_single_seq, logits_row,
+                             _apply_logits_processors_single_seq, logits_row,
                              logits_processors, past_tokens_ids,
                              prompt_tokens_ids)))
                 else:
                     logits[logits_row_idx] = \
-                        _apply_logics_processors_single_seq(
+                        _apply_logits_processors_single_seq(
                             logits_row, logits_processors, past_tokens_ids,
                             prompt_tokens_ids)
 
@@ -175,7 +175,7 @@ def _apply_logits_processors(
     return logits
 
 
-def _apply_logics_processors_single_seq(logits_row, logits_processors,
+def _apply_logits_processors_single_seq(logits_row, logits_processors,
                                         past_tokens_ids,
                                         prompt_tokens_ids) -> torch.Tensor:
     for logits_processor in logits_processors:
