@@ -6,7 +6,8 @@ import torch
 from vllm.logger import init_logger
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.detokenizer_utils import (
-    AnyTokenizer, convert_id_to_token, convert_ids_tensor_to_tokens)
+    AnyTokenizer, convert_id_to_token, convert_ids_list_to_tokens,
+    convert_ids_tensor_to_tokens)
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -49,8 +50,8 @@ class LogprobsProcessor:
     def _update_sample_logprobs(
         self,
         sampled_token_ids: List[int],
-        token_ids_lst: List[torch.Tensor],
-        sample_logprobs_lst: List[torch.Tensor],
+        token_ids_lst: List[List[int]],
+        sample_logprobs_lst: List[List[float]],
     ) -> None:
         """Incorporate sample logprobs from this step, if they exist.
 
@@ -76,24 +77,24 @@ class LogprobsProcessor:
                 sampled_token_ids, sample_logprobs_lst, token_ids_lst):
 
             # Split into sampled vs top_k.
-            assert sampled_token_id == token_ids[0].item(), (
+            assert sampled_token_id == token_ids[0], (
                 "Sampler concats the sampled token logprob in front of "
                 f"the topk logprobs, but got {sampled_token_id=} and "
-                f"{token_ids[0].item()=}")
-            sampled_token_logprob = logprobs[0].item()
+                f"{token_ids[0]=}")
+            sampled_token_logprob = logprobs[0]
             topk_token_ids = token_ids[1:]
             topk_logprobs = logprobs[1:]
 
             # Detokenize non-incrementally.
-            decoded_tokens = convert_ids_tensor_to_tokens(
+            decoded_tokens = convert_ids_list_to_tokens(
                 self.tokenizer, topk_token_ids)
 
             # Make the dict of top-token Logprob objects associated with the
             # current sequence offset
             if sampled_token_id in topk_token_ids:
                 pos_logprobs_dict = self._make_pos_logprob_dict(
-                    topk_logprobs.tolist(), topk_token_ids.tolist(),
-                    decoded_tokens, self.num_logprobs)
+                    topk_logprobs, topk_token_ids, decoded_tokens,
+                    self.num_logprobs)
             else:
                 # If the sampled token is not one of the top tokens
                 # at this sequence offset, inject the sampled token
@@ -103,11 +104,11 @@ class LogprobsProcessor:
                                                  self.tokenizer,
                                                  sampled_token_id))
                 pos_logprobs_dict = self._make_pos_logprob_dict(
-                    topk_logprobs.tolist(), topk_token_ids.tolist(),
-                    decoded_tokens, self.num_logprobs,
-                    (sampled_token_id, sample_logprob_obj))
+                    topk_logprobs, topk_token_ids, decoded_tokens,
+                    self.num_logprobs, (sampled_token_id, sample_logprob_obj))
 
             self.logprobs.append(pos_logprobs_dict)
+            assert self.cumulative_logprob is not None
             self.cumulative_logprob += sampled_token_logprob
 
     def _update_prompt_logprobs(

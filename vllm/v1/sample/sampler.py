@@ -57,6 +57,7 @@ class Sampler(nn.Module):
         else:
             logprobs, logprob_token_ids, ranks = None, None, None
 
+        # These are GPU tensors.
         sampler_output = SamplerOutput(
             sampled_token_ids=sampled,
             logprob_token_ids=logprob_token_ids,
@@ -148,7 +149,6 @@ class Sampler(nn.Module):
 
         sampled_token_ranks = (logprobs >= sampled_logprobs).sum(-1)
 
-        # NOTE: the returned tensors are still on-device
         return topk_logprobs, topk_indices, sampled_token_ranks
 
     def apply_penalties(

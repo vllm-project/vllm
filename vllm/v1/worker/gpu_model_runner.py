@@ -136,13 +136,7 @@ class GPUModelRunner:
         self.num_sms = self.device_properties.multi_processor_count
 
         # Persistent buffers for CUDA graphs.
-        # Sizing `input_ids` to `max_num_tokens + 1` allows
-        # `input_ids` to store the first token of the next
-        # prompt chunk ("peek token") if a partial prefill
-        # is scheduled in this step. The peek token is
-        # required to compute prompt logprobs for a partial
-        # prefill chunk.
-        self.input_ids = torch.zeros(self.max_num_tokens + 1,
+        self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
                                      device=self.device)
         self.positions = torch.zeros(self.max_num_tokens,
@@ -183,7 +177,7 @@ class GPUModelRunner:
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
         # not make any assumptions about the values in these tensors.
-        self.input_ids_cpu = torch.zeros(self.max_num_tokens + 1,
+        self.input_ids_cpu = torch.zeros(self.max_num_tokens,
                                          dtype=torch.int32,
                                          device="cpu",
                                          pin_memory=self.pin_memory)
@@ -397,27 +391,11 @@ class GPUModelRunner:
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
-        # Number of input id tokens to copy from CPU to GPU
-        num_copy_tokens = total_num_scheduled_tokens
-        flat_token_ids_cpu_tensor = (
-            self.input_batch.token_ids_cpu_tensor.flatten())
-        partial_req_id = scheduler_output.partial_req_id
-        if (partial_req_id
-                and partial_req_id in self.input_batch.num_prompt_logprobs):
-            # To facilitate computing prompt logprobs of the last token
-            # in a partial prefill chunk, inject the first token of the next
-            # prefill chunk ("peek token") at the last index of the
-            # CPU-side input ids tensor; note that this token is not passed
-            # as input to the model
-            num_copy_tokens = total_num_scheduled_tokens + 1
-            self.input_ids_cpu[
-                total_num_scheduled_tokens] = flat_token_ids_cpu_tensor[
-                    token_indices[-1] + 1]
 
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
-        torch.index_select(flat_token_ids_cpu_tensor,
+        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
@@ -450,11 +428,8 @@ class GPUModelRunner:
         max_seq_len = self.seq_lens_np[:num_reqs].max()
 
         # Copy the tensors to the GPU.
-        # If prompt logprobs must be computed for a partial request,
-        # this line also copies the "peek token" to GPU, as the last
-        # element of `input_ids`
-        self.input_ids[:num_copy_tokens].copy_(
-            self.input_ids_cpu[:num_copy_tokens], non_blocking=True)
+        self.input_ids[:total_num_scheduled_tokens].copy_(
+            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
         if self.model_config.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
@@ -812,53 +787,55 @@ class GPUModelRunner:
             sampling_metadata=sampling_metadata,
         )
 
-        sampled_token_ids_cpu = sampler_output.sampled_token_ids.to(
-            'cpu', non_blocking=True)
-
         #TODO also copy logprobs and ranks tensors to CPU here
 
         # Compute prompt logprobs if needed.
         # NOTE(rob): for simplicity, compute prompt logprobs for each
         # prompt separately. Prompt logprobs are rare (used for eval),
         # and few prefills per batch, so prioritize simple over optimal.
-        prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
+        prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor,
+                                              torch.Tensor]] = {}
         if self.input_batch.num_prompt_logprobs:
             # Prompt token ids are required for computing prompt logprobs
             assert input_ids is not None
         for (request_id, num_prompt_logprobs
              ) in self.input_batch.num_prompt_logprobs.items():
 
-            # Compute the positions of the prompt tokens
+            request = self.requests[request_id]
+            req_idx = self.input_batch.req_id_to_index[request_id]
+            prompt_token_ids = torch.tensor(request.prompt_token_ids)
+            is_partial_req = request_id == scheduler_output.partial_req_id
+
+            # Get number of prompt logits generated.
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 request_id]
-            is_partial_req = request_id == scheduler_output.partial_req_id
-            req_idx = self.input_batch.req_id_to_index[request_id]
-            # Index of this request's first scheduled prompt token within
-            # model input token vector
-            start_idx_in_inp_ids = self.query_start_loc_np[req_idx].item()
-            # Unless request is partial,
-            num_scheduled_prompt_tokens = (
-                num_scheduled_tokens if is_partial_req
-                # Exclude the sample token if there is one.
-                else num_scheduled_tokens - 1)
-            end_idx_in_inp_ids = (start_idx_in_inp_ids +
-                                  num_scheduled_prompt_tokens)
-            prompt_hidden_states = (
-                hidden_states[start_idx_in_inp_ids:end_idx_in_inp_ids])
+            num_prompt_logits = (num_scheduled_tokens if is_partial_req else
+                                 num_scheduled_tokens - 1)
+
+            # Get start and end indices of the hidden states
+            # corresponding to prompt logits
+            start_idx_in_hidden_states = self.query_start_loc_np[req_idx].item(
+            )
+            end_idx_in_hidden_states = (start_idx_in_hidden_states +
+                                        num_prompt_logits)
+
+            # Compute prompt logits from prompt hidden states
+            prompt_hidden_states = (hidden_states[
+                start_idx_in_hidden_states:end_idx_in_hidden_states])
             logits = self.model.compute_logits(prompt_hidden_states, None)
-            # - Offset `prompt_indices` by 1 because (in general) the logprob
-            #   distribution at sequence position i is predicting position i+1.
-            #   Note: for partial prefill chunks, `end_idx_in_inp_idx + 1`
-            #   points to the "peek token" index i.e. the first token of the
-            #   next chunk, which is what is predicted by the prompt logprobs
-            #   of the last token in the current chunk.
-            chunk_prompt_token_ids = self.input_ids[start_idx_in_inp_ids +
-                                                    1:end_idx_in_inp_ids + 1]
+
+            # Get start and end indices of the prompt token ids
+            # corresponding to the prompt logits
+            start_idx_in_tokens = request.num_computed_tokens + 1
+            end_idx_in_tokens = start_idx_in_tokens + num_prompt_logits
+
             # Compute prompt logprobs.
             prompt_logprobs_dict[request_id] = self.model.sampler.get_logprobs(
                 logits,
                 num_prompt_logprobs,
-                token_ids=chunk_prompt_token_ids  #type: ignore
+                token_ids=prompt_token_ids[
+                    start_idx_in_tokens:end_idx_in_tokens].to(
+                        self.device)  # copy to gpu
             )
 
         # TODO(woosuk): The following loop can be slow since it iterates over
@@ -893,7 +870,12 @@ class GPUModelRunner:
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
-        sampled_token_ids = sampled_token_ids_cpu.tolist()
+        sampled_token_ids = sampler_output.sampled_token_ids.tolist()
+        if sampler_output.logprob_token_ids is not None:
+            logprob_token_ids = sampler_output.logprob_token_ids.tolist()
+            logprobs = sampler_output.logprobs.tolist()
+        else:
+            (logprob_token_ids, logprobs) = (None, None)
         # Update with the actual token ids
         for i, req_state, seq_len in request_seq_lens:
             token_id = sampled_token_ids[i]
@@ -904,8 +886,8 @@ class GPUModelRunner:
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
-            logprob_token_ids_cpu=sampler_output.logprob_token_ids,
-            logprobs_cpu=sampler_output.logprobs,
+            logprob_token_ids_cpu=logprob_token_ids,
+            logprobs_cpu=logprobs,
             token_ranks_cpu=sampler_output.sampled_token_ranks,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )

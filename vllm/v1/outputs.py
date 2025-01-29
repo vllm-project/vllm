@@ -32,9 +32,9 @@ class ModelRunnerOutput:
     sampled_token_ids: List[int]
 
     # [num_reqs, max_num_logprobs + 1]
-    logprob_token_ids_cpu: Optional[torch.Tensor]
+    logprob_token_ids_cpu: Optional[List[List[int]]]
     # [num_reqs, max_num_logprobs + 1]
-    logprobs_cpu: Optional[torch.Tensor]
+    logprobs_cpu: Optional[List[List[float]]]
     # [num_reqs]
     token_ranks_cpu: Optional[torch.Tensor]
 

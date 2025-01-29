@@ -3,8 +3,6 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
                     Tuple, Union)
 
-import torch
-
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -463,11 +461,15 @@ class Scheduler:
                 stopped = self._check_stop(request)
 
                 # Extract sample logprobs if needed.
+                logprobs_token_ids: List[List[int]] = []
+                logprobs: List[List[float]] = []
                 if request.sampling_params.logprobs:
                     assert logprobs_token_ids_cpu is not None
                     assert logprobs_cpu is not None
                     assert token_ranks_cpu is not None
                     # Here we assume there is 1 generated token per step.
+                    # Once we support generating N tokens per step the
+                    # outer list should be length-N
                     logprobs_token_ids = [logprobs_token_ids_cpu[req_index]]
                     logprobs = [logprobs_cpu[req_index]]
                     token_ranks = [token_ranks_cpu[req_index]]
