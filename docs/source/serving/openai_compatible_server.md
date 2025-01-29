@@ -161,11 +161,11 @@ print(completion._request_id)
 
 The `vllm serve` command is used to launch the OpenAI-compatible server.
 
-```{argparse}
+:::{argparse}
 :module: vllm.entrypoints.openai.cli_args
 :func: create_parser_for_docs
 :prog: vllm serve
-```
+:::
 
 #### Configuration file
 
@@ -188,10 +188,10 @@ To use the above config file:
 vllm serve SOME_MODEL --config config.yaml
 ```
 
-```{note}
+:::{note}
 In case an argument is supplied simultaneously using command line and the config file, the value from the command line will take precedence.
 The order of priorities is `command line > config file values > defaults`.
-```
+:::
 
 ## API Reference
 
@@ -208,19 +208,19 @@ Code example: <gh-file:examples/online_serving/openai_completion_client.py>
 
 The following [sampling parameters](#sampling-params) are supported.
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-completion-sampling-params
 :end-before: end-completion-sampling-params
-```
+:::
 
 The following extra parameters are supported:
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-completion-extra-params
 :end-before: end-completion-extra-params
-```
+:::
 
 (chat-api)=
 
@@ -240,19 +240,19 @@ Code example: <gh-file:examples/online_serving/openai_chat_completion_client.py>
 
 The following [sampling parameters](#sampling-params) are supported.
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-chat-completion-sampling-params
 :end-before: end-chat-completion-sampling-params
-```
+:::
 
 The following extra parameters are supported:
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-chat-completion-extra-params
 :end-before: end-chat-completion-extra-params
-```
+:::
 
 (embeddings-api)=
 
@@ -264,9 +264,9 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 If the model has a [chat template](#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](#chat-api))
 which will be treated as a single prompt to the model.
 
-```{tip}
+:::{tip}
 This enables multi-modal inputs to be passed to embedding models, see [this page](#multimodal-inputs) for details.
-```
+:::
 
 Code example: <gh-file:examples/online_serving/openai_embedding_client.py>
 
@@ -274,27 +274,27 @@ Code example: <gh-file:examples/online_serving/openai_embedding_client.py>
 
 The following [pooling parameters](#pooling-params) are supported.
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-embedding-pooling-params
 :end-before: end-embedding-pooling-params
-```
+:::
 
 The following extra parameters are supported by default:
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-embedding-extra-params
 :end-before: end-embedding-extra-params
-```
+:::
 
 For chat-like input (i.e. if `messages` is passed), these extra parameters are supported instead:
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-chat-embedding-extra-params
 :end-before: end-chat-embedding-extra-params
-```
+:::
 
 (tokenizer-api)=
 
@@ -465,19 +465,19 @@ Response:
 
 The following [pooling parameters](#pooling-params) are supported.
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-score-pooling-params
 :end-before: end-score-pooling-params
-```
+:::
 
 The following extra parameters are supported:
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-score-extra-params
 :end-before: end-score-extra-params
-```
+:::
 
 (rerank-api)=
 
@@ -552,16 +552,16 @@ Response:
 
 The following [pooling parameters](#pooling-params) are supported.
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-rerank-pooling-params
 :end-before: end-rerank-pooling-params
-```
+:::
 
 The following extra parameters are supported:
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-rerank-extra-params
 :end-before: end-rerank-extra-params
-```
+:::
