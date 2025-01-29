@@ -101,6 +101,10 @@ def cpu_platform_plugin() -> Optional[str]:
     try:
         from importlib.metadata import version
         is_cpu = "cpu" in version("vllm")
+        if not is_cpu:
+            import platform
+            is_cpu = platform.machine().lower().startswith("arm")
+
     except Exception:
         pass
 
@@ -213,8 +217,11 @@ def __getattr__(name: str):
             global _init_trace
             _init_trace = "".join(traceback.format_stack())
         return _current_platform
-    else:
+    elif name in globals():
         return globals()[name]
+    else:
+        raise AttributeError(
+            f"No attribute named '{name}' exists in {__name__}.")
 
 
 __all__ = [

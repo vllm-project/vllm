@@ -1067,6 +1067,8 @@ void paged_attention_custom_launcher(
   KVT* value_cache_ptr = reinterpret_cast<KVT*>(value_cache.data_ptr());
   int* block_tables_ptr = block_tables.data_ptr<int>();
   int* context_lens_ptr = context_lens.data_ptr<int>();
+  const float* k_scale_ptr = reinterpret_cast<const float*>(k_scale.data_ptr());
+  const float* v_scale_ptr = reinterpret_cast<const float*>(v_scale.data_ptr());
 
   const float* k_scale_ptr = reinterpret_cast<const float*>(k_scale.data_ptr());
   const float* v_scale_ptr = reinterpret_cast<const float*>(v_scale.data_ptr());

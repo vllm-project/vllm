@@ -74,7 +74,6 @@ def test_models(
         baseline_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, NUM_LOG_PROBS)
 
-
     with vllm_runner(
             test_model,
             max_model_len=MAX_MODEL_LEN,

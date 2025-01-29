@@ -36,13 +36,13 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputsV2, MultiModalKwargs,
-                                    NestedTensors, PlaceholderRange)
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptReplacementDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -188,7 +188,9 @@ class Qwen2AudioMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        processor = self.info.get_hf_processor()
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
 
         # Use getattr with default to be compatible with transformers<4.48
         audio_token = getattr(processor, "audio_token", "<|AUDIO|>")
@@ -196,6 +198,10 @@ class Qwen2AudioMultiModalProcessor(
                                   "<|audio_bos|>")
         audio_eos_token = getattr(processor, "audio_eos_token",
                                   "<|audio_eos|>")
+
+        audio_token_id = vocab[audio_token]
+        audio_bos_id = vocab[audio_bos_token]
+        audio_eos_id = vocab[audio_eos_token]
 
         feature_attention_mask = out_mm_kwargs.get("feature_attention_mask")
         if feature_attention_mask is None:
@@ -208,19 +214,20 @@ class Qwen2AudioMultiModalProcessor(
             audio_output_lengths = audio_output_lens.tolist()
 
         def get_replacement_qwen2_audio(item_idx: int):
-            num_placeholders = audio_output_lengths[item_idx]
-            if num_placeholders == 0:
+            num_features = audio_output_lengths[item_idx]
+            if num_features == 0:
                 audios = mm_items.get_items("audio", AudioProcessorItems)
                 audio = audios.get(item_idx)
                 raise ValueError(
                     f"The audio {audio} (len={len(audio)}) is too short "
                     "to be represented inside the model")
 
-            return "".join([
-                audio_bos_token,
-                audio_token * num_placeholders,
-                audio_eos_token,
-            ])
+            audio_tokens = [audio_token_id] * num_features
+
+            return PromptReplacementDetails(
+                full=[audio_bos_id] + audio_tokens + [audio_eos_id],
+                features=audio_tokens,
+            )
 
         return [
             PromptReplacement(
@@ -239,26 +246,6 @@ class Qwen2AudioMultiModalProcessor(
         # audios are short (the corresponding placeholders may take up fewer
         # tokens than the number of audio items)
         return not hasattr(self.info.get_hf_processor(), "audio_token")
-
-    def apply(
-        self,
-        prompt: Union[str, list[int]],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> MultiModalInputsV2:
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
-
-        # Only <|AUDIO|> tokens should be considered as placeholders,
-        # so we ignore the audio_bos_token and audio_eos_token
-        result["mm_placeholders"] = {
-            modality: [
-                PlaceholderRange(offset=p["offset"] + 1,
-                                 length=p["length"] - 2) for p in ps
-            ]
-            for modality, ps in result["mm_placeholders"].items()
-        }
-
-        return result
 
 
 @MULTIMODAL_REGISTRY.register_processor(

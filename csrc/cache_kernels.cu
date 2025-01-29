@@ -258,8 +258,8 @@ __global__ void reshape_and_cache_flash_kernel(
           reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
           reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
           slot_mapping.data_ptr<int64_t>(), key_stride, value_stride, \
-          num_heads, head_size, block_size, x,  \
-          reinterpret_cast<const float*>(k_scale.data_ptr()), \ 
+          num_heads, head_size, block_size, x,                        \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),         \
           reinterpret_cast<const float*>(v_scale.data_ptr()));
 
 void reshape_and_cache(
@@ -302,7 +302,7 @@ void reshape_and_cache(
           reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
           slot_mapping.data_ptr<int64_t>(), block_stride, key_stride, \
           value_stride, num_heads, head_size, block_size,             \
-          reinterpret_cast<const float*>(k_scale.data_ptr()),\ 
+          reinterpret_cast<const float*>(k_scale.data_ptr()),         \
           reinterpret_cast<const float*>(v_scale.data_ptr()));
 
 void reshape_and_cache_flash(

@@ -67,7 +67,8 @@ _RUNNER_TASKS: Dict[RunnerType, List[_ResolvedTask]] = {
 
 _TASK_RUNNER: Dict[_ResolvedTask, RunnerType] = {
     task: runner
-    for runner, tasks in _RUNNER_TASKS.items() for task in tasks
+    for runner, tasks in _RUNNER_TASKS.items()
+    for task in tasks
 }
 
 HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
@@ -189,6 +190,7 @@ class ModelConfig:
         factors.append(self.rope_theta)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
+<<<<<<< HEAD
     def __init__(self,
                  model: str,
                  task: Union[TaskOption, Literal["draft"]],
@@ -222,6 +224,44 @@ class ModelConfig:
                  override_pooler_config: Optional["PoolerConfig"] = None,
                  logits_processor_pattern: Optional[str] = None,
                  generation_config: Optional[str] = None) -> None:
+=======
+    def __init__(
+        self,
+        model: str,
+        task: Union[TaskOption, Literal["draft"]],
+        tokenizer: str,
+        tokenizer_mode: str,
+        trust_remote_code: bool,
+        dtype: Union[str, torch.dtype],
+        seed: int,
+        allowed_local_media_path: str = "",
+        revision: Optional[str] = None,
+        code_revision: Optional[str] = None,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_theta: Optional[float] = None,
+        tokenizer_revision: Optional[str] = None,
+        max_model_len: Optional[int] = None,
+        spec_target_max_model_len: Optional[int] = None,
+        quantization: Optional[str] = None,
+        enforce_eager: Optional[bool] = None,
+        max_seq_len_to_capture: Optional[int] = None,
+        max_logprobs: int = 20,
+        disable_sliding_window: bool = False,
+        skip_tokenizer_init: bool = False,
+        served_model_name: Optional[Union[str, List[str]]] = None,
+        limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+        use_async_output_proc: bool = True,
+        config_format: ConfigFormat = ConfigFormat.AUTO,
+        hf_overrides: Optional[HfOverrides] = None,
+        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        disable_mm_preprocessor_cache: bool = False,
+        override_neuron_config: Optional[Dict[str, Any]] = None,
+        override_pooler_config: Optional["PoolerConfig"] = None,
+        logits_processor_pattern: Optional[str] = None,
+        generation_config: Optional[str] = None,
+        enable_sleep_mode: bool = False,
+    ) -> None:
+>>>>>>> main
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -269,6 +309,12 @@ class ModelConfig:
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
+        self.enable_sleep_mode = enable_sleep_mode
+
+        from vllm.platforms import current_platform
+
+        if self.enable_sleep_mode and not current_platform.is_cuda():
+            raise ValueError("Sleep mode is only supported on CUDA devices.")
 
         hf_config = get_config(self.model, trust_remote_code, revision,
                                code_revision, config_format)
@@ -301,14 +347,15 @@ class ModelConfig:
             (self.hf_text_config.model_type in ["gemma2", "cohere2"]))
 
         if (not self.disable_sliding_window and has_interleaved_attention):
-            if envs.VLLM_ATTENTION_BACKEND == "XFORMERS":
+            if (backend :=
+                    envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER"):
                 sliding_window_len_min = get_min_sliding_window(
                     self.hf_text_config.sliding_window)
 
                 logger.warning_once(
                     f"{self.hf_text_config.model_type} has interleaved "
                     "attention, which is currently not supported by the "
-                    "XFORMERS backend. Disabling sliding window and capping "
+                    f"{backend} backend. Disabling sliding window and capping "
                     "the max length to the sliding window size "
                     f"({sliding_window_len_min}).")
                 self.disable_sliding_window = True
@@ -340,7 +387,6 @@ class ModelConfig:
         self.is_hybrid = self._init_is_hybrid()
         self.has_inner_state = self._init_has_inner_state()
 
-        from vllm.platforms import current_platform
         if current_platform.is_neuron():
             self.override_neuron_config = override_neuron_config
         else:
@@ -599,7 +645,7 @@ class ModelConfig:
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
 
-        MODEL_NOT_SUPPORT_CUDA_GRAPH = ['deepseek_v3', 'mllama']
+        MODEL_NOT_SUPPORT_CUDA_GRAPH = ['mllama']
         if (self.hf_config.model_type in MODEL_NOT_SUPPORT_CUDA_GRAPH
                 and not self.enforce_eager):
             logger.warning(
@@ -902,12 +948,18 @@ class ModelConfig:
             "top_k",
             "top_p",
             "min_p",
+            "max_new_tokens",
         ]
         if any(p in config for p in available_params):
             diff_sampling_param = {
                 p: config.get(p)
                 for p in available_params if config.get(p) is not None
             }
+            # Huggingface definition of max_new_tokens is equivalent
+            # to vLLM's max_tokens
+            if "max_new_tokens" in diff_sampling_param:
+                diff_sampling_param["max_tokens"] = diff_sampling_param.pop(
+                    "max_new_tokens")
         else:
             diff_sampling_param = {}
         return diff_sampling_param
@@ -998,7 +1050,6 @@ class CacheConfig:
         self.enable_prefix_caching = enable_prefix_caching
         self.cpu_offload_gb = cpu_offload_gb
         self.calculate_kv_scales = calculate_kv_scales
-
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -1009,8 +1060,7 @@ class CacheConfig:
 
         # Set calculate_kv_scales to False if the value is unset.
         if self.calculate_kv_scales is None:
-          self.calculate_kv_scales = False
-
+            self.calculate_kv_scales = False
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
@@ -1221,9 +1271,6 @@ class ParallelConfig:
     pipeline_parallel_size: int = 1  # Number of pipeline parallel groups.
     tensor_parallel_size: int = 1  # Number of tensor parallel groups.
 
-    # Deprecated, use distributed_executor_backend instead.
-    worker_use_ray: Optional[bool] = None
-
     # Maximum number of multiple batches
     # when load model sequentially. To avoid RAM OOM when using tensor
     # parallel and large models.
@@ -1277,14 +1324,7 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
-        if self.worker_use_ray:
-            if self.distributed_executor_backend is None:
-                self.distributed_executor_backend = "ray"
-            elif not self.use_ray:
-                raise ValueError(f"worker-use-ray can't be used with "
-                                 f"distributed executor backend "
-                                 f"'{self.distributed_executor_backend}'.")
-        ray_only_devices = ["tpu", "hpu"]
+        ray_only_devices = ["tpu"]
         from vllm.platforms import current_platform
         if (current_platform.device_type in ray_only_devices
                 and self.world_size > 1):
@@ -1682,7 +1722,8 @@ class SpeculativeConfig:
             raise ValueError("Expect the batch size threshold of disabling "
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
-
+        if (enable_chunked_prefill and speculative_model == "eagle"):
+            raise ValueError("Chunked prefill and EAGLE are not compatible.")
         # TODO: The user should be able to specify revision/max model len
         # for the draft model. It is not currently supported.
         draft_revision = None
@@ -1748,12 +1789,6 @@ class SpeculativeConfig:
                         "This speculative model supports a maximum of "
                         f"num_speculative_tokens={n_predict}, but "
                         f"{num_speculative_tokens=} was provided.")
-
-            if enable_chunked_prefill and draft_hf_config.model_type in (
-                    "medusa", "mlp_speculator", "eagle"):
-                raise ValueError(
-                    "Chunked prefill and hidden-state based draft models are "
-                    "not compatible.")
 
             speculative_draft_tensor_parallel_size = \
                 SpeculativeConfig._verify_and_get_draft_model_tensor_parallel_size(
@@ -1978,8 +2013,8 @@ class SpeculativeConfig:
                              "typical_acceptance_sampler.")
 
         if (self.draft_token_acceptance_method != 'rejection_sampler'
-                and self.draft_token_acceptance_method !=
-                'typical_acceptance_sampler'):
+                and self.draft_token_acceptance_method
+                != 'typical_acceptance_sampler'):
             raise ValueError(
                 "Expected draft_token_acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "
@@ -2702,10 +2737,11 @@ class CompilationConfig(BaseModel):
         - use_inductor: whether to use inductor compilation.
             - False: inductor compilation is not used. graph runs in eager.
             - True: inductor compilation is used. one graph for symbolic shape
-                is compiled. In addition, compile for cudagraph sizes that are
-                in candidate_compile_sizes, using configurations
-                in inductor_compile_config.
-        - candidate_compile_sizes: sizes to compile for inductor.
+                is compiled. In addition, compile for compile_sizes,
+                using configurations in inductor_compile_config.
+        - compile_sizes: sizes to compile for inductor. In addition
+            to integers, it also supports "cudagraph_capture_sizes" to
+            specify the sizes for cudagraph capture.
         - inductor_compile_config: additional configurations for inductor.
             - None: use default configurations.
         - inductor_passes: additional passes for inductor. It is a dictionary
@@ -2733,7 +2769,7 @@ class CompilationConfig(BaseModel):
     splitting_ops: List[str] = Field(default=None)  # type: ignore
 
     use_inductor: bool = True
-    candidate_compile_sizes: Optional[List[int]] = Field(default=None)
+    compile_sizes: Optional[List[Union[int, str]]] = Field(default=None)
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
 
@@ -2781,9 +2817,8 @@ class CompilationConfig(BaseModel):
     pass_config: PassConfig = Field(default_factory=PassConfig)
 
     # not configurable, computed after init
-    compile_sizes: List[int] = PrivateAttr
-    capture_sizes: List[int] = PrivateAttr
     max_capture_size: int = PrivateAttr
+    local_cache_dir: str = PrivateAttr  # local cache dir for each rank
     # optimization:
     # Intuitively, bs_to_padded_graph_size should be Dict[int, int].
     # since we know all keys are in a range [0, max_capture_size],
@@ -2908,43 +2943,47 @@ class CompilationConfig(BaseModel):
         from vllm.compilation.backends import VllmBackend
         return VllmBackend(vllm_config)
 
-    def init_with_cudagraph_sizes(self, sizes_to_specialize: List[int]):
+    def init_with_cudagraph_sizes(self,
+                                  cudagraph_capture_sizes: List[int]) -> None:
         """To complete the initialization of config,
         we need to know the cudagraph sizes."""
 
         if self.cudagraph_capture_sizes is None:
-            self.capture_sizes = sizes_to_specialize
+            self.cudagraph_capture_sizes = cudagraph_capture_sizes
         else:
-            self.capture_sizes = self.cudagraph_capture_sizes
+            # de-duplicate the sizes provided by the config
+            self.cudagraph_capture_sizes = list(
+                set(self.cudagraph_capture_sizes))
             logger.info(("cudagraph sizes specified by model runner"
                          " %s is overridden by config %s"),
-                        sizes_to_specialize, self.cudagraph_capture_sizes)
+                        cudagraph_capture_sizes, self.cudagraph_capture_sizes)
 
-        if self.candidate_compile_sizes is None:
-            self.candidate_compile_sizes = []
-        self.compile_sizes = [
-            x for x in self.candidate_compile_sizes if x in self.capture_sizes
-        ]
-        ignored_sizes = [
-            x for x in self.candidate_compile_sizes
-            if x not in self.capture_sizes
-        ]
-        if ignored_sizes:
-            logger.warning(("candidate_compile_sizes %s are ignored "
-                            "because they are not cudagraph capture sizes."),
-                           ignored_sizes)
+        computed_compile_sizes = []
+        if self.compile_sizes is not None:
+            # de-duplicate the sizes provided by the config
+            self.compile_sizes = list(set(self.compile_sizes))
+            for x in self.compile_sizes:
+                if isinstance(x, str):
+                    assert x == "cudagraph_capture_sizes", \
+                    "Unrecognized size type in compile_sizes, " \
+                    f"expect 'cudagraph_capture_sizes', got {x}"
+                    computed_compile_sizes.extend(self.cudagraph_capture_sizes)
+                else:
+                    assert isinstance(x, int)
+                    computed_compile_sizes.append(x)
+        self.compile_sizes = computed_compile_sizes  # type: ignore
 
         # sort to make sure cudagraph capture sizes are in descending order
-        self.capture_sizes.sort(reverse=True)
-        self.max_capture_size = self.capture_sizes[
-            0] if self.capture_sizes else 0
+        self.cudagraph_capture_sizes.sort(reverse=True)
+        self.max_capture_size = self.cudagraph_capture_sizes[
+            0] if self.cudagraph_capture_sizes else 0
 
         # pre-compute the mapping from batch size to padded graph size
         self.bs_to_padded_graph_size = [
             0 for i in range(self.max_capture_size + 1)
         ]
-        for end, start in zip(self.capture_sizes,
-                              self.capture_sizes[1:] + [0]):
+        for end, start in zip(self.cudagraph_capture_sizes,
+                              self.cudagraph_capture_sizes[1:] + [0]):
             for bs in range(start, end):
                 if bs == start:
                     self.bs_to_padded_graph_size[bs] = start
@@ -3215,14 +3254,14 @@ class VllmConfig:
         However, if users specify the cudagraph capture sizes through
         compilation config, we will use the specified sizes instead.
 
-        In the end, `vllm_config.compilation_config.capture_sizes` will be the
-        final sizes to capture cudagraph (in descending order).
+        In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
+        will be the final sizes to capture cudagraph (in descending order).
 
         During runtime, if batchsize is larger than
-        `vllm_config.compilation_config.capture_sizes`,
+        `vllm_config.compilation_config.cudagraph_capture_sizes`,
         no cudagraph will be used.
         If the batch size is no larger than
-        `vllm_config.compilation_config.capture_sizes`,
+        `vllm_config.compilation_config.cudagraph_capture_sizes`,
         we can quickly find the padded graph size for a given batch size by
         looking up `vllm_config.compilation_config.bs_to_padded_graph_size`.
         """
@@ -3304,7 +3343,7 @@ _current_vllm_config: Optional[VllmConfig] = None
 
 
 @contextmanager
-def set_current_vllm_config(vllm_config: VllmConfig):
+def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     """
     Temporarily set the current VLLM config.
     Used during model initialization.
@@ -3324,7 +3363,8 @@ def set_current_vllm_config(vllm_config: VllmConfig):
                      vllm_config.compilation_config.enabled_custom_ops)
         logger.debug("disabled custom ops: %s",
                      vllm_config.compilation_config.disabled_custom_ops)
-        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
+        if check_compile and \
+            vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
             and compilation_counter.num_models_seen == num_models_seen:
             # If the model supports compilation,
             # compilation_counter.num_models_seen should be increased
