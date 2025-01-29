@@ -22,9 +22,9 @@ The available APIs depend on the type of model that is being run:
 
 Please refer to the above pages for more details about each API.
 
-```{seealso}
+:::{seealso}
 [API Reference](/api/offline_inference/index)
-```
+:::
 
 ## Configuration Options
 
@@ -70,12 +70,12 @@ llm = LLM(model="ibm-granite/granite-3.1-8b-instruct",
           tensor_parallel_size=2)
 ```
 
-```{important}
+:::{important}
 To ensure that vLLM initializes CUDA correctly, you should avoid calling related functions (e.g. {func}`torch.cuda.set_device`)
 before initializing vLLM. Otherwise, you may run into an error like `RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
 
 To control which devices are used, please instead set the `CUDA_VISIBLE_DEVICES` environment variable.
-```
+:::
 
 #### Quantization
 

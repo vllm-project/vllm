@@ -97,9 +97,9 @@ docker build -f Dockerfile.hpu -t vllm-hpu-env  .
 docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --rm vllm-hpu-env
 ```
 
-```{tip}
+:::{tip}
 If you are facing the following error: `docker: Error response from daemon: Unknown runtime specified habana.`, please refer to "Install Optional Packages" section of [Install Driver and Software](https://docs.habana.ai/en/latest/Installation_Guide/Driver_Installation.html#install-driver-and-software) and "Configure Container Runtime" section of [Docker Installation](https://docs.habana.ai/en/latest/Installation_Guide/Installation_Methods/Docker_Installation.html#configure-container-runtime).. Make sure you have `habanalabs-container-runtime` package installed and that `habana` container runtime is registered.
-```
+:::
 
 ## Extra information
 
@@ -153,24 +153,38 @@ The following configurations have been validated to be function with Gaudi2 devi
 
 Currently in vLLM for HPU we support four execution modes, depending on selected HPU PyTorch Bridge backend (via `PT_HPU_LAZY_MODE` environment variable), and `--enforce-eager` flag.
 
-| `PT_HPU_LAZY_MODE` | `enforce_eager` | Execution Mode     |
-| ------------------ | --------------- | ------------------ |
-| 0                  | 0               | torch.compile      |
-| 0                  | 1               | PyTorch eager mode |
-| 1                  | 0               | HPU Graphs         |
-| 1                  | 1               | PyTorch lazy mode  |
+:::{list-table} vLLM execution modes
+:widths: 25 25 50
+:header-rows: 1
 
-```{warning}
+- * `PT_HPU_LAZY_MODE`
+  * `enforce_eager`
+  * execution mode
+- * 0
+  * 0
+  * torch.compile
+- * 0
+  * 1
+  * PyTorch eager mode
+- * 1
+  * 0
+  * HPU Graphs
+- * 1
+  * 1
+  * PyTorch lazy mode
+:::
+
+:::{warning}
 All modes using PT_HPU_LAZY_MODE=0 are experimental and should only be used for validating functional correctness. To achieve the best performance, use HPU Graphs or PyTorch Lazy Mode. Performance improvements are planned for future releases.
-```
+:::
 
 ### Bucketing Mechanism
 
 Intel Gaudi accelerators perform best when operating on models with fixed tensor shapes. [Intel Gaudi Graph Compiler](https://docs.habana.ai/en/latest/Gaudi_Overview/Intel_Gaudi_Software_Suite.html#graph-compiler-and-runtime) generates optimized binary code that implements the given model topology on Gaudi. In its default configuration, the produced binary code may be highly dependent on input and output tensor shapes, requiring graph recompilation when encountering tensors with different shapes within the same topology. While these binaries efficiently utilize Gaudi, the compilation process itself can introduce noticeable overhead in end-to-end execution. In dynamic inference serving scenarios, it is important to minimize the number of graph compilations and reduce the risk of graph compilation occurring during server runtime. Currently, this is achieved by "bucketing" the model's forward pass across two dimensions: `batch_size` and `sequence_length`.
 
-```{note}
+:::{note}
 Bucketing helps significantly reduce the number of required graphs, but it does not handle graph compilation or device code generation. These tasks are performed during the warmup and HPUGraph capture phase.
-```
+:::
 
 Bucketing ranges are determined with 3 parameters - `min`, `step` and `max`. They can be set separately for prompt and decode phase, and for batch size and sequence length dimension. These parameters can be observed in logs during vLLM startup:
 
@@ -203,15 +217,15 @@ min = 128, step = 128, max = 512
 
 In the logged scenario, 24 buckets were generated for prompt (prefill) runs, and 48 buckets for decode runs. Each bucket corresponds to a separate optimized device binary for a given model with specified tensor shapes. Whenever a batch of requests is processed, it is padded across batch and sequence length dimension to the smallest possible bucket.
 
-```{warning}
+:::{warning}
 If a request exceeds the maximum bucket size in any dimension, it will be processed without padding, and its processing may require a graph compilation, potentially significantly increasing end-to-end latency. The boundaries of the buckets are user-configurable via environment variables, and upper bucket boundaries can be increased to avoid such scenario.
-```
+:::
 
 For example, if a request with 3 sequences, each having a maximum sequence length of 412, is sent to an idle vLLM server, it will be padded and executed as a `(4, 512)` prefill bucket. This is because the `batch_size` (number of sequences) will be padded to 4 (the nearest batch size dimension higher than 3), and the maximum sequence length will be padded to 512 (the nearest sequence length dimension higher than 412). After the prefill stage, it will be executed as a `(4, 512)` decode bucket and will remain in this bucket until either the batch dimension changes (e.g., due to a request being completed), in which case it will become a `(2, 512)` bucket, or the context length increases beyond 512 tokens, at which point it will become a `(4, 640)` bucket.
 
-```{note}
+:::{note}
 Bucketing is transparent to the user – padding in the sequence length dimension is never returned, and padding in the batch dimension does not create new requests.
-```
+:::
 
 ### Warmup
 
@@ -233,9 +247,9 @@ INFO 08-01 22:27:16 hpu_model_runner.py:1066] [Warmup][Decode][47/48] batch_size
 INFO 08-01 22:27:16 hpu_model_runner.py:1066] [Warmup][Decode][48/48] batch_size:1 seq_len:128 free_mem:55.43 GiB
 ```
 
-```{tip}
+:::{tip}
 Compiling all the buckets may take some time and can be disabled by setting the VLLM_SKIP_WARMUP=true environment variable. Keep in mind that if you do this, you may encounter graph compilations when executing a given bucket for the first time. Disabling warmup is fine for development, but it is highly recommended to enable it in deployment.
-```
+:::
 
 ### HPU Graph Capture
 
@@ -244,9 +258,9 @@ Compiling all the buckets may take some time and can be disabled by setting the 
 When HPU Graphs are used, they share the common memory pool ("usable memory") with the KV cache, as determined by the `gpu_memory_utilization` flag (default value is `0.9`). Before the KV cache is allocated, the model weights are loaded onto the device, and a forward pass of the model is executed on dummy data to estimate memory usage. Only after that, the `gpu_memory_utilization` flag is applied. At its default value, it marks 90% of the free device memory at that point as usable. Next, the KV cache is allocated, the model is warmed up, and HPU Graphs are captured. The `VLLM_GRAPH_RESERVED_MEM` environment variable defines the ratio of memory reserved for HPU Graph capture. With its default value (`VLLM_GRAPH_RESERVED_MEM=0.1`), 10% of the usable memory will be reserved for graph capture (referred to as "usable graph memory"), and the remaining 90% will be used for the KV cache. The environment variable `VLLM_GRAPH_PROMPT_RATIO` determines the ratio of usable graph memory reserved for prefill and
 decode graphs. By default (`VLLM_GRAPH_PROMPT_RATIO=0.3`), both stages share equal memory constraints. A lower value corresponds to less usable graph memory reserved for the prefill stage. For example, setting `VLLM_GRAPH_PROMPT_RATIO=0.2` reserves 20% of usable graph memory for prefill graphs, while 80% is allocated for decode graphs.
 
-```{note}
+:::{note}
 `gpu_memory_utilization` does not represent the absolute memory usage across the HPU. Instead, it specifies the memory margin after loading the model and running a profile. For example, if a device has 100 GiB of total memory and 50 GiB of free memory after loading the model weights and executing the profiling run, the default value of `gpu_memory_utilization` will mark 90% of the 50 GiB as usable, leaving 5 GiB as a margin, regardless of the total device memory.
-```
+:::
 
 You can also configure the strategy for capturing HPU graphs separately for the prompt and decode stages. The strategy affects the order in which graphs are captured. Two strategies are implemented:
 
@@ -255,9 +269,9 @@ You can also configure the strategy for capturing HPU graphs separately for the 
 
 When a large number of requests are pending, the vLLM scheduler attempts to fill the maximum batch size for decoding as quickly as possible. Once a request is finished, the decode batch size decreases. When this happens, vLLM attempts to schedule a prefill iteration for requests in the waiting queue to restore the decode batch size to its previous state. In a fully loaded scenario, the decode batch size is often at its maximum, making large-batch HPU graphs critical to capture, as indicated by the `max_bs` strategy. Conversely, prefill iterations will typically be executed with very low batch sizes (1-4), as reflected in the `min_tokens` strategy.
 
-```{note}
+:::{note}
 `VLLM_GRAPH_PROMPT_RATIO` does not set a hard limit on the memory allocated for graphs in each stage (prefill and decode). vLLM first attempts to use the entire usable prefill graph memory (usable graph memory * VLLM_GRAPH_PROMPT_RATIO) for capturing prefill HPU Graphs. It will then attempt to do the same for decode graphs and the usable decode graph memory pool. If one stage is fully captured and there is unused memory remaining in the usable graph memory pool, vLLM will attempt to capture more graphs for the other stage, until no more HPU Graphs can be captured without exceeding the reserved memory pool. The behavior of this mechanism is illustrated in the example below.
-```
+:::
 
 Each step outlined is logged by the vLLM server, with negative values indicating memory release:
 
@@ -322,13 +336,13 @@ INFO 08-02 17:38:43 hpu_executor.py:91] init_cache_engine took 37.92 GiB of devi
 
 - `VLLM_{phase}_{dim}_BUCKET_{param}` - collection of 12 environment variables configuring ranges of bucketing mechanism.
 
-  - `{phase}` is either `PROMPT` or `DECODE`
+  * `{phase}` is either `PROMPT` or `DECODE`
 
-  - `{dim}` is either `BS`, `SEQ` or `BLOCK`
+  * `{dim}` is either `BS`, `SEQ` or `BLOCK`
 
-  - `{param}` is either `MIN`, `STEP` or `MAX`
+  * `{param}` is either `MIN`, `STEP` or `MAX`
 
-  - Default values:
+  * Default values:
 
     - Prompt:
 

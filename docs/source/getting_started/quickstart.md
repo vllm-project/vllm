@@ -34,9 +34,9 @@ conda activate myenv
 pip install vllm
 ```
 
-```{note}
+:::{note}
 For non-CUDA platforms, please refer [here](#installation-index) for specific instructions on how to install vLLM.
-```
+:::
 
 (quickstart-offline)=
 
@@ -71,9 +71,9 @@ The {class}`~vllm.LLM` class initializes vLLM's engine and the [OPT-125M model](
 llm = LLM(model="facebook/opt-125m")
 ```
 
-```{note}
+:::{note}
 By default, vLLM downloads models from [HuggingFace](https://huggingface.co/). If you would like to use models from [ModelScope](https://www.modelscope.cn), set the environment variable `VLLM_USE_MODELSCOPE` before initializing the engine.
-```
+:::
 
 Now, the fun part! The outputs are generated using `llm.generate`. It adds the input prompts to the vLLM engine's waiting queue and executes the vLLM engine to generate the outputs with high throughput. The outputs are returned as a list of `RequestOutput` objects, which include all of the output tokens.
 
@@ -99,10 +99,10 @@ Run the following command to start the vLLM server with the [Qwen2.5-1.5B-Instru
 vllm serve Qwen/Qwen2.5-1.5B-Instruct
 ```
 
-```{note}
+:::{note}
 By default, the server uses a predefined chat template stored in the tokenizer.
 You can learn about overriding it [here](#chat-template).
-```
+:::
 
 This server can be queried in the same format as OpenAI API. For example, to list the models:
 
