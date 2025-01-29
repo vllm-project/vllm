@@ -150,10 +150,9 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         # NOTE: please avoid accessing `kv_cache` and `attn_metadata` arguments
         # directly. Instead, please use the `self.kv_cache` and
-        # `forward_context.attn_metadata` to access them.
+        # `get_forward_context().attn_metadata` to access them.
         if self.calculate_kv_scales:
-            forward_context: ForwardContext = get_forward_context()
-            ctx_attn_metadata = forward_context.attn_metadata
+            ctx_attn_metadata = get_forward_context().attn_metadata
             if ctx_attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(key, value)
         if self.use_output:
