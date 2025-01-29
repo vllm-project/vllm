@@ -164,7 +164,7 @@ def test_decode():
     req0.num_computed_tokens = 55
     for _ in range(4):
         req0.append_output_token_ids(8)
-    new_blocks = manager.append_slots(req0, 4)
+    new_blocks = manager.allocate_slots(req0, 4, [])
     assert new_blocks is not None and len(new_blocks) == 0
     assert manager.req_to_blocks[req0.request_id][-2].block_hash is None
 
@@ -175,7 +175,7 @@ def test_decode():
     # the preallocated block.
     for _ in range(5 + 10):
         req0.append_output_token_ids(7)
-    new_blocks = manager.append_slots(req0, 15)
+    new_blocks = manager.allocate_slots(req0, 15, [])
     assert new_blocks is not None and len(new_blocks) == 0
     assert manager.req_to_blocks[req0.request_id][-2].block_hash is not None
 
@@ -185,7 +185,7 @@ def test_decode():
     # the preallocated block.
     for _ in range(6 + 11):
         req0.append_output_token_ids(12)
-    new_blocks = manager.append_slots(req0, 17)
+    new_blocks = manager.allocate_slots(req0, 17, [])
     # Plus one preallocated block.
     assert new_blocks is not None and len(new_blocks) == 2
 
@@ -396,11 +396,11 @@ def test_preallocate_blocks(num_preallocate_tokens: int, block_size: int):
     assert len(blocks) == 1 + num_preallocated_blocks
 
     # Assume all computed.
-    manager.append_slots(req, block_size * (len(blocks) - 1))
+    manager.allocate_slots(req, block_size * (len(blocks) - 1), [])
     req.num_computed_tokens = block_size * len(blocks)
 
     # Append 1 block.
-    blocks = manager.append_slots(req, block_size)
+    blocks = manager.allocate_slots(req, block_size, [])
     assert len(blocks) == 1 + num_preallocated_blocks
 
 
@@ -503,7 +503,7 @@ def test_mm_prefix_caching():
     # Append slots without allocating a new block.
     for _ in range(5):
         req0.append_output_token_ids(8)
-    new_blocks = manager.append_slots(req0, 5)
+    new_blocks = manager.allocate_slots(req0, 5, [])
     assert new_blocks is not None and len(new_blocks) == 0
 
     # The just completed block should have hashes with extra keys.
@@ -648,7 +648,7 @@ def test_uncache_blocks():
     # Simulate speculative tokens.
     for _ in range(5):
         req0.append_output_token_ids(8)
-    manager.append_slots(req0, 5)
+    manager.allocate_slots(req0, 5, [])
     assert len(manager.cached_block_hash_to_block) == 2
 
     # After sampling, assuming only 1 token is accepted.

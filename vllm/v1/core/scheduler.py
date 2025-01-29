@@ -138,8 +138,8 @@ class Scheduler:
             assert num_new_tokens > 0
 
             while True:
-                new_blocks = self.kv_cache_manager.append_slots(
-                    request, num_new_tokens)
+                new_blocks = self.kv_cache_manager.allocate_slots(
+                    request, num_new_tokens, [])
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.

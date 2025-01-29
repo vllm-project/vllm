@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
@@ -67,7 +67,7 @@ class KVCacheManager:
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
-        self.req_to_blocks: Dict[str, List[KVCacheBlock]] = {}
+        self.req_to_blocks: DefaultDict[str, List[KVCacheBlock]] = defaultdict(list)
 
     def get_computed_blocks(
             self, request: Request) -> Tuple[List[KVCacheBlock], int]:
@@ -190,15 +190,28 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        computed_blocks: List[KVCacheBlock],
+        new_computed_blocks: List[KVCacheBlock]
     ) -> Optional[List[KVCacheBlock]]:
-        """Allocate slots for a new request.
+        """Add slots for a new prefill or a new decode request.
 
         Args:
             request: The request to allocate slots.
             num_tokens: The number of tokens to allocate. Note that this does
                 not include the tokens that have already been computed.
-            computed_blocks: A list of computed blocks.
+            new_computed_blocks: A list of new computed blocks just hitting the
+                prefix caching.
+
+        Blocks layout:
+        -----------------------------------------------------------------------
+        | < computed > | < new computed > |    < new >    | < pre-allocated > |
+        -----------------------------------------------------------------------
+        |                  < required >                   |
+        --------------------------------------------------
+        |                    < full >                  |
+        ------------------------------------------------
+                                          | <new full> |
+                                          --------------
+        The following *_blocks are illustrated in this layout.
 
         Returns:
             A list of new allocated blocks.
@@ -209,51 +222,73 @@ class KVCacheManager:
 
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
-            self._touch(computed_blocks)
+            self._touch(new_computed_blocks)
         else:
-            assert not computed_blocks, (
+            assert not new_computed_blocks, (
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
 
-        num_required_blocks = cdiv(num_tokens, self.block_size)
-        if num_required_blocks > self.free_block_queue.num_free_blocks:
+        # The number of computed tokens is the number of computed tokens plus
+        # the new prefix cacheing hits
+        num_computed_tokens = (request.num_computed_tokens +
+                               len(new_computed_blocks) * self.block_size)
+        num_required_blocks = cdiv(num_computed_tokens + num_tokens,
+                                   self.block_size)
+        req_blocks = self.req_to_blocks[request.request_id]
+        num_new_blocks = (num_required_blocks - len(req_blocks) -
+                          len(new_computed_blocks))
+        if num_new_blocks > self.free_block_queue.num_free_blocks:
             # Cannot allocate new blocks
-            self._untouch(computed_blocks)
+            self._untouch(new_computed_blocks)
             return None
+
+        # Append the new computed blocks to the request blocks until now to
+        # avoid the case where the new blocks cannot be allocated.
+        req_blocks.extend(new_computed_blocks)
+
+        # Start to handle new blocks
 
         # Determine the number of new blocks to allocate considering
         # preallocated blocks.
-        num_new_blocks = min(
-            num_required_blocks + self.num_preallocate_blocks,
-            self.free_block_queue.num_free_blocks,
-            # Should not exceed the maximum number of blocks per request.
-            # This is especially because the block table has the shape
-            # [..., max_num_blocks_per_req].
-            # TODO(woosuk): Check and reject requests if
-            # num_prompt_tokens + max_tokens > max_model_len.
-            self.max_num_blocks_per_req - len(computed_blocks),
-        )
-        assert num_new_blocks > 0
+        if num_new_blocks <= 0:
+            # No new block is needed.
+            new_blocks = []
+        else:
+            num_new_blocks = min(
+                num_new_blocks + self.num_preallocate_blocks,
+                self.free_block_queue.num_free_blocks,
+                # Should not exceed the maximum number of blocks per request.
+                # This is especially because the block table has the shape
+                # [..., max_num_blocks_per_req].
+                # TODO(woosuk): Check and reject requests if
+                # num_prompt_tokens + max_tokens > max_model_len.
+                self.max_num_blocks_per_req - len(req_blocks),
+            )
+            assert num_new_blocks > 0
 
-        # Concatenate the computed block IDs and the new block IDs.
-        new_blocks = self._get_new_blocks(num_new_blocks)
-        self.req_to_blocks[request.request_id] = computed_blocks + new_blocks
+            # Concatenate the computed block IDs and the new block IDs.
+            new_blocks = self._get_new_blocks(num_new_blocks)
+            req_blocks.extend(new_blocks)
 
         if not self.enable_caching:
             return new_blocks
 
-        num_computed_tokens = len(computed_blocks) * self.block_size
+        # NOTE(rickyx): We are assuming the `num_tokens` are actual
+        # tokens rather than lookahead slots (e.g. for speculative decoding).
+        # TODO(rickyx): When supporting speculative decoding, we will need to
+        # differentiate between them so that we can know how many blocks are
+        # full after appending the actual tokens.
         num_full_blocks = (num_computed_tokens + num_tokens) // self.block_size
-
-        new_full_blocks = self.req_to_blocks[
-            request.request_id][len(computed_blocks):num_full_blocks]
+        num_computed_full_blocks = num_computed_tokens // self.block_size
+        new_full_blocks = req_blocks[num_computed_full_blocks:num_full_blocks]
         if new_full_blocks:
             self._cache_full_blocks(
                 request=request,
-                blk_start_idx=len(computed_blocks),
+                blk_start_idx=num_computed_full_blocks,
                 # The new full blocks are the full blocks that are not computed.
                 full_blocks=new_full_blocks,
-                prev_block=computed_blocks[-1] if computed_blocks else None,
+                prev_block=(req_blocks[num_computed_full_blocks - 1]
+                            if num_computed_full_blocks > 0 else None)
             )
 
         return new_blocks
