@@ -37,7 +37,6 @@ def benchmark_config(
     dtype: torch.dtype,
     use_fp8_w8a8: bool,
     use_int8_w8a16: bool,
-    use_graphs: bool,
     num_iters: int = 100,
 ) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
@@ -116,22 +115,16 @@ def benchmark_config(
     run()
     torch.cuda.synchronize()
 
-    if use_graphs:
-        # Capture 10 invocations with CUDA graph
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            for _ in range(10):
-                run()
-        torch.cuda.synchronize()
-
-        # Warmup
-        for _ in range(5):
-            graph.replay()
-    else:
-        # Warmup
-        for _ in range(5):
+    # Capture 10 invocations with CUDA graph
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        for _ in range(10):
             run()
+    torch.cuda.synchronize()
 
+    # Warmup
+    for _ in range(5):
+        graph.replay()
     torch.cuda.synchronize()
 
     start_event = torch.cuda.Event(enable_timing=True)
@@ -143,18 +136,12 @@ def benchmark_config(
         torch.cuda.synchronize()
 
         start_event.record()
-        if use_graphs:
-            graph.replay()
-        else:
-            run()
+        graph.replay()
         end_event.record()
         end_event.synchronize()
         latencies.append(start_event.elapsed_time(end_event))
     avg = sum(latencies) / (num_iters * 10) * 1000  # us
-
-    if use_graphs:
-        graph.reset()
-
+    graph.reset()
     return avg
 
 
@@ -346,7 +333,6 @@ class BenchmarkWorker:
         dtype: torch.dtype,
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
-        use_graphs: bool,
     ) -> Tuple[Dict[str, int], float]:
         current_platform.seed_everything(self.seed)
         dtype_str = get_config_dtype_str(dtype,
@@ -357,20 +343,16 @@ class BenchmarkWorker:
         op_config = get_moe_configs(num_experts, shard_intermediate_size // 2,
                                     dtype_str)
         if op_config is None:
-            config = get_default_config(num_tokens,
-                                        num_experts,
-                                        shard_intermediate_size,
-                                        hidden_size,
-                                        topk,
-                                        dtype_str,
-                                        is_marlin=False)
+            config = get_default_config(num_tokens, num_experts,
+                                        shard_intermediate_size, hidden_size,
+                                        topk, dtype_str)
         else:
             config = op_config[min(op_config.keys(),
                                    key=lambda x: abs(x - num_tokens))]
         kernel_time = benchmark_config(config, num_tokens, num_experts,
                                        shard_intermediate_size, hidden_size,
                                        topk, dtype, use_fp8_w8a8,
-                                       use_int8_w8a16, use_graphs)
+                                       use_int8_w8a16)
         return config, kernel_time
 
     def tune(
@@ -384,7 +366,6 @@ class BenchmarkWorker:
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
         search_space: List[Dict[str, int]],
-        use_graphs: bool,
     ) -> Dict[str, int]:
         best_config = None
         best_time = float("inf")
@@ -398,18 +379,16 @@ class BenchmarkWorker:
         with torch.cuda.device(self.device_id):
             for config in tqdm(search_space):
                 try:
-                    kernel_time = benchmark_config(
-                        config,
-                        num_tokens,
-                        num_experts,
-                        shard_intermediate_size,
-                        hidden_size,
-                        topk,
-                        dtype,
-                        use_fp8_w8a8,
-                        use_int8_w8a16,
-                        use_graphs,
-                        num_iters=(20 if use_graphs else 100))
+                    kernel_time = benchmark_config(config,
+                                                   num_tokens,
+                                                   num_experts,
+                                                   shard_intermediate_size,
+                                                   hidden_size,
+                                                   topk,
+                                                   dtype,
+                                                   use_fp8_w8a8,
+                                                   use_int8_w8a16,
+                                                   num_iters=20)
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
                     continue
@@ -473,7 +452,6 @@ def main(args: argparse.Namespace):
 
     config = AutoConfig.from_pretrained(
         args.model, trust_remote_code=args.trust_remote_code)
-    use_graphs = True
     if config.architectures[0] == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
@@ -485,8 +463,6 @@ def main(args: argparse.Namespace):
         intermediate_size = config.intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
     elif config.architectures[0] == "DeepseekV3ForCausalLM":
-        # bypass graph capture for DeepseekV2 and V3
-        use_graphs = False
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
@@ -533,10 +509,9 @@ def main(args: argparse.Namespace):
 
         start = time.time()
         configs = _distribute(
-            "tune",
-            [(batch_size, E, shard_intermediate_size, hidden_size, topk, dtype,
-              use_fp8_w8a8, use_int8_w8a16, search_space, use_graphs)
-             for batch_size in batch_sizes])
+            "tune", [(batch_size, E, shard_intermediate_size, hidden_size,
+                      topk, dtype, use_fp8_w8a8, use_int8_w8a16, search_space)
+                     for batch_size in batch_sizes])
         best_configs = {
             M: sort_config(config)
             for M, config in zip(batch_sizes, configs)
@@ -547,10 +522,9 @@ def main(args: argparse.Namespace):
         print(f"Tuning took {end - start:.2f} seconds")
     else:
         outputs = _distribute(
-            "benchmark",
-            [(batch_size, E, shard_intermediate_size, hidden_size, topk, dtype,
-              use_fp8_w8a8, use_int8_w8a16, use_graphs)
-             for batch_size in batch_sizes])
+            "benchmark", [(batch_size, E, shard_intermediate_size, hidden_size,
+                           topk, dtype, use_fp8_w8a8, use_int8_w8a16)
+                          for batch_size in batch_sizes])
 
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
             print(f"Batch size: {batch_size}, config: {config}")
@@ -570,7 +544,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, required=False)
     parser.add_argument("--tune", action="store_true")
-    parser.add_argument("--trust-remote-code", type=bool, default=False)
+    parser.add_argument("--trust-remote-code", action="store_true")
     args = parser.parse_args()
 
     main(args)
