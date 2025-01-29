@@ -110,6 +110,10 @@ def fused_moe_kernel(
     # and accumulate
     # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
     # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
+    off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
+    if off_experts == -1:
+        return
+    
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
         return
@@ -124,7 +128,7 @@ def fused_moe_kernel(
     a_ptrs = a_ptr + (offs_token[:, None] // top_k * stride_am +
                       offs_k[None, :] * stride_ak)
 
-    off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
+    
     b_ptrs = b_ptr + off_experts * stride_be + (offs_k[:, None] * stride_bk +
                                                 offs_bn[None, :] * stride_bn)
     if use_int8_w8a16:
@@ -254,7 +258,7 @@ def moe_align_block_size(
                              device=topk_ids.device)
     sorted_ids.fill_(topk_ids.numel())
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-    expert_ids = torch.empty((max_num_m_blocks, ),
+    expert_ids = torch.zeros((max_num_m_blocks, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
     num_tokens_post_pad = torch.empty((1),
@@ -262,8 +266,13 @@ def moe_align_block_size(
                                       device=topk_ids.device)
     ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
                              expert_ids, num_tokens_post_pad)
+    # if expert_map is not None:
     if expert_map is not None:
         expert_ids = expert_map[expert_ids]
+    # print(f"\033[91m//// MoE Block Size Aligned (Block size {block_size}) ////\033[0m"
+    #       f"\n\033[91mnum_tokens_post_pad\033[0m: {num_tokens_post_pad} "
+    #       f"\n\033[91mexpert_ids ({expert_ids.size()})\033[0m: {expert_ids} "
+    #       f"\n\033[91msorted_ids ({sorted_ids.size()})\033[0m: {sorted_ids} ")
     return sorted_ids, expert_ids, num_tokens_post_pad
 
 
@@ -677,6 +686,7 @@ def fused_experts(hidden_states: torch.Tensor,
         torch.ops.vllm.inplace_fused_experts(hidden_states, w1, w2,
                                              topk_weights, topk_ids,
                                              use_fp8_w8a8, use_int8_w8a16,
+                                             global_num_experts, expert_map,
                                              w1_scale, w2_scale, a1_scale,
                                              a2_scale, block_shape)
         return hidden_states
@@ -684,7 +694,9 @@ def fused_experts(hidden_states: torch.Tensor,
         return torch.ops.vllm.outplace_fused_experts(hidden_states, w1, w2,
                                                      topk_weights, topk_ids,
                                                      use_fp8_w8a8,
-                                                     use_int8_w8a16, w1_scale,
+                                                     use_int8_w8a16, 
+                                                     global_num_experts, 
+                                                     expert_map, w1_scale,
                                                      w2_scale, a1_scale,
                                                      a2_scale, block_shape)
 
@@ -785,51 +797,51 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
-        # sorted_token_ids, expert_ids, num_tokens_post_padded = (
-        #     moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'], 
-        #                             global_num_experts, expert_map))
+        sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'], 
+                                    global_num_experts, expert_map))
 
-        # invoke_fused_moe_kernel(curr_hidden_states,         # A
-        #                         w1,                         # B
-        #                         intermediate_cache1,        # C
-        #                         a1_scale,                   # A_scale
-        #                         w1_scale,                   # B_scale
-        #                         curr_topk_weights,          # topk_weights
-        #                         curr_topk_ids,              # topk_ids
-        #                         sorted_token_ids,           # sorted_token_ids
-        #                         expert_ids,                 # expert_ids
-        #                         num_tokens_post_padded, # num_tokens_post_padded
-        #                         False,                      # mul_routed_weight
-        #                         top_k_num,          # top_k
-        #                         config,                     # config
-        #                         compute_type=compute_type,  
-        #                         use_fp8_w8a8=use_fp8_w8a8,  
-        #                         use_int8_w8a16=use_int8_w8a16,
-        #                         block_shape=block_shape)
+        invoke_fused_moe_kernel(curr_hidden_states,         # A
+                                w1,                         # B
+                                intermediate_cache1,        # C
+                                a1_scale,                   # A_scale
+                                w1_scale,                   # B_scale
+                                curr_topk_weights,          # topk_weights
+                                curr_topk_ids,              # topk_ids
+                                sorted_token_ids,           # sorted_token_ids
+                                expert_ids,                 # expert_ids
+                                num_tokens_post_padded, # num_tokens_post_padded
+                                False,                      # mul_routed_weight
+                                top_k_num,          # top_k
+                                config,                     # config
+                                compute_type=compute_type,  
+                                use_fp8_w8a8=use_fp8_w8a8,  
+                                use_int8_w8a16=use_int8_w8a16,
+                                block_shape=block_shape)
 
-        # torch.ops._C.silu_and_mul(intermediate_cache2,
-        #                           intermediate_cache1.view(-1, N))
+        torch.ops._C.silu_and_mul(intermediate_cache2,
+                                  intermediate_cache1.view(-1, N))
 
-        # invoke_fused_moe_kernel(intermediate_cache2,
-        #                         w2,
-        #                         intermediate_cache3,
-        #                         a2_scale,
-        #                         w2_scale,
-        #                         curr_topk_weights,
-        #                         curr_topk_ids,
-        #                         sorted_token_ids,
-        #                         expert_ids,
-        #                         num_tokens_post_padded,
-        #                         True,
-        #                         1,
-        #                         config,
-        #                         compute_type=compute_type,
-        #                         use_fp8_w8a8=use_fp8_w8a8,
-        #                         use_int8_w8a16=use_int8_w8a16,
-        #                         block_shape=block_shape)
+        invoke_fused_moe_kernel(intermediate_cache2,
+                                w2,
+                                intermediate_cache3,
+                                a2_scale,
+                                w2_scale,
+                                curr_topk_weights,
+                                curr_topk_ids,
+                                sorted_token_ids,
+                                expert_ids,
+                                num_tokens_post_padded,
+                                True,
+                                1,
+                                config,
+                                compute_type=compute_type,
+                                use_fp8_w8a8=use_fp8_w8a8,
+                                use_int8_w8a16=use_int8_w8a16,
+                                block_shape=block_shape)
 
-        # ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
-        #             out_hidden_states[begin_chunk_idx:end_chunk_idx])
+        ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                    out_hidden_states[begin_chunk_idx:end_chunk_idx])
     return out_hidden_states
 
 # Deepseek V1
