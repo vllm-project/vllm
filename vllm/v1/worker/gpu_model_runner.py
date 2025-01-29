@@ -136,13 +136,7 @@ class GPUModelRunner:
         self.num_sms = self.device_properties.multi_processor_count
 
         # Persistent buffers for CUDA graphs.
-        # Sizing `input_ids` to `max_num_tokens + 1` allows
-        # `input_ids` to store the first token of the next
-        # prompt chunk ("peek token") if a partial prefill
-        # is scheduled in this step. The peek token is
-        # required to compute prompt logprobs for a partial
-        # prefill chunk.
-        self.input_ids = torch.zeros(self.max_num_tokens + 1,
+        self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
                                      device=self.device)
         self.positions = torch.zeros(self.max_num_tokens,
@@ -183,7 +177,7 @@ class GPUModelRunner:
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
         # not make any assumptions about the values in these tensors.
-        self.input_ids_cpu = torch.zeros(self.max_num_tokens + 1,
+        self.input_ids_cpu = torch.zeros(self.max_num_tokens,
                                          dtype=torch.int32,
                                          device="cpu",
                                          pin_memory=self.pin_memory)
@@ -397,27 +391,11 @@ class GPUModelRunner:
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
-        # Number of input id tokens to copy from CPU to GPU
-        num_copy_tokens = total_num_scheduled_tokens
-        flat_token_ids_cpu_tensor = (
-            self.input_batch.token_ids_cpu_tensor.flatten())
-        partial_req_id = scheduler_output.partial_req_id
-        if (partial_req_id
-                and partial_req_id in self.input_batch.num_prompt_logprobs):
-            # To facilitate computing prompt logprobs of the last token
-            # in a partial prefill chunk, inject the first token of the next
-            # prefill chunk ("peek token") at the last index of the
-            # CPU-side input ids tensor; note that this token is not passed
-            # as input to the model
-            num_copy_tokens = total_num_scheduled_tokens + 1
-            self.input_ids_cpu[
-                total_num_scheduled_tokens] = flat_token_ids_cpu_tensor[
-                    token_indices[-1] + 1]
 
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
-        torch.index_select(flat_token_ids_cpu_tensor,
+        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
@@ -450,11 +428,8 @@ class GPUModelRunner:
         max_seq_len = self.seq_lens_np[:num_reqs].max()
 
         # Copy the tensors to the GPU.
-        # If prompt logprobs must be computed for a partial request,
-        # this line also copies the "peek token" to GPU, as the last
-        # element of `input_ids`
-        self.input_ids[:num_copy_tokens].copy_(
-            self.input_ids_cpu[:num_copy_tokens], non_blocking=True)
+        self.input_ids[:total_num_scheduled_tokens].copy_(
+            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
         if self.model_config.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
