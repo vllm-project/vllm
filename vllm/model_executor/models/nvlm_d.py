@@ -9,39 +9,61 @@ from typing import Optional
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.inputs import INPUT_REGISTRY
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .intern_vit import InternVisionModel
-from .internvl import (InternVLChatModel, InternVLInputPipeline,
-                       get_max_internvl_image_tokens)
+from .internvl import (InternVLChatModel, InternVLDummyInputsBuilder,
+                       InternVLMultiModalProcessor, InternVLProcessingInfo,
+                       InternVLProcessor)
 
-IMG_START = '<|vision_start|>'
-IMG_END = '<|vision_end|>'
-IMG_CONTEXT = '<|vision_pad|>'
+IMG_PAD = "<|vision_pad|>"
 
 
-class NVLMInputPipeline(InternVLInputPipeline):
+class NVLMProcessor(InternVLProcessor):
 
-    def _create_image_prompt(self, feature_size: int, num_patches: int) -> str:
-        tile_pos_identifiers = ([f"<tile_{i}>"
-                                 for i in range(1, num_patches)] +
-                                ["<tile_global_thumbnail>"])
+    @property
+    def image_token_id(self) -> int:
+        return self.tokenizer.get_vocab()[IMG_PAD]
+
+    def get_image_repl_features(
+        self,
+        feature_size: int,
+        num_patches: int,
+    ) -> str:
+        tile_pos_identifiers = [f"<tile_{i}>" for i in range(1, num_patches)]
+        if self.use_thumbnail:
+            tile_pos_identifiers += ["<tile_global_thumbnail>"]
+
         context_size = feature_size // num_patches
+        return "".join(identifier + IMG_PAD * context_size
+                       for identifier in tile_pos_identifiers)
 
-        return '<Image>' + ''.join(
-            tile_pos_identifier + self.img_context_token * context_size
-            for tile_pos_identifier in tile_pos_identifiers) + '</Image>'
+    def get_image_repl_full(self, feature_size: int, num_patches: int) -> str:
+        features = self.get_image_repl_features(feature_size, num_patches)
+        return "<Image>" + features + "</Image>"
 
 
-input_pipeline = NVLMInputPipeline(IMG_START, IMG_END, IMG_CONTEXT)
+class NVLMProcessingInfo(InternVLProcessingInfo):
+
+    def get_hf_processor(
+        self,
+        *,
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
+    ) -> NVLMProcessor:
+        return NVLMProcessor(
+            self.get_hf_config(),
+            self.get_tokenizer(),
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+        )
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper(input_pipeline.input_mapper)
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_internvl_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(input_pipeline.dummy_data)
-@INPUT_REGISTRY.register_input_processor(input_pipeline.input_processor)
+@MULTIMODAL_REGISTRY.register_processor(
+    InternVLMultiModalProcessor,
+    info=NVLMProcessingInfo,
+    dummy_inputs=InternVLDummyInputsBuilder)
 class NVLM_D_Model(InternVLChatModel):
 
     def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:

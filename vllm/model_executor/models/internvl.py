@@ -4,8 +4,7 @@
 # Copyright (c) 2023 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
-import re
-from functools import cached_property, partial
+from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
@@ -13,26 +12,31 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
-from transformers import PretrainedConfig
+from transformers import BatchFeature, PretrainedConfig, TensorType
+from transformers.image_utils import ImageInput
+from transformers.tokenization_utils_base import TextInput
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.intern_vit import (InternVisionModel,
                                                    InternVisionPatchModel)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
-from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
+from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
+                                   ImageSize, MultiModalDataItems)
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptReplacementDetails)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_list_of
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
-                   get_clip_num_patches)
+from .clip import get_clip_num_patches
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -130,27 +134,6 @@ def calculate_num_blocks(orig_width: int, orig_height: int, min_num: int,
     return blocks, target_width, target_height
 
 
-def calculate_num_blocks_wrapper(
-    hf_config: PretrainedConfig,
-    max_dynamic_patch: Optional[int] = None,
-    dynamic_image_size: Optional[bool] = None,
-):
-    if dynamic_image_size is None:
-        dynamic_image_size = hf_config.dynamic_image_size
-
-    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
-    if max_dynamic_patch is None:
-        max_dynamic_patch = hf_config.max_dynamic_patch
-    min_num = hf_config.min_dynamic_patch
-    image_size = hf_config.vision_config.image_size
-    use_thumbnail = hf_config.use_thumbnail
-    return partial(calculate_num_blocks,
-                   min_num=min_num,
-                   max_num=max_dynamic_patch,
-                   image_size=image_size,
-                   use_thumbnail=use_thumbnail)
-
-
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
 def dynamic_preprocess(image: Image.Image, min_num: int, max_num: int,
                        image_size: int,
@@ -183,39 +166,18 @@ def dynamic_preprocess(image: Image.Image, min_num: int, max_num: int,
     return processed_images
 
 
-# adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
-def image_to_pixel_values(image: Image.Image, input_size: int, min_num: int,
-                          max_num: int, use_thumbnail: bool) -> torch.Tensor:
-    transform = build_transform(input_size=input_size)
-    images = dynamic_preprocess(image,
-                                min_num=min_num,
-                                max_num=max_num,
-                                image_size=input_size,
-                                use_thumbnail=use_thumbnail)
-    pixel_values = [transform(image) for image in images]
-    pixel_values = torch.stack(pixel_values)
-    return pixel_values
-
-
-def image_to_pixel_values_wrapper(
-    hf_config: PretrainedConfig,
-    max_dynamic_patch: Optional[int] = None,
-    dynamic_image_size: Optional[bool] = None,
-):
-    image_size = hf_config.vision_config.image_size
-    min_num = hf_config.min_dynamic_patch
-    if dynamic_image_size is None:
-        dynamic_image_size = hf_config.dynamic_image_size
-
+def _get_max_dynamic_patch(
+    *,
+    dynamic_image_size: bool,
+    max_dynamic_patch: int,
+    use_thumbnail: bool,
+) -> int:
     max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
-    if max_dynamic_patch is None:
-        max_dynamic_patch = hf_config.max_dynamic_patch
-    use_thumbnail = hf_config.use_thumbnail
-    return partial(image_to_pixel_values,
-                   input_size=image_size,
-                   min_num=min_num,
-                   max_num=max_dynamic_patch,
-                   use_thumbnail=use_thumbnail)
+
+    if use_thumbnail and max_dynamic_patch > 1:
+        max_dynamic_patch += 1
+
+    return max_dynamic_patch
 
 
 def get_internvl_num_patches(hf_config: PretrainedConfig):
@@ -228,249 +190,335 @@ def get_internvl_num_patches(hf_config: PretrainedConfig):
         (downsample_ratio**2))
 
 
-def get_max_internvl_image_tokens(
-    ctx: InputContext,
-    *,
-    max_dynamic_patch: Optional[int] = None,
-    dynamic_image_size: Optional[bool] = None,
-):
-    hf_config = ctx.get_hf_config()
-    if dynamic_image_size is None:
-        dynamic_image_size = hf_config.dynamic_image_size
-
-    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
-    if max_dynamic_patch is None:
-        max_dynamic_patch = hf_config.max_dynamic_patch
-    use_thumbnail = hf_config.use_thumbnail
-    if use_thumbnail and max_dynamic_patch > 1:
-        max_dynamic_patch += 1
-
-    num_patches = get_internvl_num_patches(hf_config)
-    return num_patches * max_dynamic_patch
+# adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
+def image_to_pixel_values(image: Image.Image, input_size: int, min_num: int,
+                          max_num: int, use_thumbnail: bool) -> torch.Tensor:
+    transform = build_transform(input_size=input_size)
+    images = dynamic_preprocess(image,
+                                min_num=min_num,
+                                max_num=max_num,
+                                image_size=input_size,
+                                use_thumbnail=use_thumbnail)
+    pixel_values = [transform(image) for image in images]
+    return torch.stack(pixel_values)
 
 
-def get_max_internvl_image_size(
-    ctx: InputContext,
-    *,
-    max_dynamic_patch: Optional[int] = None,
-    dynamic_image_size: Optional[bool] = None,
-):
-    hf_config = ctx.get_hf_config()
-    image_size = hf_config.vision_config.image_size
-    if dynamic_image_size is None:
-        dynamic_image_size = hf_config.dynamic_image_size
+class InternVLProcessor:
+    """
+    This model doesn't define its own HF processor,
+    so we implement our own one here.
 
-    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
-    if max_dynamic_patch is None:
-        max_dynamic_patch = hf_config.max_dynamic_patch
-    use_thumbnail = hf_config.use_thumbnail
-    if use_thumbnail and max_dynamic_patch > 1:
-        max_dynamic_patch += 1
-    width = image_size * max_dynamic_patch
-    height = image_size
-    return width, height
-
-
-class InternVLInputPipeline:
+    The code to insert image tokens is based on:
+    https://huggingface.co/OpenGVLab/InternVL2-1B/blob/main/modeling_internvl_chat.py#L252
+    """
 
     def __init__(
         self,
-        img_start_token: str,
-        img_end_token: str,
-        img_context_token: str,
+        config: PretrainedConfig,
+        tokenizer: AnyTokenizer,
+        *,
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
     ) -> None:
         super().__init__()
 
-        self.img_start_token = img_start_token
-        self.img_end_token = img_end_token
-        self.img_context_token = img_context_token
+        self.config = config
+        self.tokenizer = tokenizer
 
-    def _create_image_prompt(self, feature_size: int, num_patches: int) -> str:
-        return (self.img_start_token + self.img_context_token * feature_size +
-                self.img_end_token)
+        image_size: int = config.vision_config.image_size
+        patch_size: int = config.vision_config.patch_size
 
-    def _expand_image_prompt(
+        if dynamic_image_size is None:
+            dynamic_image_size = config.dynamic_image_size
+        assert isinstance(dynamic_image_size, bool)
+
+        if max_dynamic_patch is None:
+            max_dynamic_patch = config.max_dynamic_patch
+        assert isinstance(max_dynamic_patch, int)
+
+        self.num_image_token = int(
+            (image_size // patch_size)**2 * (config.downsample_ratio**2))
+        self.image_size = image_size
+        self.min_dynamic_patch: int = config.min_dynamic_patch
+        self.max_dynamic_patch = max_dynamic_patch
+        self.dynamic_image_size = dynamic_image_size
+        self.use_thumbnail: bool = config.use_thumbnail
+
+    @property
+    def image_token_id(self) -> int:
+        return self.tokenizer.get_vocab()[IMG_CONTEXT]
+
+    def get_image_repl_features(
         self,
-        prompt: str,
-        feature_sizes: List[int],
+        feature_size: int,
         num_patches: int,
     ) -> str:
-        image_idx = sorted(
-            map(int, re.findall(r"Image-(\d+): <image>\n", prompt)))
+        return IMG_CONTEXT * feature_size
 
-        new_prompt = prompt
-        for idx, feature_size in enumerate(feature_sizes, start=1):
-            image_prompt = self._create_image_prompt(feature_size, num_patches)
-            if not image_idx:
-                image_prompt = f"Image-{idx}: {image_prompt}"
+    def get_image_repl_full(self, feature_size: int, num_patches: int) -> str:
+        features = self.get_image_repl_features(feature_size, num_patches)
+        return IMG_START + features + IMG_END
 
-            new_prompt = new_prompt.replace('<image>', image_prompt, 1)
-
-        return new_prompt
-
-    def input_processor(
+    def __call__(
         self,
-        ctx: InputContext,
-        inputs: DecoderOnlyInputs,
-        *,
+        text: Optional[Union[TextInput, list[TextInput]]] = None,
+        images: Optional[Union[ImageInput, list[ImageInput]]] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
-    ) -> DecoderOnlyInputs:
-        multi_modal_data = inputs.get("multi_modal_data")
-        if multi_modal_data is None or "image" not in multi_modal_data:
-            return inputs
+        return_tensors: Optional[Union[str, TensorType]] = None,
+    ) -> BatchFeature:
+        if text is None:
+            text = []
+        if not isinstance(text, list):
+            text = [text]
+        if images is None:
+            images = []
+        if not isinstance(images, list):
+            images = [images]
 
-        model_config = ctx.model_config
-        hf_config = ctx.get_hf_config()
+        max_dynamic_patch = (self.max_dynamic_patch if max_dynamic_patch
+                             is None else max_dynamic_patch)
+        dynamic_image_size = (self.dynamic_image_size if dynamic_image_size
+                              is None else dynamic_image_size)
+        max_dynamic_patch = _get_max_dynamic_patch(
+            dynamic_image_size=dynamic_image_size,
+            max_dynamic_patch=max_dynamic_patch,
+            use_thumbnail=False,  # Applied in image_to_pixel_values
+        )
 
-        image_data = multi_modal_data["image"]
-        num_patches = get_internvl_num_patches(hf_config)
-        num_blocks_calculator = calculate_num_blocks_wrapper(
-            hf_config, max_dynamic_patch, dynamic_image_size)
-        if isinstance(image_data, Image.Image):
-            width, height = image_data.size
-            num_blocks, _, _ = num_blocks_calculator(width, height)
-            image_feature_sizes = [num_blocks * num_patches]
-        elif is_list_of(image_data, Image.Image):
-            image_feature_sizes = []
-            for image in image_data:
+        if len(images) == 0:
+            image_inputs = {}
+        else:
+            pixel_values = [
+                image_to_pixel_values(
+                    image,
+                    input_size=self.image_size,
+                    min_num=self.min_dynamic_patch,
+                    max_num=max_dynamic_patch,
+                    use_thumbnail=self.use_thumbnail,
+                ) for image in images
+            ]
+            image_inputs = {"pixel_values": torch.stack(pixel_values)}
+
+            for image, item in zip(images, image_inputs["pixel_values"]):
+                num_patches = item.shape[0]
                 width, height = image.size
-                num_blocks, _, _ = num_blocks_calculator(width, height)
-                image_feature_sizes.append(num_blocks * num_patches)
-        elif isinstance(image_data, torch.Tensor):
-            num_images, image_feature_size, hidden_size = image_data.shape
-            image_feature_sizes = [image_feature_size]
-        else:
-            raise TypeError(f"Invalid image type: {type(image_data)}")
+                num_blocks, _, _ = calculate_num_blocks(
+                    orig_width=width,
+                    orig_height=height,
+                    image_size=self.image_size,
+                    min_num=self.min_dynamic_patch,
+                    max_num=max_dynamic_patch,
+                    use_thumbnail=self.use_thumbnail,
+                )
+                feature_size = num_blocks * num_patches
 
-        tokenizer = cached_get_tokenizer(
-            model_config.tokenizer,
-            trust_remote_code=model_config.trust_remote_code)
+                image_repl = self.get_image_repl_full(feature_size,
+                                                      num_patches)
+                text = [t.replace('<image>', image_repl, 1) for t in text]
 
-        prompt = inputs.get("prompt")
-        prompt_token_ids = inputs["prompt_token_ids"]
-        if prompt is None:
-            prompt = tokenizer.decode(prompt_token_ids)
+        text_inputs = self.tokenizer(text)
 
-        new_prompt = self._expand_image_prompt(prompt, image_feature_sizes,
-                                               num_patches)
-        new_prompt_token_ids = tokenizer.encode(new_prompt)
-        img_context_token_id = tokenizer.encode(self.img_context_token,
-                                                add_special_tokens=False)
-        assert len(img_context_token_id) == 1, \
-            (f"Invalid image token '{self.img_context_token}': A valid image "
-            f"token encodes to a single token ID, got {img_context_token_id}.")
-        img_context_token_id = img_context_token_id[0]
+        return BatchFeature(
+            {
+                **text_inputs,
+                **image_inputs,
+            },
+            tensor_type=return_tensors,
+        )
 
-        # Get precise tracking of placeholder positions
-        token_idx = image_idx = 0
-        placeholder_ranges = []
-        while token_idx < len(new_prompt_token_ids):
-            if new_prompt_token_ids[token_idx] == img_context_token_id:
-                curr_image_featue_size = image_feature_sizes[image_idx]
-                placeholder_ranges.append(
-                    PlaceholderRange(offset=token_idx,
-                                     length=curr_image_featue_size))
-                image_idx += 1
-                token_idx += curr_image_featue_size
-            else:
-                token_idx += 1
 
-        return token_inputs(
-            prompt=prompt,
-            prompt_token_ids=new_prompt_token_ids,
-            multi_modal_data=multi_modal_data,
-            multi_modal_placeholders={"image": placeholder_ranges})
+class InternVLProcessingInfo(BaseProcessingInfo):
 
-    def input_mapper(
+    def get_hf_processor(
         self,
-        ctx: InputContext,
-        data: object,
         *,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
-    ):
-        hf_config = ctx.get_hf_config()
+    ) -> InternVLProcessor:
+        return InternVLProcessor(
+            self.get_hf_config(),
+            self.get_tokenizer(),
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+        )
 
-        image_pixel_values_mapper = image_to_pixel_values_wrapper(
-            hf_config, max_dynamic_patch, dynamic_image_size)
-        if isinstance(data, Image.Image):
-            data = image_pixel_values_mapper(data)
-            # Add an N dimension for number of images per prompt (currently 1).
-            data = data.unsqueeze(0)
-        elif is_list_of(data, Image.Image):
-            # we can't stack here because images may have different num_patches
-            data = [image_pixel_values_mapper(img) for img in data]
-        else:
-            return MultiModalKwargs({"image_embeds": data})
-        model_config = ctx.model_config
-        tokenizer = cached_get_tokenizer(
-            model_config.tokenizer,
-            trust_remote_code=model_config.trust_remote_code)
-        image_token_id = tokenizer.encode(self.img_context_token,
-                                          add_special_tokens=False,
-                                          return_tensors="pt")[0]
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
 
-        return MultiModalKwargs({
-            "pixel_values": data,
-            "image_token_id": image_token_id
-        })
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        return {"image": self.get_max_image_tokens()}
 
-    def dummy_data(
+    def get_num_image_tokens(
         self,
-        ctx: InputContext,
+        *,
+        image_width: int,
+        image_height: int,
+        processor: Optional[InternVLProcessor],
+    ) -> int:
+        hf_config = self.get_hf_config()
+
+        if processor is None:
+            min_dynamic_patch = hf_config.min_dynamic_patch
+            max_dynamic_patch = hf_config.max_dynamic_patch
+            dynamic_image_size = hf_config.dynamic_image_size
+        else:
+            min_dynamic_patch = processor.min_dynamic_patch
+            max_dynamic_patch = processor.max_dynamic_patch
+            dynamic_image_size = processor.dynamic_image_size
+
+        max_dynamic_patch = _get_max_dynamic_patch(
+            dynamic_image_size=dynamic_image_size,
+            max_dynamic_patch=max_dynamic_patch,
+            use_thumbnail=False,  # Applied in calculate_num_blocks
+        )
+
+        num_patches = get_internvl_num_patches(hf_config)
+        num_blocks, _, _ = calculate_num_blocks(
+            orig_width=image_width,
+            orig_height=image_height,
+            min_num=min_dynamic_patch,
+            max_num=max_dynamic_patch,
+            image_size=hf_config.vision_config.image_size,
+            use_thumbnail=hf_config.use_thumbnail,
+        )
+
+        return num_blocks * num_patches
+
+    def get_max_image_tokens(self) -> int:
+        hf_config = self.get_hf_config()
+        num_patches = get_internvl_num_patches(hf_config)
+        max_dynamic_patch = _get_max_dynamic_patch(
+            dynamic_image_size=hf_config.dynamic_image_size,
+            max_dynamic_patch=hf_config.max_dynamic_patch,
+            use_thumbnail=hf_config.use_thumbnail,
+        )
+
+        return num_patches * max_dynamic_patch
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        hf_config = self.get_hf_config()
+        image_size = hf_config.vision_config.image_size
+        max_dynamic_patch = _get_max_dynamic_patch(
+            dynamic_image_size=hf_config.dynamic_image_size,
+            max_dynamic_patch=hf_config.max_dynamic_patch,
+            use_thumbnail=hf_config.use_thumbnail,
+        )
+
+        width = image_size * max_dynamic_patch
+        height = image_size
+        return ImageSize(width=width, height=height)
+
+
+class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[InternVLProcessingInfo]
+                                 ):
+
+    def get_dummy_processor_inputs(
+        self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        *,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-    ):
-        num_images = mm_counts["image"]
+    ) -> ProcessorInputs:
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+        num_images = mm_counts.get("image", 0)
 
-        hf_config = ctx.get_hf_config()
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
 
-        image_feature_size = get_max_internvl_image_tokens(
-            ctx,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-        )
-        model_config = ctx.model_config
-        tokenizer = cached_get_tokenizer(
-            model_config.tokenizer,
-            trust_remote_code=model_config.trust_remote_code)
-
-        seq_data, ranges = dummy_seq_data_for_clip(
-            hf_config.vision_config,
-            seq_len,
-            num_images,
-            image_token_id=tokenizer.encode(self.img_context_token,
-                                            add_special_tokens=False)[0],
-            image_feature_size_override=image_feature_size,
+        return ProcessorInputs(
+            prompt_text="".join(f"Image-{i}: <image>\n"
+                                for i in range(1, num_images + 1)),
+            mm_data=mm_data,
         )
 
-        max_image_width, max_image_height = get_max_internvl_image_size(
-            ctx,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
+
+class InternVLMultiModalProcessor(
+        BaseMultiModalProcessor[InternVLProcessingInfo]):
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
         )
 
-        mm_data = dummy_image_for_clip(
-            hf_config.vision_config,
-            num_images,
-            image_width_override=max_image_width,
-            image_height_override=max_image_height,
+        image_token_id = self.info.get_hf_processor(**mm_kwargs).image_token_id
+        image_data = mm_data.get("images", [])
+        assert isinstance(image_data, list)
+
+        # Since there may be extra tokens in the feature placeholders,
+        # we need to pass the image token ID to the model to select the
+        # tokens to merge from the vision encoder outputs
+        processed_outputs["image_token_id"] = [image_token_id
+                                               ] * len(image_data)
+
+        return processed_outputs
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            image_embeds=MultiModalFieldConfig.batched("image"),
+            image_token_id=MultiModalFieldConfig.batched("image"),
         )
 
-        return DummyData(seq_data, mm_data, ranges)
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> list[PromptReplacement]:
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+
+        hf_config = self.info.get_hf_config()
+        num_patches = get_internvl_num_patches(hf_config)
+
+        def get_replacement_internvl(item_idx: int):
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems))
+
+            if isinstance(images, ImageEmbeddingItems):
+                feature_size = images.get_feature_size(item_idx)
+            else:
+                image_size = images.get_image_size(item_idx)
+                feature_size = self.info.get_num_image_tokens(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                    processor=hf_processor,
+                )
+
+            return PromptReplacementDetails(
+                full=hf_processor.get_image_repl_full(feature_size,
+                                                      num_patches),
+                features=hf_processor.get_image_repl_features(
+                    feature_size, num_patches),
+            )
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target="<image>",
+                replacement=get_replacement_internvl,
+            )
+        ]
 
 
-input_pipeline = InternVLInputPipeline(IMG_START, IMG_END, IMG_CONTEXT)
-
-
-@MULTIMODAL_REGISTRY.register_image_input_mapper(input_pipeline.input_mapper)
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_internvl_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(input_pipeline.dummy_data)
-@INPUT_REGISTRY.register_input_processor(input_pipeline.input_processor)
+@MULTIMODAL_REGISTRY.register_processor(
+    InternVLMultiModalProcessor,
+    info=InternVLProcessingInfo,
+    dummy_inputs=InternVLDummyInputsBuilder)
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:

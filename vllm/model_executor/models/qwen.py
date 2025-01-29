@@ -797,13 +797,13 @@ class QWenVLDummyInputsBuilder(BaseDummyInputsBuilder[QWenVLProcessingInfo]):
 
         vision_config = hf_config.visual
 
-        max_image_size = vision_config["image_size"]
+        target_width = target_height = vision_config["image_size"]
         num_images = mm_counts.get("image", 0)
 
         mm_data = {
             "image":
-            self._get_dummy_images(width=max_image_size,
-                                   height=max_image_size,
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
                                    num_images=num_images)
         }
 
