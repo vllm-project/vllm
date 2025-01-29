@@ -226,8 +226,11 @@ def __getattr__(name: str):
             global _init_trace
             _init_trace = "".join(traceback.format_stack())
         return _current_platform
-    else:
+    elif name in globals():
         return globals()[name]
+    else:
+        raise AttributeError(
+            f"No attribute named '{name}' exists in {__name__}.")
 
 
 __all__ = [
