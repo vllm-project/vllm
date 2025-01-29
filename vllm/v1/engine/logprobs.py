@@ -49,7 +49,7 @@ class LogprobsProcessor:
 
     def _update_sample_logprobs(
         self,
-        sampled_token_ids: List[int],
+        sampled_token_ids_lst: List[int],
         token_ids_lst: List[List[int]],
         sample_logprobs_lst: List[List[float]],
         sampled_token_ranks_lst: List[int],
@@ -59,13 +59,17 @@ class LogprobsProcessor:
         Lists are only of length >1 if EngineCore made
         >1 tokens in prior step (e.g. in spec decoding).
 
+        Token rank = (index in logprob-sorted vocab vector) + 1
+        
         Args:
           sampled_token_ids: list of int token ids
-          token_ids_list: list of (topk + 1) token ids tensors at each pos;
+          token_ids_lst: list of (topk + 1) token ids tensors at each pos;
                           `None` if sample logprobs are disabled in this req
-          sample_logprobs: list of (topk + 1) logprobs tensors at each pos;
-                          `None` if sample logprobs are disabled in this req
-
+          sample_logprobs_lst: list of (topk + 1) logprobs tensors at
+                          each pos; `None` if sample logprobs are
+                          disabled in this req
+          sampled_token_ranks_lst: list of individual sampled token ranks
+                                   for each sampled token
         Return:
           Sample logprobs, if required for this request
         """
@@ -75,7 +79,7 @@ class LogprobsProcessor:
         assert self.logprobs is not None
 
         for sampled_token_id, sampled_token_rank, logprobs, token_ids in zip(
-                sampled_token_ids, sampled_token_ranks_lst,
+                sampled_token_ids_lst, sampled_token_ranks_lst,
                 sample_logprobs_lst, token_ids_lst):
 
             # Split into sampled vs top_k.
@@ -132,10 +136,13 @@ class LogprobsProcessor:
 
         If prompt logprobs are disabled, both arguments should be `None`.
 
+        Token rank = (index in logprob-sorted vocab vector) + 1
+
         Args:
           token_ids: (num prompt tokens-1) x (topk + 1) token ids tensor
                      `None` if prompt logprobs are disabled in this req
           prompt_logprobs: (num prompt tokens-1) x (topk + 1) logprobs tensor
+          prompt_token_ranks: (num prompt_tokens-1) prompt token rank tensor
           prompt_token_ids_lst: (num prompt tokens)-length list of prompt
                                 token ids
 

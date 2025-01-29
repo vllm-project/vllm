@@ -869,13 +869,16 @@ class GPUModelRunner:
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
         sampled_token_ids = sampler_output.sampled_token_ids.tolist()
-        if sampler_output.logprob_token_ids is not None:
-            logprob_token_ids = sampler_output.logprob_token_ids.tolist()
-            logprobs = sampler_output.logprobs.tolist()
-            sampled_token_ranks = sampler_output.sampled_token_ranks.tolist()
-        else:
-            (logprob_token_ids, logprobs, sampled_token_ranks) = (None, None,
-                                                                  None)
+        do_sample_logprobs = sampler_output.logprob_token_ids is not None
+        logprob_token_ids: List[List[int]] = (
+            sampler_output.logprob_token_ids.tolist()
+            if do_sample_logprobs else None)
+        logprobs: List[List[float]] = (sampler_output.logprobs.tolist()
+                                       if do_sample_logprobs else None)
+        sampled_token_ranks: List[int] = (
+            sampler_output.sampled_token_ranks.tolist()
+            if do_sample_logprobs else None)
+
         # Update with the actual token ids
         for i, req_state, seq_len in request_seq_lens:
             token_id = sampled_token_ids[i]

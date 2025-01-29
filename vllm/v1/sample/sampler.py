@@ -133,6 +133,7 @@ class Sampler(nn.Module):
         Returns:
           Top-k float logprobs tensor, (num tokens) x (num_logprobs + 1)
           Top-k int indices tensor, (num tokens) x (num_logprobs + 1)
+          Sampled token rank tensor, (num tokens)
         """
         # Compute logprobs.
         logprobs = logits.log_softmax(dim=-1, dtype=torch.float32)
