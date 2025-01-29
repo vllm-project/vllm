@@ -261,7 +261,6 @@ class ModelConfig:
         generation_config: Optional[str] = None,
         enable_sleep_mode: bool = False,
     ) -> None:
->>>>>>> main
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
