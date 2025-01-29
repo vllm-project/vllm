@@ -3,15 +3,16 @@ import torch
 
 from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk, cutlass_moe
-from vllm.platforms import current_platform
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe,
+                                                            fused_topk)
+from vllm.platforms import current_platform
 
 NUM_EXPERTS = [8, 64]
 TOP_KS = [2, 6]
 
 
-@pytest.mark.parametrize("m", [16, 32, 64, 224])
+@pytest.mark.parametrize("m", [2, 16, 32, 64, 224])
 @pytest.mark.parametrize("n", [128, 2048])
 @pytest.mark.parametrize("k", [128, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
@@ -36,39 +37,39 @@ def test_cutlass_moe(
 
         a_q, a_scale = ops.scaled_fp8_quant(a)
 
-        w1_qs = []
-        w2_qs = []
-        w1_scales = []
-        w2_scales = []
+        w1_q = torch.empty((e, 2 * n, k),
+                           device="cuda",
+                           dtype=torch.float8_e4m3fn)
+        w2_q = torch.empty((e, k, n), device="cuda", dtype=torch.float8_e4m3fn)
+        w1_scale = torch.empty((e, 1, 1), device="cuda", dtype=torch.float32)
+        w2_scale = torch.empty((e, 1, 1), device="cuda", dtype=torch.float32)
 
         for expert in range(e):
-            w1_q, w1_scale = ops.scaled_fp8_quant(w1[expert])
-            w2_q, w2_scale = ops.scaled_fp8_quant(w2[expert])
-            w1_qs.append(w1_q.t())
-            w2_qs.append(w2_q.t())
-            w1_scales.append(w1_scale.reshape((1, 1)))
-            w2_scales.append(w2_scale.reshape((1, 1)))
-
-        score = torch.randn((m, e), device="cuda", dtype=dtype)
-
-        topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
-
+            w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(w1[expert])
+            w2_q[expert], w2_scale[expert] = ops.scaled_fp8_quant(w2[expert])
+        w1_q = w1_q.transpose(1, 2)
+        w2_q = w2_q.transpose(1, 2)
         a_d = (a_q.float() * a_scale).half()
+        w1_d = (w1_q.transpose(1, 2).float() * w1_scale).half()
+        w2_d = (w2_q.transpose(1, 2).float() * w2_scale).half()
+
         w1_d = torch.empty_like(w1)
         w2_d = torch.empty_like(w2)
         for expert in range(e):
-            w1_d[expert] = (w1_qs[expert].t().float() *
-                            w1_scales[expert]).half()
-            w2_d[expert] = (w2_qs[expert].t().float() *
-                            w2_scales[expert]).half()
-        torch_output = torch_moe(a_d, w1_d, w2_d, score, topk)
-        cutlass_output = cutlass_moe(a_q, a_scale, w1_qs, w2_qs, w1_scales,
-                                     w2_scales, topk_weights, topk_ids, m, n,
-                                     k)
+            w1_d[expert] = (w1_q[expert].t().float() * w1_scale[expert]).half()
+            w2_d[expert] = (w2_q[expert].t().float() * w2_scale[expert]).half()
 
-        # print(torch_output)
-        # print(cutlass_output)
-        # print(torch_output / cutlass_output)
+        score = torch.randn((m, e), device="cuda", dtype=dtype)
+        topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
+
+        torch_output = torch_moe(a_d, w1_d, w2_d, score, topk)
+        cutlass_output = cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale,
+                                     w2_scale, topk_weights, topk_ids, m, n, k,
+                                     e)
+
+        print(torch_output)
+        print(cutlass_output)
+        print("*")
 
         torch.testing.assert_close(torch_output,
                                    cutlass_output,

@@ -334,9 +334,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("cutlass_grouped_mm", torch::kCUDA, &cutlass_grouped_mm);
 
   ops.def(
-      "compute_expert_offsets(Tensor! trg_a_ptrs,"
-      "                   Tensor! a, Tensor topk_ids,"
-      "                   Tensor! expert_offsets, SymInt num_experts) -> ()");
+      "compute_expert_offsets(Tensor topk_ids, Tensor! expert_offsets, "
+      "                       Tensor! problem_sizes1, Tensor! problem_sizes2, "
+      "                       SymInt num_experts, SymInt n, SymInt k) -> ()");
   ops.impl("compute_expert_offsets", torch::kCUDA, &compute_expert_offsets);
 
   // Check if cutlass sparse scaled_mm is supported for CUDA devices of the

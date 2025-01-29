@@ -126,11 +126,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   //       b_offsets) -> ()");
   //   ops.impl("cutlass_grouped_mm", torch::kCUDA, &cutlass_grouped_mm);
 
-  ops.def(
-      "compute_expert_offsets(Tensor! trg_a_ptrs,"
-      "                   Tensor! a, Tensor topk_ids,"
-      "                   Tensor! expert_offsets, SymInt num_experts) -> ()");
-  ops.impl("compute_expert_offsets", torch::kCUDA, &compute_expert_offsets);
+  //   ops.def(
+  //       "compute_expert_offsets(Tensor! trg_a_ptrs,"
+  //       "                   Tensor! a, Tensor topk_ids,"
+  //       "                   Tensor! expert_offsets, SymInt num_experts) ->
+  //       ()");
+  //   ops.impl("compute_expert_offsets", torch::kCUDA,
+  //   &compute_expert_offsets);
 
   // w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
   // quantization.

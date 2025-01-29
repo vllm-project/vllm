@@ -134,7 +134,7 @@ void cutlass_group_gemm_caller(torch::Tensor& out_tensors,
   using ElementAB = typename Gemm::ElementAB;
   using ElementC = typename Gemm::ElementC;
 
-  int groups = (int)expert_offsets.size(0) - 1;
+  int groups = (int)expert_offsets.size(0);
   int k_size = a_tensors.size(1);
   int n_size = out_tensors.size(1);
 
@@ -146,27 +146,22 @@ void cutlass_group_gemm_caller(torch::Tensor& out_tensors,
 
   auto options_int =
       torch::TensorOptions().dtype(torch::kInt64).device(a_tensors.device());
-  torch::Tensor a_ptrs_base =
-      torch::full({groups + 1}, reinterpret_cast<int64_t>(a_tensors.data_ptr()),
-                  options_int);
+  torch::Tensor a_ptrs_base = torch::full(
+      groups, reinterpret_cast<int64_t>(a_tensors.data_ptr()), options_int);
   torch::Tensor out_ptrs_base = torch::full(
-      {groups + 1}, reinterpret_cast<int64_t>(out_tensors.data_ptr()),
-      options_int);
-  torch::Tensor b_ptrs_base =
-      torch::full({groups + 1}, reinterpret_cast<int64_t>(b_tensors.data_ptr()),
-                  options_int);
-  torch::Tensor a_scales_base =
-      torch::full({groups + 1}, reinterpret_cast<int64_t>(a_scales.data_ptr()),
-                  options_int);
-  torch::Tensor b_scales_base =
-      torch::full({groups + 1}, reinterpret_cast<int64_t>(b_scales.data_ptr()),
-                  options_int);
+      groups, reinterpret_cast<int64_t>(out_tensors.data_ptr()), options_int);
+  torch::Tensor b_ptrs_base = torch::full(
+      groups, reinterpret_cast<int64_t>(b_tensors.data_ptr()), options_int);
+  torch::Tensor a_scales_base = torch::full(
+      groups, reinterpret_cast<int64_t>(a_scales.data_ptr()), options_int);
+  torch::Tensor b_scales_base = torch::full(
+      groups, reinterpret_cast<int64_t>(b_scales.data_ptr()), options_int);
 
-  torch::Tensor b_offsets = torch::arange(0, b_single_size * (groups + 1),
-                                          b_single_size, options_int);
-  torch::Tensor a_scales_offsets = torch::arange(0, groups + 1, options_int);
+  torch::Tensor b_offsets =
+      torch::arange(0, b_single_size * groups, b_single_size, options_int);
+  torch::Tensor a_scales_offsets = torch::arange(0, groups, options_int);
   torch::Tensor b_scales_offsets = torch::arange(
-      0, b_scale_single_size * (groups + 1), b_scale_single_size, options_int);
+      0, b_scale_single_size * groups, b_scale_single_size, options_int);
 
   torch::Tensor a_ptrs = a_ptrs_base.add(
       expert_offsets, sizeof(ElementAB_Type) * a_tensors.size(1));
@@ -189,6 +184,7 @@ void cutlass_group_gemm_caller(torch::Tensor& out_tensors,
   std::vector<StrideB> b_stride_host(groups);
   std::vector<StrideC> c_stride_host(groups);
 
+  // TODO pass strides?
   for (int32_t g = 0; g < groups; ++g) {
     int64_t lda = a_tensors.stride(0);    // row-major (m x k)
     int64_t ldb = a_tensors.stride(0);    // column-major (k x n)
@@ -325,10 +321,11 @@ void cutlass_grouped_mm_sm90(torch::Tensor& out_tensors,
       problem_sizes);
 }
 
-__global__ void get_a_expert_offsets(cutlass::float_e4m3_t** trg_a_ptrs,
-                                     cutlass::float_e4m3_t* base_a_ptr,
-                                     const int* __restrict__ topk_ids,
-                                     int64_t* expert_offsets, int topk_length) {
+__global__ void get_a_expert_offsets(const int* __restrict__ topk_ids,
+                                     int32_t* expert_offsets,
+                                     int32_t* problem_sizes1,
+                                     int32_t* problem_sizes2, int topk_length,
+                                     int n, int k) {
   int expert_id = threadIdx.x;
   int num_experts = blockDim.x;
 
@@ -336,15 +333,19 @@ __global__ void get_a_expert_offsets(cutlass::float_e4m3_t** trg_a_ptrs,
   for (int i = 0; i < topk_length; ++i) {
     occurrences += (topk_ids[i] == expert_id);
   }
-  expert_offsets[expert_id + 1] = occurrences;
+  problem_sizes1[expert_id * 3] = occurrences;
+  problem_sizes1[expert_id * 3 + 1] = 2 * n;
+  problem_sizes1[expert_id * 3 + 2] = k;
+  problem_sizes2[expert_id * 3] = occurrences;
+  problem_sizes2[expert_id * 3 + 1] = k;
+  problem_sizes2[expert_id * 3 + 2] = n;
   __syncthreads();
 
   if (threadIdx.x == 0) {
-    int64_t tot_offset = 0;
+    int32_t tot_offset = 0;
     expert_offsets[0] = 0;
     for (int i = 0; i < num_experts; ++i) {
-      trg_a_ptrs[i] = base_a_ptr + tot_offset;
-      tot_offset += expert_offsets[i + 1];
+      tot_offset += problem_sizes1[i * 3];
       expert_offsets[i + 1] = tot_offset;
     }
   }
@@ -394,14 +395,16 @@ __global__ void get_a_expert_offsets(cutlass::float_e4m3_t** trg_a_ptrs,
 //   };
 // }
 
-void compute_expert_offsets_caller(torch::Tensor& trg_a_ptrs, torch::Tensor& a,
-                                   const torch::Tensor& topk_ids,
+void compute_expert_offsets_caller(const torch::Tensor& topk_ids,
                                    torch::Tensor& expert_offsets,
-                                   const int64_t num_experts) {
+                                   torch::Tensor& problem_sizes1,
+                                   torch::Tensor& problem_sizes2,
+                                   const int64_t num_experts, const int64_t n,
+                                   const int64_t k) {
   get_a_expert_offsets<<<1, num_experts>>>(
-      (cutlass::float_e4m3_t**)trg_a_ptrs.data_ptr(),
-      (cutlass::float_e4m3_t*)a.data_ptr(), (const int*)topk_ids.data_ptr(),
-      (int64_t*)expert_offsets.data_ptr(), topk_ids.numel());
+      (const int32_t*)topk_ids.data_ptr(), (int32_t*)expert_offsets.data_ptr(),
+      (int32_t*)problem_sizes1.data_ptr(), (int32_t*)problem_sizes2.data_ptr(),
+      topk_ids.numel(), n, k);
 }
 
 // void permute_fp8_rows(torch::Tensor& a_ptr,
