@@ -433,7 +433,8 @@ class Scheduler:
                     if start_pos + num_tokens <= request.num_computed_tokens:
                         # The encoder output is already processed and stored
                         # in the decoder's KV cache.
-                        self.encoder_cache_manager.free(request, input_id)
+                        self.encoder_cache_manager.free_encoder_input(
+                            request, input_id)
 
             if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
@@ -524,7 +525,7 @@ class Scheduler:
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
         self.kv_cache_manager.free(request)
-        self.encoder_cache_manager.free_all(request)
+        self.encoder_cache_manager.free(request)
         self.running_reqs_data.pop(request.request_id, None)
         del self.requests[request.request_id]
         self.finished_req_ids.add(request.request_id)
