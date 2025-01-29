@@ -108,9 +108,9 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height,
     return best_ratio
 
 
-def calculate_num_blocks(orig_width: int, orig_height: int, min_num: int,
-                         max_num: int, image_size: int,
-                         use_thumbnail: bool) -> Tuple[int, int, int]:
+def calculate_targets(orig_width: int, orig_height: int, min_num: int,
+                      max_num: int, image_size: int,
+                      use_thumbnail: bool) -> Tuple[int, int, int]:
     aspect_ratio = orig_width / orig_height
 
     # calculate the existing image aspect ratio
@@ -141,7 +141,7 @@ def dynamic_preprocess(image: Image.Image, min_num: int, max_num: int,
     orig_width, orig_height = image.size
 
     # calculate the number of blocks without thumbnail
-    blocks, target_width, target_height = calculate_num_blocks(
+    blocks, target_width, target_height = calculate_targets(
         orig_width,
         orig_height,
         min_num,
@@ -251,11 +251,15 @@ class InternVLProcessor:
     def get_image_repl_features(
         self,
         feature_size: int,
-        num_patches: int,
+        num_patches: Optional[int],
     ) -> str:
         return IMG_CONTEXT * feature_size
 
-    def get_image_repl_full(self, feature_size: int, num_patches: int) -> str:
+    def get_image_repl_full(
+        self,
+        feature_size: int,
+        num_patches: Optional[int],
+    ) -> str:
         features = self.get_image_repl_features(feature_size, num_patches)
         return IMG_START + features + IMG_END
 
@@ -289,7 +293,7 @@ class InternVLProcessor:
         if len(images) == 0:
             image_inputs = {}
         else:
-            pixel_values = [
+            pixel_values_lst = [
                 image_to_pixel_values(
                     image,
                     input_size=self.image_size,
@@ -298,20 +302,14 @@ class InternVLProcessor:
                     use_thumbnail=self.use_thumbnail,
                 ) for image in images
             ]
-            image_inputs = {"pixel_values": torch.stack(pixel_values)}
+            image_inputs = {
+                "pixel_values_flat": torch.cat(pixel_values_lst),
+                "image_num_patches": list(map(len, pixel_values_lst)),
+            }
 
-            for image, item in zip(images, image_inputs["pixel_values"]):
-                num_patches = item.shape[0]
-                width, height = image.size
-                num_blocks, _, _ = calculate_num_blocks(
-                    orig_width=width,
-                    orig_height=height,
-                    image_size=self.image_size,
-                    min_num=self.min_dynamic_patch,
-                    max_num=max_dynamic_patch,
-                    use_thumbnail=self.use_thumbnail,
-                )
-                feature_size = num_blocks * num_patches
+            for pixel_values in pixel_values_lst:
+                num_patches = pixel_values.shape[0]
+                feature_size = num_patches * self.num_image_token
 
                 image_repl = self.get_image_repl_full(feature_size,
                                                       num_patches)
@@ -356,53 +354,42 @@ class InternVLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: Optional[InternVLProcessor],
     ) -> int:
-        hf_config = self.get_hf_config()
-
         if processor is None:
-            min_dynamic_patch = hf_config.min_dynamic_patch
-            max_dynamic_patch = hf_config.max_dynamic_patch
-            dynamic_image_size = hf_config.dynamic_image_size
-        else:
-            min_dynamic_patch = processor.min_dynamic_patch
-            max_dynamic_patch = processor.max_dynamic_patch
-            dynamic_image_size = processor.dynamic_image_size
+            processor = self.get_hf_processor()
 
         max_dynamic_patch = _get_max_dynamic_patch(
-            dynamic_image_size=dynamic_image_size,
-            max_dynamic_patch=max_dynamic_patch,
-            use_thumbnail=False,  # Applied in calculate_num_blocks
+            dynamic_image_size=processor.dynamic_image_size,
+            max_dynamic_patch=processor.max_dynamic_patch,
+            use_thumbnail=False,  # Applied in calculate_targets
         )
 
-        num_patches = get_internvl_num_patches(hf_config)
-        num_blocks, _, _ = calculate_num_blocks(
+        num_patches, _, _ = calculate_targets(
             orig_width=image_width,
             orig_height=image_height,
-            min_num=min_dynamic_patch,
+            image_size=processor.image_size,
+            min_num=processor.min_dynamic_patch,
             max_num=max_dynamic_patch,
-            image_size=hf_config.vision_config.image_size,
-            use_thumbnail=hf_config.use_thumbnail,
+            use_thumbnail=processor.use_thumbnail,
         )
 
-        return num_blocks * num_patches
+        return num_patches * processor.num_image_token
 
     def get_max_image_tokens(self) -> int:
-        hf_config = self.get_hf_config()
-        num_patches = get_internvl_num_patches(hf_config)
-        max_dynamic_patch = _get_max_dynamic_patch(
-            dynamic_image_size=hf_config.dynamic_image_size,
-            max_dynamic_patch=hf_config.max_dynamic_patch,
-            use_thumbnail=hf_config.use_thumbnail,
-        )
+        processor = self.get_hf_processor()
 
-        return num_patches * max_dynamic_patch
+        hf_config = self.get_hf_config()
+        max_num_patches = get_internvl_num_patches(hf_config)
+
+        return max_num_patches * processor.num_image_token
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        hf_config = self.get_hf_config()
-        image_size = hf_config.vision_config.image_size
+        processor = self.get_hf_processor()
+
+        image_size = processor.image_size
         max_dynamic_patch = _get_max_dynamic_patch(
-            dynamic_image_size=hf_config.dynamic_image_size,
-            max_dynamic_patch=hf_config.max_dynamic_patch,
-            use_thumbnail=hf_config.use_thumbnail,
+            dynamic_image_size=processor.dynamic_image_size,
+            max_dynamic_patch=processor.max_dynamic_patch,
+            use_thumbnail=processor.use_thumbnail,
         )
 
         width = image_size * max_dynamic_patch
@@ -467,8 +454,12 @@ class InternVLMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
+
         return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
+            pixel_values_flat=MultiModalFieldConfig.flat_from_sizes(
+                "image", image_num_patches),
+            image_num_patches=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
             image_token_id=MultiModalFieldConfig.batched("image"),
         )
@@ -481,8 +472,14 @@ class InternVLMultiModalProcessor(
     ) -> list[PromptReplacement]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        hf_config = self.info.get_hf_config()
-        num_patches = get_internvl_num_patches(hf_config)
+        if "image_num_patches" in out_mm_kwargs:
+            image_num_patches = out_mm_kwargs["image_num_patches"]
+        elif "image_embeds" in out_mm_kwargs:
+            # TODO: Use image size information in dictionary embedding inputs
+            # to compute num_patches (similar to Qwen2-VL)
+            image_num_patches = [None] * len(out_mm_kwargs["image_embeds"])
+        else:
+            image_num_patches = []
 
         def get_replacement_internvl(item_idx: int):
             images = mm_items.get_items(
@@ -497,6 +494,8 @@ class InternVLMultiModalProcessor(
                     image_height=image_size.height,
                     processor=hf_processor,
                 )
+
+            num_patches = image_num_patches[item_idx].item()
 
             return PromptReplacementDetails(
                 full=hf_processor.get_image_repl_full(feature_size,
@@ -666,10 +665,11 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[InternVLImageInputs]:
-        pixel_values = kwargs.pop("pixel_values", None)
+        pixel_values_flat = kwargs.pop("pixel_values_flat", None)
+        image_num_patches = kwargs.pop("image_num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None and image_embeds is None:
+        if pixel_values_flat is None and image_embeds is None:
             return None
 
         if image_embeds is not None:
@@ -686,22 +686,19 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         assert isinstance(image_token_id, torch.Tensor)
         self.img_context_token_id = image_token_id.flatten().unique().item()
 
-        if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
+        if pixel_values_flat is not None:
+            if not isinstance(pixel_values_flat, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
+                                 f"Got type: {type(pixel_values_flat)}")
 
-            patches_per_image = []
-            for request_pixel_values in pixel_values:
-                for image_pixel_values in request_pixel_values:
-                    patches_per_image.append(image_pixel_values.shape[0])
-            # We need to flatten (B, N, P) to (B*N*P),
-            # so we call flatten_bn twice.
+            assert isinstance(image_num_patches, (torch.Tensor, list))
+
             return InternVLImagePixelInputs(
                 type="pixel_values",
                 data=self._validate_pixel_values(
-                    flatten_bn(flatten_bn(pixel_values), concat=True)),
-                patches_per_image=patches_per_image)
+                    flatten_bn(pixel_values_flat, concat=True)),
+                patches_per_image=flatten_bn(image_num_patches,
+                                             concat=True).tolist())
 
         raise AssertionError("This line should be unreachable.")
 
@@ -735,7 +732,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         image_embeds = image_embeds.split(image_feature_sizes)
         return image_embeds
 
-    def _set_visual_token_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
         if self.is_mono:
             self.visual_token_mask = (
                 input_ids == self.img_context_token_id).reshape(-1, 1)

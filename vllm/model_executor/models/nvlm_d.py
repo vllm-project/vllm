@@ -29,8 +29,11 @@ class NVLMProcessor(InternVLProcessor):
     def get_image_repl_features(
         self,
         feature_size: int,
-        num_patches: int,
+        num_patches: Optional[int],
     ) -> str:
+        if num_patches is None:
+            raise NotImplementedError("Embedding inputs are not supported")
+
         tile_pos_identifiers = [f"<tile_{i}>" for i in range(1, num_patches)]
         if self.use_thumbnail:
             tile_pos_identifiers += ["<tile_global_thumbnail>"]
@@ -39,7 +42,11 @@ class NVLMProcessor(InternVLProcessor):
         return "".join(identifier + IMG_PAD * context_size
                        for identifier in tile_pos_identifiers)
 
-    def get_image_repl_full(self, feature_size: int, num_patches: int) -> str:
+    def get_image_repl_full(
+        self,
+        feature_size: int,
+        num_patches: Optional[int],
+    ) -> str:
         features = self.get_image_repl_features(feature_size, num_patches)
         return "<Image>" + features + "</Image>"
 

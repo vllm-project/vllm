@@ -723,7 +723,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `NVLM_D_Model`
   * NVLM-D 1.0
-  * T + I<sup>E+</sup>
+  * T + I<sup>+</sup>
   * `nvidia/NVLM-D-72B`, etc.
   *
   * ✅︎
