@@ -2,8 +2,7 @@
 
 # INT4 W4A16
 
-vLLM supports quantizing weights and activations to INT4 for memory savings and inference acceleration.
-<!-- #TODO (Brian/Kyle) This quantization method is particularly useful for reducing model size while maintaining good performance. -->
+vLLM supports quantizing weights and activations to INT4 for memory savings and inference acceleration. This quantization method is particularly useful for reducing model size and maintaining low latency in workloads with low queries per second (QPS).
 
 Please visit the HF collection of [quantized INT4 checkpoints of popular LLMs ready to use with vLLM](https://huggingface.co/collections/neuralmagic/int4-llms-for-vllm-668ec34bf3c9fa45f857df2c).
 
@@ -93,7 +92,7 @@ oneshot(
 )
 
 # Save the compressed model
-SAVE_DIR = MODEL_ID.split("/")[1] + "-W4A16-Dynamic-Per-Token"
+SAVE_DIR = MODEL_ID.split("/")[1] + "-W4A16-G128"
 model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 ```
@@ -106,14 +105,14 @@ After quantization, you can load and run the model in vLLM:
 
 ```python
 from vllm import LLM
-model = LLM("./Meta-Llama-3-8B-Instruct-W4A16-Dynamic-Per-Token")
+model = LLM("./Meta-Llama-3-8B-Instruct-W4A16-G128")
 ```
 
 To evaluate accuracy, you can use `lm_eval`:
 
 ```console
 $ lm_eval --model vllm \
-  --model_args pretrained="./Meta-Llama-3-8B-Instruct-W4A16-Dynamic-Per-Token",add_bos_token=true \
+  --model_args pretrained="./Meta-Llama-3-8B-Instruct-W4A16-G128",add_bos_token=true \
   --tasks gsm8k \
   --num_fewshot 5 \
   --limit 250 \
@@ -126,13 +125,15 @@ Quantized models can be sensitive to the presence of the `bos` token. Make sure 
 
 ## Best Practices
 
-<!-- #TODO (Brian/Kyle)
-
-- Start with 512 samples for calibration data (increase if accuracy drops)
+- Start with 512 samples for calibration data, and increase if accuracy drops
+- Ensure the calibration data contains a high variety of samples to prevent overfitting towards a specific use case
 - Use a sequence length of 2048 as a starting point
 - Employ the chat template or instruction template that the model was trained with
-- If you've fine-tuned a model, consider using a sample of your training data for calibration -->
+- If you've fine-tuned a model, consider using a sample of your training data for calibration
+<!-- TODO (Brian/Kyle) include description of activation ordering and dampening_frac hyperparameters -->
+<!-- TODO (Brian/Kyle) "choosing the correct quantization scheme/ compression technique" -->
+<!-- TODO (Brian/Kyle) include vision or audio calibration datasets as well -->
 
 ## Troubleshooting and Support
 
-If you encounter any issues or have feature requests, please open an issue on the [`vllm-project/llm-compressor`](https://github.com/vllm-project/llm-compressor) GitHub repository.
+If you encounter any issues or have feature requests, please open an issue on the [`vllm-project/llm-compressor`](https://github.com/vllm-project/llm-compressor) GitHub repository. The full INT4 quantization example is available in `llm-compressor` [here](https://github.com/vllm-project/llm-compressor/blob/main/examples/quantization_w4a16/llama3_example.py).
