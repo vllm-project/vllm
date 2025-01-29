@@ -1,10 +1,11 @@
 import time
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import List
 
 import numpy as np
 import prometheus_client
 
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
@@ -78,13 +79,13 @@ class LoggingStatLogger(StatLoggerBase):
 
 class PrometheusStatLogger(StatLoggerBase):
 
-    def __init__(self, labels: Dict[str, str]):
-        self.labels = labels
-
-        labelnames = self.labels.keys()
-        labelvalues = self.labels.values()
-
+    def __init__(self, model_config: ModelConfig):
         self._unregister_vllm_metrics()
+
+        labelnames = ["model_name"]
+        labelvalues = [model_config.served_model_name]
+
+        max_model_len = model_config.max_model_len
 
         self.gauge_scheduler_running = prometheus_client.Gauge(
             name="vllm:num_requests_running",
@@ -106,6 +107,40 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation="Number of generation tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
 
+        self.histogram_num_prompt_tokens_request = \
+            prometheus_client.Histogram(
+                name="vllm:request_prompt_tokens",
+                documentation="Number of prefill tokens processed.",
+                buckets=build_1_2_5_buckets(max_model_len),
+                labelnames=labelnames).labels(*labelvalues)
+
+        self.histogram_num_generation_tokens_request = \
+            prometheus_client.Histogram(
+                name="vllm:request_generation_tokens",
+                documentation="Number of generation tokens processed.",
+                buckets=build_1_2_5_buckets(max_model_len),
+                labelnames=labelnames).labels(*labelvalues)
+
+        self.histogram_time_to_first_token = \
+            prometheus_client.Histogram(
+                name="vllm:time_to_first_token_seconds",
+                documentation="Histogram of time to first token in seconds.",
+                buckets=[
+                    0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5,
+                    0.75, 1.0, 2.5, 5.0, 7.5, 10.0
+                ],
+                labelnames=labelnames).labels(*labelvalues)
+
+        self.histogram_time_per_output_token = \
+            prometheus_client.Histogram(
+                name="vllm:time_per_output_token_seconds",
+                documentation="Histogram of time per output token in seconds.",
+                buckets=[
+                    0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5,
+                    0.75, 1.0, 2.5
+                ],
+                labelnames=labelnames).labels(*labelvalues)
+
     def log(self, scheduler_stats: SchedulerStats,
             iteration_stats: IterationStats):
         """Log to prometheus."""
@@ -116,9 +151,47 @@ class PrometheusStatLogger(StatLoggerBase):
         self.counter_generation_tokens.inc(
             iteration_stats.num_generation_tokens)
 
+        for finished_request in iteration_stats.finished_requests:
+            self.histogram_num_prompt_tokens_request.observe(
+                finished_request.num_prompt_tokens)
+            self.histogram_num_generation_tokens_request.observe(
+                finished_request.num_generation_tokens)
+
+        for ttft in iteration_stats.time_to_first_tokens_iter:
+            self.histogram_time_to_first_token.observe(ttft)
+        for tpot in iteration_stats.time_per_output_tokens_iter:
+            self.histogram_time_per_output_token.observe(tpot)
+
     @staticmethod
     def _unregister_vllm_metrics():
         # Unregister any existing vLLM collectors (for CI/CD
         for collector in list(prometheus_client.REGISTRY._collector_to_names):
             if hasattr(collector, "_name") and "vllm" in collector._name:
                 prometheus_client.REGISTRY.unregister(collector)
+
+
+def build_buckets(mantissa_lst: List[int], max_value: int) -> List[int]:
+    """
+    Builds a list of buckets with increasing powers of 10 multiplied by
+    mantissa values until the value exceeds the specified maximum.
+
+    """
+    exponent = 0
+    buckets: List[int] = []
+    while True:
+        for m in mantissa_lst:
+            value = m * 10**exponent
+            if value <= max_value:
+                buckets.append(value)
+            else:
+                return buckets
+        exponent += 1
+
+
+def build_1_2_5_buckets(max_value: int) -> List[int]:
+    """
+    Example:
+    >>> build_1_2_5_buckets(100)
+    [1, 2, 5, 10, 20, 50, 100]
+    """
+    return build_buckets([1, 2, 5], max_value)

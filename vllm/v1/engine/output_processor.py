@@ -103,7 +103,8 @@ class OutputProcessor:
             # 1) Compute stats for this iteration.
             iteration_stats.update_from_output(engine_core_output,
                                                req_state.is_prefilling,
-                                               req_state.prompt_len)
+                                               req_state.prompt_len,
+                                               req_state.stats)
 
             new_token_ids = engine_core_output.new_token_ids
             finish_reason = engine_core_output.finish_reason
@@ -137,6 +138,10 @@ class OutputProcessor:
                         # If req not finished in EngineCore, but Detokenizer
                         # detected stop string, abort needed in EngineCore.
                         reqs_to_abort.append(req_id)
+
+                    # Track per-request stats
+                    iteration_stats.update_from_finished_request(
+                        request_output, req_state.stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
