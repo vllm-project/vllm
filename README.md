@@ -15,7 +15,7 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 > [!NOTE] 
-> For Intel Gaudi specific setup instructions and examples, please refer [Intel® Gaudi® README](https://github.com/HabanaAI/vllm-fork/blob/habana_main/README_GAUDI.md). For jupyter notebook based quickstart tutorials refer [Getting Started with vLLM](https://github.com/HabanaAI/Gaudi-tutorials/blob/main/PyTorch/Getting_Started_with_vLLM/Getting_Started_with_vLLM.ipynb) and [Understanding vLLM on Gaudi](https://github.com/HabanaAI/Gaudi-tutorials/blob/main/PyTorch/Understanding_vLLM_on_Gaudi/Understanding_vLLM_on_Gaudi.ipynb).
+> For Intel Gaudi specific setup instructions and examples, please refer [Intel® Gaudi® README](https://github.com/HabanaAI/vllm-fork/blob/habana_main/README_GAUDI.md). For jupyter notebook based quickstart tutorials refer [Getting Started with vLLM](https://github.com/HabanaAI/Gaudi-tutorials/blob/main/PyTorch/vLLM_Tutorials/Getting_Started_with_vLLM/Getting_Started_with_vLLM.ipynb) and [Understanding vLLM on Gaudi](https://github.com/HabanaAI/Gaudi-tutorials/blob/main/PyTorch/vLLM_Tutorials/Understanding_vLLM_on_Gaudi/Understanding_vLLM_on_Gaudi.ipynb).
 
 The first vLLM meetup in 2025 is happening on January 22nd, Wednesday, with Google Cloud in San Francisco! We will talk about vLLM's performant V1 architecture, Q1 roadmap, Google Cloud's innovation around vLLM: networking, Cloud Run, Vertex, and TPU! [Register Now](https://lu.ma/zep56hui)
 
