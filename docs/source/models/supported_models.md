@@ -54,6 +54,70 @@ llm.apply_model(lambda model: print(model.__class__))
 
 If it is `TransformersModel` then it means it's based on `transformers`!
 
+#### Supported features:
+
+##### LORA and quantization
+
+Both are not supported yet! Make sure to open an issue and we'll work on this together with the `transformers` team! 
+
+Usually `transformers` model load weights via the `load_adapters` API, that depends on PEFT. We need to work a bit to either use this api (for now this would result in some weights not being marked as loaded) or replace modules accordingly. 
+
+Hints as to how this would look like:
+```python
+class TransformersModel(nn.Module, SupportsLoRA):
+  def __init__(*):
+    ...
+    self.model.load_adapter(vllm_config.load_config.model_loader_extra_config["qlora_adapter_name_or_path"])
+```
+
+
+Blocker is that you need to specify supported lora layers, when we would ideally want to load whatever is inside the checkpoint!
+
+##### Remote code
+
+This fallback also means that any model on the hub that can be used in `transformers` with `trust_remote_code=True` that correctly implements attention can be used in production! 
+
+
+```python 
+from vllm import LLM
+llm = LLM(model=..., task="generate", trust_remote_code=True)  # Name or path of your model
+llm.apply_model(lambda model: print(model.__class__))
+```
+
+A model just needs the following two things:
+
+```python
+from transformers import PreTrainedModel
+from torch import nn
+
+class MyAttention(nn.Module):
+
+  def forward(self, hidden_states, **kwargs): # <- kwargs are required
+
+    ...
+    attention_interface = attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+    attn_output, attn_weights = attention_interface(
+      self,
+      query_states,
+      key_states,
+      value_states,
+      **kwargs,
+    )
+    ...
+
+class MyModel(PreTrainedModel):
+  _supports_attention_backend = True
+```
+
+Here is what happends in the background: 
+
+1. The config is loaded 
+2. `MyModel` python class is loaded from the `auto_map`, and we check that the model `_supports_attention_backend`. 
+3. The `TransformersModel` backend is used. See `/model_executors/models/transformers`, which leverage `self.config._attn_implementation = "vllm"`, thus the need to use `ALL_ATTENTION_FUNCTION`. 
+
+That's it! 
+
+
 ### ModelScope
 
 To use models from [ModelScope](https://www.modelscope.cn) instead of HuggingFace Hub, set an environment variable:

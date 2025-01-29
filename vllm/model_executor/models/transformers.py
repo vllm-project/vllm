@@ -85,10 +85,14 @@ class HFRowParallelLinear(RowParallelLinear):
         return super().forward(input)[0]
 
 
-def replace_tp_linear_class(orig_module: nn.Linear, style: str, quant_config):
+def replace_tp_linear_class(orig_module: nn.Linear,
+                            style: str,
+                            quant_config=None):
     """
     In model configurations, we use a neutral type (string) to specify parallel
     styles, here we use it to translate nn.Linear into vllm-style tp Linear.
+
+    Quant config is not supported yet
     """
 
     if not isinstance(style, str):
@@ -100,25 +104,27 @@ def replace_tp_linear_class(orig_module: nn.Linear, style: str, quant_config):
     bias = orig_module.bias is not None
 
     if style == "colwise":
-        return HFColumnParallelLinear(input_size,
-                                      output_size,
-                                      bias,
-                                      quant_config=quant_config)
+        return HFColumnParallelLinear(
+            input_size,
+            output_size,
+            bias,
+        )
     elif style == "rowwise":
-        return HFRowParallelLinear(input_size,
-                                   output_size,
-                                   bias,
-                                   quant_config=quant_config)
+        return HFRowParallelLinear(
+            input_size,
+            output_size,
+            bias,
+        )
     # We don't consider colwise_rep since it's used in lm_head
     else:
         raise ValueError(f"Unsupported parallel style value: {style}")
 
 
-class TransformersModel(nn.Module, SupportsLoRA):
+class TransformersModel(nn.Module):
     embedding_padding_modules = ["lm_head"]
-    packed_modules_mapping = {}
+    embedding_modules = ["embed_tokens"
+                         ]  # TODO transformers will have a util to get it
 
-    # TODO Add support for bnb and LORA
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         logger.info("Using Transformers backend.")
@@ -154,9 +160,8 @@ class TransformersModel(nn.Module, SupportsLoRA):
                 scale=config.head_dim**-0.5,
                 num_kv_heads=divide(config.num_key_value_heads, tp_size),
                 cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=f"{i}.attn")
-            for i in range(config.num_hidden_layers)
+                quant_config=None,
+                prefix=f"{i}.attn") for i in range(config.num_hidden_layers)
         ]
 
         # Model modifications
@@ -165,7 +170,7 @@ class TransformersModel(nn.Module, SupportsLoRA):
         # ForCausalLM modifications
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
-                                      quant_config=quant_config,
+                                      quant_config=None,
                                       prefix=maybe_prefix(prefix, "lm_head"))
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.get_input_embeddings().weight
