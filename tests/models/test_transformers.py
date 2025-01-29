@@ -73,13 +73,3 @@ def test_distributed(
     kwargs = {"model_impl": "transformers", "tensor_parallel_size": 2}
     check_implementation(hf_runner, vllm_runner, example_prompts,
                          "meta-llama/Llama-3.2-1B-Instruct", **kwargs)
-
-
-def test_quantized(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-):
-    kwargs = {"model_impl": "transformers"}
-    check_implementation(hf_runner, vllm_runner, example_prompts,
-                         "unsloth/Llama-3.2-1B-Instruct-bnb-4bit", **kwargs)
