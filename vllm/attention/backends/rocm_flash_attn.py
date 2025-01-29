@@ -812,29 +812,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         cpa_fp8_out = True
                     else:
                         out = output
-                from inspect import signature
-                print(f"sig={signature(ops.paged_attention_rocm)}")
                 block_tables = decode_meta.block_tables if self.attn_type != AttentionType.ENCODER_DECODER else decode_meta.cross_block_tables
                 seq_lens = decode_meta.seq_lens_tensor if self.attn_type != AttentionType.ENCODER_DECODER else decode_meta.encoder_seq_lens_tensor
-                print(f"type(out) = {out.dtype}\n"
-                      f"type(exp_sums) = {type(exp_sums)}\n"
-                      f"type(max_logits) = {type(max_logits)}\n"
-                      f"type(tmp_output) = {type(tmp_output)}\n"
-                      f"type(decode_query) = {type(decode_query)}\n"
-                      f"type(key_cache) = {type(key_cache)}\n"
-                      f"type(value_cache) = {type(value_cache)}\n"
-                      f"type(self.num_kv_heads) = {type(self.num_kv_heads)}\n"
-                      f"type(self.scale) = {type(self.scale)}\n"
-                      f"type(block_tables) = {type(block_tables)}\n"
-                      f"type(seq_lens) = {type(seq_lens)}\n"
-                      f"type(block_size) = {type(block_size)}\n"
-                      f"type(max_seq_len) = {type(max_seq_len)}\n"
-                      f"type(self.alibi_slopes) = {type(self.alibi_slopes)}\n"
-                      f"type(kv_cache_dtype) = {type(kv_cache)}\n"
-                      f"type(layer._k_scale) = {type(layer._k_scale)}\n"
-                      f"type(layer._v_scale) = {type(layer._v_scale)}\n"
-                      f"type(fp8_out_scale) = {type(fp8_out_scale)}\n"
-                      f"type(_PARTITION_SIZE_ROCM) = {type(_PARTITION_SIZE_ROCM)}")
                 ops.paged_attention_rocm(
                     out,
                     exp_sums,
