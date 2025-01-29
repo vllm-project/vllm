@@ -30,11 +30,12 @@ class AllowedTokenIdsLogitsProcessor:
 @lru_cache(maxsize=32)
 def _get_allowed_token_ids_logits_processor(
     allowed_token_ids: FrozenSet[int],
-    vocab_size: int,
+    tokenizer: AnyTokenizer,
 ) -> LogitsProcessor:
     if not allowed_token_ids:
         raise ValueError("Empty allowed_token_ids provided")
-    if not all(0 <= tid < vocab_size for tid in allowed_token_ids):
+    token_ids = set(tokenizer.get_vocab().values())
+    if not all(tid in token_ids for tid in allowed_token_ids):
         raise ValueError("allowed_token_ids contains "
                          "out-of-vocab token id")
     return AllowedTokenIdsLogitsProcessor(allowed_token_ids)
@@ -81,6 +82,6 @@ def get_logits_processors(
     if allowed_token_ids is not None:
         logits_processors.append(
             _get_allowed_token_ids_logits_processor(
-                frozenset(allowed_token_ids), len(tokenizer)))
+                frozenset(allowed_token_ids), tokenizer))
 
     return logits_processors
