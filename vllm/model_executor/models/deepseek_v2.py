@@ -474,11 +474,11 @@ class DeepseekV2Model(nn.Module):
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
                 in_shape = input_ids.shape
-            if in_shape[0] < 32:
-                print (f"\033[91mDeepseekV2Model Input Size:\033[0m {in_shape}")
-                self.print_args += 1
-                if self.print_args > 2:
-                    self.print_args = -1            
+            # if in_shape[0] < 32:
+            #     print (f"\033[91mDeepseekV2Model Input Size:\033[0m {in_shape}")
+            #     self.print_args += 1
+            #     if self.print_args > 2:
+            #         self.print_args = -1            
             residual = None
         else:
             assert intermediate_tensors is not None

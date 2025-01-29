@@ -317,13 +317,13 @@ class FusedMoE(torch.nn.Module):
         self.expert_map[ep_rank * expert_per_partition:
                         (ep_rank + 1) * expert_per_partition] = (
             torch.arange(0, expert_per_partition,dtype=torch.int32))
-        print(f"\033[91mCreating MoE Layer:\033[0m"
-              f"\t\033[92mNumber of Experts:\033[0m {num_experts}, "
-              f"\t\033[92mTP Size:\033[0m {self.tp_size}, "
-              f"\t\033[92mGlobal TP Rank:\033[0m {get_tensor_model_parallel_rank()}, "
-              f"\t\033[92mTP Rank:\033[0m {tp_rank}, "
-              f"\t\033[92mEP Rank:\033[0m {ep_rank}, "
-              f"\t\033[92mExpert Map:\033[0m {self.expert_map}")
+        # print(f"\033[91mCreating MoE Layer:\033[0m"
+        #       f"\t\033[92mNumber of Experts:\033[0m {num_experts}, "
+        #       f"\t\033[92mTP Size:\033[0m {self.tp_size}, "
+        #       f"\t\033[92mGlobal TP Rank:\033[0m {get_tensor_model_parallel_rank()}, "
+        #       f"\t\033[92mTP Rank:\033[0m {tp_rank}, "
+        #       f"\t\033[92mEP Rank:\033[0m {ep_rank}, "
+        #       f"\t\033[92mExpert Map:\033[0m {self.expert_map}")
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -590,18 +590,18 @@ class FusedMoE(torch.nn.Module):
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_topk, grouped_topk)
         
-        if print_args > -1:
-            print(f"\033[1m//// select_experts RUN {print_args} Arguments ////\033[0m")
-            args = locals()
-            for arg_name, arg_value in args.items():
-                if isinstance(arg_value, torch.Tensor):
-                    print(f"\033[91m{arg_name} sizes\033[0m: {arg_value.size()}")
-                    num_elements = arg_value.numel()
-                    if num_elements < 32*6:
-                        print(f"\033[91m{arg_name}\033[0m: {arg_value}")
-                else:
-                    print(f"\033[91m{arg_name}\033[0m: {arg_value}")
-            print("")
+        # if print_args > -1:
+        #     print(f"\033[1m//// select_experts RUN {print_args} Arguments ////\033[0m")
+        #     args = locals()
+        #     for arg_name, arg_value in args.items():
+        #         if isinstance(arg_value, torch.Tensor):
+        #             print(f"\033[91m{arg_name} sizes\033[0m: {arg_value.size()}")
+        #             num_elements = arg_value.numel()
+        #             if num_elements < 32*6:
+        #                 print(f"\033[91m{arg_name}\033[0m: {arg_value}")
+        #         else:
+        #             print(f"\033[91m{arg_name}\033[0m: {arg_value}")
+        #     print("")
                 
         # DeekSeekv2 uses grouped_top_k
         if use_grouped_topk:
