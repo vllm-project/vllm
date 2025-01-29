@@ -395,9 +395,11 @@ def test_preallocate_blocks(num_preallocate_tokens: int, block_size: int):
     req.num_computed_tokens = block_size
     assert len(blocks) == 1 + num_preallocated_blocks
 
-    # Assume all computed.
-    manager.allocate_slots(req, block_size * (len(blocks) - 1), [])
-    req.num_computed_tokens = block_size * len(blocks)
+    # Assume all computed, only when num_preallocate_tokens > 0, we need to
+    # consume the previously preallocated blocks.
+    if num_preallocated_blocks > 0:
+        manager.allocate_slots(req, block_size * (len(blocks) - 1), [])
+        req.num_computed_tokens = block_size * len(blocks)
 
     # Append 1 block.
     blocks = manager.allocate_slots(req, block_size, [])
