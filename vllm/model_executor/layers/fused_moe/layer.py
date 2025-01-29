@@ -203,17 +203,39 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         #     permuted_weights=True,
         #     activation="silu",
         # )
-        w13_list = [layer.w13_weight[i] for i in range(layer.w13_weight.shape[0])]
-        w2_list = [layer.w2_weight[i] for i in range(layer.w2_weight.shape[0])]
-        final_hidden_states = torch.ops.hpu.mixture_of_experts(hidden_states=x,
-                                         expert_routing_table=topk_ids,
-                                         router_weights=topk_weights,
-                                         w12=w13_list,
-                                         w3=w2_list,
+        final_hidden_states = torch.zeros_like(x)
+        num_experts = layer.w13_weight.shape[0]
+        n_expert_slice = layer.w13_weight.shape[0] // 8
+        assert n_expert_slice * 8 == num_experts
+
+        # w13_list = layer.hpu_fused_moe.MoeOp.w13_list
+        # w2_list = layer.hpu_fused_moe.MoeOp.w2_list
+
+        for i in range(8):
+            min_expert = i * n_expert_slice
+            max_expert = (i + 1) * n_expert_slice
+            # w13_list_slice = [w13_list[i].weight.squeeze() for i in range(min_expert, max_expert)]
+            # w2_list_slice = [w2_list[i].weight.squeeze() for i in range(min_expert, max_expert)]
+            w13_list_slice = [layer.w13_weight[j].squeeze().clone() for j in range(min_expert, max_expert)]
+            w2_list_slice = [layer.w2_weight[j].squeeze().clone() for j in range(min_expert, max_expert)]
+            # print(f"w13_list_slice[0].shape: {w13_list_slice[0].shape}, device: {w13_list_slice[0].device}, dtype: {w13_list_slice[0].dtype}")
+            # print(f"w2_list_slice[0].shape: {w2_list_slice[0].shape}, device: {w2_list_slice[0].device}, dtype: {w2_list_slice[0].dtype}")
+            # print(f"hidden_states.shape: {x.shape}, device: {x.device}, dtype: {x.dtype}")
+            # print(f"topk_ids.shape: {topk_ids.shape}, device: {topk_ids.device}, dtype: {topk_ids.dtype}")
+            # print(f"topk_weights.shape: {topk_weights.shape}, device: {topk_weights.device}, dtype: {topk_weights.dtype}")
+            # print(f"min_expert: {min_expert}, max_expert: {max_expert}")
+            final_hidden_states += torch.ops.hpu.mixture_of_experts(hidden_states=x,
+                                         expert_routing_table=topk_ids.to(torch.int64),
+                                         router_weights=topk_weights.to(x.dtype),
+                                         w12=w13_list_slice,
+                                         w3=w2_list_slice,
                                          permuted_weights=True,
                                          activation="silu",
-                                         experts_min=0,
-                                         experts_max=layer.MoeOp.num_experts)
+                                         experts_min=min_expert,
+                                         experts_max=max_expert - 1)
+            # print(f"final_hidden_states.shape: {final_hidden_states.shape}, device: {final_hidden_states.device}, dtype: {final_hidden_states.dtype}")
+            htorch.core.mark_step()
+            # print(f"done mark step {i}")
         return final_hidden_states.view(-1, x.shape[1])
 
     def forward_cpu(
@@ -455,6 +477,7 @@ class FusedMoE(torch.nn.Module):
         if is_hpu:
             self.hpu_fused_moe.MoeOp.w13_list[expert_id].set_weight(
                 orig_exp_data)
+            # print(f"loaded w13 for hpu for expert_id: {expert_id}, orig_exp_data.shape: {orig_exp_data.shape}")
 
     def _load_w2(self,
                  expert_data: torch.Tensor,
@@ -476,6 +499,7 @@ class FusedMoE(torch.nn.Module):
         expert_data.copy_(loaded_weight)
         if is_hpu:
             self.hpu_fused_moe.MoeOp.w2_list[expert_id].set_weight(expert_data)
+            # print(f"loaded w2 for hpu for expert_id: {expert_id}, expert_data.shape: {expert_data.shape}")
 
     def _load_single_value(self, param: torch.nn.Parameter,
                            loaded_weight: torch.Tensor, expert_id: int):
