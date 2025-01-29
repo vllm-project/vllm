@@ -177,6 +177,8 @@ class ModelConfig:
                 implementation is available.
             "vllm" will use the vLLM model implementation.
             "transformers" will use the Transformers model implementation.
+        override_generation_config: Override the generation config with the
+            given config.
     """
 
     def compute_hash(self) -> str:
@@ -237,6 +239,7 @@ class ModelConfig:
         logits_processor_pattern: Optional[str] = None,
         generation_config: Optional[str] = None,
         enable_sleep_mode: bool = False,
+        override_generation_config: Optional[Dict[str, Any]] = None,
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
         self.model = model
@@ -382,6 +385,7 @@ class ModelConfig:
         self.logits_processor_pattern = logits_processor_pattern
 
         self.generation_config = generation_config
+        self.override_generation_config = override_generation_config or {}
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -918,8 +922,13 @@ class ModelConfig:
         """
         if self.generation_config is None:
             # When generation_config is not set
-            return {}
-        config = self.try_get_generation_config()
+            config = {}
+        else:
+            config = self.try_get_generation_config()
+
+        # Overriding with given generation config
+        config.update(self.override_generation_config)
+
         available_params = [
             "repetition_penalty",
             "temperature",
