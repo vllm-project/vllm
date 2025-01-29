@@ -264,6 +264,7 @@ def _fwd_grouped_kernel_stage1(
     BLOCK_N: tl.constexpr,
     BLOCK_H: tl.constexpr,
     NUM_KV_SPLITS: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
     logit_cap: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
@@ -312,11 +313,12 @@ def _fwd_grouped_kernel_stage1(
     if split_kv_end > split_kv_start:
         for start_n in range(split_kv_start, split_kv_end, BLOCK_N):
             offs_n = start_n + tl.arange(0, BLOCK_N)
-            kv_loc = tl.load(
-                Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + offs_n,
+            kv_page_number = tl.load(
+                Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + offs_n // PAGE_SIZE,
                 mask=offs_n < split_kv_end,
                 other=0,
             )
+            kv_loc = kv_page_number * PAGE_SIZE + offs_n % PAGE_SIZE
             offs_buf_k = (
                 kv_loc[None, :] * stride_buf_kbs
                 + cur_kv_head * stride_buf_kh
@@ -406,6 +408,7 @@ def _decode_grouped_att_m_fwd(
     B_Seqlen,
     num_kv_splits,
     sm_scale,
+    page_size,
     logit_cap,
 ):
     BLOCK = 32
@@ -471,6 +474,7 @@ def _decode_grouped_att_m_fwd(
         BLOCK_N=BLOCK,
         BLOCK_H=BLOCK_H,
         NUM_KV_SPLITS=NUM_KV_SPLITS,
+        PAGE_SIZE=page_size,
         logit_cap=logit_cap,
         num_warps=4,
         num_stages=2,
@@ -614,6 +618,7 @@ def decode_attention_fwd_grouped(
     attn_logits,
     num_kv_splits,
     sm_scale,
+    page_size,
     logit_cap=0.0,
 ):
     _decode_grouped_att_m_fwd(
@@ -626,6 +631,7 @@ def decode_attention_fwd_grouped(
         b_seq_len,
         num_kv_splits,
         sm_scale,
+        page_size,
         logit_cap,
     )
     _decode_softmax_reducev_fwd(attn_logits, q, o, v_buffer, b_seq_len, num_kv_splits)
@@ -642,6 +648,7 @@ def decode_attention_fwd(
     attn_logits,
     num_kv_splits,
     sm_scale,
+    page_size=1,
     logit_cap=0.0,
 ):
     assert num_kv_splits == attn_logits.shape[2]
@@ -649,6 +656,7 @@ def decode_attention_fwd(
 
     if kv_group_num == 1:
         # MHA
+        assert page_size == 1, "page_size > 1 is not supported for MHA"
         decode_attention_fwd_normal(
             q,
             k_buffer,
@@ -675,5 +683,6 @@ def decode_attention_fwd(
             attn_logits,
             num_kv_splits,
             sm_scale,
+            page_size,
             logit_cap,
         )
