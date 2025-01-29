@@ -32,6 +32,16 @@ using namespace cute;
   #define ENABLE_SM90_KERNEL_LEVEL 1
 #endif
 
+template <typename StrideA, typename StrideB, typename StrideC>
+__global__ void make_mm_strides(StrideA* stride_a, StrideB* stride_b,
+                                StrideC* stride_c, int64_t lda, int64_t ldb,
+                                int64_t ldc) {
+  int expert_id = threadIdx.x;
+  stride_a[expert_id] = StrideA{lda, Int<1>{}, Int<0>{}};
+  stride_b[expert_id] = StrideB{ldb, Int<1>{}, Int<0>{}};
+  stride_c[expert_id] = StrideC{ldc, Int<1>{}, Int<0>{}};
+}
+
 namespace {
 
 template <typename Kernel>
@@ -123,6 +133,14 @@ cutlass::platform::unique_ptr<T, ItemDeleter<T>> make_device_ptr(
   return cutlass::platform::unique_ptr<T, ItemDeleter<T>>(data_device);
 }
 
+template <typename T>
+cutlass::platform::unique_ptr<T, ItemDeleter<T>> allocate_device_ptr(
+    int count) {
+  T* data_device;
+  cudaMalloc(&data_device, count * sizeof(T));
+  return cutlass::platform::unique_ptr<T, ItemDeleter<T>>(data_device);
+}
+
 template <typename Gemm>
 void cutlass_group_gemm_caller(torch::Tensor& out_tensors,
                                torch::Tensor const& a_tensors,
@@ -180,20 +198,14 @@ void cutlass_group_gemm_caller(torch::Tensor& out_tensors,
   using StrideB = Stride<int64_t, Int<1>, Int<0>>;
   using StrideC = typename GemmKernel::InternalStrideC;
 
-  std::vector<StrideA> a_stride_host(groups);
-  std::vector<StrideB> b_stride_host(groups);
-  std::vector<StrideC> c_stride_host(groups);
-
-  // TODO pass strides?
-  for (int32_t g = 0; g < groups; ++g) {
-    int64_t lda = a_tensors.stride(0);    // row-major (m x k)
-    int64_t ldb = a_tensors.stride(0);    // column-major (k x n)
-    int64_t ldc = out_tensors.stride(0);  // row-major (m x n)
-
-    a_stride_host[g] = StrideA{lda, Int<1>{}, Int<0>{}};
-    b_stride_host[g] = StrideB{ldb, Int<1>{}, Int<0>{}};
-    c_stride_host[g] = StrideC{ldc, Int<1>{}, Int<0>{}};
-  }
+  int64_t lda = a_tensors.stride(0);    // row-major (m x k)
+  int64_t ldb = a_tensors.stride(0);    // column-major (k x n)
+  int64_t ldc = out_tensors.stride(0);  // row-major (m x n)
+  auto a_stride_ptr = allocate_device_ptr<StrideA>(groups);
+  auto b_stride_ptr = allocate_device_ptr<StrideB>(groups);
+  auto c_stride_ptr = allocate_device_ptr<StrideC>(groups);
+  make_mm_strides<<<1, groups>>>(a_stride_ptr.get(), b_stride_ptr.get(),
+                                 c_stride_ptr.get(), lda, ldb, ldc);
 
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = 0;
@@ -205,10 +217,6 @@ void cutlass_group_gemm_caller(torch::Tensor& out_tensors,
       reinterpret_cast<ProblemShape::UnderlyingProblemShape*>(
           problem_sizes.data_ptr());
   ProblemShape prob_shape{groups, problem_sizes_as_shapes, nullptr};
-
-  auto a_stride_ptr = make_device_ptr(a_stride_host);
-  auto b_stride_ptr = make_device_ptr(b_stride_host);
-  auto c_stride_ptr = make_device_ptr(c_stride_host);
 
   typename GemmKernel::MainloopArguments mainloop_args{
       reinterpret_cast<const ElementAB_Type**>(a_ptrs.data_ptr()),

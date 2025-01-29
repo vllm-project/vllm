@@ -5,10 +5,10 @@ import torch.utils.benchmark as benchmark
 from benchmark_shapes import WEIGHT_SHAPES_MOE
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe,
+                                                            fused_experts,
+                                                            fused_topk)
 from vllm.utils import FlexibleArgumentParser
-from vllm.model_executor.layers.fused_moe.fused_moe import (fused_topk,
-                                                            cutlass_moe,
-                                                            fused_experts)
 
 DEFAULT_MODELS = [
     "nm-testing/Mixtral-8x7B-Instruct-v0.1", "nm-testing/deepseekv2-lite",
@@ -69,18 +69,18 @@ def bench_run(results: List[benchmark.Measurement], model: str,
 
     a_q, a_scale = ops.scaled_fp8_quant(a)
 
-    w1_qs = []
-    w2_qs = []
-    w1_scales = []
-    w2_scales = []
-
-    for expert in range(num_experts):
-        w1_q, w1_scale = ops.scaled_fp8_quant(w1[expert])
-        w2_q, w2_scale = ops.scaled_fp8_quant(w2[expert])
-        w1_qs.append(w1_q.t())
-        w2_qs.append(w2_q.t())
-        w1_scales.append(w1_scale.reshape((1, 1)))
-        w2_scales.append(w2_scale.reshape((1, 1)))
+    w1_q = torch.empty((num_experts, 2 * n, k),
+                       device="cuda",
+                       dtype=torch.float8_e4m3fn)
+    w2_q = torch.empty((num_experts, k, n),
+                       device="cuda",
+                       dtype=torch.float8_e4m3fn)
+    w1_scale = torch.empty((num_experts, 1, 1),
+                           device="cuda",
+                           dtype=torch.float32)
+    w2_scale = torch.empty((num_experts, 1, 1),
+                           device="cuda",
+                           dtype=torch.float32)
 
     score = torch.randn((m, num_experts), device="cuda", dtype=dtype)
 
@@ -96,13 +96,14 @@ def bench_run(results: List[benchmark.Measurement], model: str,
         # Cutlass params
         "a_q": a_q,
         "a_scale": a_scale,
-        "w1_qs": w1_qs,
-        "w2_qs": w2_qs,
-        "w1_scales": w1_scales,
-        "w2_scales": w2_scales,
+        "w1_q": w1_q,
+        "w2_q": w2_q,
+        "w1_scale": w1_scale,
+        "w2_scale": w2_scale,
         "m": m,
         "n": n,
         "k": k,
+        "num_experts": num_experts,
         # Gen params
         "topk_weights": topk_weights,
         "topk_ids": topk_ids,
@@ -129,13 +130,13 @@ def bench_run(results: List[benchmark.Measurement], model: str,
 
     # Warmup pytorch
     for _ in range(num_warmup):
-        cutlass_moe(a_q, a_scale, w1_qs, w2_qs, w1_scales, w2_scales,
-                    topk_weights, topk_ids, m, n, k)
+        cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights,
+                    topk_ids, m, n, k, num_experts)
 
     results.append(
         benchmark.Timer(
             stmt=
-            "cutlass_moe(a_q, a_scale, w1_qs, w2_qs, w1_scales, w2_scales, topk_weights, topk_ids, m, n, k)",  # noqa: E501
+            "cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights, topk_ids, m, n, k, num_experts)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
@@ -174,9 +175,6 @@ def main(args):
     compare.print()
 
 
-# For quick benchmarking use:
-#   python benchmark_marlin.py --batch-sizes 1 16 32 --limit-k 4096 --limit-n 4096 ...
-#
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description="Benchmark Marlin across specified models/shapes/batches")

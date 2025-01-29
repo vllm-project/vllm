@@ -915,22 +915,21 @@ def cutlass_moe(
                                         problem_sizes1, problem_sizes2,
                                         num_groups, n, k)
 
-    c_s1 = torch.zeros((m * topk, n * 2), device="cuda", dtype=torch.half)
-    c_s2 = torch.zeros((m * topk, k), device="cuda", dtype=torch.half)
+    c1 = torch.zeros((m * topk, n * 2), device="cuda", dtype=torch.half)
+    c2 = torch.zeros((m * topk, k), device="cuda", dtype=torch.half)
 
-    torch.ops._C.cutlass_grouped_mm(c_s1, rep_a_q, w1_q, rep_a_scales,
-                                    w1_scale, expert_offsets[:-1],
-                                    problem_sizes1)
+    torch.ops._C.cutlass_grouped_mm(c1, rep_a_q, w1_q, rep_a_scales, w1_scale,
+                                    expert_offsets[:-1], problem_sizes1)
 
     intermediate = torch.empty((m * topk, n), device="cuda", dtype=torch.half)
-    torch.ops._C.silu_and_mul(intermediate, c_s1)
+    torch.ops._C.silu_and_mul(intermediate, c1)
 
     intemediate_q, intermediate_scales = ops.scaled_fp8_quant(intermediate)
     rep_intermediate_scales = intermediate_scales.repeat((num_groups, 1))
 
-    torch.ops._C.cutlass_grouped_mm(c_s2, intemediate_q, w2_q,
+    torch.ops._C.cutlass_grouped_mm(c2, intemediate_q, w2_q,
                                     rep_intermediate_scales, w2_scale,
                                     expert_offsets[:-1], problem_sizes2)
 
-    return (c_s2[a_map.argsort()].view(m, topk, k) *
+    return (c2[a_map.argsort()].view(m, topk, k) *
             topk_weights.view(m, topk, 1).half()).sum(dim=1)
