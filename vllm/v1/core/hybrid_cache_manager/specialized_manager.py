@@ -141,12 +141,6 @@ class SlidingWindowManager(FullAttentionManager):
                  block_pool_operations: BlockPoolOperations):
         super().__init__(kv_cache_spec, block_pool_operations)
         self.sliding_window = kv_cache_spec.sliding_window
-        # # +1 here because the sliding window may not start from the beginning
-        # # of the first block. For example, if the block size is 2, and sliding
-        # # window size is 4, [XX, XA, BC, D] where ABCD are the 4 tokens inside
-        # # the sliding window, we need to hold the last 3 blocks.
-        # self.num_block_sliding_window = cdiv(kv_cache_spec.sliding_window,
-        #                                      self.block_size) + 1
         self._null_block = block_pool_operations.get_null_block()
 
     def get_possible_cached_prefix(
