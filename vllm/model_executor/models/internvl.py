@@ -36,7 +36,6 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .clip import get_clip_num_patches
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -178,16 +177,6 @@ def _get_max_dynamic_patch(
         max_dynamic_patch += 1
 
     return max_dynamic_patch
-
-
-def get_internvl_num_patches(hf_config: PretrainedConfig):
-    vision_config = hf_config.vision_config
-    downsample_ratio = hf_config.downsample_ratio
-    image_size = vision_config.image_size
-    patch_size = vision_config.patch_size
-    return int(
-        get_clip_num_patches(image_size=image_size, patch_size=patch_size) *
-        (downsample_ratio**2))
 
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
@@ -375,26 +364,49 @@ class InternVLProcessingInfo(BaseProcessingInfo):
         return num_patches * processor.num_image_token
 
     def get_max_image_tokens(self) -> int:
-        processor = self.get_hf_processor()
+        target_width, target_height = self.get_image_size_with_most_features()
 
-        hf_config = self.get_hf_config()
-        max_num_patches = get_internvl_num_patches(hf_config)
-
-        return max_num_patches * processor.num_image_token
+        return self.get_num_image_tokens(
+            image_width=target_width,
+            image_height=target_height,
+            processor=None,
+        )
 
     def get_image_size_with_most_features(self) -> ImageSize:
         processor = self.get_hf_processor()
 
-        image_size = processor.image_size
-        max_dynamic_patch = _get_max_dynamic_patch(
+        min_num = processor.min_dynamic_patch
+        max_num = _get_max_dynamic_patch(
             dynamic_image_size=processor.dynamic_image_size,
             max_dynamic_patch=processor.max_dynamic_patch,
             use_thumbnail=processor.use_thumbnail,
         )
 
-        width = image_size * max_dynamic_patch
-        height = image_size
-        return ImageSize(width=width, height=height)
+        base_size = processor.image_size
+        target_ratios = {(i, j)
+                         for n in range(min_num, max_num + 1)
+                         for i in range(1, n + 1)
+                         for j in range(1, n + 1)
+                         if i * j <= max_num and i * j >= min_num}
+
+        largest_feature_size, largest_feature_pinpoint = 0, None
+        for wr, hr in target_ratios:
+            width, height = base_size * wr, base_size * hr
+
+            feat_size = self.get_num_image_tokens(
+                image_width=width,
+                image_height=height,
+                processor=processor,
+            )
+            if feat_size > largest_feature_size:
+                largest_feature_size = feat_size
+                largest_feature_pinpoint = ImageSize(width=width,
+                                                     height=height)
+
+        if largest_feature_size == 0 or largest_feature_pinpoint is None:
+            raise ValueError("Cannot have a largest feature size of 0!")
+
+        return largest_feature_pinpoint
 
 
 class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[InternVLProcessingInfo]
