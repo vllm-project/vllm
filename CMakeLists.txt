@@ -446,9 +446,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 message(STATUS "Enabling C extension.")
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_C_LIBS cuda)
-endif()
 define_gpu_extension_target(
   _C
   DESTINATION vllm
@@ -457,7 +454,6 @@ define_gpu_extension_target(
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR};${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
-  LIBRARIES ${VLLM_C_LIBS}
   USE_SABI 3
   WITH_SOABI)
 
