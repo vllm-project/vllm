@@ -26,8 +26,8 @@ class LogprobsProcessor:
     logprobs: Optional[SampleLogprobs]
     prompt_logprobs: Optional[PromptLogprobs]
     cumulative_logprob: Optional[float]
-    num_logprobs: int
-    num_prompt_logprobs: int
+    num_logprobs: Optional[int]
+    num_prompt_logprobs: Optional[int]
 
     @classmethod
     def from_new_request(
@@ -40,11 +40,11 @@ class LogprobsProcessor:
         return cls(
             tokenizer=tokenizer,
             prompt_token_ids=request.prompt_token_ids,
-            cumulative_logprob=(0. if num_logprobs else None),
-            logprobs=([] if num_logprobs else None),
-            prompt_logprobs=([] if num_prompt_logprobs else None),
-            num_prompt_logprobs=(num_prompt_logprobs or 0),
-            num_logprobs=(num_logprobs or 0),
+            cumulative_logprob=(None if num_logprobs is None else 0.),
+            logprobs=(None if num_logprobs is None else []),
+            prompt_logprobs=(None if num_prompt_logprobs is None else []),
+            num_prompt_logprobs=num_prompt_logprobs,
+            num_logprobs=num_logprobs,
         )
 
     def _update_sample_logprobs(
@@ -73,10 +73,15 @@ class LogprobsProcessor:
         Return:
           Sample logprobs, if required for this request
         """
-        if self.num_logprobs == 0:
+        num_logprobs = self.num_logprobs
+        if num_logprobs is None:
             # Sample logprobs disabled for this request
             return
         assert self.logprobs is not None
+
+        # If False, only sampled token logprobs are
+        # needed for this request
+        need_non_sampled_logprobs = num_logprobs > 0
 
         for sampled_token_id, sampled_token_rank, logprobs, token_ids in zip(
                 sampled_token_ids_lst, sampled_token_ranks_lst,
@@ -88,19 +93,20 @@ class LogprobsProcessor:
                 f"the topk logprobs, but got {sampled_token_id=} and "
                 f"{token_ids[0]=}")
             sampled_token_logprob = logprobs[0]
-            topk_token_ids = token_ids[1:]
-            topk_logprobs = logprobs[1:]
+            topk_token_ids = token_ids[1:] if need_non_sampled_logprobs else []
+            topk_logprobs = logprobs[1:] if need_non_sampled_logprobs else []
 
             # Detokenize non-incrementally.
             decoded_tokens = convert_ids_list_to_tokens(
-                self.tokenizer, topk_token_ids)
+                self.tokenizer,
+                topk_token_ids) if need_non_sampled_logprobs else []
 
             # Make the dict of top-token Logprob objects associated with the
             # current sequence offset
-            if sampled_token_id in topk_token_ids:
+            if need_non_sampled_logprobs and sampled_token_id in topk_token_ids:
                 pos_logprobs_dict = self._make_pos_logprob_dict(
                     topk_logprobs, topk_token_ids, decoded_tokens,
-                    self.num_logprobs)
+                    num_logprobs)
             else:
                 # If the sampled token is not one of the top tokens
                 # at this sequence offset, inject the sampled token
@@ -112,7 +118,7 @@ class LogprobsProcessor:
                                              rank=sampled_token_rank)
                 pos_logprobs_dict = self._make_pos_logprob_dict(
                     topk_logprobs, topk_token_ids, decoded_tokens,
-                    self.num_logprobs, (sampled_token_id, sample_logprob_obj))
+                    num_logprobs, (sampled_token_id, sample_logprob_obj))
 
             self.logprobs.append(pos_logprobs_dict)
             assert self.cumulative_logprob is not None
@@ -149,12 +155,18 @@ class LogprobsProcessor:
         Return:
           Prompt logprobs, if required for this request
         """
-        if self.num_prompt_logprobs == 0:
+        num_prompt_logprobs = self.num_prompt_logprobs
+        if num_prompt_logprobs is None:
             # Prompt logprobs disabled for this request
-            return None
+            return
         assert prompt_logprobs is not None
         assert token_ids is not None
         assert prompt_token_ranks is not None
+
+        # If False, only prompt token logprobs are
+        # needed for this request
+        need_non_prompt_logprobs = num_prompt_logprobs > 0
+
         if prompt_logprobs.numel() == 0:
             # Prompt logprobs are enabled for this request but prefill
             # is finished and no more logprobs are being streamed from
@@ -170,8 +182,8 @@ class LogprobsProcessor:
         # Detokenize non-incrementally.
         # NOTE(rob): the output is flattened:
         # [num_tok, num_lps] -> [num_tok * num_lps]
-        decoded_tokens = convert_ids_tensor_to_tokens(self.tokenizer,
-                                                      token_ids)
+        decoded_tokens = convert_ids_tensor_to_tokens(
+            self.tokenizer, token_ids) if need_non_prompt_logprobs else []
 
         # Make Logprob for each token.
         num_chunk_tokens, decoded_tokens_stride = prompt_logprobs.shape
@@ -187,20 +199,22 @@ class LogprobsProcessor:
             # Split into prompt token vs top_k.
             prompt_token_logprob = prompt_logprobs[tok_idx, 0].item()
             prompt_token_rank = prompt_token_ranks[tok_idx].item()
-            topk_token_ids = token_ids[tok_idx, 1:]
-            topk_logprobs = prompt_logprobs[tok_idx, 1:]
+            topk_token_ids = token_ids[
+                tok_idx, 1:].tolist() if need_non_prompt_logprobs else []
+            topk_logprobs = prompt_logprobs[
+                tok_idx, 1:].tolist() if need_non_prompt_logprobs else []
             decoded_tokens_offset = tok_idx * decoded_tokens_stride + 1
 
             # Make the dict of top-token Logprob objects associated with the
             # current prompt offset
-            if prompt_token_id in topk_token_ids:
+            if need_non_prompt_logprobs and prompt_token_id in topk_token_ids:
                 self.prompt_logprobs.append(
                     self._make_pos_logprob_dict(
-                        topk_logprobs.tolist(),
-                        topk_token_ids.tolist(),
+                        topk_logprobs,
+                        topk_token_ids,
                         # Deal with the flattening from above.
                         decoded_tokens[decoded_tokens_offset:],
-                        self.num_prompt_logprobs,
+                        num_prompt_logprobs,
                     ))
             else:
                 # If the prompt token is not one of the top tokens
@@ -213,9 +227,9 @@ class LogprobsProcessor:
                                              rank=prompt_token_rank)
                 self.prompt_logprobs.append(
                     self._make_pos_logprob_dict(
-                        topk_logprobs.tolist(), topk_token_ids.tolist(),
+                        topk_logprobs, topk_token_ids,
                         decoded_tokens[decoded_tokens_offset:],
-                        self.num_prompt_logprobs,
+                        num_prompt_logprobs,
                         (prompt_token_id, prompt_logprob_obj)))
 
     def pop_prompt_logprobs(self) -> Optional[PromptLogprobs]:
@@ -278,17 +292,23 @@ class LogprobsProcessor:
           keys in total
         
         """
-        # Sampler uses torch.topk() which sorts so the
-        # index in lists is equivalent to rank-1.
-        logprobs_dict = {
-            logprob_token_ids[idx]:
-            Logprob(
-                logprob=logprobs[idx],
-                rank=idx + 1,
-                decoded_token=decoded_tokens[idx],
-            )
-            for idx in range(num_logprobs)
-        }
+        if num_logprobs == 0:
+            # "Zero" logprobs means that we only return
+            # sampled or prompt token logprobs
+            assert special_token_id_logprob is not None
+            logprobs_dict = {}
+        else:
+            # Sampler uses torch.topk() which sorts so the
+            # index in lists is equivalent to rank-1.
+            logprobs_dict = {
+                logprob_token_ids[idx]:
+                Logprob(
+                    logprob=logprobs[idx],
+                    rank=idx + 1,
+                    decoded_token=decoded_tokens[idx],
+                )
+                for idx in range(num_logprobs)
+            }
 
         # Inject special token Logprob if necessary.
         # `rank` field must already be set.

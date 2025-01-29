@@ -18,7 +18,7 @@ class SamplingMetadata:
 
     generators: Dict[int, torch.Generator]
 
-    max_num_logprobs: int
+    max_num_logprobs: Optional[int]
 
     no_penalties: bool
     prompt_token_ids: Optional[torch.Tensor]

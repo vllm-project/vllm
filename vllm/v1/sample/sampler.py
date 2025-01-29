@@ -1,5 +1,5 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -24,7 +24,7 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        needs_logprobs = sampling_metadata.max_num_logprobs > 0
+        needs_logprobs = sampling_metadata.max_num_logprobs is not None
         if needs_logprobs:
             # NOTE(woosuk): Use the original logits (before any penalties or
             # temperature scaling) for the top-k logprobs.
@@ -113,7 +113,7 @@ class Sampler(nn.Module):
     def get_logprobs(
         self,
         logits: torch.Tensor,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         token_ids: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute logprobs from logits.
