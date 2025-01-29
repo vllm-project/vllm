@@ -416,6 +416,7 @@ class Scheduler:
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs_token_ids_cpu = model_runner_output.logprob_token_ids_cpu
         logprobs_cpu = model_runner_output.logprobs_cpu
+        token_ranks_cpu = model_runner_output.token_ranks_cpu
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
@@ -445,8 +446,8 @@ class Scheduler:
                         self.encoder_cache_manager.free(request, input_id)
 
             # Extract prompt logprobs for this req if needed.
-            prompt_logprobs, prompt_logprobs_token_ids = (
-                prompt_logprobs_dict.get(req_id, (None, None)))
+            prompt_logprobs, prompt_logprobs_token_ids, prompt_token_ranks = (
+                prompt_logprobs_dict.get(req_id, (None, None, None)))
 
             if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
@@ -462,14 +463,16 @@ class Scheduler:
                 stopped = self._check_stop(request)
 
                 # Extract sample logprobs if needed.
-                logprobs_token_ids: List[torch.Tensor] = []
-                logprobs: List[torch.Tensor] = []
                 if request.sampling_params.logprobs:
                     assert logprobs_token_ids_cpu is not None
                     assert logprobs_cpu is not None
+                    assert token_ranks_cpu is not None
                     # Here we assume there is 1 generated token per step.
                     logprobs_token_ids = [logprobs_token_ids_cpu[req_index]]
                     logprobs = [logprobs_cpu[req_index]]
+                    token_ranks = [token_ranks_cpu[req_index]]
+                else:
+                    logprobs_token_ids, logprobs, token_ranks = [], [], []
 
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
@@ -478,8 +481,10 @@ class Scheduler:
                     finish_reason=request.get_finished_reason(),
                     new_logprobs_token_ids=logprobs_token_ids,
                     new_logprobs=logprobs,
+                    new_token_ranks=token_ranks,
                     new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
                     new_prompt_logprobs=prompt_logprobs,
+                    new_prompt_token_ranks=prompt_token_ranks,
                     stop_reason=request.stop_reason)
                 outputs.append(output)
 
@@ -497,6 +502,7 @@ class Scheduler:
                     finish_reason=request.get_finished_reason(),
                     new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
                     new_prompt_logprobs=prompt_logprobs,
+                    new_prompt_token_ranks=prompt_token_ranks,
                     stop_reason=request.stop_reason)
                 outputs.append(output)
 

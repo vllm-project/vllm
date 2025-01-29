@@ -46,21 +46,22 @@ class Sampler(nn.Module):
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
 
+        # TODO initiate nonblocking CPU copy here?
+
         if needs_logprobs:
             # Get sampled and topk token logprobs.
-            # NOTE: CPU<>GPU sync happens here.
-            logprobs, logprob_token_ids = self.get_logprobs(
+            logprobs, logprob_token_ids, ranks = self.get_logprobs(
                 raw_logits,
                 sampling_metadata.max_num_logprobs,
                 token_ids=sampled)
         else:
-            logprobs, logprob_token_ids = None, None
+            logprobs, logprob_token_ids, ranks = None, None, None
 
-        # NOTE: CPU-GPU synchronization happens here.
         sampler_output = SamplerOutput(
             sampled_token_ids=sampled,
             logprob_token_ids=logprob_token_ids,
             logprobs=logprobs,
+            sampled_token_ranks=ranks,
         )
         return sampler_output
 
@@ -112,7 +113,7 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         num_logprobs: int,
         token_ids: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute logprobs from logits.
 
         Also compute logprobs associated with `token_ids` and
@@ -145,10 +146,10 @@ class Sampler(nn.Module):
         topk_indices = torch.cat((token_ids, topk_indices), dim=1)
         topk_logprobs = torch.cat((sampled_logprobs, topk_logprobs), dim=1)
 
-        # NOTE: returned tensors are unsynchronized
-        return topk_logprobs.to(device='cpu',
-                                non_blocking=True), topk_indices.to(
-                                    device='cpu', non_blocking=True)
+        sampled_token_ranks = (logprobs >= sampled_logprobs).sum(-1)
+
+        # NOTE: the returned tensors are still on-device
+        return topk_logprobs, topk_indices, sampled_token_ranks
 
     def apply_penalties(
         self,

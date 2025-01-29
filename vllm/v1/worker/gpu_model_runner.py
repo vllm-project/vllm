@@ -632,13 +632,12 @@ class GPUModelRunner:
         self,
         scheduler_output: "SchedulerOutput",
     ) -> SamplingMetadata:
-        skip_copy = True
-        if (scheduler_output.finished_req_ids
-                or scheduler_output.preempted_req_ids):
-            skip_copy = False
-        if (scheduler_output.scheduled_new_reqs
-                or scheduler_output.scheduled_resumed_reqs):
-            skip_copy = False
+        skip_copy = not any((
+            scheduler_output.finished_req_ids,
+            scheduler_output.preempted_req_ids,
+            scheduler_output.scheduled_new_reqs,
+            scheduler_output.scheduled_resumed_reqs,
+        ))
         # Create the sampling metadata.
         req_id_output_token_ids: Dict[str, List[int]] = \
             {req_id: req.output_token_ids \
@@ -813,6 +812,11 @@ class GPUModelRunner:
             sampling_metadata=sampling_metadata,
         )
 
+        sampled_token_ids_cpu = sampler_output.sampled_token_ids.to(
+            'cpu', non_blocking=True)
+
+        #TODO also copy logprobs and ranks tensors to CPU here
+
         # Compute prompt logprobs if needed.
         # NOTE(rob): for simplicity, compute prompt logprobs for each
         # prompt separately. Prompt logprobs are rare (used for eval),
@@ -889,7 +893,7 @@ class GPUModelRunner:
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
-        sampled_token_ids = sampler_output.sampled_token_ids.tolist()
+        sampled_token_ids = sampled_token_ids_cpu.tolist()
         # Update with the actual token ids
         for i, req_state, seq_len in request_seq_lens:
             token_id = sampled_token_ids[i]
@@ -902,6 +906,7 @@ class GPUModelRunner:
             sampled_token_ids=sampled_token_ids,
             logprob_token_ids_cpu=sampler_output.logprob_token_ids,
             logprobs_cpu=sampler_output.logprobs,
+            token_ranks_cpu=sampler_output.sampled_token_ranks,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
