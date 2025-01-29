@@ -25,9 +25,9 @@ pip install -r requirements-cpu.txt
 pip install -e . 
 ```
 
-```{note}
+:::{note}
 On macOS the `VLLM_TARGET_DEVICE` is automatically set to `cpu`, which currently is the only supported device.
-```
+:::
 
 #### Troubleshooting
 

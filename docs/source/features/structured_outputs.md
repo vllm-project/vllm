@@ -95,10 +95,10 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-```{tip}
+:::{tip}
 While not strictly necessary, normally it´s better to indicate in the prompt that a JSON needs to be generated and which fields and how should the LLM fill them.
 This can improve the results notably in most cases.
-```
+:::
 
 Finally we have the `guided_grammar`, which probably is the most difficult one to use but it´s really powerful, as it allows us to define complete languages like SQL queries.
 It works by using a context free EBNF grammar, which for example we can use to define a specific format of simplified SQL queries, like in the example below:

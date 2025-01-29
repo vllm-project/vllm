@@ -30,10 +30,10 @@ pip install -v -r requirements-xpu.txt
 VLLM_TARGET_DEVICE=xpu python setup.py install
 ```
 
-```{note}
+:::{note}
 - FP16 is the default data type in the current XPU backend. The BF16 data
   type will be supported in the future.
-```
+:::
 
 ## Set up using Docker
 

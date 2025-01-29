@@ -17,7 +17,7 @@ Looking to add your own multi-modal model? Please follow the instructions listed
 
 ## Submodules
 
-```{toctree}
+:::{toctree}
 :maxdepth: 1
 
 inputs
@@ -25,4 +25,4 @@ parse
 processing
 profiling
 registry
-```
+:::

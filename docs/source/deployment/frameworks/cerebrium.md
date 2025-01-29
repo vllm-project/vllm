@@ -2,11 +2,11 @@
 
 # Cerebrium
 
-```{raw} html
+:::{raw} html
 <p align="center">
     <img src="https://i.ibb.co/hHcScTT/Screenshot-2024-06-13-at-10-14-54.png" alt="vLLM_plus_cerebrium"/>
 </p>
-```
+:::
 
 vLLM can be run on a cloud based GPU machine with [Cerebrium](https://www.cerebrium.ai/), a serverless AI infrastructure platform that makes it easier for companies to build and deploy AI based applications.
 

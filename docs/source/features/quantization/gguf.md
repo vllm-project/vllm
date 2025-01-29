@@ -2,13 +2,13 @@
 
 # GGUF
 
-```{warning}
+:::{warning}
 Please note that GGUF support in vLLM is highly experimental and under-optimized at the moment, it might be incompatible with other features. Currently, you can use GGUF as a way to reduce memory footprint. If you encounter any issues, please report them to the vLLM team.
-```
+:::
 
-```{warning}
+:::{warning}
 Currently, vllm only supports loading single-file GGUF models. If you have a multi-files GGUF model, you can use [gguf-split](https://github.com/ggerganov/llama.cpp/pull/6135) tool to merge them to a single-file model.
-```
+:::
 
 To run a GGUF model with vLLM, you can download and use the local GGUF model from [TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF](https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF) with the following command:
 
@@ -25,9 +25,9 @@ You can also add `--tensor-parallel-size 2` to enable tensor parallelism inferen
 vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --tokenizer TinyLlama/TinyLlama-1.1B-Chat-v1.0 --tensor-parallel-size 2
 ```
 
-```{warning}
+:::{warning}
 We recommend using the tokenizer from base model instead of GGUF model. Because the tokenizer conversion from GGUF is time-consuming and unstable, especially for some models with large vocab size.
-```
+:::
 
 You can also use the GGUF model directly through the LLM entrypoint:
 
