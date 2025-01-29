@@ -10,9 +10,9 @@ vLLM contains pre-compiled C++ and CUDA (12.1) binaries.
 
 ### Create a new Python environment
 
-```{note}
+:::{note}
 PyTorch installed via `conda` will statically link `NCCL` library, which can cause issues when vLLM tries to use `NCCL`. See <gh-issue:8420> for more details.
-```
+:::
 
 In order to be performant, vLLM has to compile many cuda kernels. The compilation unfortunately introduces binary incompatibility with other CUDA versions and PyTorch versions, even for the same PyTorch version with different building configurations.
 
@@ -100,10 +100,10 @@ pip install --editable .
 
 You can find more information about vLLM's wheels in <project:#install-the-latest-code>.
 
-```{note}
+:::{note}
 There is a possibility that your source code may have a different commit ID compared to the latest vLLM wheel, which could potentially lead to unknown errors.
 It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to <project:#install-the-latest-code> for instructions on how to install a specified wheel.
-```
+:::
 
 #### Full build (with compilation)
 
@@ -115,7 +115,7 @@ cd vllm
 pip install -e .
 ```
 
-```{tip}
+:::{tip}
 Building from source requires a lot of compilation. If you are building from source repeatedly, it's more efficient to cache the compilation results.
 
 For example, you can install [ccache](https://github.com/ccache/ccache) using `conda install ccache` or `apt install ccache` .
@@ -123,7 +123,7 @@ As long as `which ccache` command can find the `ccache` binary, it will be used 
 
 [sccache](https://github.com/mozilla/sccache) works similarly to `ccache`, but has the capability to utilize caching in remote storage environments.
 The following environment variables can be set to configure the vLLM `sccache` remote: `SCCACHE_BUCKET=vllm-build-sccache SCCACHE_REGION=us-west-2 SCCACHE_S3_NO_CREDENTIALS=1`. We also recommend setting `SCCACHE_IDLE_TIMEOUT=0`.
-```
+:::
 
 ##### Use an existing PyTorch installation
 
