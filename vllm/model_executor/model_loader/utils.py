@@ -56,7 +56,8 @@ def get_model_architecture(
         if arch == "TransformersModel":
             continue
         custom_module = None
-        if hasattr(model_config.hf_config, "auto_map"):
+        auto_map = getattr(model_config.hf_config, "auto_map", None)
+        if auto_map is not None and hasattr(auto_map, "AutoModel"):
             custom_module = get_class_from_dynamic_module(
                 model_config.hf_config.auto_map["AutoModel"],
                 model_config.model)
