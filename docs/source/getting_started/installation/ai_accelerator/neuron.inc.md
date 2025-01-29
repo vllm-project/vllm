@@ -67,9 +67,9 @@ Currently, there are no pre-built Neuron wheels.
 
 ### Build wheel from source
 
-```{note}
+:::{note}
 The currently supported version of Pytorch for Neuron installs `triton` version `2.1.0`. This is incompatible with `vllm >= 0.5.3`. You may see an error `cannot import name 'default_dump_dir...`. To work around this, run a `pip install --upgrade triton==3.0.0` after installing the vLLM wheel.
-```
+:::
 
 Following instructions are applicable to Neuron SDK 2.16 and beyond.
 

@@ -7,9 +7,9 @@ This quantization method is particularly useful for reducing model size while ma
 
 Please visit the HF collection of [quantized INT8 checkpoints of popular LLMs ready to use with vLLM](https://huggingface.co/collections/neuralmagic/int8-llms-for-vllm-668ec32c049dca0369816415).
 
-```{note}
+:::{note}
 INT8 computation is supported on NVIDIA GPUs with compute capability > 7.5 (Turing, Ampere, Ada Lovelace, Hopper).
-```
+:::
 
 ## Prerequisites
 
@@ -119,9 +119,9 @@ $ lm_eval --model vllm \
   --batch_size 'auto'
 ```
 
-```{note}
+:::{note}
 Quantized models can be sensitive to the presence of the `bos` token. Make sure to include the `add_bos_token=True` argument when running evaluations.
-```
+:::
 
 ## Best Practices
 
