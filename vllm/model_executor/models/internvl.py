@@ -430,8 +430,7 @@ class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[InternVLProcessingInfo]
         }
 
         return ProcessorInputs(
-            prompt_text="".join(f"Image-{i}: <image>\n"
-                                for i in range(1, num_images + 1)),
+            prompt_text="<image>" * num_images,
             mm_data=mm_data,
         )
 
@@ -668,7 +667,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[InternVLImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
-        image_token_id = kwargs.pop("image_token_id", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
         if pixel_values is None and image_embeds is None:
@@ -684,7 +682,9 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                 data=flatten_bn(image_embeds),
             )
 
-        self.img_context_token_id = image_token_id[0]
+        image_token_id = kwargs["image_token_id"]
+        assert isinstance(image_token_id, torch.Tensor)
+        self.img_context_token_id = image_token_id.flatten().unique().item()
 
         if pixel_values is not None:
             if not isinstance(pixel_values, (torch.Tensor, list)):
