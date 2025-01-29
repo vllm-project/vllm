@@ -3,7 +3,7 @@
 import re
 import time
 from argparse import Namespace
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -42,31 +42,23 @@ class OpenAIBaseModel(BaseModel):
     # OpenAI API does allow extra fields
     model_config = ConfigDict(extra="allow")
 
-    # Cache class field names
-    field_names: ClassVar[Optional[Set[str]]] = None
-
     @model_validator(mode="before")
     @classmethod
     def __log_extra_fields__(cls, data):
-
-        field_names = cls.field_names
-        if field_names is None:
-            if not isinstance(data, dict):
-                return data
+        if isinstance(data, dict):
             # Get all class field names and their potential aliases
             field_names = set()
             for field_name, field in cls.model_fields.items():
                 field_names.add(field_name)
-                if alias := getattr(field, 'alias', None):
-                    field_names.add(alias)
-            cls.field_names = field_names
+                if hasattr(field, 'alias') and field.alias:
+                    field_names.add(field.alias)
 
-        # Compare against both field names and aliases
-        if any(k not in field_names for k in data):
-            logger.warning(
-                "The following fields were present in the request "
-                "but ignored: %s",
-                data.keys() - field_names)
+            # Compare against both field names and aliases
+            extra_fields = data.keys() - field_names
+            if extra_fields:
+                logger.warning(
+                    "The following fields were present in the request "
+                    "but ignored: %s", extra_fields)
         return data
 
 
@@ -380,16 +372,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     ) -> BeamSearchParams:
         # TODO(#9845): remove max_tokens when field is removed from OpenAI API
         max_tokens = self.max_completion_tokens or self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
 
         if default_sampling_params is None:
             default_sampling_params = {}
         n = self.n if self.n is not None else 1
-
-        # Use minimum of context window, user request & server limit.
-        max_tokens = min(
-            val for val in (default_max_tokens, max_tokens,
-                            default_sampling_params.get("max_tokens", None))
-            if val is not None)
 
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
@@ -410,16 +398,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             default_sampling_params: Optional[dict] = None) -> SamplingParams:
         # TODO(#9845): remove max_tokens when field is removed from OpenAI API
         max_tokens = self.max_completion_tokens or self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
 
         if default_sampling_params is None:
             default_sampling_params = {}
-
-        # Use minimum of context window, user request & server limit.
-        max_tokens = min(
-            val for val in (default_max_tokens, max_tokens,
-                            default_sampling_params.get("max_tokens", None))
-            if val is not None)
-
         # Default parameters
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get(
@@ -749,16 +732,12 @@ class CompletionRequest(OpenAIBaseModel):
             default_sampling_params: Optional[dict] = None
     ) -> BeamSearchParams:
         max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
 
         if default_sampling_params is None:
             default_sampling_params = {}
         n = self.n if self.n is not None else 1
-
-        # Use minimum of context window, user request & server limit.
-        max_tokens = min(
-            val for val in (default_max_tokens, max_tokens,
-                            default_sampling_params.get("max_tokens", None))
-            if val is not None)
 
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get("temperature", 1.0)
@@ -777,16 +756,11 @@ class CompletionRequest(OpenAIBaseModel):
             logits_processor_pattern: Optional[str],
             default_sampling_params: Optional[dict] = None) -> SamplingParams:
         max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
 
         if default_sampling_params is None:
             default_sampling_params = {}
-
-        # Use minimum of context window, user request & server limit.
-        max_tokens = min(
-            val for val in (default_max_tokens, max_tokens,
-                            default_sampling_params.get("max_tokens", None))
-            if val is not None)
-
         # Default parameters
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get(
@@ -1018,52 +992,6 @@ class ScoreRequest(OpenAIBaseModel):
         return PoolingParams(additional_data=self.additional_data)
 
 
-class RerankRequest(OpenAIBaseModel):
-    model: str
-    query: str
-    documents: List[str]
-    top_n: int = Field(default_factory=lambda: 0)
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
-
-    # doc: begin-rerank-pooling-params
-    additional_data: Optional[Any] = None
-    # doc: end-rerank-pooling-params
-
-    # doc: begin-rerank-extra-params
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."))
-
-    # doc: end-rerank-extra-params
-
-    def to_pooling_params(self):
-        return PoolingParams(additional_data=self.additional_data)
-
-
-class RerankDocument(BaseModel):
-    text: str
-
-
-class RerankResult(BaseModel):
-    index: int
-    document: RerankDocument
-    relevance_score: float
-
-
-class RerankUsage(BaseModel):
-    total_tokens: int
-
-
-class RerankResponse(OpenAIBaseModel):
-    id: str
-    model: str
-    usage: RerankUsage
-    results: List[RerankResult]
-
-
 class CompletionLogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
@@ -1283,7 +1211,7 @@ class BatchRequestInput(OpenAIBaseModel):
     url: str
 
     # The parameters of the request.
-    body: Union[ChatCompletionRequest, EmbeddingRequest, ScoreRequest]
+    body: Union[ChatCompletionRequest, EmbeddingRequest]
 
 
 class BatchResponseData(OpenAIBaseModel):
@@ -1294,8 +1222,7 @@ class BatchResponseData(OpenAIBaseModel):
     request_id: str
 
     # The body of the response.
-    body: Optional[Union[ChatCompletionResponse, EmbeddingResponse,
-                         ScoreResponse]] = None
+    body: Optional[Union[ChatCompletionResponse, EmbeddingResponse]] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):

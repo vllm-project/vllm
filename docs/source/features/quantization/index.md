@@ -15,5 +15,6 @@ gguf
 inc
 int8
 fp8
-quantized_kvcache
+fp8_e5m2_kvcache
+fp8_e4m3_kvcache
 ```

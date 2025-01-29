@@ -199,8 +199,6 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         # Compute some attn_metadata fields which default to None
         query_start_loc = (None if self.query_start_loc is None else
                            self.query_start_loc[:self.num_prefills + 1])
-        seq_start_loc = (None if self.seq_start_loc is None else
-                         self.seq_start_loc[:self.num_prefills + 1])
         slot_mapping = (None if self.slot_mapping is None else
                         self.slot_mapping[:self.num_prefill_tokens])
         seq_lens = (None if self.seq_lens is None else
@@ -220,14 +218,12 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=self.
             multi_modal_placeholder_index_maps,
-            enable_kv_scales_calculation=self.enable_kv_scales_calculation,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=self.max_prefill_seq_len,
             max_decode_seq_len=0,
             query_start_loc=query_start_loc,
-            seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
@@ -266,7 +262,6 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=None,
-            enable_kv_scales_calculation=True,
             seq_lens_tensor=seq_lens_tensor,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,

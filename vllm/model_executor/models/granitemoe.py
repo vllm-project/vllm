@@ -348,7 +348,6 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.config = config
         self.lora_config = lora_config
-        self.quant_config = quant_config  # Required by MixtralForCausalLM
 
         self.model = GraniteMoeModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "model"))
@@ -429,10 +428,10 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 for e in range(p.size(0)):
                     w1_name = n.replace(
                         '.block_sparse_moe.input_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w1.weight")
+                        ".block_sparse_moe.experts.%d.w1.weight" % e)
                     w3_name = n.replace(
                         '.block_sparse_moe.input_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w3.weight")
+                        ".block_sparse_moe.experts.%d.w3.weight" % e)
                     w1_param, w3_param = p[e].chunk(2, dim=0)
                     assert w1_name not in new_weights
                     assert w3_name not in new_weights
@@ -442,7 +441,7 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 for e in range(p.size(0)):
                     w2_name = n.replace(
                         '.block_sparse_moe.output_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w2.weight")
+                        ".block_sparse_moe.experts.%d.w2.weight" % e)
                     w2_param = p[e]
                     assert w2_name not in new_weights
                     new_weights[w2_name] = w2_param

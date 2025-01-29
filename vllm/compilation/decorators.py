@@ -198,8 +198,6 @@ def _support_torch_compile(
                             f" {dims} for argument {k} with type {type(arg)}.")
             # here, it is the starting point of the `torch.compile` process
             start_monitoring_torch_compile(self.vllm_config)
-            logger.debug("Start compiling function %s",
-                         self.original_code_object)
 
         # if we don't use custom dispatcher, we can directly call the
         # compiled function and let torch.compile handle the dispatching,

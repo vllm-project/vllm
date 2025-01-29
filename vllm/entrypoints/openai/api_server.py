@@ -1,6 +1,5 @@
 import asyncio
 import atexit
-import gc
 import importlib
 import inspect
 import multiprocessing
@@ -56,7 +55,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               PoolingChatRequest,
                                               PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
-                                              RerankRequest, RerankResponse,
                                               ScoreRequest, ScoreResponse,
                                               TokenizeRequest,
                                               TokenizeResponse,
@@ -69,7 +67,6 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
-from vllm.entrypoints.openai.serving_rerank import JinaAIServingRerank
 from vllm.entrypoints.openai.serving_score import OpenAIServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
@@ -107,11 +104,6 @@ async def lifespan(app: FastAPI):
             task.add_done_callback(_running_tasks.remove)
         else:
             task = None
-
-        # Mark the startup heap as static so that it's ignored by GC.
-        # Reduces pause times of oldest generation collections.
-        gc.collect()
-        gc.freeze()
         try:
             yield
         finally:
@@ -306,10 +298,6 @@ def embedding(request: Request) -> Optional[OpenAIServingEmbedding]:
 
 def score(request: Request) -> Optional[OpenAIServingScores]:
     return request.app.state.openai_serving_scores
-
-
-def rerank(request: Request) -> Optional[JinaAIServingRerank]:
-    return request.app.state.jinaai_serving_reranking
 
 
 def tokenization(request: Request) -> OpenAIServingTokenization:
@@ -508,40 +496,6 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
     return await create_score(request, raw_request)
 
 
-@router.post("/rerank")
-@with_cancellation
-async def do_rerank(request: RerankRequest, raw_request: Request):
-    handler = rerank(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Rerank (Score) API")
-    generator = await handler.do_rerank(request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    elif isinstance(generator, RerankResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-@router.post("/v1/rerank")
-@with_cancellation
-async def do_rerank_v1(request: RerankRequest, raw_request: Request):
-    logger.warning(
-        "To indicate that the rerank API is not part of the standard OpenAI"
-        " API, we have located it at `/rerank`. Please update your client"
-        "accordingly. (Note: Conforms to JinaAI rerank API)")
-
-    return await do_rerank(request, raw_request)
-
-
-@router.post("/v2/rerank")
-@with_cancellation
-async def do_rerank_v2(request: RerankRequest, raw_request: Request):
-    return await do_rerank(request, raw_request)
-
-
 TASK_HANDLERS: Dict[str, Dict[str, tuple]] = {
     "generate": {
         "messages": (ChatCompletionRequest, create_chat_completion),
@@ -552,10 +506,7 @@ TASK_HANDLERS: Dict[str, Dict[str, tuple]] = {
         "default": (EmbeddingCompletionRequest, create_embedding),
     },
     "score": {
-        "default": (RerankRequest, do_rerank)
-    },
-    "rerank": {
-        "default": (RerankRequest, do_rerank)
+        "default": (ScoreRequest, create_score),
     },
     "reward": {
         "messages": (PoolingChatRequest, create_pooling),
@@ -566,18 +517,6 @@ TASK_HANDLERS: Dict[str, Dict[str, tuple]] = {
         "default": (PoolingCompletionRequest, create_pooling),
     },
 }
-
-if envs.VLLM_SERVER_DEV_MODE:
-
-    @router.post("/reset_prefix_cache")
-    async def reset_prefix_cache(raw_request: Request):
-        """
-        Reset the prefix cache. Note that we currently do not check if the
-        prefix cache is successfully reset in the API server.
-        """
-        logger.info("Resetting prefix cache...")
-        await engine_client(raw_request).reset_prefix_cache()
-        return Response(status_code=200)
 
 
 @router.post("/invocations")
@@ -797,12 +736,6 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
     ) if model_config.task == "embed" else None
     state.openai_serving_scores = OpenAIServingScores(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger
-    ) if model_config.task == "score" else None
-    state.jinaai_serving_reranking = JinaAIServingRerank(
         engine_client,
         model_config,
         state.openai_serving_models,

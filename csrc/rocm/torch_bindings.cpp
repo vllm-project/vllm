@@ -27,7 +27,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                int max_context_len,"
       "                Tensor? alibi_slopes,"
       "                str kv_cache_dtype,"
-      "                Tensor k_scale, Tensor v_scale) -> ()");
+      "                float k_scale, float v_scale) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
 }
 

@@ -3,7 +3,7 @@ import codecs
 import json
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
-from functools import cache, lru_cache, partial
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import (Any, Awaitable, Callable, Dict, Generic, Iterable, List,
                     Literal, Optional, Tuple, TypeVar, Union, cast)
@@ -377,7 +377,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return self._model_config.allowed_local_media_path
 
     @staticmethod
-    @cache
+    @lru_cache(maxsize=None)
     def _cached_token_str(tokenizer: AnyTokenizer, token_index: int) -> str:
         return tokenizer.decode(token_index)
 

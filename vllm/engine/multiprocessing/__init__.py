@@ -121,10 +121,6 @@ class RPCUProfileRequest(Enum):
     STOP_PROFILE = 2
 
 
-class RPCResetPrefixCacheRequest(Enum):
-    RESET_PREFIX_CACHE = 1
-
-
 @dataclass
 class RPCLoadAdapterRequest:
     lora_request: LoRARequest
@@ -138,8 +134,7 @@ class RPCAdapterLoadedResponse:
 
 
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
-                      RPCUProfileRequest, RPCLoadAdapterRequest,
-                      RPCResetPrefixCacheRequest]
+                      RPCUProfileRequest, RPCLoadAdapterRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
                           RPCError]

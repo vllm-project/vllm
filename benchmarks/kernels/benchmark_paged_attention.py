@@ -98,9 +98,7 @@ def main(
         start_time = time.perf_counter()
 
         # Using default kv_scale
-        k_scale = v_scale = torch.tensor(1.0,
-                                         dtype=torch.float32,
-                                         device=device)
+        k_scale = v_scale = 1.0
 
         for _ in range(num_iters):
             if version == "v1":

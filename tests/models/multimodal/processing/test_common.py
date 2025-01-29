@@ -35,7 +35,7 @@ def _test_processing_correctness(
         task="auto",
         tokenizer=model_id,
         tokenizer_mode="auto",
-        trust_remote_code=model_info.trust_remote_code,
+        trust_remote_code=True,
         seed=0,
         dtype="float16",
         revision=None,

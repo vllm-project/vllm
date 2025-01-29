@@ -17,21 +17,15 @@ from vllm.attention.backends.utils import (
     compute_slot_mapping_start_idx, get_num_prefill_decode_query_kv_tokens,
     get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
     is_all_encoder_attn_metadata_set, is_block_tables_empty)
-from vllm.envs import VLLM_FLASH_ATTN_VERSION
-from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
-from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
-from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
-                                  flash_attn_varlen_func,
-                                  flash_attn_with_kvcache,
-                                  is_fa_version_supported)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
                                           ModelInputForGPUWithSamplingMetadata)
 
-logger = init_logger(__name__)
+from vllm.vllm_flash_attn import (flash_attn_varlen_func,
+                                  flash_attn_with_kvcache)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -233,7 +227,6 @@ class FlashAttentionMetadata(AttentionMetadata):
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=self.
             multi_modal_placeholder_index_maps,
-            enable_kv_scales_calculation=self.enable_kv_scales_calculation,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=self.max_query_len,
@@ -278,7 +271,6 @@ class FlashAttentionMetadata(AttentionMetadata):
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=None,
-            enable_kv_scales_calculation=True,
             seq_lens=None,
             seq_lens_tensor=seq_lens_tensor,
             max_decode_query_len=self.max_decode_query_len,
@@ -383,12 +375,6 @@ class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
-        self.input_builder = input_builder
-        self.runner = input_builder.runner
-        self.sliding_window = input_builder.sliding_window
-        self.block_size = input_builder.block_size
-
-    def prepare(self):
         self.slot_mapping: List[int] = []
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
@@ -401,6 +387,11 @@ class FlashAttentionMetadataBuilder(
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
         self.has_prefix_cache_hit = False
+
+        self.input_builder = input_builder
+        self.runner = input_builder.runner
+        self.sliding_window = input_builder.sliding_window
+        self.block_size = input_builder.block_size
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -562,7 +553,6 @@ class FlashAttentionMetadataBuilder(
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
-            enable_kv_scales_calculation=True,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
             max_decode_query_len=max_decode_query_len,
@@ -643,25 +633,6 @@ class FlashAttentionImpl(AttentionImpl):
                 f"Supported head sizes are: {support_head_sizes}.")
         self.attn_type = attn_type
 
-        # if hopper default to FA3, otherwise stick to FA2 for now
-        # TODO(lucas): profile FA3 on ampere to see if it makes sense to
-        #  use FA3 as default for both
-        if current_platform.get_device_capability()[0] >= 9:
-            self.fa_version = 3 if is_fa_version_supported(3) else 2
-        else:
-            self.fa_version = 2
-
-        if VLLM_FLASH_ATTN_VERSION is not None:
-            assert VLLM_FLASH_ATTN_VERSION in [2, 3]
-            self.fa_version = VLLM_FLASH_ATTN_VERSION
-
-        if not is_fa_version_supported(self.fa_version):
-            logger.error("Cannot use FA version %d is not supported due to %s",
-                         self.fa_version,
-                         fa_version_unsupported_reason(self.fa_version))
-
-        assert is_fa_version_supported(self.fa_version)
-
     def forward(
         self,
         layer: AttentionLayer,
@@ -686,7 +657,7 @@ class FlashAttentionImpl(AttentionImpl):
         NOTE: It in-place updates the output tensor.
         """
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
-        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0, (
+        assert layer._k_scale == 1.0 and layer._v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
 
         assert output is not None, "Output tensor must be provided."
@@ -780,7 +751,6 @@ class FlashAttentionImpl(AttentionImpl):
                     alibi_slopes=alibi_slopes,
                     softcap=logits_soft_cap,
                     out=prefill_output,
-                    fa_version=self.fa_version,
                 )
             else:
                 # prefix-enabled attention
@@ -794,7 +764,7 @@ class FlashAttentionImpl(AttentionImpl):
                     v=value_cache,
                     cu_seqlens_q=prefill_meta.query_start_loc,
                     max_seqlen_q=prefill_meta.max_query_len,
-                    seqused_k=prefill_meta.seq_lens_tensor,
+                    cu_seqlens_k=prefill_meta.seq_start_loc,
                     max_seqlen_k=max_seq_len,
                     softmax_scale=softmax_scale,
                     causal=True,
@@ -803,7 +773,6 @@ class FlashAttentionImpl(AttentionImpl):
                     block_table=prefill_meta.block_tables,
                     softcap=logits_soft_cap,
                     out=prefill_output,
-                    fa_version=self.fa_version,
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -823,7 +792,7 @@ class FlashAttentionImpl(AttentionImpl):
                     v=value_cache,
                     cu_seqlens_q=decode_meta.query_start_loc,
                     max_seqlen_q=decode_meta.max_decode_query_len,
-                    seqused_k=decode_meta.seq_lens_tensor,
+                    cu_seqlens_k=decode_meta.seq_start_loc,
                     max_seqlen_k=decode_meta.max_decode_seq_len,
                     softmax_scale=softmax_scale,
                     causal=True,
@@ -832,7 +801,6 @@ class FlashAttentionImpl(AttentionImpl):
                     softcap=logits_soft_cap,
                     block_table=decode_meta.block_tables,
                     out=decode_output,
-                    fa_version=self.fa_version,
                 )
             else:
                 # Use flash_attn_with_kvcache for normal decoding.
@@ -853,7 +821,6 @@ class FlashAttentionImpl(AttentionImpl):
                     alibi_slopes=alibi_slopes,
                     softcap=logits_soft_cap,
                     out=decode_output.unsqueeze(1),
-                    fa_version=self.fa_version,
                 )
         return output
 

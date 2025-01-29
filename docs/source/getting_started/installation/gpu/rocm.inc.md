@@ -13,14 +13,6 @@ vLLM supports AMD GPUs with ROCm 6.2.
 
 Currently, there are no pre-built ROCm wheels.
 
-However, the [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
-docker image designed for validating inference performance on the AMD Instinct™ MI300X accelerator.
-
-```{tip}
-Please check [LLM inference performance validation on AMD Instinct MI300X](https://rocm.docs.amd.com/en/latest/how-to/performance-validation/mi300x/vllm-benchmark.html)
-for instructions on how to use this prebuilt docker image.
-```
-
 ### Build wheel from source
 
 0. Install prerequisites (skip if you are already in an environment/docker with the following installed):

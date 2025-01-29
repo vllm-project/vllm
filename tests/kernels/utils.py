@@ -5,7 +5,7 @@ import random
 import unittest
 from numbers import Number
 from typing import (Any, Dict, List, NamedTuple, Optional, Sequence, Tuple,
-                    Type, Union)
+                    Union)
 
 import pytest
 import torch
@@ -909,7 +909,6 @@ def make_test_metadata(
             num_prefills=num_prefills,
             slot_mapping=(None if kv_mmap is None else kv_mmap.slot_mapping),
             multi_modal_placeholder_index_maps=None,
-            enable_kv_scales_calculation=True,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -959,7 +958,6 @@ def make_test_metadata(
             num_prefills=num_prefills,
             slot_mapping=kv_mmap.slot_mapping,
             multi_modal_placeholder_index_maps=None,
-            enable_kv_scales_calculation=True,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -1100,28 +1098,3 @@ def opcheck(op: Union[torch._ops.OpOverload, torch._ops.OpOverloadPacket,
             kwargs,
             test_utils=test_utils,
             raise_exception=raise_exception) if cond else {}
-
-
-# For testing quantized linear kernels
-def to_fp8(tensor: torch.Tensor):
-    finfo = torch.finfo(torch.float8_e4m3fn)
-    return torch.round(tensor.clamp(
-        min=finfo.min, max=finfo.max)).to(dtype=torch.float8_e4m3fn)
-
-
-def to_int8(tensor: torch.Tensor):
-    return torch.round(tensor.clamp(min=-128, max=127)).to(dtype=torch.int8)
-
-
-def baseline_scaled_mm(a: torch.Tensor,
-                       b: torch.Tensor,
-                       scale_a: torch.Tensor,
-                       scale_b: torch.Tensor,
-                       out_dtype: Type[torch.dtype],
-                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    output = (scale_a * (scale_b * (torch.mm(
-        a.to(dtype=torch.float32), b.to(dtype=torch.float32))))).to(out_dtype)
-    if bias is not None:
-        output = output + bias
-
-    return output

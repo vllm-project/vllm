@@ -74,7 +74,11 @@ DOLPHIN_CONFIG = GGUFTestConfig(
 )
 
 MODELS = [
-    LLAMA_CONFIG, QWEN2_CONFIG, PHI3_CONFIG, GPT2_CONFIG, STABLELM_CONFIG,
+    LLAMA_CONFIG,
+    QWEN2_CONFIG,
+    PHI3_CONFIG,
+    GPT2_CONFIG,
+    STABLELM_CONFIG,
     DOLPHIN_CONFIG
     # STARCODER_CONFIG, # broken
 ]
@@ -110,12 +114,11 @@ def test_models(
             messages, tokenize=False, add_generation_prompt=True)
 
     # Run unquantized model.
-    with vllm_runner(
-            model_name=model.original_model,
-            enforce_eager=True,  # faster tests
-            dtype=dtype,
-            max_model_len=MAX_MODEL_LEN,
-            tensor_parallel_size=tp_size) as original_model:
+    with vllm_runner(model_name=model.original_model,
+                     enforce_eager=True, # faster tests
+                     dtype=dtype,
+                     max_model_len=MAX_MODEL_LEN,
+                     tensor_parallel_size=tp_size) as original_model:
         original_outputs = original_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
 

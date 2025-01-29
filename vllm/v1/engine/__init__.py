@@ -66,11 +66,6 @@ class EngineCoreProfile:
     is_start: bool
 
 
-@dataclass
-class EngineCoreResetPrefixCache:
-    pass
-
-
 class EngineCoreRequestType(enum.Enum):
     """
     Request types defined as hex byte strings, so it can be sent over sockets
@@ -79,8 +74,6 @@ class EngineCoreRequestType(enum.Enum):
     ADD = b'\x00'
     ABORT = b'\x01'
     PROFILE = b'\x02'
-    RESET_PREFIX_CACHE = b'\x03'
 
 
-EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile,
-                               EngineCoreResetPrefixCache, List[str]]
+EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile, List[str]]

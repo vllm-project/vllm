@@ -27,9 +27,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCAdapterLoadedResponse, RPCError,
                                          RPCLoadAdapterRequest,
-                                         RPCProcessRequest,
-                                         RPCResetPrefixCacheRequest,
-                                         RPCStartupRequest, RPCStartupResponse,
+                                         RPCProcessRequest, RPCStartupRequest,
+                                         RPCStartupResponse,
                                          RPCUProfileRequest)
 from vllm.engine.protocol import EngineClient
 # yapf: enable
@@ -263,14 +262,7 @@ class MQLLMEngineClient(EngineClient):
         """Setup the client before it starts sending server requests."""
 
         # Start output_loop
-        if self.output_loop is None:
-            # only generate once to avoid multiple concurrent output_loops
-            # this will lead to race conditions and wrong orders of tokens
-            # returned by the engine
-            # setup will be called multiple times during the startup of
-            # the engine
-            self.output_loop = asyncio.create_task(
-                self.run_output_handler_loop())
+        self.output_loop = asyncio.create_task(self.run_output_handler_loop())
 
         with self.get_data_socket() as socket:
             # Wait until server is ready.
@@ -279,9 +271,8 @@ class MQLLMEngineClient(EngineClient):
             self.tracing_flag = response.tracing_enabled
 
             # Start health_loop.
-            if self.health_loop is None:
-                self.health_loop = asyncio.create_task(
-                    self.run_heartbeat_loop(timeout=VLLM_RPC_TIMEOUT))
+            self.health_loop = asyncio.create_task(
+                self.run_heartbeat_loop(timeout=VLLM_RPC_TIMEOUT))
 
     def close(self):
         """Destroy the ZeroMQ Context."""
@@ -675,13 +666,6 @@ class MQLLMEngineClient(EngineClient):
 
         await self._send_one_way_rpc_request(
             request=RPCUProfileRequest.STOP_PROFILE, socket=self.input_socket)
-
-    async def reset_prefix_cache(self) -> None:
-        """Reset the prefix cache"""
-
-        await self._send_one_way_rpc_request(
-            request=RPCResetPrefixCacheRequest.RESET_PREFIX_CACHE,
-            socket=self.input_socket)
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""

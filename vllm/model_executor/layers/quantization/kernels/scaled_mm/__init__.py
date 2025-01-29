@@ -5,8 +5,8 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
     CutlassScaledMMLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
     ScaledMMLinearKernel, ScaledMMLinearLayerConfig)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
-    TritonScaledMMLinearKernel)
+# from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
+#     TritonScaledMMLinear)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.xla import (
     XLAScaledMMLinearKernel)
 from vllm.platforms import PlatformEnum, current_platform
@@ -15,7 +15,9 @@ from vllm.platforms import PlatformEnum, current_platform
 _POSSIBLE_KERNELS: Dict[PlatformEnum, List[Type[ScaledMMLinearKernel]]] = {
     PlatformEnum.CPU: [CutlassScaledMMLinearKernel],
     PlatformEnum.CUDA: [CutlassScaledMMLinearKernel],
-    PlatformEnum.ROCM: [TritonScaledMMLinearKernel],
+    # TODO(rob): Create TritonScaledMMLinear kernel. ROCM will
+    # incorrectly attempt to run AZP models if prompted to.
+    PlatformEnum.ROCM: [CutlassScaledMMLinearKernel],
     PlatformEnum.TPU: [XLAScaledMMLinearKernel],
 }
 

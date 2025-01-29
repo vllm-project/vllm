@@ -33,9 +33,7 @@ __global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
 
   extern __shared__ int32_t shared_mem[];
   int32_t* cumsum = shared_mem;  // 1d tensor with shape (num_experts + 1)
-  token_cnts_t* tokens_cnts =
-      (token_cnts_t*)(shared_mem + num_experts +
-                      1);  // 2d tensor with shape (blockDim.x + 1, num_experts)
+  token_cnts_t* tokens_cnts = (token_cnts_t*)(shared_mem + blockDim.x + 1);
 
   for (int i = 0; i < num_experts; ++i) {
     tokens_cnts[index(num_experts, threadIdx.x + 1, i)] = 0;
@@ -235,17 +233,15 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
       (num_experts + 1) * sizeof(int32_t);
 
   bool use_global_memory = false;
-  bool use_i16 = false;  // Use uint16_t for shared memory token counts
-  if (shared_mem_i32 < device_max_shared_mem) {
-    // Do nothing in this case. We're all set to use int32_t token counts
-  } else if (shared_mem_i16 < device_max_shared_mem &&
+  bool use_i16 = false; // Use uint16_t for shared memory token counts
+  if (shared_mem_i16 > device_max_shared_mem) {
+    use_global_memory = true;
+  } else if (shared_mem_i32 > device_max_shared_mem &&
              topk_ids.numel() <= 65535) {
     // when nelements of topk_ids is smaller than 65535 (max value of uint16),
     // element value of token_cnts would also smaller than 65535,
     // so we can use uint16 as dtype of token_cnts
     use_i16 = true;
-  } else {
-    use_global_memory = true;
   }
 
   if (use_global_memory) {

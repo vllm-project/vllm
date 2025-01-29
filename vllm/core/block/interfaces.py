@@ -192,11 +192,6 @@ class BlockAllocator(ABC):
         """Prefix cache hit rate. -1 means not supported or disabled."""
         pass
 
-    @abstractmethod
-    def reset_prefix_cache(self) -> bool:
-        """Reset prefix cache."""
-        pass
-
     class NoFreeBlocksError(ValueError):
         pass
 
@@ -300,11 +295,6 @@ class DeviceAwareBlockAllocator(ABC):
     @abstractmethod
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         """Prefix cache hit rate. -1 means not supported or disabled."""
-        pass
-
-    @abstractmethod
-    def reset_prefix_cache(self) -> bool:
-        """Reset prefix cache."""
         pass
 
     @abstractmethod

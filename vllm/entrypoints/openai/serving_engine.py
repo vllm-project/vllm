@@ -26,8 +26,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeRequest,
                                               EmbeddingChatRequest,
                                               EmbeddingCompletionRequest,
-                                              ErrorResponse, RerankRequest,
-                                              ScoreRequest,
+                                              ErrorResponse, ScoreRequest,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -205,9 +204,9 @@ class OpenAIServing:
         token_num = len(input_ids)
 
         # Note: EmbeddingRequest and ScoreRequest doesn't have max_tokens
-        if isinstance(request,
-                      (EmbeddingChatRequest, EmbeddingCompletionRequest,
-                       ScoreRequest, RerankRequest)):
+        if isinstance(
+                request,
+            (EmbeddingChatRequest, EmbeddingCompletionRequest, ScoreRequest)):
 
             operation = "score" if isinstance(request, ScoreRequest) \
                 else "embedding generation"

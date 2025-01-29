@@ -28,10 +28,9 @@ def run_aria(question: str, modality: str):
     llm = LLM(model=model_name,
               max_model_len=4096,
               max_num_seqs=2,
-              dtype="bfloat16",
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
 
-    prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>{question}"
+    prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>\n{question}"
               "<|im_end|>\n<|im_start|>assistant\n")
 
     stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]

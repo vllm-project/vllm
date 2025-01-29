@@ -272,11 +272,6 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def reset_prefix_cache(self) -> None:
-        """Reset the prefix cache"""
-        ...
-
-    @abstractmethod
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
         ...

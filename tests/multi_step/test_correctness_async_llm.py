@@ -16,8 +16,7 @@ NUM_SCHEDULER_STEPS = [8]  # Multi-step decoding steps
 NUM_PROMPTS = [10]
 
 DEFAULT_SERVER_ARGS: List[str] = [
-    "--distributed-executor-backend",
-    "ray",
+    "--worker-use-ray",
     "--gpu-memory-utilization",
     "0.85",
     "--swap-space",

@@ -30,19 +30,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalInputs, MultiModalKwargs,
+                                    NestedTensors, PlaceholderRange)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo,
                                         BoundPromptReplacement,
-                                        PlaceholderFeaturesInfo,
-                                        PromptReplacement,
-                                        PromptReplacementDetails)
-# yapf: enable
+                                        PlaceholderInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
@@ -441,12 +437,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                     processor=hf_processor,
                 )
 
-            image_tokens = [_IMAGE_TOKEN_ID] * num_image_tokens
-
-            return PromptReplacementDetails(
-                full=image_tokens + [bos_token_id],
-                features=image_tokens,
-            )
+            return [_IMAGE_TOKEN_ID] * num_image_tokens + [bos_token_id]
 
         num_images = mm_items.get_count("image", strict=False)
 
@@ -463,7 +454,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         token_ids: list[int],
         mm_prompt_repls: Mapping[str, Sequence[BoundPromptReplacement]],
         mm_item_counts: Mapping[str, int],
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderInfo]]]:
         token_ids, text, placeholders = super()._apply_prompt_replacements(
             token_ids=token_ids,
             mm_prompt_repls=mm_prompt_repls,
@@ -476,17 +467,37 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
             token_ids = [token_ids[0], *token_ids[2:]]
             placeholders = {
                 modality: [
-                    PlaceholderFeaturesInfo(
+                    PlaceholderInfo(
                         modality=p.modality,
                         item_idx=p.item_idx,
                         start_idx=p.start_idx - 1,
-                        tokens=p.tokens,
+                        replacement=p.replacement,
                     ) for p in ps
                 ]
                 for modality, ps in placeholders.items()
             }
 
         return token_ids, text, placeholders
+
+    def apply(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalInputs:
+        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
+
+        # Only <|image|> tokens should be considered as placeholders,
+        # so we ignore the trailing bos_token_id
+        result["mm_placeholders"] = {
+            modality: [
+                PlaceholderRange(offset=p["offset"], length=p["length"] - 1)
+                for p in ps
+            ]
+            for modality, ps in result["mm_placeholders"].items()
+        }
+
+        return result
 
 
 @MULTIMODAL_REGISTRY.register_processor(Phi3VMultiModalProcessor,

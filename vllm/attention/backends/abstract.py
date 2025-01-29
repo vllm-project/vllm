@@ -65,6 +65,11 @@ class AttentionBackend(ABC):
     def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
         raise NotImplementedError
 
+    @classmethod
+    def make_metadata_builder(cls, *args,
+                              **kwargs) -> "AttentionMetadataBuilder":
+        return cls.get_builder_cls()(*args, **kwargs)
+
     @staticmethod
     @abstractmethod
     def get_kv_cache_shape(
@@ -122,10 +127,6 @@ class AttentionMetadata:
     # `model_executable`.
     multi_modal_placeholder_index_maps: Optional[Dict[
         str, MultiModalPlaceholderMap.IndexMap]]
-
-    # Enable/disable KV scales calculation. This is so that we can disable the
-    # calculation until after prefill and cuda graph capture.
-    enable_kv_scales_calculation: bool
 
     @property
     @abstractmethod
@@ -213,12 +214,6 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
 
     @abstractmethod
     def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
-        """Create the builder, remember some configuration and parameters."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def prepare(self) -> None:
-        """Prepare for one batch."""
         raise NotImplementedError
 
     @abstractmethod
@@ -230,10 +225,8 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
 
 class AttentionLayer(Protocol):
 
-    _k_scale: torch.Tensor
-    _v_scale: torch.Tensor
-    _k_scale_float: float
-    _v_scale_float: float
+    _k_scale: float
+    _v_scale: float
 
     def forward(
         self,

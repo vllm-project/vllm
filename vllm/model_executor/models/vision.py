@@ -82,25 +82,23 @@ def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
         if backend_by_env_var is not None:
             selected_backend = backend_name_to_enum(backend_by_env_var)
     if selected_backend is None:
-        if current_platform.is_cuda():
-            device_available = current_platform.has_device_capability(80)
-            if device_available and support_fa:
-                from transformers.utils import is_flash_attn_2_available
-                if is_flash_attn_2_available():
-                    selected_backend = _Backend.FLASH_ATTN
-                else:
-                    logger.warning_once(
-                        "Current `vllm-flash-attn` has a bug inside vision "
-                        "module, so we use xformers backend instead. You can "
-                        "run `pip install flash-attn` to use flash-attention "
-                        "backend.")
-                    selected_backend = _Backend.XFORMERS
+        # For Volta and Turing GPUs, use xformers instead.
+        device_available = current_platform.has_device_capability(80)
+        if device_available and support_fa:
+            from transformers.utils import is_flash_attn_2_available
+            if is_flash_attn_2_available():
+                selected_backend = _Backend.FLASH_ATTN
             else:
-                # For Volta and Turing GPUs, use xformers instead.
+                logger.warning_once(
+                    "Current `vllm-flash-attn` has a bug inside vision module, "
+                    "so we use xformers backend instead. You can run "
+                    "`pip install flash-attn` to use flash-attention backend.")
                 selected_backend = _Backend.XFORMERS
-        else:
-            # Default to torch SDPA for other non-GPU platforms.
+        elif current_platform.is_cpu() or current_platform.is_rocm():
+            # ROCM doesn't support xformers
             selected_backend = _Backend.TORCH_SDPA
+        else:
+            selected_backend = _Backend.XFORMERS
     return selected_backend
 
 

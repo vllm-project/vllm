@@ -315,14 +315,13 @@ class PixtralHFMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         hf_config = self.info.get_hf_config()
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
-
-        image_break_id = vocab[processor.image_break_token]
         image_token_id = hf_config.image_token_index
-        image_end_id = vocab[processor.image_end_token]
+
+        processor = self.info.get_hf_processor()
+        image_token = processor.image_token
+        image_break_token = processor.image_break_token
+        image_end_token = processor.image_end_token
 
         vision_config = hf_config.vision_config
         assert isinstance(vision_config, PixtralVisionConfig)
@@ -337,10 +336,10 @@ class PixtralHFMultiModalProcessor(
                 image_height=image_size.height,
             )
 
-            tokens = ([image_token_id] * ncols + [image_break_id]) * nrows
-            tokens[-1] = image_end_id
+            tokens = ([image_token] * ncols + [image_break_token]) * nrows
+            tokens[-1] = image_end_token
 
-            return tokens
+            return "".join(tokens)
 
         return [
             PromptReplacement(

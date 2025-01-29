@@ -7,16 +7,12 @@ import pytest
 
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-# yapf conflicts with isort for this block
-# yapf: disable
-from vllm.multimodal.processing import (PlaceholderFeaturesInfo,
-                                        PromptReplacement,
+from vllm.multimodal.processing import (PlaceholderInfo, PromptReplacement,
                                         find_mm_placeholders,
                                         find_text_matches, find_token_matches,
                                         iter_token_matches,
                                         replace_text_matches,
                                         replace_token_matches)
-# yapf: enable
 from vllm.multimodal.profiling import MultiModalProfiler
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -437,19 +433,19 @@ def test_find_replace_tokens(
             [1, 9833, 28747, 32000, 9833, 28747, 32000, 32000, 918],
             {
                 "pattern_1": [
-                    PlaceholderFeaturesInfo(
+                    PlaceholderInfo(
                         modality="pattern_1",
                         item_idx=0,
                         start_idx=6,
-                        tokens=[32000, 32000],
+                        replacement=[32000, 32000],
                     ),
                 ],
                 "pattern_4": [
-                    PlaceholderFeaturesInfo(
+                    PlaceholderInfo(
                         modality="pattern_4",
                         item_idx=0,
                         start_idx=3,
-                        tokens=[32000],
+                        replacement=[32000],
                     ),
                 ],
             }
@@ -459,25 +455,25 @@ def test_find_replace_tokens(
             [1, 32000, 32000, 9833, 28747, 32000, 32000, 1550, 918, 1550],
             {
                 "pattern_1": [
-                    PlaceholderFeaturesInfo(
+                    PlaceholderInfo(
                         modality="pattern_1",
                         item_idx=0,
                         start_idx=1,
-                        tokens=[32000, 32000],
+                        replacement=[32000, 32000],
                     ),
-                    PlaceholderFeaturesInfo(
+                    PlaceholderInfo(
                         modality="pattern_1",
                         item_idx=1,
                         start_idx=5,
-                        tokens=[32000, 32000],
+                        replacement=[32000, 32000],
                     ),
                 ],
                 "pattern_3": [
-                    PlaceholderFeaturesInfo(
+                    PlaceholderInfo(
                         modality="pattern_3",
                         item_idx=0,
                         start_idx=7,
-                        tokens=[1550, 918, 1550],
+                        replacement=[1550, 918, 1550],
                     ),
                 ],
                 # No match for pattern_4 as it has lower priority than pattern_1
@@ -487,33 +483,33 @@ def test_find_replace_tokens(
             [1, 32000, 32000, 32000, 32000, 32000, 1550, 918, 1550],
             {
                 "pattern_1": [
-                    PlaceholderFeaturesInfo(
+                    PlaceholderInfo(
                         modality="pattern_1",
                         item_idx=0,
                         start_idx=1,
-                        tokens=[32000, 32000],
+                        replacement=[32000, 32000],
                     ),
-                    PlaceholderFeaturesInfo(
+                    PlaceholderInfo(
                         modality="pattern_1",
                         item_idx=1,
                         start_idx=3,
-                        tokens=[32000, 32000],
+                        replacement=[32000, 32000],
                     ),
                 ],
                 "pattern_4": [
-                    PlaceholderFeaturesInfo(
+                    PlaceholderInfo(
                         modality="pattern_4",
                         item_idx=0,
                         start_idx=5,
-                        tokens=[32000],
+                        replacement=[32000],
                     ),
                 ],
                 "pattern_3": [
-                    PlaceholderFeaturesInfo(
+                    PlaceholderInfo(
                         modality="pattern_3",
                         item_idx=0,
                         start_idx=6,
-                        tokens=[1550, 918, 1550],
+                        replacement=[1550, 918, 1550],
                     ),
                 ],
             }

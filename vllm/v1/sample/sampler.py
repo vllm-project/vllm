@@ -50,8 +50,9 @@ class Sampler(nn.Module):
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
 
+        # NOTE: CPU-GPU synchronization happens here.
         sampler_output = SamplerOutput(
-            sampled_token_ids=sampled,
+            sampled_token_ids=sampled.tolist(),
             logprob_token_ids=topk_indices,
             logprobs=topk_logprobs,
             prompt_logprob_token_ids=None,

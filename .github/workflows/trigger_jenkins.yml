@@ -81,7 +81,7 @@ jobs:
             elif [[ $TARGET_BRANCH =~ v*.*.* ]]; then
               synapse_version=${TARGET_BRANCH#v}
             else
-              echo "Can't Calculate Synapse Version, Failing The Test"
+              echo "Cant Calculate Synapse Version, Failing The Test"
               exit 1
             fi
             synapse_build=$(curl "https://dms.habana-labs.com/api/v1.1/branch/info/v$synapse_version" | jq -r ".release_id")
