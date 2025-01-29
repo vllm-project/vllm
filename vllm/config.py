@@ -1700,7 +1700,8 @@ class SpeculativeConfig:
                              f"{speculative_disable_by_batch_size=}")
         if (enable_chunked_prefill and speculative_model == "eagle"):
             raise ValueError("Chunked prefill and EAGLE are not compatible.")
-        if compilation_level and compilation_level==CompilationLevel.PIECEWISE:
+        if (compilation_level
+                and compilation_level == CompilationLevel.PIECEWISE):
             raise ValueError("Speculative decoding and Piecewise (-O3)"
                              "compilation are not compatible.")
         # TODO: The user should be able to specify revision/max model len
