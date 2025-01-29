@@ -26,7 +26,7 @@ Second, install prerequisites vLLM OpenVINO backend installation:
 
 ```console
 pip install --upgrade pip
-pip install -r requirements-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements/build.txt --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
 Finally, install vLLM with OpenVINO backend:

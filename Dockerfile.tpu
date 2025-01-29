@@ -19,7 +19,7 @@ ENV VLLM_TARGET_DEVICE="tpu"
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     python3 -m pip install \
-        -r requirements-tpu.txt
+        -r requirements/tpu.txt
 RUN python3 setup.py develop
 
 # install development dependencies (for testing)

@@ -86,7 +86,7 @@ for instructions on how to use this prebuilt docker image.
     # Install dependencies
     $ pip install --upgrade numba scipy huggingface-hub[cli]
     $ pip install "numpy<2"
-    $ pip install -r requirements-rocm.txt
+    $ pip install -r requirements/rocm.txt
 
     # Build vLLM for MI210/MI250/MI300.
     $ export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
