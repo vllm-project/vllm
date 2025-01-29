@@ -1070,8 +1070,6 @@ void paged_attention_custom_launcher(
   const float* k_scale_ptr = reinterpret_cast<const float*>(k_scale.data_ptr());
   const float* v_scale_ptr = reinterpret_cast<const float*>(v_scale.data_ptr());
 
-  const float* k_scale_ptr = reinterpret_cast<const float*>(k_scale.data_ptr());
-  const float* v_scale_ptr = reinterpret_cast<const float*>(v_scale.data_ptr());
 
   // NOTE: fp8_out_scale is optional.
   const float* fp8_out_scale_ptr =
