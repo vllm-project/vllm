@@ -6,7 +6,8 @@ from argparse import Namespace
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Union
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
+                      ValidationInfo, field_validator, model_validator)
 from typing_extensions import Annotated
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
@@ -1284,6 +1285,20 @@ class BatchRequestInput(OpenAIBaseModel):
 
     # The parameters of the request.
     body: Union[ChatCompletionRequest, EmbeddingRequest, ScoreRequest]
+
+    @field_validator('body', mode='plain')
+    @classmethod
+    def check_type_for_url(cls, value: Any, info: ValidationInfo):
+        # Use url to disambiguate models
+        url = info.data['url']
+        if url == "/v1/chat/completions":
+            return ChatCompletionRequest.model_validate(value)
+        if url == "/v1/embeddings":
+            return TypeAdapter(EmbeddingRequest).validate_python(value)
+        if url == "/v1/score":
+            return ScoreRequest.model_validate(value)
+        return TypeAdapter(Union[ChatCompletionRequest, EmbeddingRequest,
+                                 ScoreRequest]).validate_python(value)
 
 
 class BatchResponseData(OpenAIBaseModel):
