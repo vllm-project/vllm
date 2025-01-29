@@ -152,6 +152,8 @@ def _test_processing_correctness(
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
     "TIGER-Lab/Mantis-8B-siglip-llama3",
     "mistral-community/pixtral-12b",
+    "openbmb/MiniCPM-o-2_6",
+    "openbmb/MiniCPM-V-2_6",
     "Qwen/Qwen-VL-Chat",
     "Qwen/Qwen2-VL-2B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
