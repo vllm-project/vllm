@@ -187,9 +187,8 @@ class Attention(nn.Module):
                 forward_context: ForwardContext = get_forward_context()
                 ctx_attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                return self.impl.forward(query, key, value, self_kv_cache,
-                                         ctx_attn_metadata, self._k_scale,
-                                         self._v_scale)
+                return self.impl.forward(self, query, key, value,
+                                         self_kv_cache, ctx_attn_metadata)
             else:
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
