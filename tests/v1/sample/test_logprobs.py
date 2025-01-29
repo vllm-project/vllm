@@ -302,3 +302,41 @@ def test_none_logprobs(vllm_runner, model, example_prompts, monkeypatch):
         assert results_logprobs_none[i].outputs[0].cumulative_logprob is None
         # Check prompt logprobs are None
         assert results_logprobs_none[i].prompt_logprobs is None
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_zero_logprobs(vllm_runner, model, example_prompts, monkeypatch):
+    """Engine should return sampled token and prompt token logprobs
+    
+    Args:
+      vllm_runner: vLLM engine runner fixture
+      model: model name
+      example_prompts: list of example prompts (test fixture)
+      monkeypatch: supports editing env vars and rolling back changes
+                   after the test
+    """
+    override_backend_env_variable(monkeypatch, "FLASH_ATTN")
+
+    max_num_seqs = 256
+    max_num_batched_tokens = None
+    max_tokens = 5
+
+    with vllm_runner(
+            model,
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+    ) as vllm_model:
+        sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
+                                                       logprobs=0,
+                                                       prompt_logprobs=0,
+                                                       temperature=0.0)
+        results_logprobs_none = vllm_model.model.generate(
+            example_prompts, sampling_params=sampling_params_logprobs_none)
+
+    for i in range(len(results_logprobs_none)):
+        # Check sample logprobs are None
+        assert results_logprobs_none[i].outputs[0].logprobs is not None
+        assert results_logprobs_none[i].outputs[
+            0].cumulative_logprob is not None
+        # Check prompt logprobs are None
+        assert results_logprobs_none[i].prompt_logprobs is not None
