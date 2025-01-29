@@ -49,6 +49,12 @@ class EncoderCacheManager:
         self.num_free_slots += request.get_num_encoder_tokens(input_id)
         self.freed.append((req_id, input_id))
 
+    def free_all(self, request: Request) -> None:
+        """Free all cached input ids for the request."""
+        input_ids = self.cached.get(request.request_id, set())
+        for input_id in input_ids:
+            self.free(request, input_id)
+
     def get_freed_ids(self) -> List[Tuple[str, int]]:
         freed = self.freed
         self.freed = []

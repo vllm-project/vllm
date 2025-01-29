@@ -202,7 +202,7 @@ class Scheduler:
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
                 if num_new_tokens == 0:
-                    # The happens when prompt length is divisible by the block
+                    # This happens when prompt length is divisible by the block
                     # size and all blocks are cached. Now we force to recompute
                     # the last block. Note that we have to re-compute an entire
                     # block because allocate_slots() assumes num_computed_tokens
@@ -447,6 +447,8 @@ class Scheduler:
                 # Check for stop and update request state.
                 # This must be called before me make the EngineCoreOutput.
                 stopped = self._check_stop(request)
+                if stopped:
+                    self._free_request(request)
 
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
@@ -472,7 +474,6 @@ class Scheduler:
         if (request.num_tokens >= self.max_model_len
                 or request.num_output_tokens >= request.max_tokens):
             request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-            self._free_request(request)
             return True
 
         sampling_params = request.sampling_params
@@ -480,13 +481,11 @@ class Scheduler:
         if (not sampling_params.ignore_eos
                 and last_token_id == request.eos_token_id):
             request.status = RequestStatus.FINISHED_STOPPED
-            self._free_request(request)
             return True
 
         if last_token_id in (sampling_params.stop_token_ids or ()):
             request.status = RequestStatus.FINISHED_STOPPED
             request.stop_reason = last_token_id
-            self._free_request(request)
             return True
         return False
 
@@ -525,6 +524,7 @@ class Scheduler:
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
         self.kv_cache_manager.free(request)
+        self.encoder_cache_manager.free_all(request)
         self.running_reqs_data.pop(request.request_id, None)
         del self.requests[request.request_id]
         self.finished_req_ids.add(request.request_id)
