@@ -392,7 +392,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type == "phi3_v":
                 # Workaround since this token is not defined in the tokenizer
                 return f"<|image_{current_count}|>"
-            if model_type == "minicpmv":
+            if model_type in ("minicpmo", "minicpmv"):
                 return "(<image>./</image>)"
             if model_type in ("blip-2", "chatglm", "fuyu", "paligemma",
                               "pixtral"):
@@ -424,10 +424,14 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type == "qwen2_audio":
                 return (f"Audio {current_count}: "
                         f"<|audio_bos|><|AUDIO|><|audio_eos|>")
+            if model_type == "minicpmo":
+                return "(<audio>./</audio>)"
             raise TypeError(f"Unknown model type: {model_type}")
         elif modality == "video":
             if model_type == "qwen2_vl":
                 return "<|vision_start|><|video_pad|><|vision_end|>"
+            if model_type in ("minicpmo", "minicpmv"):
+                return "(<video>./</video>)"
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.video_token_index)
