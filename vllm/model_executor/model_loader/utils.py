@@ -72,10 +72,11 @@ def get_model_architecture(
             if not is_transformers_impl_compatible(arch, custom_module):
                 raise ValueError(
                     "%s has no vLLM implementation and the Transformers "
-                    "implementationis not compatible with vLLM.", arch)
-            logger.info(
-                "%s has no vLLM implementation, falling back to "
-                "Transformers implementation", arch)
+                    "implementation is not compatible with vLLM.", arch)
+            logger.warning(
+                "%s has no vLLM implementation, falling back to Transformers "
+                "implementation. Some features may not be supported and "
+                "performance may not be optimal.", arch)
             architectures[i] = "TransformersModel"
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
