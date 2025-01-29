@@ -100,8 +100,7 @@ class MoeWNA16Config(QuantizationConfig):
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
         can_convert = cls.is_moe_wna16_compatible(hf_quant_cfg)
-        is_valid_user_quant = (user_quant is None or user_quant == "moe_wna16")
-        if can_convert and is_valid_user_quant:
+        if can_convert and user_quant == "moe_wna16":
             return cls.get_name()
         return None
 
@@ -128,7 +127,9 @@ class MoeWNA16Config(QuantizationConfig):
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         if is_layer_skipped_quant(prefix, self.modules_to_not_convert):
             return UnquantizedLinearMethod()
-        elif isinstance(layer, LinearBase):
+        elif isinstance(layer, FusedMoE):
+            return MoeWNA16Method(self)
+        else:
             if self.linear_quant_method == "gptq":
                 if self.use_marlin:
                     return GPTQMarlinLinearMethod(
@@ -145,9 +146,6 @@ class MoeWNA16Config(QuantizationConfig):
                         AWQConfig.from_config(self.full_config))
             else:
                 raise ValueError("moe_wna16 only support gptq and awq.")
-        elif isinstance(layer, FusedMoE):
-            return MoeWNA16Method(self)
-        return None
 
 
 def is_layer_skipped_quant(prefix: str, modules_to_not_convert: List[str]):
