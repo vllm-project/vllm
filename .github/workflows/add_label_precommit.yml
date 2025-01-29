@@ -16,7 +16,7 @@ jobs:
                             owner: context.repo.owner,
                             repo: context.repo.repo,
                             issue_number: context.issue.number,
-                            labels: ['pre-commit passed']
+                            labels: ['pre-commit-passed']
                         })
                 env:
                     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
