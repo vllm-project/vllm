@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass
+from itertools import chain
 from typing import Callable, Deque, Dict, List, Optional, Tuple, TypedDict
 from vllm.utils import cdiv
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec, SlidingWindowSpec
@@ -86,7 +87,11 @@ class SpecializedManager(ABC):
                               num_computed_tokens: int) -> List[KVCacheBlock]:
         """
         Update the `block_table` in place to remove blocks that are no longer 
-        needed. Returns the removed blocks.
+        needed. Replace the removed blocks with null_block and returns the 
+        removed blocks. 
+        The removed blocks should be in the order of the
+        priority to be evicted, where the first block should have the highest
+        priority.
         
         Args:
             block_table: The block table to be updated.
@@ -135,9 +140,13 @@ class SlidingWindowManager(FullAttentionManager):
     def __init__(self, kv_cache_spec: SlidingWindowSpec,
                  block_pool_operations: BlockPoolOperations):
         super().__init__(kv_cache_spec, block_pool_operations)
-        # +1 due to not aligned
-        self.num_block_sliding_window = cdiv(kv_cache_spec.sliding_window,
-                                             self.block_size) + 1
+        self.sliding_window = kv_cache_spec.sliding_window
+        # # +1 here because the sliding window may not start from the beginning
+        # # of the first block. For example, if the block size is 2, and sliding
+        # # window size is 4, [XX, XA, BC, D] where ABCD are the 4 tokens inside
+        # # the sliding window, we need to hold the last 3 blocks.
+        # self.num_block_sliding_window = cdiv(kv_cache_spec.sliding_window,
+        #                                      self.block_size) + 1
         self._null_block = block_pool_operations.get_null_block()
 
     def get_possible_cached_prefix(
@@ -147,42 +156,60 @@ class SlidingWindowManager(FullAttentionManager):
         # the time complexity from O(num_block) to
         # O(num_block / num_block_sliding_window) + O(num_computed_block),
         # which is good for low cache hit rate senarios.
+        # TODO: add test for this function
         start = 0
         ranges = []
         computed_blocks: List[KVCacheBlock] = []
 
-        for i, block_hash in enumerate(block_hashes):
+        dummy_block_hash = BlockHashType(-1, ())
+        # Add a dummy block hash to support the case that the last block is
+        # cached.
+        for i, block_hash in enumerate(chain(block_hashes,
+                                             [dummy_block_hash])):
             if cached_block := self.block_pool_operations.get_cached_block(
                     block_hash):
                 computed_blocks.append(cached_block)
             else:
                 if start == 0:
+                    # All tokens between [0, i * block_size] are cached.
+                    # All of them are possible cached prefix.
+                    ranges.append(PrefixLengthRange(0, i * self.block_size))
+                elif (i - start) * self.block_size >= self.sliding_window:
+                    # All tokens between [start * block_size,
+                    # i * block_size)] are cached. These tokens except the
+                    # first `self.sliding_window - 1` ones are possible cached
+                    # prefix.
+                    first_cached_token = start * self.block_size
+                    # should be first_cached_token + self.sliding_window - 1 + 1
+                    # +1 is for converting the token index to the prefix length.
+                    first_possible_length = first_cached_token + \
+                        self.sliding_window
                     ranges.append(
-                        PrefixLengthRange(start * self.block_size,
+                        PrefixLengthRange(first_possible_length,
                                           i * self.block_size))
-                elif i - start >= self.num_block_sliding_window:
-                    ranges.append((PrefixLengthRange(
-                        (start + self.num_block_sliding_window) *
-                        self.block_size, i * self.block_size)))
-                computed_blocks.append(
-                    self.block_pool_operations.get_null_block())
+                computed_blocks.append(self._null_block)
                 start = i + 1
+        computed_blocks = computed_blocks[:-1]  # remove the dummy block
         return ranges, computed_blocks
 
     def remove_useless_blocks(self, block_table: List[KVCacheBlock],
                               num_computed_tokens: int) -> List[KVCacheBlock]:
-        num_block_should_free = cdiv(num_computed_tokens, self.block_size) - \
-                self.num_block_sliding_window
-        removed_blocks: Deque[KVCacheBlock] = deque()
-        for i in range(num_block_should_free - 1, -1, -1):
+        # Remove the blocks that are no longer be in the sliding window.
+        last_useful_token = num_computed_tokens - self.sliding_window
+        last_useful_block = last_useful_token // self.block_size
+
+        removed_blocks: List[KVCacheBlock] = []
+        for i in range(last_useful_block - 1, -1, -1):
             if block_table[i] == self._null_block:
+                # If the block is already a null block, the blocks before it
+                # should also be null blocks.
                 break
-            removed_blocks.appendleft(block_table[i])
+            removed_blocks.append(block_table[i])
             block_table[i] = self._null_block
         return removed_blocks
 
 
-spec_manager_map = {
+spec_manager_map: Dict[KVCacheSpec, SpecializedManager] = {
     FullAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager
 }

@@ -122,7 +122,7 @@ class KVCacheManager:
         block_hashes = request.kv_block_hashes
         for i, manager in enumerate(self.managers):
             computed_tokens_i, computed_blocks_i = (
-                manager.get_computed_blocks_and_tokens(block_hashes[i]))
+                manager.get_possible_cached_prefix(block_hashes[i]))
             computed_blocks.append(computed_blocks_i)
             computed_tokens.append(computed_tokens_i)
 
@@ -139,9 +139,9 @@ class KVCacheManager:
             num_computed_tokens = self._get_common_computed_tokens(
                 computed_tokens)
 
-            for i, manager in enumerate(self.managers):
-                computed_blocks[i] = computed_blocks[:num_computed_tokens //
-                                                     manager.block_size]
+        for i, manager in enumerate(self.managers):
+            computed_blocks[i] = computed_blocks[:num_computed_tokens //
+                                                 manager.block_size]
         self._free_blocks_for_sliding_window(computed_blocks,
                                              num_computed_tokens)
         return computed_blocks, num_computed_tokens
@@ -348,6 +348,7 @@ class KVCacheManager:
 
     def _get_ordered_blocks_one_kv_cache_group(
             self, blocks: KVCacheBlocks) -> Iterable[KVCacheBlock]:
+        # TODO (Chen): rethink where to do the reverse operation
         ordered_blocks: Iterable[KVCacheBlock] = blocks
         if self.enable_caching:
             # Free blocks in reverse order so that the tail blocks are
