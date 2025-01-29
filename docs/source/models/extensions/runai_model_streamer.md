@@ -48,6 +48,6 @@ You can read further about CPU buffer memory limiting [here](https://github.com/
 vllm serve /home/meta-llama/Llama-3.2-3B-Instruct --load-format runai_streamer --model-loader-extra-config '{"memory_limit":5368709120}'
 ```
 
-```{note}
+:::{note}
 For further instructions about tunable parameters and additional parameters configurable through environment variables, read the [Environment Variables Documentation](https://github.com/run-ai/runai-model-streamer/blob/master/docs/src/env-vars.md).
-```
+:::

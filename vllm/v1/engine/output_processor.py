@@ -8,7 +8,7 @@ from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.engine.detokenizer import (DetokenizerOutput,
                                         IncrementalDetokenizer)
-from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.metrics.stats import IterationStats, RequestStateStats
 
 
 @dataclass
@@ -36,6 +36,8 @@ class RequestState:
         self.detokenizer = detokenizer
         self.is_prefilling = True
         self.queue = queue
+
+        self.stats = RequestStateStats()
 
     @classmethod
     def from_new_request(
@@ -146,7 +148,8 @@ class OutputProcessor:
             # 1) Compute stats for this iteration.
             iteration_stats.update_from_output(engine_core_output,
                                                req_state.is_prefilling,
-                                               req_state.prompt_len)
+                                               req_state.prompt_len,
+                                               req_state.stats)
             req_state.is_prefilling = False
 
             # 2) Detokenize the token ids into text.
@@ -170,6 +173,10 @@ class OutputProcessor:
                         # If req not finished in EngineCore, but Detokenizer
                         # detected stop string, abort needed in EngineCore.
                         reqs_to_abort.append(req_id)
+
+                    # Track per-request stats
+                    iteration_stats.update_from_finished_request(
+                        request_output, req_state.stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,

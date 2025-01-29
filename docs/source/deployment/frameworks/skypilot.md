@@ -2,11 +2,11 @@
 
 # SkyPilot
 
-```{raw} html
+:::{raw} html
 <p align="center">
   <img src="https://imgur.com/yxtzPEu.png" alt="vLLM"/>
 </p>
-```
+:::
 
 vLLM can be **run and scaled to multiple service replicas on clouds and Kubernetes** with [SkyPilot](https://github.com/skypilot-org/skypilot), an open-source framework for running LLMs on any cloud. More examples for various open models, such as Llama-3, Mixtral, etc, can be found in [SkyPilot AI gallery](https://skypilot.readthedocs.io/en/latest/gallery/index.html).
 
@@ -104,10 +104,10 @@ service:
   max_completion_tokens: 1
 ```
 
-```{raw} html
+:::{raw} html
 <details>
 <summary>Click to see the full recipe YAML</summary>
-```
+:::
 
 ```yaml
 service:
@@ -153,9 +153,9 @@ run: |
     2>&1 | tee api_server.log
 ```
 
-```{raw} html
+:::{raw} html
 </details>
-```
+:::
 
 Start the serving the Llama-3 8B model on multiple replicas:
 
@@ -169,10 +169,10 @@ Wait until the service is ready:
 watch -n10 sky serve status vllm
 ```
 
-```{raw} html
+:::{raw} html
 <details>
 <summary>Example outputs:</summary>
-```
+:::
 
 ```console
 Services
@@ -185,9 +185,9 @@ vllm          1   1        xx.yy.zz.121  18 mins ago  1x GCP([Spot]{'L4': 1})  R
 vllm          2   1        xx.yy.zz.245  18 mins ago  1x GCP([Spot]{'L4': 1})  READY   us-east4
 ```
 
-```{raw} html
+:::{raw} html
 </details>
-```
+:::
 
 After the service is READY, you can find a single endpoint for the service and access the service with the endpoint:
 
@@ -223,10 +223,10 @@ service:
 
 This will scale the service up to when the QPS exceeds 2 for each replica.
 
-```{raw} html
+:::{raw} html
 <details>
 <summary>Click to see the full recipe YAML</summary>
-```
+:::
 
 ```yaml
 service:
@@ -275,9 +275,9 @@ run: |
     2>&1 | tee api_server.log
 ```
 
-```{raw} html
+:::{raw} html
 </details>
-```
+:::
 
 To update the service with the new config:
 
@@ -295,10 +295,10 @@ sky serve down vllm
 
 It is also possible to access the Llama-3 service with a separate GUI frontend, so the user requests send to the GUI will be load-balanced across replicas.
 
-```{raw} html
+:::{raw} html
 <details>
 <summary>Click to see the full GUI YAML</summary>
-```
+:::
 
 ```yaml
 envs:
@@ -328,9 +328,9 @@ run: |
     --stop-token-ids 128009,128001 | tee ~/gradio.log
 ```
 
-```{raw} html
+:::{raw} html
 </details>
-```
+:::
 
 1. Start the chat web UI:
 
