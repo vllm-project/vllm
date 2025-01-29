@@ -14,9 +14,9 @@ import torch
 from typing_extensions import TypeVar, deprecated
 
 import vllm.envs as envs
-from vllm.config import (CompilationLevel, DecodingConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         SchedulerConfig, VllmConfig)
+from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
+                         VllmConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
@@ -202,7 +202,6 @@ class LLMEngine:
         return outputs_
 
     tokenizer: Optional[BaseTokenizerGroup]
-    _base_features: FeatureUsage
 
     def __init__(
         self,
@@ -404,17 +403,6 @@ class LLMEngine:
             ))
 
         self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}
-
-        # Initialize the base feature set in use based on engine-wide config.
-        self._base_features = FeatureUsage()
-        if vllm_config.speculative_config:
-            self._base_features.add(FEATURES.SPEC_DECODE)
-        if self.scheduler_config.num_scheduler_steps > 1:
-            self._base_features.add(FEATURES.MULTI_STEP)
-        if (self.vllm_config.compilation_config
-                and self.vllm_config.compilation_config.level
-                == CompilationLevel.PIECEWISE):
-            self._base_features.add(FEATURES.TORCH_COMPILE)
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -745,7 +733,7 @@ class LLMEngine:
                              "Priority scheduling is not enabled.")
 
         # Start with the set of base features enabled at the engine level
-        features = FeatureUsage(self._base_features)
+        features = FeatureUsage(self.vllm_config.features)
         # Add any additional features enabled at the request level
         if isinstance(params, SamplingParams):
             if params.using_guided_decoding():

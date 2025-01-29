@@ -75,6 +75,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import with_cancellation
+from vllm.features import FeaturesIncompatible
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
@@ -860,29 +861,33 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     signal.signal(signal.SIGTERM, signal_handler)
 
-    async with build_async_engine_client(args) as engine_client:
-        app = build_app(args)
+    try:
+        async with build_async_engine_client(args) as engine_client:
+            app = build_app(args)
 
-        model_config = await engine_client.get_model_config()
-        await init_app_state(engine_client, model_config, app.state, args)
+            model_config = await engine_client.get_model_config()
+            await init_app_state(engine_client, model_config, app.state, args)
 
-        shutdown_task = await serve_http(
-            app,
-            host=args.host,
-            port=args.port,
-            log_level=args.uvicorn_log_level,
-            timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
-            ssl_keyfile=args.ssl_keyfile,
-            ssl_certfile=args.ssl_certfile,
-            ssl_ca_certs=args.ssl_ca_certs,
-            ssl_cert_reqs=args.ssl_cert_reqs,
-            # Workaround to work on macOS
-            fd=sock.fileno() if sys.platform.startswith("darwin") else None,
-            **uvicorn_kwargs,
-        )
+            shutdown_task = await serve_http(
+                app,
+                host=args.host,
+                port=args.port,
+                log_level=args.uvicorn_log_level,
+                timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+                ssl_keyfile=args.ssl_keyfile,
+                ssl_certfile=args.ssl_certfile,
+                ssl_ca_certs=args.ssl_ca_certs,
+                ssl_cert_reqs=args.ssl_cert_reqs,
+                # Workaround to work on macOS
+                fd=sock.fileno()
+                if sys.platform.startswith("darwin") else None,
+                **uvicorn_kwargs,
+            )
 
-    # NB: Await server shutdown only after the backend context is exited
-    await shutdown_task
+        # NB: Await server shutdown only after the backend context is exited
+        await shutdown_task
+    except FeaturesIncompatible as e:
+        logger.error("Features incompatible: %s", e)
 
     sock.close()
 

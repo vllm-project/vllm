@@ -18,6 +18,7 @@ from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
+from vllm.features import FEATURES, FeaturesIncompatible, FeatureUsage
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
@@ -2991,6 +2992,7 @@ class VllmConfig:
     additional_config: SupportsHash = field(default=None,
                                             init=True)  # type: ignore
     instance_id: str = ""
+    features: FeatureUsage = field(default_factory=FeatureUsage, init=False)
 
     def compute_hash(self) -> str:
         """
@@ -3205,6 +3207,16 @@ class VllmConfig:
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
+
+        if self.speculative_config:
+            self.features.add(FEATURES.SPEC_DECODE)
+        if self.scheduler_config.num_scheduler_steps > 1:
+            self.features.add(FEATURES.MULTI_STEP)
+        if (self.compilation_config and self.compilation_config.level
+                == CompilationLevel.PIECEWISE):
+            self.features.add(FEATURES.TORCH_COMPILE)
+        if not self.features.compatible():
+            raise FeaturesIncompatible(self.features.conflicts())
 
     def _set_cudagraph_sizes(self):
         """
