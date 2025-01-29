@@ -1621,6 +1621,7 @@ class SpeculativeConfig:
         typical_acceptance_sampler_posterior_threshold: Optional[float],
         typical_acceptance_sampler_posterior_alpha: Optional[float],
         disable_logprobs: Optional[bool],
+        compilation_level: Optional["CompilationLevel"],
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -1652,7 +1653,7 @@ class SpeculativeConfig:
                 speculation for some sequences.
             enable_chunked_prefill (bool): Whether vLLM is configured to use
                 chunked prefill or not. Used for raising an error since its not
-                yet compatible with spec decode.
+                yet compatible with all spec decode features.
             speculative_disable_by_batch_size (Optional[int]): Disable
                 speculative decoding for new incoming requests when the number
                 of enqueue requests  is larger than this value, if provided.
@@ -1678,7 +1679,9 @@ class SpeculativeConfig:
                 If set to False, token log probabilities are returned
                 according to the log probability settings in SamplingParams.
                 If not specified, it defaults to True.
-
+            compilation_level (CompilationLevel): Level of torch compilation of
+                the model. Used for raising an error since its not yet 
+                compatible with spec decode.
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
                 the necessary conditions are met, else None.
@@ -1697,6 +1700,9 @@ class SpeculativeConfig:
                              f"{speculative_disable_by_batch_size=}")
         if (enable_chunked_prefill and speculative_model == "eagle"):
             raise ValueError("Chunked prefill and EAGLE are not compatible.")
+        if compilation_level and compilation_level==CompilationLevel.PIECEWISE:
+            raise ValueError("Speculative decoding and Piecewise (-O3)"
+                             "compilation are not compatible.")
         # TODO: The user should be able to specify revision/max model len
         # for the draft model. It is not currently supported.
         draft_revision = None
