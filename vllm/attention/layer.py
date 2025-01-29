@@ -139,10 +139,7 @@ class Attention(nn.Module):
             ).parallel_config.pipeline_parallel_size)
         ]
 
-<<<<<<< HEAD
         self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-=======
->>>>>>> main
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
@@ -157,11 +154,7 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         if self.calculate_kv_scales and \
             attn_metadata.enable_kv_scales_calculation:
-<<<<<<< HEAD
             self.calc_kv_scales(query, key, value)
-=======
-            self.calc_kv_scales(key, value)
->>>>>>> main
         if self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
