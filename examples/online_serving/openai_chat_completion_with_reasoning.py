@@ -1,6 +1,17 @@
 """
 An example shows how to generate chat completions from reasoning models
 like DeepSeekR1.
+
+To run this example, you need to start the vLLM server with the reasoning 
+parser:
+
+```bash
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
+     --enable-reasoning --reasoning-parser deepseek_r1
+```
+
+This example demonstrates how to generate chat completions from reasoning models
+using the OpenAI Python client library.
 """
 
 from openai import OpenAI
