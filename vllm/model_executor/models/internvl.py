@@ -120,7 +120,7 @@ def resolve_internvl_min_max_num(
 ) -> tuple[int, int]:
     max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
 
-    if use_thumbnail and max_dynamic_patch > 1:
+    if use_thumbnail and max_dynamic_patch != 1:
         max_dynamic_patch += 1
 
     return min_dynamic_patch, max_dynamic_patch
@@ -161,9 +161,11 @@ def calculate_internvl_targets(
     target_width = image_size * target_aspect_ratio[0]
     target_height = image_size * target_aspect_ratio[1]
     blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
-    # add thumbnail image if num_blocks > 1
-    if use_thumbnail and blocks > 1:
+
+    # add thumbnail image if num_blocks != 1
+    if use_thumbnail and blocks != 1:
         blocks += 1
+
     return blocks, target_width, target_height
 
 
@@ -587,6 +589,8 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         if "image_num_patches" in out_mm_kwargs:
             image_num_patches = out_mm_kwargs["image_num_patches"]
+            assert isinstance(image_num_patches, torch.Tensor)
+            image_num_patches = image_num_patches.tolist()
         elif "image_embeds" in out_mm_kwargs:
             # TODO: Use image size information in dictionary embedding inputs
             # to compute num_patches (similar to Qwen2-VL)
@@ -610,8 +614,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             num_patches = image_num_patches[item_idx]
             if num_patches is not None:
-                assert isinstance(num_patches, torch.Tensor)
-                num_patches = num_patches.item()
+                assert isinstance(num_patches, int)
 
             return PromptReplacementDetails(
                 full=hf_processor.get_image_repl_full(feature_size,

@@ -5,7 +5,7 @@
 # Copyright (c) 2024 H2O.AI
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
-from typing import Optional
+from typing import Mapping, Optional
 
 import torch
 from PIL import Image
@@ -13,6 +13,11 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalKwargs
+from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
+                                   MultiModalDataItems)
+from vllm.multimodal.processing import (PromptReplacement,
+                                        PromptReplacementDetails)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .intern_vit import InternVisionModel
@@ -36,7 +41,7 @@ def resolve_h2ovl_min_max_num(
     if use_msac:
         max_dynamic_patch *= 2
 
-    if use_thumbnail and max_dynamic_patch > 1:
+    if use_thumbnail and max_dynamic_patch != 1:
         max_dynamic_patch += 1
 
     return min_dynamic_patch, max_dynamic_patch
@@ -84,9 +89,11 @@ def calculate_h2ovl_targets(
     target_width = image_size * target_aspect_ratio[0]
     target_height = image_size * target_aspect_ratio[1]
     blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
-    # add thumbnail image if num_blocks > 1
-    if use_thumbnail and blocks > 1:
+
+    # add thumbnail image if num_blocks != 1
+    if use_thumbnail and blocks != 1:
         blocks += 1
+
     return blocks, target_width, target_height, target_aspect_ratio
 
 
@@ -306,7 +313,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
     ) -> list[torch.Tensor]:
-        use_msac = self.use_msac if len(images) > 1 else False
+        use_msac = self.use_msac if len(images) == 1 else False
 
         min_num, max_num = self.resolve_min_max_num(
             max_dynamic_patch=max_dynamic_patch,
@@ -343,8 +350,72 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
+class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
+                               ):
+
+    def _get_prompt_replacements(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> list[PromptReplacement]:
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+
+        if "image_num_patches" in out_mm_kwargs:
+            image_num_patches = out_mm_kwargs["image_num_patches"]
+            assert isinstance(image_num_patches, torch.Tensor)
+            image_num_patches = image_num_patches.tolist()
+        elif "image_embeds" in out_mm_kwargs:
+            # TODO: Use image size information in dictionary embedding inputs
+            # to compute num_patches (similar to Qwen2-VL)
+            image_num_patches = [None] * len(out_mm_kwargs["image_embeds"])
+        else:
+            image_num_patches = []
+
+        num_images = len(image_num_patches)
+
+        def get_replacement_internvl(item_idx: int):
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems))
+
+            if isinstance(images, ImageEmbeddingItems):
+                feature_size = images.get_feature_size(item_idx)
+            else:
+                image_size = images.get_image_size(item_idx)
+                feature_size = self.info.get_num_image_tokens(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                    processor=hf_processor,
+                )
+
+            if num_images > 1 and hf_processor.use_msac:
+                # Assume feature size scales linearly with number of patches
+                use_thumbnail = hf_processor.use_thumbnail
+                feature_size = ((feature_size - use_thumbnail) * 2 +
+                                use_thumbnail)
+
+            num_patches = image_num_patches[item_idx]
+            if num_patches is not None:
+                assert isinstance(num_patches, int)
+
+            return PromptReplacementDetails(
+                full=hf_processor.get_image_repl_full(feature_size,
+                                                      num_patches),
+                features=hf_processor.get_image_repl_features(
+                    feature_size, num_patches),
+            )
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target="<image>",
+                replacement=get_replacement_internvl,
+            )
+        ]
+
+
 @MULTIMODAL_REGISTRY.register_processor(
-    InternVLMultiModalProcessor,
+    H2OVLMultiModalProcessor,
     info=H2OVLProcessingInfo,
     dummy_inputs=InternVLDummyInputsBuilder)
 class H2OVLChatModel(InternVLChatModel):
