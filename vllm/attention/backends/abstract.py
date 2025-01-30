@@ -278,7 +278,7 @@ class AttentionImpl(ABC, Generic[T]):
         raise NotImplementedError
 
 
-class MLAAttentionImpl(AttentionImpl):
+class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
 
     @abstractmethod
     def forward(

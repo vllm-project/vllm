@@ -1,6 +1,6 @@
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generic, List, Optional
 
 import torch
 
@@ -8,7 +8,7 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionLayer,
                                               AttentionMetadata,
-                                              MLAAttentionImpl)
+                                              MLAAttentionImpl, T)
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -16,14 +16,14 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 
-@dataclass(kw_only=True)
-class MLAMetadataCommon(AttentionMetadata):
+@dataclass
+class MLACommonMetadata(AttentionMetadata):
     # Input positions for rotrary embeddings since for MLA the rotary
     # position embeddings are applied inside the attention backend
     input_positions: torch.Tensor
 
 
-class MLACommonImpl(MLAAttentionImpl):
+class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     """
     Common class for implementing repeated parts 
     
@@ -138,7 +138,7 @@ class MLACommonImpl(MLAAttentionImpl):
         # q_proj should be q_b_proj if q_lora_rank is not None, but from an
         # attention backend perspective we rely on the layer to pass in the
         # correct matrix
-        q_proj: Optional[ColumnParallelLinear],
+        q_proj: ColumnParallelLinear,
         kv_b_proj: ColumnParallelLinear,
         o_proj: RowParallelLinear,
     ) -> None:
@@ -252,7 +252,7 @@ class MLACommonImpl(MLAAttentionImpl):
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        attn_metadata: MLAMetadataCommon,
+        attn_metadata: T,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -262,7 +262,7 @@ class MLACommonImpl(MLAAttentionImpl):
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: MLAMetadataCommon,
+        attn_metadata: T,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -273,7 +273,7 @@ class MLACommonImpl(MLAAttentionImpl):
         k_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
-        attn_metadata: MLAMetadataCommon,
+        attn_metadata: T,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if output is not None:
@@ -289,6 +289,7 @@ class MLACommonImpl(MLAAttentionImpl):
 
         # Restore head dim (for rotary embedding)
         k_pe = k_pe.unsqueeze(1)
+        assert hasattr(attn_metadata, "input_positions")
 
         if is_decode:
             q_nope = self._q_proj_and_k_up_proj(hidden_states_or_q_c)

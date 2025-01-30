@@ -20,7 +20,7 @@ from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionState, AttentionType)
-from vllm.attention.backends.mla.utils import MLACommonImpl, MLAMetadataCommon
+from vllm.attention.backends.mla.utils import MLACommonImpl, MLACommonMetadata
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
@@ -122,8 +122,8 @@ class TritonMLAState(AttentionState):
         return
 
 
-@dataclass(kw_only=True)
-class TritonMLAMetadata(MLAMetadataCommon):
+@dataclass
+class TritonMLAMetadata(MLACommonMetadata):
     """Metadata for TritonMLAMetadata.
 
     NOTE: Any python object stored here is not updated when it is
@@ -212,10 +212,8 @@ class TritonMLAMetadata(MLAMetadataCommon):
         if self._cached_prefill_metadata is not None:
             return self._cached_prefill_metadata
 
-        assert ((self.seq_lens is not None)
-                or (self.encoder_seq_lens is not None))
-        assert ((self.seq_lens_tensor is not None)
-                or (self.encoder_seq_lens_tensor is not None))
+        assert self.seq_lens is not None
+        assert self.seq_lens_tensor is not None
 
         # Compute some attn_metadata fields which default to None
         query_start_loc = (None if self.query_start_loc is None else
@@ -243,6 +241,7 @@ class TritonMLAMetadata(MLAMetadataCommon):
             multi_modal_placeholder_index_maps=self.
             multi_modal_placeholder_index_maps,
             enable_kv_scales_calculation=self.enable_kv_scales_calculation,
+            input_positions=input_positions,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=self.max_query_len,
@@ -254,7 +253,6 @@ class TritonMLAMetadata(MLAMetadataCommon):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
-            input_positions=input_positions,
             head_dim=self.head_dim)
         return self._cached_prefill_metadata
 
@@ -265,8 +263,7 @@ class TritonMLAMetadata(MLAMetadataCommon):
 
         if self._cached_decode_metadata is not None:
             return self._cached_decode_metadata
-        assert ((self.seq_lens_tensor is not None)
-                or (self.encoder_seq_lens_tensor is not None))
+        assert self.seq_lens_tensor is not None
 
         # Compute some attn_metadata fields which default to None
         slot_mapping = (None if self.slot_mapping is None else
@@ -569,6 +566,7 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             seq_lens=seq_lens,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
             enable_kv_scales_calculation=True,
+            input_positions=input_positions,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
             max_decode_query_len=max_decode_query_len,
@@ -579,13 +577,12 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
-            input_positions=input_positions,
             num_kv_splits=num_kv_splits,
             head_dim=self.runner.model_config.get_head_size(),
         )
 
 
-class TritonMLAImpl(MLACommonImpl):
+class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
 
     def __init__(
             self,
@@ -628,6 +625,7 @@ class TritonMLAImpl(MLACommonImpl):
         k_pe: torch.Tensor,
         attn_metadata: TritonMLAMetadata,
     ) -> torch.Tensor:
+        assert isinstance(attn_metadata, TritonMLAMetadata)
         return self._forward_prefill_flash(q, kv_c_normed, k_pe,
                                            attn_metadata.seq_start_loc,
                                            attn_metadata.max_prefill_seq_len)
@@ -644,6 +642,7 @@ class TritonMLAImpl(MLACommonImpl):
             raise NotImplementedError("FP8 Triton MLA not yet supported")
 
         decode_meta = attn_metadata.decode_metadata
+        assert decode_meta is not None
         B = q_nope.shape[0]
 
         q = torch.cat([q_nope, q_pe], dim=-1)
