@@ -1,5 +1,6 @@
 """This file is used for /tests and /benchmarks"""
-from typing import List, Optional
+from types import MappingProxyType
+from typing import List, Mapping, Optional
 
 import numpy
 import torch
@@ -10,14 +11,6 @@ from vllm.scalar_type import ScalarType, scalar_types
 
 SUPPORTED_GPTQ_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint8b128]
 SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
-
-# Note: this is a hack. We should update each model to register the
-# stacked params and get it from there instead in a future PR.
-# fused_name: List[shard_name]
-FUSED_LAYER_NAME_MAPPING = {
-    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-    "gate_up_proj": ["gate_proj", "up_proj"]
-}
 
 
 def pack_quantized_values_into_int32(w_q: torch.Tensor,
@@ -63,14 +56,18 @@ def unpack_quantized_values_into_int32(w_q: torch.Tensor,
     return res.permute(inv_perm)
 
 
-def is_layer_skipped(prefix: str, ignored_layers: List[str]) -> bool:
+def is_layer_skipped(
+    prefix: str,
+    ignored_layers: List[str],
+    packed_modules_mapping: Mapping[str, List[str]] = MappingProxyType({})
+) -> bool:
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
     proj_name = prefix.split(".")[-1]
-    if proj_name in FUSED_LAYER_NAME_MAPPING:
+    if proj_name in packed_modules_mapping:
         shard_prefixes = [
             prefix.replace(proj_name, shard_proj_name)
-            for shard_proj_name in FUSED_LAYER_NAME_MAPPING[proj_name]
+            for shard_proj_name in packed_modules_mapping[proj_name]
         ]
 
         is_skipped = None

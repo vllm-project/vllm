@@ -1,11 +1,9 @@
 import re
-from typing import Iterable, Optional
+from types import MappingProxyType
+from typing import Iterable, List, Mapping, Optional
 
 from compressed_tensors import CompressionFormat
 from torch.nn import Module
-
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    FUSED_LAYER_NAME_MAPPING)
 
 
 def is_activation_quantization_format(format: str) -> bool:
@@ -17,8 +15,11 @@ def is_activation_quantization_format(format: str) -> bool:
     return format in _ACTIVATION_QUANTIZATION_FORMATS
 
 
-def should_ignore_layer(layer_name: Optional[str],
-                        ignore: Iterable[str]) -> bool:
+def should_ignore_layer(
+    layer_name: Optional[str],
+    ignore: Iterable[str] = tuple(),
+    packed_modules_mapping: Mapping[str, List[str]] = MappingProxyType({})
+) -> bool:
     if layer_name is None:
         return False
 
@@ -30,8 +31,8 @@ def should_ignore_layer(layer_name: Optional[str],
     # in the safetensors checkpoint. So, we convert the name
     # from the fused version to unfused + check to make sure that
     # each shard of the fused layer has the same scheme.
-    if proj_name in FUSED_LAYER_NAME_MAPPING and layer_name not in ignore:
-        shard_proj_names = FUSED_LAYER_NAME_MAPPING[proj_name]
+    if proj_name in packed_modules_mapping and layer_name not in ignore:
+        shard_proj_names = packed_modules_mapping[proj_name]
 
         # Convert fused_name --> [shard_names]
         shard_names = [

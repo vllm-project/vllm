@@ -1,6 +1,6 @@
 import inspect
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Mapping, Optional, Type
 
 import torch
 from torch import nn
@@ -57,6 +57,7 @@ def method_has_implemented_embedding(
 
 class QuantizationConfig(ABC):
     """Base class for quantization configs."""
+    packed_modules_mapping: Mapping[str, List[str]] = dict()
 
     @abstractmethod
     def get_name(self) -> str:
