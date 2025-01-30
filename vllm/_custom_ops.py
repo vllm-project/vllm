@@ -980,6 +980,19 @@ def reshape_and_cache_flash(
                                                    v_scale)
 
 
+def concat_and_cache_mla(
+    ckv: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+    scale: torch.Tensor,
+) -> None:
+    torch.ops._C_cache_ops.concat_and_cache_mla(ckv, k_pe, kv_cache,
+                                                slot_mapping, kv_cache_dtype,
+                                                scale)
+
+
 def copy_blocks(key_caches: List[torch.Tensor],
                 value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:

@@ -268,9 +268,9 @@ class AttentionImpl(ABC, Generic[T]):
     def forward(
         self,
         layer: AttentionLayer,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        query: torch.Tensor,  # For MLA hidden_states_or_cq
+        key: torch.Tensor,  # For MLA ckv_normed
+        value: torch.Tensor,  # For MLA k_pe
         kv_cache: torch.Tensor,
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,

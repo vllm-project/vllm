@@ -75,6 +75,20 @@ HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
                                              PretrainedConfig]]
 
 
+def _is_flashinfer_available() -> bool:
+    """Check if FlashInfer is available.
+
+    Returns:
+        bool: True if FlashInfer is installed and available, False otherwise.
+    """
+    try:
+        from flashinfer import (  # noqa:F401
+            BatchDecodeMlaWithPagedKVCacheWrapper)
+        return True
+    except ImportError:
+        return False
+
+
 class SupportsHash(Protocol):
 
     def compute_hash(self) -> str:
@@ -165,6 +179,7 @@ class ModelConfig:
             `logits_processors` extra completion argument. Defaults to None,
             which allows no processors.
         generation_config: Configuration parameter file for generation.
+        disable_mla: Whether to disable MLA for DeepSeek models.
         override_generation_config: Override the generation config with the
             given config.
     """
@@ -226,6 +241,7 @@ class ModelConfig:
         override_pooler_config: Optional["PoolerConfig"] = None,
         logits_processor_pattern: Optional[str] = None,
         generation_config: Optional[str] = None,
+        disable_mla: bool = False,
         enable_sleep_mode: bool = False,
         override_generation_config: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -276,6 +292,7 @@ class ModelConfig:
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
+        self.disable_mla = disable_mla
         self.enable_sleep_mode = enable_sleep_mode
 
         from vllm.platforms import current_platform
@@ -736,17 +753,26 @@ class ModelConfig:
     def get_hidden_size(self) -> int:
         return self.hf_text_config.hidden_size
 
+    @property
+    def is_deepseek_mla(self) -> bool:
+        return hasattr(self.hf_text_config,
+                       "model_type") and (self.hf_text_config.model_type
+                                          in ('deepseek_v2', 'deepseek_v3'))
+
     def get_head_size(self) -> int:
         # TODO remove hard code
-        if hasattr(self.hf_text_config,
-                   "model_type") and (self.hf_text_config.model_type
-                                      in ('deepseek_v2', 'deepseek_v3')):
-            qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim",
-                                       0)
-            qk_nope_head_dim = getattr(self.hf_text_config, "qk_nope_head_dim",
-                                       0)
-            if qk_rope_head_dim and qk_nope_head_dim:
-                return qk_rope_head_dim + qk_nope_head_dim
+        if self.is_deepseek_mla:
+            # FlashAttention supports only head_size 32, 64, 128, 256,
+            # we need to pad head_size 192 to 256
+            if self.should_use_mla:
+                return self.hf_text_config.kv_lora_rank
+            else:
+                qk_rope_head_dim = getattr(self.hf_text_config,
+                                           "qk_rope_head_dim", 0)
+                qk_nope_head_dim = getattr(self.hf_text_config,
+                                           "qk_nope_head_dim", 0)
+                if qk_rope_head_dim and qk_nope_head_dim:
+                    return qk_rope_head_dim + qk_nope_head_dim
 
         if self.is_attention_free:
             return 0
@@ -805,6 +831,10 @@ class ModelConfig:
 
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU."""
+        if self.should_use_mla:
+            # TODO(simon): feature flag MLA
+            return 1
+
         total_num_kv_heads = self.get_total_num_kv_heads()
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
@@ -956,6 +986,11 @@ class ModelConfig:
         return ModelRegistry.is_cross_encoder_model(architectures)
 
     @property
+    def should_use_mla(self) -> bool:
+        use_mla = (self.is_deepseek_mla and not self.disable_mla
+                   and not envs.VLLM_DISABLE_MLA)
+        return use_mla
+
     def supported_runner_types(self) -> Set[RunnerType]:
         return {_TASK_RUNNER[task] for task in self.supported_tasks}
 
