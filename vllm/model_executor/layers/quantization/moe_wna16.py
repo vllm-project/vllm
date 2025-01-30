@@ -5,7 +5,7 @@ import torch
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod, LinearBase
 from vllm.model_executor.layers.quantization.awq import (AWQConfig,
                                                          AWQLinearMethod)
 from vllm.model_executor.layers.quantization.awq_marlin import (
@@ -126,9 +126,7 @@ class MoeWNA16Config(QuantizationConfig):
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         if is_layer_skipped_quant(prefix, self.modules_to_not_convert):
             return UnquantizedLinearMethod()
-        elif isinstance(layer, FusedMoE):
-            return MoeWNA16Method(self)
-        else:
+        elif isinstance(layer, LinearBase):
             if self.linear_quant_method == "gptq":
                 if self.use_marlin:
                     return GPTQMarlinLinearMethod(
@@ -145,6 +143,9 @@ class MoeWNA16Config(QuantizationConfig):
                         AWQConfig.from_config(self.full_config))
             else:
                 raise ValueError("moe_wna16 only support gptq and awq.")
+        elif isinstance(layer, FusedMoE):
+            return MoeWNA16Method(self)
+        return None
 
 
 def is_layer_skipped_quant(prefix: str, modules_to_not_convert: List[str]):
