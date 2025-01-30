@@ -36,13 +36,17 @@ def main(args: argparse.Namespace):
 
     # tokenizer = AutoTokenizer.from_pretrained(engine_args.model)
     # inputs = tokenizer('Hello, world!', return_tensors='pt').input_ids
-    inputs = 'Where is the capital of China?'
-
-    RequestOutputs = llm.generate(inputs,
-                        sampling_params=sampling_params,
-                        use_tqdm=False)
+    inputs = ['Where is the capital of China?',
+              'The capital of Russia is ',
+              'The CEO of DeepSeek is ',
+              'The future of AI is',
+             ] * 32
+    outputs = llm.generate(inputs, sampling_params)
+    for i, output in enumerate(outputs):
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt {i}: {prompt!r}, Generated text: {generated_text!r}")
     # print(tokenizer.decode(outputs[0]))
-    print('Output: ', RequestOutputs[0].outputs[0].text)
     
         
 if __name__ == '__main__':
@@ -84,3 +88,4 @@ if __name__ == '__main__':
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     main(args)
+
