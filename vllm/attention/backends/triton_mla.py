@@ -20,7 +20,7 @@ from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionState, AttentionType)
-from vllm.attention.backends.mla.utils import MLAImplCommon, MLAMetadataCommon
+from vllm.attention.backends.mla.utils import MLACommonImpl, MLAMetadataCommon
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
@@ -585,7 +585,7 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
         )
 
 
-class TritonMLAImpl(MLAImplCommon):
+class TritonMLAImpl(MLACommonImpl):
 
     def __init__(
             self,

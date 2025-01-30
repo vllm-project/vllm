@@ -6,8 +6,9 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.attention.backends.abstract import (AttentionImpl, AttentionLayer,
-                                              AttentionMetadata)
+from vllm.attention.backends.abstract import (AttentionLayer,
+                                              AttentionMetadata,
+                                              MLAAttentionImpl)
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -18,11 +19,11 @@ from vllm.vllm_flash_attn import flash_attn_varlen_func
 @dataclass(kw_only=True)
 class MLAMetadataCommon(AttentionMetadata):
     # Input positions for rotrary embeddings since for MLA the rotarty
-    # position encoding
+    # position embeddings are applied inside the attention backend
     input_positions: torch.Tensor
 
 
-class MLAImplCommon(AttentionImpl):
+class MLACommonImpl(MLAAttentionImpl):
     """
     Common class for implementing repeated parts 
     
