@@ -286,15 +286,26 @@ def test_validation_against_both_guided_decoding_options(sample_regex, llm):
 
 @pytest.mark.skip_global_cleanup
 def test_disable_guided_decoding_fallback(sample_regex, llm):
+    # see has_xgrammar_unsupported_json_features()
+    unsupported_json = {
+        "type": "object",
+        "properties": {
+            "example": {
+                "type": "string",
+                "minLength": 5  # unsupported by xgrammar
+            }
+        }
+    }
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      guided_decoding=GuidedDecodingParams(
-                                         regex=sample_regex,
+                                         json=unsupported_json,
                                          backend="xgrammar:no-fallback"))
 
     with pytest.raises(
             ValueError,
-            match="xgrammar does not support regex guided decoding"):
+            match="xgrammar does not support advanced JSON schema features "
+            "like enums, patterns or numeric ranges."):
         llm.generate(prompts="This should fail",
                      sampling_params=sampling_params,
                      use_tqdm=True)
