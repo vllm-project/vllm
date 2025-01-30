@@ -10,6 +10,12 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 aten = torch.ops.aten
 
+def prod(x):
+    res = 1
+    for i in x:
+        res *= i
+    return res
+
 def matmul_flop(inputs: List[Any], outputs: List[Any]) -> Number:
     """
     Count flops for matmul.
@@ -18,11 +24,6 @@ def matmul_flop(inputs: List[Any], outputs: List[Any]) -> Number:
     input_shapes = [v.shape for v in inputs]
     assert len(input_shapes) == 2, input_shapes
     assert input_shapes[0][-1] == input_shapes[1][-2], input_shapes
-    def prod(x):
-        res = 1
-        for i in x:
-            res *= i
-        return res
     flop = prod(input_shapes[0]) * input_shapes[-1][-1]
     return flop
  
@@ -62,6 +63,12 @@ def nln_flop(inputs: List[Any], outputs: List[Any]) -> Number:
 def softmax_flop(inputs: List[Any], outputs: List[Any]) -> Number:
     return 2 * inputs[0].numel()
 
+def attn_flop(q, k, v, *args) -> Number:
+    macs = prod(q.shape) * k.shape[-2] # (b * n * s * d) * s 
+    macs += prod(q.shape[:-1]) * k.shape[-2] * v.shape[-1] # (b * n * s) * s * d
+
+    return 2 * macs
+
 flop_mapping = {
     aten.mm: matmul_flop,
     aten.mm.default: matmul_flop,
@@ -75,7 +82,6 @@ flop_mapping = {
     aten.native_layer_norm.default: nln_flop,
     aten.softmax: softmax_flop,
     aten._softmax.default: softmax_flop
-
 }
 
 class FlopContextManager(TorchDispatchMode):
@@ -127,5 +133,8 @@ class FlopContextManager(TorchDispatchMode):
             flop_count = flop_mapping[func_packet](args, out if isinstance(out, tuple) else (out, ))
             for par in self.parents:
                 self.flop_counts[par][func_packet] += flop_count
-
+        elif 'attention' in func_packet.op.__name__: 
+            flop_count = attn_flop(*args)
+            for par in self.parents:
+                self.flop_counts[par][func_packet] += flop_count
         return out
