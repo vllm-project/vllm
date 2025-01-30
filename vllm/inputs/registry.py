@@ -32,7 +32,8 @@ P = TypeVar("P", bound=ProcessorMixin, default=ProcessorMixin)
 class HashableDict(dict):
     """Hashable dict for unhashable pythonic dict in mm_kwargs."""
 
-    def __hash__(self):
+    # python built-in dict is unhashable
+    def __hash__(self):  # type: ignore[override]
         return hash(tuple(sorted(self.items())))
 
 
