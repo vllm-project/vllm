@@ -340,6 +340,7 @@ def _attn_fwd_inner(
             encoded_sm_ptrs += BLOCK_N
     return acc, l_i, m_i
 
+
 def is_hip():
     return triton.runtime.driver.active.get_current_target().backend == "hip"
 
