@@ -43,14 +43,14 @@ def test_processor_override(
     if dynamic_image_size is not None:
         mm_processor_kwargs["dynamic_image_size"] = dynamic_image_size
 
-    expected_num_patches = max_dynamic_patch + 1 if max_dynamic_patch > 1 else 1
-    if dynamic_image_size is False:
-        expected_num_patches = 1
-
     # Build the image str / prompt based on the number of images we pass
     prompt = "<image>" * num_imgs
     image = image_assets[0].pil_image.resize((448 * 2, 448 * 2))
     mm_data = {"image": [image] * num_imgs}
+
+    expected_num_patches = max_dynamic_patch + 1 if max_dynamic_patch > 1 else 1
+    if dynamic_image_size is False:
+        expected_num_patches = 1
 
     processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
 

@@ -292,18 +292,25 @@ class H2OVLProcessor(BaseInternVLProcessor):
         *,
         image_width: int,
         image_height: int,
+        use_msac: Optional[bool] = None,
     ) -> int:
+        use_msac = (self.use_msac if use_msac is None else use_msac)
+
         target_ratios = self.resolve_target_ratios(
             use_thumbnail=False,  # Applied in calculate_targets
         )
 
+        use_thumbnail = self.use_thumbnail
         num_patches, _, _, _ = calculate_h2ovl_targets(
             orig_width=image_width,
             orig_height=image_height,
             image_size=self.image_size,
             target_ratios=target_ratios,
-            use_thumbnail=self.use_thumbnail,
+            use_thumbnail=use_thumbnail,
         )
+
+        if use_msac:
+            num_patches = (num_patches - use_thumbnail) * 2 + use_thumbnail
 
         return num_patches * self.num_image_token
 
@@ -349,6 +356,43 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
             dynamic_image_size=dynamic_image_size,
         )
 
+    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+        max_tokens_no_msac = self.get_max_image_tokens(use_msac=False)
+        if max_tokens_no_msac // seq_len < 2:
+            # Dummy data will have one image; in that case msac may be applied
+            max_tokens_per_image = self.get_max_image_tokens(use_msac=None)
+        else:
+            max_tokens_per_image = max_tokens_no_msac
+
+        return {"image": max_tokens_per_image}
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        processor: Optional[H2OVLProcessor],
+        use_msac: Optional[bool] = None,
+    ) -> int:
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        return processor.get_num_image_tokens(
+            image_width=image_width,
+            image_height=image_height,
+            use_msac=use_msac,
+        )
+
+    def get_max_image_tokens(self, use_msac: Optional[bool] = None) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
+
+        return self.get_num_image_tokens(
+            image_width=target_width,
+            image_height=target_height,
+            processor=None,
+            use_msac=use_msac,
+        )
+
 
 class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
                                ):
@@ -386,13 +430,8 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
                     image_width=image_size.width,
                     image_height=image_size.height,
                     processor=hf_processor,
+                    use_msac=None if num_images == 1 else False,
                 )
-
-            if num_images > 1 and hf_processor.use_msac:
-                # Assume feature size scales linearly with number of patches
-                use_thumbnail = hf_processor.use_thumbnail
-                feature_size = ((feature_size - use_thumbnail) * 2 +
-                                use_thumbnail)
 
             num_patches = image_num_patches[item_idx]
             if num_patches is not None:
