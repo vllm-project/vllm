@@ -393,6 +393,10 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         num_blocks = num_gpu_blocks_override
 
     logger.info("# GPU blocks: %d", num_blocks)
+    max_concurrency = (num_blocks * vllm_config.cache_config.block_size /
+                       vllm_config.model_config.max_model_len)
+    logger.info("Maximum concurrency for %s tokens per request: %.2fx",
+                vllm_config.model_config.max_model_len, max_concurrency)
 
     per_layer_size = page_size * num_blocks
 
