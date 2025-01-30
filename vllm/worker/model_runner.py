@@ -1066,7 +1066,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
-            use_mla=self.model_config.should_use_mla,
+            use_mla=self.model_config.use_mla,
         ) if needs_attn_backend else None
         if self.attn_backend:
             self.attn_state = self.attn_backend.get_state_cls()(

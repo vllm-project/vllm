@@ -488,7 +488,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
-        if model_config.should_use_mla:
+        if model_config.use_mla:
             attn_cls = DeepseekV2MLAAttention
         else:
             attn_cls = DeepseekV2Attention

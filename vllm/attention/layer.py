@@ -44,7 +44,7 @@ class Attention(nn.Module):
         use_mla: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        **kwargs,
+        **extra_impl_args,
     ) -> None:
         super().__init__()
         if per_layer_sliding_window is not None:
@@ -114,7 +114,7 @@ class Attention(nn.Module):
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap, attn_type,
-                             **kwargs)
+                             **extra_impl_args)
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
