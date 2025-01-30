@@ -165,7 +165,6 @@ class ModelConfig:
             `logits_processors` extra completion argument. Defaults to None,
             which allows no processors.
         generation_config: Configuration parameter file for generation.
-        disable_mla: Whether to disable MLA for DeepSeek models.
         override_generation_config: Override the generation config with the
             given config.
     """
@@ -227,7 +226,6 @@ class ModelConfig:
         override_pooler_config: Optional["PoolerConfig"] = None,
         logits_processor_pattern: Optional[str] = None,
         generation_config: Optional[str] = None,
-        disable_mla: bool = False,
         enable_sleep_mode: bool = False,
         override_generation_config: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -278,7 +276,6 @@ class ModelConfig:
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
-        self.disable_mla = disable_mla
         self.enable_sleep_mode = enable_sleep_mode
 
         from vllm.platforms import current_platform
@@ -748,7 +745,7 @@ class ModelConfig:
     def get_head_size(self) -> int:
         # TODO remove hard code
         if self.is_deepseek_mla:
-            if self.should_use_mla:
+            if self.use_mla:
                 return self.hf_text_config.kv_lora_rank
             else:
                 qk_rope_head_dim = getattr(self.hf_text_config,
@@ -815,7 +812,7 @@ class ModelConfig:
 
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU."""
-        if self.should_use_mla:
+        if self.use_mla:
             # When using MLA during decode it becomes MQA
             return 1
 
@@ -971,8 +968,7 @@ class ModelConfig:
 
     @property
     def use_mla(self) -> bool:
-        use_mla = (self.is_deepseek_mla and not self.disable_mla
-                   and not envs.VLLM_MLA_DISABLE)
+        use_mla = (self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE)
         return use_mla
 
     def supported_runner_types(self) -> Set[RunnerType]:
