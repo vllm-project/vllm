@@ -15,6 +15,11 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools_scm]
 # version_file = "vllm/_version.py" # currently handled by `setup.py:get_version()`
 
+[tool.yapfignore]
+ignore_patterns = [
+    "build/**",
+]
+
 [tool.ruff]
 # Allow lines to be as long as 80.
 line-length = 80
@@ -52,6 +57,9 @@ ignore = [
     "B007",
     # f-string format
     "UP032",
+    # Python 3.8 typing
+    "UP006", "UP035",
+
 ]
 
 [tool.mypy]
@@ -103,6 +111,7 @@ markers = [
 ]
 
 [tool.pymarkdown]
+plugins.md004.style = "sublist" # ul-style
 plugins.md013.enabled = false # line-length
 plugins.md041.enabled = false # first-line-h1
 plugins.md033.enabled = false # inline-html

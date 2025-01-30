@@ -22,14 +22,16 @@ The available APIs depend on the type of model that is being run:
 
 Please refer to the above pages for more details about each API.
 
-```{seealso}
+:::{seealso}
 [API Reference](/api/offline_inference/index)
-```
+:::
 
 ## Configuration Options
 
 This section lists the most common options for running the vLLM engine.
 For a full list, refer to the [Engine Arguments](#engine-args) page.
+
+(model-resolution)=
 
 ### Model resolution
 
@@ -40,37 +42,6 @@ Nevertheless, our model resolution may fail for the following reasons:
 - The `config.json` of the model repository lacks the `architectures` field.
 - Unofficial repositories refer to a model using alternative names which are not recorded in vLLM.
 - The same architecture name is used for multiple models, creating ambiguity as to which model should be loaded.
-
-In those cases, vLLM may throw an error like:
-
-```text
-Traceback (most recent call last):
-...
-  File "vllm/model_executor/models/registry.py", line xxx, in inspect_model_cls
-    for arch in architectures:
-TypeError: 'NoneType' object is not iterable
-```
-
-or:
-
-```text
-  File "vllm/model_executor/models/registry.py", line xxx, in _raise_for_unsupported
-    raise ValueError(
-ValueError: Model architectures ['<arch>'] are not supported for now. Supported architectures: [...]
-```
-
-:::{note}
-The above error is distinct from the following similar but different error:
-
-```text
-  File "vllm/model_executor/models/registry.py", line xxx, in _raise_for_unsupported
-    raise ValueError(
-ValueError: Model architectures ['<arch>'] failed to be inspected. Please check the logs for more details.
-```
-
-This error means that vLLM failed to import the model file. Usually, it is related to missing dependencies or outdated
-binaries in the vLLM build. Please read the logs carefully to determine the real cause of the error.
-:::
 
 To fix this, explicitly specify the model architecture by passing `config.json` overrides to the `hf_overrides` option.
 For example:
@@ -99,12 +70,12 @@ llm = LLM(model="ibm-granite/granite-3.1-8b-instruct",
           tensor_parallel_size=2)
 ```
 
-```{important}
+:::{important}
 To ensure that vLLM initializes CUDA correctly, you should avoid calling related functions (e.g. {func}`torch.cuda.set_device`)
 before initializing vLLM. Otherwise, you may run into an error like `RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
 
 To control which devices are used, please instead set the `CUDA_VISIBLE_DEVICES` environment variable.
-```
+:::
 
 #### Quantization
 
