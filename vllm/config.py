@@ -75,20 +75,6 @@ HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
                                              PretrainedConfig]]
 
 
-def _is_flashinfer_available() -> bool:
-    """Check if FlashInfer is available.
-
-    Returns:
-        bool: True if FlashInfer is installed and available, False otherwise.
-    """
-    try:
-        from flashinfer import (  # noqa:F401
-            BatchDecodeMlaWithPagedKVCacheWrapper)
-        return True
-    except ImportError:
-        return False
-
-
 class SupportsHash(Protocol):
 
     def compute_hash(self) -> str:
@@ -832,7 +818,7 @@ class ModelConfig:
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU."""
         if self.should_use_mla:
-            # TODO(simon): feature flag MLA
+            # When using MLA during decode it becomes MQA
             return 1
 
         total_num_kv_heads = self.get_total_num_kv_heads()
