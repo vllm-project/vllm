@@ -6,7 +6,7 @@ from PIL.Image import Image
 from transformers import AutoConfig
 
 # Import the functions to test
-from vllm.model_executor.models.h2ovl import (calculate_num_blocks,
+from vllm.model_executor.models.h2ovl import (calculate_targets,
                                               image_to_pixel_values_wrapper)
 from vllm.multimodal.image import rescale_image_size
 
@@ -36,7 +36,7 @@ def run_preprocessing_test(
     # Calculate the expected number of blocks
     if use_MSAC:
         # First pass
-        blocks1, _, _, aspect_ratio = calculate_num_blocks(
+        blocks1, _, _, aspect_ratio = calculate_targets(
             width,
             height,
             config.min_dynamic_patch,
@@ -47,7 +47,7 @@ def run_preprocessing_test(
         )
 
         # Second pass
-        blocks2, _, _, _ = calculate_num_blocks(
+        blocks2, _, _, _ = calculate_targets(
             width,
             height,
             config.min_dynamic_patch,
@@ -68,7 +68,7 @@ def run_preprocessing_test(
         expected_blocks = total_blocks
 
     else:
-        blocks, _, _, _ = calculate_num_blocks(
+        blocks, _, _, _ = calculate_targets(
             width,
             height,
             config.min_dynamic_patch,
