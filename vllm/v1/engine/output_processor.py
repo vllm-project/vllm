@@ -114,8 +114,6 @@ class OutputProcessor:
             # 2) Detokenize the token ids into text and check for stop
             #    strings.
             stop_reason = req_state.detokenizer.update(new_token_ids)
-            if stop_reason:
-                finish_reason = "stop"
 
             # 3) Compute sample and prompt logprobs for request,
             #    if required.
@@ -157,10 +155,12 @@ class OutputProcessor:
         stop_reason: Optional[str],
     ) -> Optional[RequestOutput]:
 
-        output_kind = request_state.output_kind
+        if stop_reason:
+            finish_reason = "stop"
         finished = bool(finish_reason)
-        if (request_state.is_prefilling or
-            (output_kind == RequestOutputKind.FINAL_ONLY and not finished)):
+        output_kind = request_state.output_kind
+        if not finished and (request_state.is_prefilling
+                             or output_kind == RequestOutputKind.FINAL_ONLY):
             # Only the final output is required in FINAL_ONLY mode.
             return None
 

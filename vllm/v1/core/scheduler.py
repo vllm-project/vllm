@@ -465,9 +465,6 @@ class Scheduler:
                     self._free_request(request)
 
                 # Extract sample logprobs if needed.
-                logprobs_token_ids: List[List[int]] = []
-                logprobs: List[List[float]] = []
-                sampled_token_ranks: List[int] = []
                 if request.sampling_params.logprobs:
                     assert logprobs_token_ids_cpu is not None
                     assert logprobs_cpu is not None
