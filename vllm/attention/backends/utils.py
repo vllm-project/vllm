@@ -2,7 +2,8 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from itertools import accumulate
-from typing import TYPE_CHECKING, Any, Dict, List, Tuple, Type, TypeVar, Union
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type,
+                    TypeVar, Union)
 
 import numpy as np
 import torch
@@ -288,8 +289,12 @@ class CommonAttentionState(AttentionState):
         self._is_graph_capturing = False
 
     @contextmanager
-    def graph_capture(self, max_batch_size: int):
+    def graph_capture(self, max_batch_size: int,
+                      positions: Optional[torch.Tensor]):
+        assert positions is None
+
         self._is_graph_capturing = True
+
         self._graph_slot_mapping = torch.full((max_batch_size, ),
                                               PAD_SLOT_ID,
                                               dtype=torch.long,
@@ -299,7 +304,9 @@ class CommonAttentionState(AttentionState):
                                           device=self.runner.device)
         self._graph_block_tables = torch.from_numpy(
             self.runner.graph_block_tables).to(device=self.runner.device)
+
         yield
+
         self._is_graph_capturing = False
         del self._graph_slot_mapping
         del self._graph_seq_lens

@@ -168,7 +168,8 @@ class AttentionState(ABC, Generic[T]):
 
     @abstractmethod
     @contextmanager
-    def graph_capture(self, max_batch_size: int):
+    def graph_capture(self, max_batch_size: int,
+                      positions: Optional[torch.Tensor]):
         """Context manager used when capturing CUDA graphs."""
         yield
 
