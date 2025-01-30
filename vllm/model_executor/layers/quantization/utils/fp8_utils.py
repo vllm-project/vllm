@@ -361,8 +361,7 @@ def w8a8_block_fp8_matmul(
 
     configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
     if configs:
-        # If an optimal configuration map has been found, look up the
-        # optimal config
+        # Get the optimal config if there is one
         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
     else:
         # Default config
