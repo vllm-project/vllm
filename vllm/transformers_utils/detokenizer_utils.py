@@ -1,7 +1,5 @@
 from typing import List, Optional, Tuple
 
-import torch
-
 from .tokenizer import AnyTokenizer
 
 
@@ -74,46 +72,6 @@ def convert_prompt_ids_to_tokens(
     return new_tokens, prefix_offset, read_offset
 
 
-def convert_id_to_token(
-    tokenizer: AnyTokenizer,
-    token_id: int,
-) -> str:
-    """Detokenize a single input id.
-    
-    Args:
-      tokenizer: tokenizer used by model under test
-      token_id: convert this token
-
-    Returns:
-      String representation of single input token.
-    """
-    token_str_lst = tokenizer.convert_ids_to_tokens([token_id])
-    replace_none_with_empty(token_str_lst)  # type: ignore
-    return token_str_lst[0]
-
-
-def convert_ids_tensor_to_tokens(
-    tokenizer: AnyTokenizer,
-    token_ids: torch.Tensor,
-) -> List[str]:
-    """Detokenize the input ids individually.
-
-    Args:
-      tokenizer: tokenizer used by model under test
-      token_ids: convert these tokens
-
-    Returns:
-      Python list of token string representations
-    
-    """
-    # Flatten input to shape [N, 1]. Tokenizers then
-    # treats it as decoding batch N seq_len 1, such
-    # that they all happen independently.
-    flat_token_ids = token_ids.reshape(-1,
-                                       1).squeeze().to(torch.int32).tolist()
-    return convert_ids_list_to_tokens(tokenizer, flat_token_ids)
-
-
 def convert_ids_list_to_tokens(
     tokenizer: AnyTokenizer,
     token_ids: List[int],
@@ -129,8 +87,7 @@ def convert_ids_list_to_tokens(
     
     """
     token_str_lst = tokenizer.convert_ids_to_tokens(token_ids)
-    replace_none_with_empty(token_str_lst)  # type: ignore
-    return token_str_lst
+    return replace_none_with_empty(token_str_lst)  # type: ignore
 
 
 # Based on
@@ -183,7 +140,8 @@ def detokenize_incrementally(
     # If the new token id is out of bounds, return an empty string.
     if 0 <= new_token_id < len(tokenizer):
         # Put new_token_id in a list so skip_special_tokens is respected
-        new_tokens = tokenizer.convert_ids_to_tokens([new_token_id])
+        new_tokens = tokenizer.convert_ids_to_tokens(
+            [new_token_id], skip_special_tokens=skip_special_tokens)
         if isinstance(new_tokens, str):
             new_tokens = [new_tokens]
     else:

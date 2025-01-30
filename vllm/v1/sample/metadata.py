@@ -18,6 +18,7 @@ class SamplingMetadata:
 
     generators: Dict[int, torch.Generator]
 
+    # None means no logprobs, 0 means sampled token logprobs only
     max_num_logprobs: Optional[int]
 
     no_penalties: bool
