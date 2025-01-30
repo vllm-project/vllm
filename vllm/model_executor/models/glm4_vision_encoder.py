@@ -169,7 +169,7 @@ class Transformer(nn.Module):
         self.layers = nn.ModuleList([
             TransformerLayer(config,
                              quant_config=quant_config,
-                             prefix=f"{prefix}.layer.{layer_idx}")
+                             prefix=f"{prefix}.layers.{layer_idx}")
             for layer_idx in range(config.num_hidden_layers)
         ])
 
@@ -238,7 +238,7 @@ class GLU(nn.Module):
             config.hidden_size, [config.ffn_hidden_size] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.merged_proj")
+            prefix=f"{prefix}.gate_proj")
 
         self.dense_4h_to_h = RowParallelLinear(
             config.ffn_hidden_size,
