@@ -69,6 +69,11 @@ class KVCacheManager:
         # is finished.
         self.req_to_blocks: Dict[str, List[KVCacheBlock]] = {}
 
+    @property
+    def usage(self) -> float:
+        return 1.0 - (self.free_block_queue.num_free_blocks /
+                      self.num_gpu_blocks)
+
     def get_computed_blocks(
             self, request: Request) -> Tuple[List[KVCacheBlock], int]:
         """Get the computed (cached) blocks for the request.
