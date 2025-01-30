@@ -296,7 +296,7 @@ def get_hf_file_to_dict(file_name: str,
                              e)
                 return None
             except HfHubHTTPError as e:
-                logger.debug(
+                logger.warning(
                     "Cannot connect to Hugging Face Hub. Skipping ,"
                     "file download for '%s':",
                     file_name,
