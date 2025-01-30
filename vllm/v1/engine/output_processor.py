@@ -205,7 +205,8 @@ class OutputProcessor:
         )
         if detokenizer_output.finished:
             completion_output = request_output.outputs[0]
-            completion_output.finish_reason = detokenizer_output.finish_reason
+            completion_output.finish_reason = str(
+                detokenizer_output.finish_reason)
             completion_output.stop_reason = detokenizer_output.stop_reason
 
         return request_output
