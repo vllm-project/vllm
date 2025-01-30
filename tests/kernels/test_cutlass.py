@@ -199,6 +199,8 @@ def test_cutlass_int8_gemm_output_dtype(a_scale_group_shape,
 
 @pytest.mark.parametrize("a_scale_group_shape",
                          [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
+@pytest.mark.parametrize("b_scale_group_shape",
+                         [PER_OUT_CH_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.skipif(not current_platform.has_device_capability(89),
