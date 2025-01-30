@@ -374,8 +374,8 @@ steps:
   # Additional params to "vllm.entrypoints.openai.api_server" can be provided 
   # here by PR authors, just remember to delete changes afterwards. 
   commands:
-    - chmod +x ./scripts/check_performance.sh
-    - ./scripts/check_performance.sh --max-model-len 4096
+    - chmod +x check-performance.sh
+    - check-performance.sh --max-model-len 4096
 
 #####  models test  #####
 

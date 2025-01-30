@@ -65,7 +65,7 @@ ATTEMPTS=3
 
 for ((i=1; i<=ATTEMPTS; i++)); do
   echo "Attempt $i/$ATTEMPTS:"
-  if ! python3 .buildkite/compare_benchmarks.py benchmark_base.txt benchmark_pr.txt; then
+  if ! python3 compare_benchmarks.py benchmark_base.txt benchmark_pr.txt; then
     ((FAILURES++))
   fi
 done
