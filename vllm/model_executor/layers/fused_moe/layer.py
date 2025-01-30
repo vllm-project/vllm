@@ -114,9 +114,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        print_args = -1
-    ) -> torch.Tensor:
+        e_score_correction_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         return self.forward(x=x,
                             layer=layer,
                             router_logits=router_logits,
@@ -129,8 +127,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                             num_expert_group=num_expert_group,
                             custom_routing_function=custom_routing_function,
                             scoring_func=scoring_func,
-                            e_score_correction_bias=e_score_correction_bias,
-                            print_args=print_args)
+                            e_score_correction_bias=e_score_correction_bias)
 
     def forward_cuda(
         self,
@@ -146,9 +143,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        print_args = -1
-    ) -> torch.Tensor:
+        e_score_correction_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -159,8 +154,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            print_args=print_args)
+            e_score_correction_bias=e_score_correction_bias)
 
         return fused_experts(hidden_states=x,
                              w1=layer.w13_weight,
@@ -169,8 +163,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                              topk_ids=topk_ids,
                              inplace=True,
                              global_num_experts=global_num_experts,
-                             expert_map=expert_map,
-                             print_args=print_args)
+                             expert_map=expert_map)
 
     def forward_cpu(
         self,
@@ -317,13 +310,6 @@ class FusedMoE(torch.nn.Module):
         self.expert_map[ep_rank * expert_per_partition:
                         (ep_rank + 1) * expert_per_partition] = (
             torch.arange(0, expert_per_partition,dtype=torch.int32))
-        # print(f"\033[91mCreating MoE Layer:\033[0m"
-        #       f"\t\033[92mNumber of Experts:\033[0m {num_experts}, "
-        #       f"\t\033[92mTP Size:\033[0m {self.tp_size}, "
-        #       f"\t\033[92mGlobal TP Rank:\033[0m {get_tensor_model_parallel_rank()}, "
-        #       f"\t\033[92mTP Rank:\033[0m {tp_rank}, "
-        #       f"\t\033[92mEP Rank:\033[0m {ep_rank}, "
-        #       f"\t\033[92mExpert Map:\033[0m {self.expert_map}")
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -449,19 +435,7 @@ class FusedMoE(torch.nn.Module):
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: str, expert_id: int) -> None:
-        # print(f"\033[1m//// Weight loader Arguments "
-        #       f"(Rank {get_tensor_model_parallel_rank()}) ////\033[0m")
-        # args = locals()
-        # for arg_name, arg_value in args.items():
-        #     if isinstance(arg_value, torch.Tensor):
-        #         print(f"\033[91m{arg_name} sizes\033[0m: {arg_value.size()}")
-        #         num_elements = arg_value.numel()
-        #         if num_elements < 32*6:
-        #             print(f"\033[91m{arg_name}\033[0m: {arg_value}")
-        #     else:
-        #         print(f"\033[91m{arg_name}\033[0m: {arg_value}")
-        # print("")
-        
+
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
         if expert_id == -1:
             return
@@ -585,23 +559,10 @@ class FusedMoE(torch.nn.Module):
                        num_expert_group: Optional[int] = None,
                        custom_routing_function: Optional[Callable] = None,
                        scoring_func: str = "softmax",
-                       e_score_correction_bias: Optional[torch.Tensor] = None,
-                       print_args = -1) -> Tuple[torch.Tensor, torch.Tensor]:
+                       e_score_correction_bias: Optional[torch.Tensor] = None) \
+                           -> Tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_topk, grouped_topk)
-        
-        # if print_args > -1:
-        #     print(f"\033[1m//// select_experts RUN {print_args} Arguments ////\033[0m")
-        #     args = locals()
-        #     for arg_name, arg_value in args.items():
-        #         if isinstance(arg_value, torch.Tensor):
-        #             print(f"\033[91m{arg_name} sizes\033[0m: {arg_value.size()}")
-        #             num_elements = arg_value.numel()
-        #             if num_elements < 32*6:
-        #                 print(f"\033[91m{arg_name}\033[0m: {arg_value}")
-        #         else:
-        #             print(f"\033[91m{arg_name}\033[0m: {arg_value}")
-        #     print("")
                 
         # DeekSeekv2 uses grouped_top_k
         if use_grouped_topk:
@@ -631,8 +592,7 @@ class FusedMoE(torch.nn.Module):
         return topk_weights, topk_ids
 
     def forward(self, hidden_states: torch.Tensor,
-                router_logits: torch.Tensor,
-                print_args = -1) -> torch.Tensor:
+                router_logits: torch.Tensor) -> torch.Tensor:
         assert self.quant_method is not None
 
         # Matrix multiply.
@@ -649,8 +609,7 @@ class FusedMoE(torch.nn.Module):
             num_expert_group=self.num_expert_group,
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
-            e_score_correction_bias=self.e_score_correction_bias,
-            print_args=print_args)
+            e_score_correction_bias=self.e_score_correction_bias)
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             # Default set to False. (May have to add shared expert outputs.)

@@ -260,13 +260,9 @@ def moe_align_block_size(
                                       device=topk_ids.device)
     ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
                              expert_ids, num_tokens_post_pad)
-    # if expert_map is not None:
     if expert_map is not None:
         expert_ids = expert_map[expert_ids]
-    # print(f"\033[91m//// MoE Block Size Aligned (Block size {block_size}) ////\033[0m"
-    #       f"\n\033[91mnum_tokens_post_pad\033[0m: {num_tokens_post_pad} "
-    #       f"\n\033[91mexpert_ids ({expert_ids.size()})\033[0m: {expert_ids} "
-    #       f"\n\033[91msorted_ids ({sorted_ids.size()})\033[0m: {sorted_ids} ")
+
     return sorted_ids, expert_ids, num_tokens_post_pad
 
 
@@ -660,22 +656,8 @@ def fused_experts(hidden_states: torch.Tensor,
                   w2_scale: Optional[torch.Tensor] = None,
                   a1_scale: Optional[torch.Tensor] = None,
                   a2_scale: Optional[torch.Tensor] = None,
-                  block_shape: Optional[List[int]] = None,
-                  print_args = -1) -> torch.Tensor:
+                  block_shape: Optional[List[int]] = None) -> torch.Tensor:
     
-    # if print_args > -1:
-    #     print(f"\033[1m//// fused_experts RUN {print_args} Arguments ////\033[0m")
-    #     args = locals()
-    #     for arg_name, arg_value in args.items():
-    #         if isinstance(arg_value, torch.Tensor):
-    #             print(f"\033[91m{arg_name} sizes\033[0m: {arg_value.size()}")
-    #             num_elements = arg_value.numel()
-    #             if num_elements < 32*6:
-    #                 print(f"\033[91m{arg_name}\033[0m: {arg_value}")
-    #         else:
-    #             print(f"\033[91m{arg_name}\033[0m: {arg_value}")
-    #     print("")
-
     if inplace:
         torch.ops.vllm.inplace_fused_experts(hidden_states, w1, w2,
                                              topk_weights, topk_ids,
