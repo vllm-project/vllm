@@ -653,7 +653,7 @@ class TritonMLAImpl(MLAImplCommon):
                         dtype=q.dtype,
                         device=q.device)
 
-        # TODO(lucas) Allocate ahead of prefill
+        # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(
             (
                 B,
