@@ -23,7 +23,7 @@ namespace vllm {
 using namespace cute;
 
 template <typename OutType, int GroupSizeM_, int GroupSizeN_, int GroupSizeK_,
-          int TileSizeM_ = 128>
+          int TileSizeM_ = 128, class ClusterShape = Shape<_1, _2, _1>>
 struct cutlass_3x_gemm_fp8_blockwise {
   using GroupSizeM = Int<GroupSizeM_>;
   using GroupSizeN = Int<GroupSizeN_>;
@@ -57,7 +57,6 @@ struct cutlass_3x_gemm_fp8_blockwise {
   using ArchTag = cutlass::arch::Sm90;
   using OperatorClass = cutlass::arch::OpClassTensorOp;
   using TileShape = Shape<TileSizeM, GroupSizeN, GroupSizeK>;
-  using ClusterShape = Shape<_1, _2, _1>;
 
   using KernelSchedule = cutlass::gemm::
       KernelTmaWarpSpecializedCooperativeFP8BlockScaledSubGroupMAccum<
@@ -144,11 +143,8 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(b_scales.size(1) == n / Gemm::GroupSizeN::value);
   TORCH_CHECK(b_scales.stride(0) == 1 || is_contiguous_vector(b_scales),
               "b_scales must be K major");
-
-  uint32_t mma_promotion_interval = 4;
   typename GemmKernel::MainloopArguments mainloop_args{
-      a_ptr,        a_stride,    b_ptr, b_stride, mma_promotion_interval,
-      a_scales_ptr, b_scales_ptr};
+      a_ptr, a_stride, b_ptr, b_stride, a_scales_ptr, b_scales_ptr};
 
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{

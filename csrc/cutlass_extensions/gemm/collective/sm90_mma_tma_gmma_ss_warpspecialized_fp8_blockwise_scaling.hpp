@@ -188,7 +188,6 @@ struct CollectiveMma<
     StrideA dA;
     ElementB const* ptr_B;
     StrideB dB;
-    uint32_t mma_promotion_interval = 4;
     ElementBlockScale const* ptr_scale_A; 
     ElementBlockScale const* ptr_scale_B;
   };
@@ -214,7 +213,6 @@ struct CollectiveMma<
     uint32_t tma_transaction_bytes = TmaTransactionBytes;
     uint32_t tma_transaction_bytes_mk = TmaTransactionBytesMK;
     uint32_t tma_transaction_bytes_nk = TmaTransactionBytesNK;
-    uint32_t mma_promotion_interval = 4;
     // Block scaling factors for A and B
     ElementBlockScale const* ptr_scale_A; 
     ElementBlockScale const* ptr_scale_B;
@@ -260,7 +258,6 @@ struct CollectiveMma<
       transaction_bytes,
       transaction_bytes_mk,
       transaction_bytes_nk,
-      args.mma_promotion_interval,
       args.ptr_scale_A,
       args.ptr_scale_B
     };
@@ -280,8 +277,6 @@ struct CollectiveMma<
     implementable = implementable && cutlass::detail::check_alignment<min_tma_aligned_elements_A>(cute::make_shape(M,K,L), StrideA{});
     constexpr int min_tma_aligned_elements_B = tma_alignment_bits / cutlass::sizeof_bits<ElementB>::value;
     implementable = implementable && cutlass::detail::check_alignment<min_tma_aligned_elements_B>(cute::make_shape(N,K,L), StrideB{});
-    /* MMA promotion interval should be a multiple of 4, since each mainloop iteration would issue 4 MMA instructions. */
-    implementable = implementable && (args.mma_promotion_interval % 4 == 0);
 
     if (!implementable) {
       CUTLASS_TRACE_HOST("  CAN IMPLEMENT: Problem Size doesn't meet the minimum alignment requirements for TMA.\n");
@@ -595,7 +590,7 @@ struct CollectiveMma<
 
     tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
 
-    GmmaFP8AccumulationWithScale accumulation(accum, mainloop_params.mma_promotion_interval, size<2>(tCrA));
+    GmmaFP8AccumulationWithScale accumulation(accum, size<2>(TileShape{}) / size<2>(typename TiledMma::AtomShape_MNK{}), size<2>(tCrA));
     warpgroup_fence_operand(accumulation());
     CUTLASS_PRAGMA_UNROLL
     for (int k_tile_prologue = prologue_mma_count; k_tile_prologue > 0; --k_tile_prologue)
