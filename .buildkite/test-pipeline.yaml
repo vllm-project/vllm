@@ -365,6 +365,19 @@ steps:
   commands:
     - pytest -v -s tool_use
 
+- label: Performance Regression Check
+  fast_check: true
+  # Additional params to "vllm.entrypoints.openai.api_server" can be provided 
+  # here by PR authors. E.g ./scripts/check_performance.sh --enable-chunked-prefill
+  # Remember to delete changes afterwards. 
+  source_file_dependencies:
+    - vllm/
+    - csrc/
+  if: build.pull_request != "" # Only run on PRs to check regressions
+  commands:
+    - chmod +x ./scripts/check_performance.sh
+    - ./scripts/check_performance.sh
+
 #####  models test  #####
 
 - label: Basic Models Test # 24min
