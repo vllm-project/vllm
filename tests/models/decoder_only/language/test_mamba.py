@@ -14,7 +14,10 @@ from ...utils import check_outputs_equal
 MODELS = [
     "state-spaces/mamba-130m-hf",
     "tiiuae/falcon-mamba-tiny-dev",
-    "mistralai/Mamba-Codestral-7B-v0.1",
+    # TODO: Compare to a Mamba2 model. The HF transformers implementation of
+    # Mamba2 is buggy for Codestral as it doesn't handle n_groups.
+    # See https://github.com/huggingface/transformers/pull/35943
+    # "mistralai/Mamba-Codestral-7B-v0.1",
 ]
 
 
