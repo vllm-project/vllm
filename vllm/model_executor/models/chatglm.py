@@ -263,12 +263,14 @@ class GLMAttention(nn.Module):
             self.total_num_kv_heads,
             bias=config.add_bias_linear or config.add_qkv_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.query_key_value",
         )
         self.dense = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=config.add_bias_linear,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense",
         )
 
         # https://huggingface.co/THUDM/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
@@ -325,6 +327,7 @@ class GLMMLP(nn.Module):
         self,
         config: ChatGLMConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -336,6 +339,7 @@ class GLMMLP(nn.Module):
             [config.ffn_hidden_size] * 2,
             bias=config.add_bias_linear,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_h_to_4h",
         )
 
         self.activation_func = SiluAndMul()
@@ -346,6 +350,7 @@ class GLMMLP(nn.Module):
             config.hidden_size,
             bias=config.add_bias_linear,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_4h_to_h",
         )
 
     def forward(self, hidden_states):
@@ -394,7 +399,7 @@ class GLMBlock(nn.Module):
             config.hidden_size, eps=config.layernorm_epsilon)
 
         # MLP
-        self.mlp = GLMMLP(config, quant_config)
+        self.mlp = GLMMLP(config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -505,7 +510,8 @@ class ChatGLMModel(nn.Module):
 
         self.embedding = VocabParallelEmbedding(config.padded_vocab_size,
                                                 config.hidden_size,
-                                                quant_config=quant_config)
+                                                quant_config=quant_config,
+                                                prefix=f"{prefix}.embedding")
 
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
