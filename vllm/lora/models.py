@@ -277,6 +277,9 @@ class LoRAModel(AdapterModel):
                                     map_location=device,
                                     weights_only=True)
 
+
+        print(f"LORA {tensors} \n\n\n EMBEDDINGS {embeddings}")
+
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id()
             if lora_model_id is None else lora_model_id,

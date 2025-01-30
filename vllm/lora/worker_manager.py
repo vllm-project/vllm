@@ -94,11 +94,16 @@ class WorkerLoRAManager(AbstractWorkerManager):
                     expected_lora_modules.append(module)
 
             expected_lora_modules = list(set(expected_lora_modules))
-            lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
-            peft_helper = PEFTHelper.from_local_dir(
-                lora_path, self.max_position_embeddings)
+            if lora_request.lora_path:
+                lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
+                peft_helper = PEFTHelper.from_local_dir(
+                    lora_path, self.max_position_embeddings)
+            else:
+                lora_request.lora_config["vllm_max_position_embeddings"] = self.max_position_embeddings
+                peft_helper = PEFTHelper.from_dict(lora_request.config)
+    
             # Validates the LoRA configuration against requirements before
             # loading weights, throwing an exception if validation fails.
             peft_helper.validate_legal(self.lora_config)
@@ -110,18 +115,32 @@ class WorkerLoRAManager(AbstractWorkerManager):
                     and model.hf_to_vllm_mapper is not None):
                 hf_to_vllm_mapper = model.hf_to_vllm_mapper
 
-            lora = self._lora_model_cls.from_local_checkpoint(
-                lora_path,
-                expected_lora_modules,
-                peft_helper=peft_helper,
-                lora_model_id=lora_request.lora_int_id,
-                device="cpu",
-                dtype=self.lora_config.lora_dtype,
-                target_embedding_padding=self.vocab_size +
-                self.lora_config.lora_extra_vocab_size,
-                embedding_modules=self.embedding_modules,
-                embedding_padding_modules=self.embedding_padding_modules,
-                weights_mapper=hf_to_vllm_mapper)
+            if len(lora_request.lora_tensors) != 0:
+                lora = self._lora_model_cls.from_lora_tensors(
+                    lora_model_id=lora_request.lora_int_id,
+                    tensors=lora_request.lora_tensors,
+                    peft_helper=peft_helper,
+                    device="cpu",
+                    dtype=self.lora_config.lora_dtype,
+                    embeddings=lora_request.lora_embeddings,
+                    target_embedding_padding=self.vocab_size + self.lora_config.lora_extra_vocab_size,
+                    embedding_modules=self.embedding_modules,
+                    embedding_padding_modules=self.embedding_padding_modules,
+                    weights_mapper=hf_to_vllm_mapper
+                )
+            else:
+                lora = self._lora_model_cls.from_local_checkpoint(
+                    lora_path,
+                    expected_lora_modules,
+                    peft_helper=peft_helper,
+                    lora_model_id=lora_request.lora_int_id,
+                    device="cpu",
+                    dtype=self.lora_config.lora_dtype,
+                    target_embedding_padding=self.vocab_size +
+                    self.lora_config.lora_extra_vocab_size,
+                    embedding_modules=self.embedding_modules,
+                    embedding_padding_modules=self.embedding_padding_modules,
+                    weights_mapper=hf_to_vllm_mapper)
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both

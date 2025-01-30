@@ -2,6 +2,7 @@ import warnings
 from typing import Optional
 
 import msgspec
+import torch
 
 from vllm.adapter_commons.request import AdapterRequest
 
@@ -26,23 +27,12 @@ class LoRARequest(
     lora_name: str
     lora_int_id: int
     lora_path: str = ""
+    lora_tensors: Optional[dict[str, torch.Tensor]] = None
+    lora_config: Optional[dict] = None,
     lora_local_path: Optional[str] = msgspec.field(default=None)
     long_lora_max_len: Optional[int] = None
     base_model_name: Optional[str] = msgspec.field(default=None)
-
-    def __post_init__(self):
-        if 'lora_local_path' in self.__struct_fields__:
-            warnings.warn(
-                "The 'lora_local_path' attribute is deprecated "
-                "and will be removed in a future version. "
-                "Please use 'lora_path' instead.",
-                DeprecationWarning,
-                stacklevel=2)
-            if not self.lora_path:
-                self.lora_path = self.lora_local_path or ""
-
-        # Ensure lora_path is not empty
-        assert self.lora_path, "lora_path cannot be empty"
+    lora_embeddings: Optional[dict[str, torch.Tensor]] = None
 
     @property
     def adapter_id(self):
@@ -55,6 +45,18 @@ class LoRARequest(
     @property
     def path(self):
         return self.lora_path
+
+    @property
+    def tensors(self):
+        return self.lora_tensors
+
+    @property
+    def config(self):
+        return self.lora_config
+
+    @property
+    def embeddings(self):
+        return self.lora_embeddings
 
     @property
     def local_path(self):
