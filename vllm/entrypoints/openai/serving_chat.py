@@ -24,13 +24,14 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
+    MistralToolCall)
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
-from vllm.utils import generate_valid_mistral_tool_id
 
 logger = init_logger(__name__)
 
@@ -660,18 +661,16 @@ class OpenAIServingChat(OpenAIServing):
             elif request.tool_choice and type(
                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
 
+                tool_call_class = MistralToolCall if isinstance(
+                    tokenizer, MistralTokenizer) else ToolCall
                 message = ChatMessage(
                     role=role,
                     content="",
                     tool_calls=[
-                        ToolCall(function=FunctionCall(
+                        tool_call_class(function=FunctionCall(
                             name=request.tool_choice.function.name,
                             arguments=output.text))
                     ])
-
-                if isinstance(tokenizer, MistralTokenizer):
-                    for tool_call in message.tool_calls:
-                        tool_call.id = generate_valid_mistral_tool_id()
 
             # if the request doesn't use tool choice
             # OR specifies to not use a tool

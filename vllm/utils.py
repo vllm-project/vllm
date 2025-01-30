@@ -29,8 +29,7 @@ from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import OrderedDict, UserDict, defaultdict
 from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
-from functools import cache, lru_cache, partial, wraps
-from random import choices
+from functools import lru_cache, partial, wraps
 from string import ascii_letters, digits
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     Dict, Generator, Generic, Iterator, List, Literal,
@@ -356,7 +355,7 @@ class PyObjectCache:
         self._index = 0
 
 
-@cache
+@lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     from vllm import _custom_ops as ops
@@ -701,7 +700,7 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
-@cache
+@lru_cache(maxsize=None)
 def is_pin_memory_available() -> bool:
     from vllm.platforms import current_platform
     return current_platform.is_pin_memory_available()
@@ -890,7 +889,7 @@ def init_cached_hf_modules() -> None:
     init_hf_modules()
 
 
-@cache
+@lru_cache(maxsize=None)
 def find_library(lib_name: str) -> str:
     """
     Find the library file in the system.
@@ -1611,7 +1610,7 @@ def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     return module
 
 
-@cache
+@lru_cache(maxsize=None)
 def get_vllm_optional_dependencies():
     metadata = importlib.metadata.metadata("vllm")
     requirements = metadata.get_all("Requires-Dist", [])
@@ -2210,9 +2209,3 @@ def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
     else:
         func = partial(method, obj)  # type: ignore
     return func(*args, **kwargs)
-
-
-def generate_valid_mistral_tool_id():
-    # Mistral Tool Call Ids must be alphanumeric with a length of 9.
-    # https://github.com/mistralai/mistral-common/blob/21ee9f6cee3441e9bb1e6ed2d10173f90bd9b94b/src/mistral_common/protocol/instruct/validator.py#L299
-    return "".join(choices(ALPHANUMERIC, k=9))

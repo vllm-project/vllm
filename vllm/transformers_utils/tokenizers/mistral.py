@@ -18,7 +18,7 @@ from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
                                                      Tekkenizer)
 
 from vllm.logger import init_logger
-from vllm.utils import generate_valid_mistral_tool_id, is_list_of
+from vllm.utils import is_list_of
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
@@ -56,18 +56,52 @@ def maybe_serialize_tool_calls(request: ChatCompletionRequest):
     # TODO: remove when pydantic v2.11 is released
     for i, message in enumerate(request.messages):
         if message.get("role") == 'assistant':
+            logger.info("found an assistant")
             tool_calls_validator = message.get("tool_calls", ().__iter__())
             validated_tool_calls = []
             while True:
                 try:
                     tool_call = next(tool_calls_validator)  # type: ignore
                     validated_tool_calls.append(tool_call)
-                    if not re.match(r"^[a-zA-Z0-9]{9}$", tool_call['id']):
-                        tool_call['id'] = generate_valid_mistral_tool_id()
+
+                    if len(tool_call["id"]) > 9:
+                        logger.warning(
+                            "Truncating tool call ID: %s to %s",
+                            tool_call["id"],
+                            tool_call["id"][-9:],
+                        )
+
+                    if not re.match(r"^[a-zA-Z0-9]{9}$", tool_call["id"]):
+                        raise RuntimeError(
+                            "Invalid tool_call ID after truncation: %s (must be exactly 9 alphanumeric characters)",
+                            tool_call["id"],
+                        )
+
                 except StopIteration:
                     break
 
             request.messages[i]["tool_calls"] = validated_tool_calls
+
+        elif message.get("role") in {"tool_results", "tool"}:
+
+            if "tool_call_id" in message:
+                tool_call_id = message["tool_call_id"]
+
+                if len(tool_call_id) > 9:
+                    logger.warning(
+                        "Truncating tool_call_id: %s to %s",
+                        tool_call_id,
+                        tool_call_id[-9:],
+                    )
+                    tool_call_id = tool_call_id[-9:]
+
+                if not re.match(r"^[a-zA-Z0-9]{9}$", tool_call_id):
+                    raise RuntimeError(
+                        "Invalid tool_call_id after truncation: %s (must be exactly 9 alphanumeric characters)",
+                        tool_call_id,
+                    )
+
+                message["tool_call_id"] = tool_call_id
 
 
 def list_local_repo_files(repo_id: str, revision: Optional[str]) -> List[str]:
