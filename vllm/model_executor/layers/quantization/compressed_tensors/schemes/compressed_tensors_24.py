@@ -33,7 +33,6 @@ class CompressedTensors24(CompressedTensorsScheme):
         input_quant: Optional[QuantizationArgs] = None,
         model_compression_config: Optional[Dict[str, Any]] = None,
     ):
-
         self.quantized = quantized
         self.weight_quant = weight_quant
         self.input_quant = input_quant
@@ -50,12 +49,16 @@ class CompressedTensors24(CompressedTensorsScheme):
         # Only cutlass 3.x kernels are implemented so far
         return 90
 
-    def create_weights(self, layer: torch.nn.Module, input_size: int,
-                       output_partition_sizes: List[int],
-                       input_size_per_partition: int,
-                       params_dtype: torch.dtype, weight_loader: Callable,
-                       **kwargs):
-
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size: int,
+        output_partition_sizes: List[int],
+        input_size_per_partition: int,
+        params_dtype: torch.dtype,
+        weight_loader: Callable,
+        **kwargs,
+    ):
         if not sparse_cutlass_supported():
             raise ValueError(
                 "Sparse CUTLASS not supported. vLLM must be built with "
@@ -68,37 +71,47 @@ class CompressedTensors24(CompressedTensorsScheme):
         self.weights_dtype: torch.dtype = self._get_params_dtype(params_dtype)
 
         # parameter to store uncompressed weight
-        weight = ModelWeightParameter(data=torch.empty(
-            sum(output_partition_sizes),
-            input_size_per_partition,
-            dtype=self.weights_dtype),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                sum(output_partition_sizes),
+                input_size_per_partition,
+                dtype=self.weights_dtype,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
         if self.do_sparse_decompress:
             assert all(partition_size % 8 == 0
                        for partition_size in output_partition_sizes
                        ), "All partitions must be divisible by 8 for "
             "2:4 sparse compressed models"
 
-            shape = BasevLLMParameter(data=torch.empty(2, 1,
-                                                       dtype=torch.int64),
-                                      weight_loader=weight_loader)
+            shape = BasevLLMParameter(
+                data=torch.empty(2, 1, dtype=torch.int64),
+                weight_loader=weight_loader,
+            )
             compressed_weight = ModelWeightParameter(
-                data=torch.empty(sum(output_partition_sizes),
-                                 input_size_per_partition // 2,
-                                 dtype=self.weights_dtype),
+                data=torch.empty(
+                    sum(output_partition_sizes),
+                    input_size_per_partition // 2,
+                    dtype=self.weights_dtype,
+                ),
                 input_dim=1,
                 output_dim=0,
-                weight_loader=weight_loader)
+                weight_loader=weight_loader,
+            )
 
-            bitmask = ModelWeightParameter(data=torch.empty(
-                sum(output_partition_sizes),
-                input_size_per_partition // 8,
-                dtype=torch.uint8),
-                                           input_dim=1,
-                                           output_dim=0,
-                                           weight_loader=weight_loader)
+            bitmask = ModelWeightParameter(
+                data=torch.empty(
+                    sum(output_partition_sizes),
+                    input_size_per_partition // 8,
+                    dtype=torch.uint8,
+                ),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader,
+            )
 
             layer.register_parameter("shape", shape)
             layer.register_parameter("compressed", compressed_weight)
@@ -112,14 +125,16 @@ class CompressedTensors24(CompressedTensorsScheme):
                     data=torch.empty((sum(output_partition_sizes), 1),
                                      dtype=torch.float32),
                     output_dim=0,
-                    weight_loader=weight_loader)
+                    weight_loader=weight_loader,
+                )
             else:
                 assert (self.weight_quant and self.weight_quant.strategy
                         == QuantizationStrategy.TENSOR.value)
                 weight_scale = PerTensorScaleParameter(
                     data=torch.empty(len(output_partition_sizes),
                                      dtype=torch.float32),
-                    weight_loader=weight_loader)
+                    weight_loader=weight_loader,
+                )
 
             layer.register_parameter("weight_scale", weight_scale)
 
@@ -128,9 +143,10 @@ class CompressedTensors24(CompressedTensorsScheme):
                 # register input quant scale
                 assert (self.input_quant.strategy ==
                         QuantizationStrategy.TENSOR.value)
-                input_scale = BasevLLMParameter(data=torch.empty(
-                    1, dtype=torch.float32),
-                                                weight_loader=weight_loader)
+                input_scale = BasevLLMParameter(
+                    data=torch.empty(1, dtype=torch.float32),
+                    weight_loader=weight_loader,
+                )
 
                 layer.register_parameter("input_scale", input_scale)
 
@@ -151,12 +167,12 @@ class CompressedTensors24(CompressedTensorsScheme):
         """
         Compress weights after loading. Store compressed weight and meta
             tensor
-        
+
         :post-condition: layer.w_compressed and layer.meta are
             set to the compressed weight and meta tensor in the
             format expected by the Cutlass kernels
         :param layer: The layer with the weights to be processed
-        
+
         """
         if self.do_sparse_decompress:
             layer.weight.data = self._decompress_bitmask_compressed_weight(
@@ -177,10 +193,13 @@ class CompressedTensors24(CompressedTensorsScheme):
 
         if self.weight_quant:
             if self.weight_quant.strategy == QuantizationStrategy.TENSOR.value:
-                layer.weight_scale = torch.nn.Parameter(convert_to_channelwise(
-                    weight_scale=layer.weight_scale,
-                    logical_widths=layer.logical_widths),
-                                                        requires_grad=False)
+                layer.weight_scale = torch.nn.Parameter(
+                    convert_to_channelwise(
+                        weight_scale=layer.weight_scale,
+                        logical_widths=layer.logical_widths,
+                    ),
+                    requires_grad=False,
+                )
             else:
                 # torch.compile workaround
                 layer.weight_scale = torch.nn.Parameter(
@@ -190,20 +209,22 @@ class CompressedTensors24(CompressedTensorsScheme):
         layer.weight = torch.nn.Parameter(w_compressed, requires_grad=False)
         layer.meta = torch.nn.Parameter(meta, requires_grad=False)
 
-    def apply_weights(self,
-                      layer: torch.nn.Module,
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
-        Returns the output tensor for the layer with 2:4 
+        Returns the output tensor for the layer with 2:4
         sparse compressed weights, given the input tensor
         and bias
 
-        :param layer: The layer with 2:4 sparse compressed 
+        :param layer: The layer with 2:4 sparse compressed
             weights to be used for the computation
         :param x: The input tensor to the layer
         :param bias: The bias to be added to the output tensor
-        :return: The output tensor of the layer 
+        :return: The output tensor of the layer
         """
         if self.quantized:
             scale = None
@@ -227,13 +248,15 @@ class CompressedTensors24(CompressedTensorsScheme):
             input_scale = layer.input_scale
             q_input = x
 
-        out = ops.cutlass_scaled_sparse_mm(a=q_input,
-                                           bt_nzs=layer.weight,
-                                           bt_meta=layer.meta,
-                                           scale_a=input_scale,
-                                           scale_b=layer.weight_scale,
-                                           out_dtype=self.output_dtype,
-                                           bias=bias)
+        out = ops.cutlass_scaled_sparse_mm(
+            a=q_input,
+            bt_nzs=layer.weight,
+            bt_meta=layer.meta,
+            scale_a=input_scale,
+            scale_b=layer.weight_scale,
+            out_dtype=self.output_dtype,
+            bias=bias,
+        )
         assert out.is_contiguous()
         return out
 
@@ -260,31 +283,38 @@ class CompressedTensors24(CompressedTensorsScheme):
         raise ValueError("Quantization type not supported by Cutlass")
 
     def _decompress_bitmask_compressed_weight(
-            self, compressed: torch.Tensor, bitmask: torch.Tensor,
-            layer: torch.nn.Module) -> torch.Tensor:
+        self,
+        compressed: torch.Tensor,
+        bitmask: torch.Tensor,
+        layer: torch.nn.Module,
+    ) -> torch.Tensor:
         """
-        Decompress a compressed 2:4 sparse weight tensor using the bitmask and 
+        Decompress a compressed 2:4 sparse weight tensor using the bitmask and
         return the result.
 
         This function also supports sharded decompression.
 
-        :param compressed: The 2:4 sparse weight tensor compressed using the 
-            sparse-24-bitmask compressor. This is different from 
-            `cutlass_sparse_compress` which uses a different scheme (2 bits for 
-            every nonzero element that represent the coordinate within the block 
-            of 4). The bitmask compression here uses a bitmask to indicate the 
+        :param compressed: The 2:4 sparse weight tensor compressed using the
+            sparse-24-bitmask compressor. This is different from
+            `cutlass_sparse_compress` which uses a different scheme (2 bits for
+            every nonzero element that represent the coordinate within the block
+            of 4). The bitmask compression here uses a bitmask to indicate the
             positions of non-zero elements.
-        :param bitmask: The 2:4 bitmask associated with the compressed weights, 
-            representing the positions of non-zero elements in the compressed 
+        :param bitmask: The 2:4 bitmask associated with the compressed weights,
+            representing the positions of non-zero elements in the compressed
             tensor.
-        :param layer: The layer whose weights need to be processed after loading.
+        :param layer: The layer whose weights need to be processed after 
+            loading.
         :return: The decompressed 2:4 sparse weight tensor.
         """
 
         sparsity_compressor = self.model_compressor.sparsity_compressor
 
-        def _process_split(bitmask_compressed_weight: torch.Tensor, shape,
-                           bitmask: torch.Tensor) -> torch.Tensor:
+        def _process_split(
+            bitmask_compressed_weight: torch.Tensor,
+            shape,
+            bitmask: torch.Tensor,
+        ) -> torch.Tensor:
             weight_data = dict(
                 compressed=bitmask_compressed_weight,
                 shape=shape,
@@ -311,8 +341,12 @@ class CompressedTensors24(CompressedTensorsScheme):
             decompressed = combine_shards(decompressed_shards)
         else:
             decompressed = sparsity_compressor.decompress_weight(
-                dict(compressed=compressed,
-                     shape=(layer.logical_widths[0],
-                            layer.input_size_per_partition),
-                     bitmask=bitmask))
+                dict(
+                    compressed=compressed,
+                    shape=(
+                        layer.logical_widths[0],
+                        layer.input_size_per_partition,
+                    ),
+                    bitmask=bitmask,
+                ))
         return decompressed
