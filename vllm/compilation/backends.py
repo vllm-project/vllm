@@ -524,6 +524,7 @@ class VllmBackend:
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
+        vllm_config = self.vllm_config
         if not self.compilation_config.cache_dir:
             # no provided cache dir, generate one based on the known factors
             # that affects the compilation. if none of the factors change,
@@ -532,7 +533,6 @@ class VllmBackend:
 
             # 1. factors come from the vllm_config (it mainly summarizes how the
             #    model is created)
-            vllm_config = self.vllm_config
             config_hash = vllm_config.compute_hash()
 
             # 2. factors come from the code files that are traced by Dynamo (
@@ -556,20 +556,26 @@ class VllmBackend:
             hash_key = hashlib.md5(
                 f"{config_hash}_{code_hash}".encode()).hexdigest()[:10]
             cache_dir = os.path.join(
-                envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key,
-                f"rank_{vllm_config.parallel_config.rank}")
-        else:
-            cache_dir = self.compilation_config.cache_dir
+                envs.VLLM_CACHE_ROOT,
+                "torch_compile_cache",
+                hash_key,
+            )
+            self.compilation_config.cache_dir = cache_dir
+
+        cache_dir = self.compilation_config.cache_dir
         os.makedirs(cache_dir, exist_ok=True)
+        local_cache_dir = os.path.join(
+            cache_dir, f"rank_{vllm_config.parallel_config.rank}")
+        self.compilation_config.local_cache_dir = local_cache_dir
 
         disabled = envs.VLLM_DISABLE_COMPILE_CACHE
         self.inductor_hash_cache: InductorHashCache = InductorHashCache(
-            cache_dir, disabled=disabled)
+            local_cache_dir, disabled=disabled)
         if disabled:
             logger.info("vLLM's torch.compile cache is disabled.")
         else:
             logger.info("Using cache directory: %s for vLLM's torch.compile",
-                        cache_dir)
+                        local_cache_dir)
 
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done
@@ -608,6 +614,18 @@ class VllmBackend:
         PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
                                     self.vllm_config, self.graph_pool,
                                     self).run(*example_inputs)
+
+        graph_path = os.path.join(local_cache_dir, "computation_graph.py")
+        if not os.path.exists(graph_path):
+            # code adapted from https://github.com/thuml/depyf/blob/dab831108a752d1facc00acdd6d4243891845c37/depyf/explain/patched_lazy_format_graph_code.py#L30 # noqa
+            # use `print_readable` because it can include submodules
+            src = "from __future__ import annotations\nimport torch\n" + \
+                self.split_gm.print_readable(print_output=False)
+            src = src.replace("<lambda>", "GraphModule")
+            with open(graph_path, "w") as f:
+                f.write(src)
+
+            logger.debug("Computation graph saved to %s", graph_path)
 
         self._called = True
 
@@ -662,7 +680,7 @@ class VllmBackend:
 class ConcreteSizeEntry:
     runtime_shape: int
     need_to_compile: bool  # the size is in compile_sizes
-    use_cudagraph: bool  # the size is in capture_sizes
+    use_cudagraph: bool  # the size is in cudagraph_capture_sizes
 
     compiled: bool = False
     runnable: Callable = None  # type: ignore
@@ -709,8 +727,8 @@ class PiecewiseBackend:
 
         self.compile_sizes: Set[int] = set(
             self.compilation_config.compile_sizes)
-        self.capture_sizes: Set[int] = set(
-            self.compilation_config.capture_sizes
+        self.cudagraph_capture_sizes: Set[int] = set(
+            self.compilation_config.cudagraph_capture_sizes
         ) if self.compilation_config.use_cudagraph else set()
 
         self.first_run_finished = False
@@ -728,11 +746,11 @@ class PiecewiseBackend:
         # to_be_compiled_sizes tracks the remaining sizes to compile,
         # and updates during the compilation process, so we need to copy it
         self.to_be_compiled_sizes: Set[int] = self.compile_sizes.copy()
-        for shape in self.compile_sizes.union(self.capture_sizes):
+        for shape in self.compile_sizes.union(self.cudagraph_capture_sizes):
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,
                 need_to_compile=shape in self.compile_sizes,
-                use_cudagraph=shape in self.capture_sizes,
+                use_cudagraph=shape in self.cudagraph_capture_sizes,
             )
 
     def check_for_ending_compilation(self):

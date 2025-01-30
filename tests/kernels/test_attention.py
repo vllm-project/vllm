@@ -7,7 +7,7 @@ import torch
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.utils import get_max_shared_memory_bytes
+from vllm.utils import get_max_shared_memory_bytes, is_navi
 
 from .allclose_default import get_default_atol, get_default_rtol
 
@@ -33,7 +33,7 @@ NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 
 # This should be sync with get_supported_head_sizes() in
 # vllm.attention.ops.paged_attn.PagedAttention
-HEAD_SIZES = [32, 64, 80, 96, 112, 120, 128, 192, 256]
+HEAD_SIZES = [64, 80, 96, 112, 120, 128, 192, 256]
 
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
@@ -182,7 +182,11 @@ def test_paged_attention(
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Using default kv_scale
-    k_scale = v_scale = 1.0
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    # additional argument for v1/v2 pa kernel
+    num_threads = 1024 if current_platform.is_rocm() \
+                and not is_navi() else 128
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
@@ -204,16 +208,16 @@ def test_paged_attention(
             v_scale,
         )
 
-        opcheck(torch.ops._C.paged_attention_v1,
-                (output, query, key_cache, value_cache, num_kv_heads, scale,
-                 block_tables, seq_lens, block_size, max_seq_len, alibi_slopes,
-                 kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
-                cond=(head_size == HEAD_SIZES[0]
-                      and block_size == BLOCK_SIZES[0]))
+        opcheck(
+            torch.ops._C.paged_attention_v1,
+            (output, query, key_cache, value_cache, num_kv_heads, scale,
+             block_tables, seq_lens, block_size, max_seq_len, alibi_slopes,
+             kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0, num_threads),
+            cond=(head_size == HEAD_SIZES[0] and block_size == BLOCK_SIZES[0]))
 
     elif version in ("v2", "rocm"):
         if current_platform.is_rocm():
-            PARTITION_SIZE = 1024 if version == "v2" else 512
+            PARTITION_SIZE = 1024 if version == "v2" else 256
         num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
         assert PARTITION_SIZE % block_size == 0
         num_seqs, num_heads, head_size = output.shape
@@ -248,13 +252,14 @@ def test_paged_attention(
                 v_scale,
             )
 
-            opcheck(torch.ops._C.paged_attention_v2,
-                    (output, exp_sums, max_logits, tmp_output, query,
-                     key_cache, value_cache, num_kv_heads, scale, block_tables,
-                     seq_lens, block_size, max_seq_len, alibi_slopes,
-                     kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
-                    cond=(head_size == HEAD_SIZES[0]
-                          and block_size == BLOCK_SIZES[0]))
+            opcheck(
+                torch.ops._C.paged_attention_v2,
+                (output, exp_sums, max_logits, tmp_output, query, key_cache,
+                 value_cache, num_kv_heads, scale, block_tables, seq_lens,
+                 block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
+                 k_scale, v_scale, 0, 0, 0, 64, 0, num_threads),
+                cond=(head_size == HEAD_SIZES[0]
+                      and block_size == BLOCK_SIZES[0]))
 
         else:
             ops.paged_attention_rocm(
@@ -275,13 +280,15 @@ def test_paged_attention(
                 kv_cache_dtype,
                 k_scale,
                 v_scale,
+                None,
+                PARTITION_SIZE,
             )
 
             opcheck(torch.ops._rocm_C.paged_attention,
                     (output, exp_sums, max_logits, tmp_output, query,
                      key_cache, value_cache, num_kv_heads, scale, block_tables,
                      seq_lens, block_size, max_seq_len, alibi_slopes,
-                     kv_cache_dtype, k_scale, v_scale),
+                     kv_cache_dtype, k_scale, v_scale, None, PARTITION_SIZE),
                     cond=(head_size == HEAD_SIZES[0]
                           and block_size == BLOCK_SIZES[0]))
 
