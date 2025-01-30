@@ -238,7 +238,7 @@ class GLU(nn.Module):
             config.hidden_size, [config.ffn_hidden_size] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_proj")
+            prefix=f"{prefix}.merged_proj")
 
         self.dense_4h_to_h = RowParallelLinear(
             config.ffn_hidden_size,
