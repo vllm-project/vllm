@@ -55,7 +55,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors, VideoItem)
+                                    VideoItem)
 from vllm.multimodal.parse import (ImageSize, ModalityDataItems,
                                    MultiModalDataItems, MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -953,12 +953,14 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(
             **hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
 
         # NOTE: Only Qwen2VLProcessor in transformers 4.47.0 has
         # image_token and video_token registered
         placeholder = {
-            "image": hf_processor.image_token,
-            "video": hf_processor.video_token,
+            "image": vocab[hf_processor.image_token],
+            "video": vocab[hf_processor.video_token],
         }
 
         merge_length = image_processor.merge_size**2
@@ -967,13 +969,13 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
             grid_thw = out_mm_kwargs[f"{modality}_grid_thw"][item_idx]
             assert isinstance(grid_thw, torch.Tensor)
 
-            num_tokens = grid_thw.prod().item() // merge_length
-            return placeholder[modality] * num_tokens
+            num_tokens = int(grid_thw.prod()) // merge_length
+            return [placeholder[modality]] * num_tokens
 
         return [
             PromptReplacement(
                 modality=modality,
-                target=placeholder[modality],
+                target=[placeholder[modality]],
                 replacement=partial(get_replacement_qwen2vl,
                                     modality=modality),
             ) for modality in ("image", "video")
@@ -1231,7 +1233,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return modalities
 
     def get_multimodal_embeddings(
-            self, **kwargs) -> Optional[List[Tuple[NestedTensors, str]]]:
+            self, **kwargs) -> Optional[tuple[torch.Tensor, ...]]:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
@@ -1258,14 +1260,40 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[List[Tuple[NestedTensors,
-                                                   str]]] = None,
+        multimodal_embeddings: Optional[tuple[torch.Tensor, ...]] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [self.config.image_token_id, self.config.video_token_id])
+        return inputs_embeds
+
+    def get_input_embeddings_v0(
+        self,
+        input_ids: torch.Tensor,
+        image_input: Optional[tuple[torch.Tensor, ...]] = None,
+        video_input: Optional[tuple[torch.Tensor, ...]] = None,
+    ) -> torch.Tensor:
+
+        inputs_embeds = self.get_input_embeddings(input_ids)
+        if image_input is not None:
+            image_embeds = self._process_image_input(image_input)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                image_embeds,
+                placeholder_token_id=self.config.image_token_id,
+            )
+
+        if video_input is not None:
+            video_embeds = self._process_video_input(video_input)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                video_embeds,
+                placeholder_token_id=self.config.video_token_id,
+            )
         return inputs_embeds
 
     def forward(
@@ -1301,22 +1329,25 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
+        # NOTE: In v1, inputs_embeds is always generated at model runner from
+        # `get_multimodal_embeddings` and `get_input_embeddings`, this
+        # condition is only for v0 compatibility.
         elif inputs_embeds is None:
-            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
+            image_input = self._parse_and_validate_image_input(**kwargs)
+            video_input = self._parse_and_validate_video_input(**kwargs)
 
-            # We need to check for usage of mrope here in case there is
-            # multimodal data.
-            # TODO (ywang96): move this to model runner in V1.
-            if multimodal_embeddings is not None and uses_mrope(self.config):
-                assert positions.ndim == 2 and positions.size(0) == 3, (
-                    "multimodal section rotary embedding requires "
-                    f"(3, seq_len) positions, but got {positions.size()}")
-
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      multimodal_embeddings)
-            input_ids = None
+            if image_input is None and video_input is None:
+                inputs_embeds = None
+            else:
+                if uses_mrope(self.config):
+                    assert positions.ndim == 2 and positions.size(0) == 3, (
+                        "multimodal section rotary embedding requires "
+                        f"(3, seq_len) positions, but got {positions.size()}")
+                inputs_embeds = self.get_input_embeddings_v0(
+                    input_ids,
+                    image_input=image_input,
+                    video_input=video_input)
+                input_ids = None
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,

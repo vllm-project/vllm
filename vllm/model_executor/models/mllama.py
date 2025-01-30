@@ -831,6 +831,7 @@ class MllamaTextCrossAttention(nn.Module):
     ) -> torch.Tensor:
         # Skip writing kv-cache for the initial profiling run.
         if len(kv_cache.shape) > 1:
+            i = torch.ones(1, dtype=torch.float32)
             if self.attn.backend in (_Backend.FLASH_ATTN,
                                      _Backend.FLASH_ATTN_VLLM_V1):
                 cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
@@ -843,8 +844,8 @@ class MllamaTextCrossAttention(nn.Module):
                     attn_metadata.
                     cross_slot_mapping,  # type: ignore[union-attr]
                     "auto",
-                    1.0,
-                    1.0,
+                    i,
+                    i,
                 )
             elif self.attn.backend in (_Backend.XFORMERS, _Backend.TORCH_SDPA):
                 key_cache, value_cache = PagedAttention.split_kv_cache(
@@ -853,7 +854,7 @@ class MllamaTextCrossAttention(nn.Module):
                 cached_v = torch.cat([v[s:e] for s, e in kv_range_for_decode])
                 PagedAttention.write_to_paged_cache(
                     cached_k, cached_v, key_cache, value_cache,
-                    attn_metadata.cross_slot_mapping, "auto", 1.0, 1.0)
+                    attn_metadata.cross_slot_mapping, "auto", i, i)
             else:
                 raise ValueError(
                     f"Unsupported Attention backend {self.attn.backend} "
@@ -1364,8 +1365,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         # For 1) text-only prefill and decode, 2) image-present decode.
         if image_inputs is None:
             full_text_row_masked_out_mask = (
-                attn_metadata.encoder_seq_lens_tensor != 0).reshape(-1, 1).to(
-                    input_ids.device)
+                attn_metadata.encoder_seq_lens_tensor
+                != 0).reshape(-1, 1).to(input_ids.device)
             skip_cross_attention = max(attn_metadata.encoder_seq_lens) == 0
 
         # For image-present prefill.
@@ -1484,14 +1485,23 @@ def convert_sparse_cross_attention_mask_to_dense(
     total_length = sum(lengths)
     total_tiles = sum([sum(tiles) for tiles in num_tiles])
     dense_mask = np.zeros(shape=(total_length, total_tiles), dtype=np.int64)
-    # A list of ranges, range[i] = [start, end] means
-    # if the i-th sample has N tiles in total, the tiles[start, end]
-    # will be used for cross-attention decoding.
+    # A list of ranges, range[i] = [start, end] means that the i-th image will
+    # use tiles[start, end] for cross-attention decoding.
     tile_range_for_decode = []
 
     seq_start = 0
     tile_start = 0
-    for masks, tiles, length in zip(sparse_mask, num_tiles, lengths):
+
+    # sparse_mask has an [] entry for each sequence that does not have images,
+    # but num_tiles does not have these entries...
+    num_tiles_idx = 0
+    for masks, length in zip(sparse_mask, lengths):
+        if len(masks) == 0:
+            # Text only
+            continue
+
+        tiles = num_tiles[num_tiles_idx]
+        num_tiles_idx += 1
         ts, td = -1, 0
         for mask, tile in zip(masks, tiles):
             if len(mask) != 2:
@@ -1511,6 +1521,7 @@ def convert_sparse_cross_attention_mask_to_dense(
         assert td != 0
         tile_range_for_decode.append((ts, ts + td))
         seq_start += length
+    assert num_tiles_idx == len(num_tiles)
 
     return dense_mask, tile_range_for_decode
 

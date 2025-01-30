@@ -5,16 +5,18 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.distributed
+import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
+from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, get_dtype_size
+from vllm.utils import GiB_bytes
 from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
@@ -77,6 +79,23 @@ class Worker:
         else:
             self.profiler = None
 
+    def sleep(self, level: int = 1) -> None:
+        free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
+        allocator = CuMemAllocator.get_instance()
+        allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
+        free_bytes_after_sleep, total = torch.cuda.mem_get_info()
+        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+        used_bytes = total - free_bytes_after_sleep
+        assert freed_bytes >= 0, "Memory usage increased after sleeping."
+        logger.info(
+            "Sleep mode freed %.2f GiB memory, "
+            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
+            used_bytes / GiB_bytes)
+
+    def wake_up(self) -> None:
+        allocator = CuMemAllocator.get_instance()
+        allocator.wake_up()
+
     def init_device(self):
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
@@ -110,7 +129,17 @@ class Worker:
         self.model_runner = GPUModelRunner(self.vllm_config, self.device)
 
     def load_model(self) -> None:
-        self.model_runner.load_model()
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CuMemAllocator.get_instance()
+            assert allocator.get_current_usage() == 0, (
+                "Sleep mode can only be "
+                "used for one instance per process.")
+            context = allocator.use_memory_pool(tag="weights")
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()
+        with context:
+            self.model_runner.load_model()
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -167,14 +196,36 @@ class Worker:
 
     def initialize_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-        self.model_runner.initialize_kv_cache(kv_cache_config)
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CuMemAllocator.get_instance()
+            context = allocator.use_memory_pool(tag="kv_cache")
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()
+        with context:
+            self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
+        # warm up sizes that are not in cudagraph capture sizes,
+        # but users still want to compile for better performance,
+        # e.g. for the max-num-batched token size in chunked prefill.
+        warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
+        if not self.model_config.enforce_eager:
+            warmup_sizes = [
+                x for x in warmup_sizes if x not in
+                self.vllm_config.compilation_config.cudagraph_capture_sizes
+            ]
+        for size in sorted(warmup_sizes, reverse=True):
+            logger.info("Compile and warming up model for size %d", size)
+            self.model_runner._dummy_run(size)
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+    def get_model(self) -> nn.Module:
+        return self.model_runner.get_model()
 
     @torch.inference_mode()
     def execute_model(
@@ -232,24 +283,3 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
                 f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
                 "You can use float16 instead by explicitly setting the"
                 "`dtype` flag in CLI, for example: --dtype=half.")
-
-
-def _get_cache_block_size(
-    cache_config: CacheConfig,
-    model_config: ModelConfig,
-    parallel_config: ParallelConfig,
-) -> int:
-    head_size = model_config.get_head_size()
-    num_heads = model_config.get_num_kv_heads(parallel_config)
-    num_attention_layers = model_config.get_num_layers_by_block_type(
-        parallel_config, LayerBlockType.attention)
-
-    key_cache_block = cache_config.block_size * num_heads * head_size
-    value_cache_block = key_cache_block
-    total = num_attention_layers * (key_cache_block + value_cache_block)
-    if cache_config.cache_dtype == "auto":
-        dtype = model_config.dtype
-    else:
-        dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-    dtype_size = get_dtype_size(dtype)
-    return dtype_size * total
