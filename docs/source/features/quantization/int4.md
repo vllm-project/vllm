@@ -133,6 +133,12 @@ Quantized models can be sensitive to the presence of the `bos` token. Make sure 
 An example configuration for the recipe with non-default hyperparameters:
 
 ```python
+from compressed_tensors.quantization import (
+    QuantizationArgs,
+    QuantizationScheme,
+    QuantizationStrategy,
+    QuantizationType,
+) 
 recipe = GPTQModifier(
     targets="Linear",
     config_groups={
