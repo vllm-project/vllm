@@ -972,6 +972,7 @@ class ModelConfig:
         use_mla = (self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE)
         return use_mla
 
+    @property
     def supported_runner_types(self) -> Set[RunnerType]:
         return {_TASK_RUNNER[task] for task in self.supported_tasks}
 
