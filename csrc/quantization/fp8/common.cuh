@@ -47,9 +47,10 @@ __device__ __forceinline__ FP8_TYPE scaled_fp8_conversion(float const val,
   return static_cast<c10::Float8_e4m3fn>(r);
 #else
   // Use hardware cvt instruction for fp8 on rocm
-  return c10::Float8_e4m3fnuz(__hip_cvt_float_to_fp8(r,fp8::fp8_type::__default_saturation,
-                                fp8::fp8_type::__default_interpret),
-                              c10::Float8_e4m3fnuz::from_bits());
+  return c10::Float8_e4m3fnuz(
+      __hip_cvt_float_to_fp8(r, fp8::fp8_type::__default_saturation,
+                             fp8::fp8_type::__default_interpret),
+      c10::Float8_e4m3fnuz::from_bits());
 #endif
 }
 
