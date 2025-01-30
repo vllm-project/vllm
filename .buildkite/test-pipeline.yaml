@@ -367,6 +367,7 @@ steps:
 
 - label: Performance Regression Check
   fast_check: true
+  working_dir: "/vllm-workspace/.buildkite"
   source_file_dependencies:
     - vllm/
     - csrc/
