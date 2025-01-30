@@ -109,7 +109,7 @@ ARG COMMON_WORKDIR
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
 COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
 
-RUN git clone --recursive https://github.com/ROCm/aiter.git && cd /app/aiter && pip install -r requirements.txt && PREBUILD_KERNELS=1 python3 setup.py develop
+RUN git clone --recursive https://github.com/ROCm/aiter.git && cd /app/aiter && pip install -r requirements.txt && PREBUILD_KERNELS=1 python3 setup.py develop && pip show aiter
 
 
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
