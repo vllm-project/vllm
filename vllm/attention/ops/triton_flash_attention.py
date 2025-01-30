@@ -591,18 +591,21 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz,
             seqlen_k = MAX_SEQLENS_K
 
         if continue_condition:
-            # Now we compute whether we need to exit early due to causal masking.
-            # This is because for seqlen_q > seqlen_k, M rows of the attn scores
-            # are completely masked, resulting in 0s written to the output, and
-            # inf written to LSE. We don't need to do any GEMMs in this case.
+            # Now we compute whether we need to exit early due to causal
+            # masking.
+            # This is because for seqlen_q > seqlen_k, M rows of the attn
+            # scores are completely masked, resulting in 0s written to the
+            # output, and inf written to LSE. We don't need to do any GEMMs
+            # in this case.
             # This block of code determines what N is, and if this WG is
             # operating on those M rows.
             n_blocks = cdiv_fn(seqlen_k, BLOCK_N)
             if (IS_CAUSAL):
                 # If seqlen_q == seqlen_k, the attn scores are a square matrix.
-                # If seqlen_q != seqlen_k, attn scores are rectangular which means
-                # the causal mask boundary is bottom right aligned, and ends
-                # at either the top edge (seqlen_q < seqlen_k) or left edge.
+                # If seqlen_q != seqlen_k, attn scores are rectangular which
+                # means the causal mask boundary is bottom right aligned, and
+                # ends at either the top edge (seqlen_q < seqlen_k) or left
+                # edge.
                 # This captures the decrease in n_blocks if we have a
                 # rectangular attn matrix
                 n_blocks_seqlen = cdiv_fn(
@@ -614,18 +617,20 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz,
                 # If we have no blocks after adjusting for seqlen deltas,
                 # this WG is part of the blocks that are all 0. We exit early.
                 if n_blocks <= 0:
-                    o_offset = Out + off_z * stride_oz + off_h_q * stride_oh + cu_seqlens_q_start * stride_om
-                    o_ptrs = o_offset + offs_m[:, None] * stride_om + offs_d[
-                        None, :] * stride_on
+                    o_offset = (Out + off_z * stride_oz + off_h_q * stride_oh +
+                                cu_seqlens_q_start * stride_om)
+                    o_ptrs = (o_offset + offs_m[:, None] * stride_om +
+                              offs_d[None, :] * stride_on)
                     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL],
                                    dtype=Out.type.element_ty)
                     o_ptrs_mask = (offs_m[:, None] < seqlen_q).broadcast_to(
                         [BLOCK_M, BLOCK_DMODEL])
                     # We still need to write 0s to the result
                     tl.store(o_ptrs, acc, mask=o_ptrs_mask)
-                    # The tensor allocated for L is based on MAX_SEQLENS_Q as that is
-                    # statically known.
-                    l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
+                    # The tensor allocated for L is based on MAX_SEQLENS_Q as
+                    # that is statically known.
+                    l_ptrs = (L + off_z * HQ * MAX_SEQLENS_Q +
+                              off_h_q * MAX_SEQLENS_Q + offs_m)
                     # We store inf to LSE, not -inf because in the bwd pass,
                     # we subtract this from qk which makes it -inf, such that
                     # exp(qk - inf) = 0 for these masked blocks.
@@ -693,8 +698,9 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz,
                                            off_hz * seqlen_q * seqlen_k)
                 else:
                     batch_philox_offset = 0
-                # We can ask to return the dropout mask without actually doing any dropout. In
-                # this case, we return an invalid pointer so indicate the mask is not valid.
+                # We can ask to return the dropout mask without actually doing
+                # any dropout. In this case, we return an invalid pointer so
+                # indicate the mask is not valid.
                 if RETURN_ENCODED_SOFTMAX:
                     encoded_sm_base = (encoded_softmax +
                                        off_h_q * seqlen_q * seqlen_k)
@@ -721,9 +727,9 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz,
                 padded_block_k = n_extra_tokens != 0
                 is_modulo_mn = not padded_block_k and (seqlen_q % BLOCK_M == 0)
                 if IS_CAUSAL:
-                    # There are always at least BLOCK_M // BLOCK_N masked blocks.
-                    # Additionally there might be one more due to dissimilar
-                    # seqlens.
+                    # There are always at least BLOCK_M // BLOCK_N masked
+                    # blocks. Additionally there might be one more due to
+                    # dissimilar seqlens.
                     masked_blocks = BLOCK_M // BLOCK_N + (not is_modulo_mn)
                 else:
                     # Padding on Q does not need to be masked in the FA loop.
@@ -855,7 +861,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz,
                 causal_start_idx = seqlen_q - seqlen_k
                 acc = acc.to(Out.type.element_ty)
                 if IS_CAUSAL:
-                    if causal_start_idx > start_m_idx and causal_start_idx < end_m_idx:
+                    if (causal_start_idx > start_m_idx and causal_start_idx < end_m_idx):
                         out_mask_boundary = tl.full((BLOCK_DMODEL, ),
                                                     causal_start_idx,
                                                     dtype=tl.int32)
@@ -867,7 +873,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz,
                         acc = tl.where(out_ptrs_mask, acc,
                                        z.to(acc.type.element_ty))
                 # write back LSE
-                l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
+                l_ptrs = (L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m)
                 # If seqlen_q not multiple of BLOCK_M, we need to mask out the
                 # last few rows. This is only true for the last M block. For
                 # others, overflow_size will be -ve
@@ -925,8 +931,6 @@ def _attn_bwd_preprocess(
     BLOCK_M: tl.constexpr,
     D_HEAD: tl.constexpr,
 ):
-    # off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
-    # off_n = tl.arange(0, D_HEAD)
     off_m = tl.program_id(0) * BLOCK_M
     off_h = tl.program_id(1)  # head index
     off_z = tl.program_id(2)  # batch index
@@ -946,8 +950,6 @@ def _attn_bwd_preprocess(
                                      block_shape=(BLOCK_M, D_HEAD),
                                      order=(1, 0))
     # load
-    # o = tl.load(Out + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
-    # do = tl.load(DO + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
     o = tl.load(O_block_ptr, boundary_check=(0, 1),
                 padding_option="zero").to(tl.float32)
     do = tl.load(DO_block_ptr, boundary_check=(0, 1),
@@ -994,7 +996,6 @@ def _bwd_kernel_dk_dv(
         MASK: tl.constexpr):
     offs_m = start_m + tl.arange(0, BLOCK_M1)
     offs_n = start_n + tl.arange(0, BLOCK_N1)
-    # offs_k = tl.arange(0, BLOCK_DMODEL)
     QT_block_ptr = tl.make_block_ptr(base=Q,
                                      shape=(BLOCK_DMODEL, N_CTX),
                                      strides=(stride_d, stride_tok),
@@ -1071,7 +1072,6 @@ def _bwd_kernel_dq(
         MASK: tl.constexpr):
     offs_m = start_m + tl.arange(0, BLOCK_M2)
     offs_n = start_n + tl.arange(0, BLOCK_N2)
-    # offs_k = tl.arange(0, BLOCK_DMODEL)
     KT_block_ptr = tl.make_block_ptr(base=K,
                                      shape=(BLOCK_DMODEL, N_CTX),
                                      strides=(stride_d, stride_tok),
@@ -1086,7 +1086,7 @@ def _bwd_kernel_dq(
                                      order=(0, 1))
     # D (= delta) is pre-divided by ds_scale.
     Di = tl.load(D + offs_m)
-    # BLOCK_M2 must be a multiple of BLOCK_N2, otherwise the code wouldn't work.
+    # BLOCK_M2 must be a multiple of BLOCK_N2, else the code wouldn't work.
     tl.static_assert(BLOCK_M2 % BLOCK_N2 == 0)
     curr_n = start_n
     step_n = BLOCK_N2
