@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
+from vllm.v1.core.guided_decoding import GuidedDecodingManager
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
@@ -66,6 +67,28 @@ class EngineCore:
 
         self.mm_input_mapper_server = MMInputMapperServer(
             vllm_config.model_config)
+
+        # initialize the tokenizer on the scheduler (this is used for constrained decoding)
+        tokenizer_group = init_tokenizer_from_configs(
+            model_config=vllm_config.model_config,
+            scheduler_config=vllm_config.scheduler_config,
+            parallel_config=vllm_config.parallel_config,
+            lora_config=vllm_config.lora_config)
+        tokenizer_group.ping()
+        # setup guided decoding, right now uses xgrammar
+        self.guided_decoding_manager = GuidedDecodingManager(
+            vllm_config=vllm_config, tokenizer_group=tokenizer_group)
+
+        # while self.grammar:
+        #     request = self.grammar.popleft()
+        #     try:
+        #         # When request first added via add_request, then it will be a future call
+        #         # check timeout and add it directly to previous queue
+        #         request.grammar = request.grammar.result(timeout=0.05)
+        #         request.status = RequestStatus.WAITING
+        #         newly_grammar_reqs.append(request)
+        #     except futures._base.TimeoutError:
+        #         scheduled_grammar_reqs.append(request)
 
     def _initialize_kv_caches(self,
                               vllm_config: VllmConfig) -> Tuple[int, int]:
@@ -127,6 +150,9 @@ class EngineCore:
 
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
+        # update FSM async here
+        # two broadcast (bitmask + calculate) <-- manager
+        # copy CPU -> CPU IPC (concat multiple bitmask?)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)
         return engine_core_outputs

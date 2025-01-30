@@ -1,29 +1,59 @@
 from __future__ import annotations
 
-import copy, enum
+import copy
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Optional
 
+import torch
 import xgrammar as xgr
 
-from vllm.config import ModelConfig
-from vllm.logger import init_logger
+from vllm.config import VllmConfig
 from vllm.v1.request import GuidedDecodingKey, Request, RequestStatus
 
-from .grammar import Grammar
-
 if TYPE_CHECKING:
-    from typing_extensions import Self
-
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
-    from .grammar import XGrammar
-
-logger = init_logger(__name__)
-
 __all__ = ["Grammar", "GuidedDecodingManager"]
+
+
+class Grammar:
+    # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string for jump-forward decoding
+
+    def __init__(self, matcher: xgr.GrammarMatcher, vocab_size: int,
+                 ctx: xgr.CompiledGrammar) -> None:
+        self.matcher = matcher
+        self.vocab_size = vocab_size
+        self.ctx = ctx
+
+    def accept_token(self, token: int) -> bool:
+        # NOTE: accept_token will determines whether we accept this token
+        # and will also update the machine state
+        return self.matcher.accept_token(token)
+
+    def allocate_bitmask(self, batch_size: int,
+                         vocab_size: int) -> torch.Tensor:
+        return xgr.allocate_token_bitmask(batch_size, vocab_size)
+
+    # this should be ran in parallel with model decoding
+    def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
+        self.matcher.fill_next_token_bitmask(bitmask, idx)
+
+    @staticmethod
+    def apply_bitmask(logits: torch.Tensor, vocab_mask: torch.Tensor) -> None:
+        xgr.apply_token_bitmask_inplace(logits, vocab_mask)
+
+    def reset(self):
+        self.matcher.reset()
+
+    def copy(self):
+        return Grammar(matcher=xgr.GrammarMatcher(self.ctx),
+                       vocab_size=self.vocab_size,
+                       ctx=self.ctx)
+
+    def __copy__(self):
+        return self.copy()
 
 
 @dataclass
@@ -74,20 +104,17 @@ class GuidedDecodingManager:
             return True
         return False
 
-    def __init__(self, *, backend: str, tokenizer_group: BaseTokenizerGroup,
-                 model_config: ModelConfig):
-        self._backend = backend
-        self.model_config = model_config
+    def __init__(self, *, vllm_config: VllmConfig,
+                 tokenizer_group: BaseTokenizerGroup):
+        self.vllm_config = vllm_config
         self.tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.grammar_cache: dict[GuidedDecodingKey, GrammarCache] = {}
         self.executor = ThreadPoolExecutor()
         self._lock = threading.Lock()
-        cls._registry[backend] = cls
 
-    def initialize_cache(self, key: GuidedDecodingKey) -> Self:
+    def initialize_cache(self, key: GuidedDecodingKey, max_threads: int = 8):
         request_type, grammar_spec = key
-        tokenizer_info = xgr.TokenizerInfo.from_huggingface(
-            tokenizer, stop_token_ids=stop_token_ids, vocab_size=vocab_size)
+        tokenizer_info = xgr.TokenizerInfo.from_huggingface(self.tokenizer)
         compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=max_threads)
         if request_type == "json":
             if type(grammar_spec) is not str:
@@ -98,6 +125,7 @@ class GuidedDecodingManager:
             ctx = compiler.compile_grammar(grammar_spec)
         else:
             raise ValueError("grammar is not of valid supported types.")
-        return Grammar(matcher=xgr.GrammarMatcher(ctx),
-                       vocab_size=self.model_config.hf_text_config.vocab_size,
-                       ctx=ctx)
+        return Grammar(
+            matcher=xgr.GrammarMatcher(ctx),
+            vocab_size=self.vllm_config.model_config.hf_text_config.vocab_size,
+            ctx=ctx)

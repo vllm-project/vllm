@@ -14,8 +14,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.guided_decoding import GuidedDecodingManager
-from vllm.v1.core.guided_decoding.grammar import Grammar
+from vllm.v1.core.guided_decoding import Grammar
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.metrics.stats import SchedulerStats
@@ -40,13 +39,11 @@ class Scheduler:
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
         lora_config: Optional[LoRAConfig],
-        decoding_config: DecodingConfig,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
         self.model_config = model_config
-        self.decoding_config = decoding_config
         # TODO: Support LoRA.
         assert lora_config is None, "V1 does not support LoRA yet."
         # Scheduling constraints.
@@ -103,21 +100,6 @@ class Scheduler:
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
 
-        # A request queue for grammar compilation
-        self.grammar: Deque[Request] = deque()
-        # initialize the tokenizer on the scheduler (this is used for constrained decoding)
-        tokenizer_group = init_tokenizer_from_configs(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
-            parallel_config=parallel_config,
-            lora_config=lora_config)
-        tokenizer_group.ping()
-        # setup guided decoding, right now uses xgrammar
-        self.guided_decoding_manager = GuidedDecodingManager(
-            backend=decoding_config.guided_decoding_backend,
-            tokenizer_group=tokenizer_group,
-            model_config=model_config)
-
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -132,25 +114,6 @@ class Scheduler:
         scheduled_resumed_reqs: List[Request] = []
         scheduled_running_reqs: List[Request] = []
         preempted_reqs: List[Request] = []
-
-        # we need to check the grammar queue for any requests that have finished FSM compilation
-        newly_grammar_reqs: List[Request] = []
-        scheduled_grammar_reqs: Deque[Request] = deque()
-        while self.grammar:
-            request = self.grammar.popleft()
-            try:
-                # When request first added via add_request, then it will be a future call
-                # check timeout and add it directly to previous queue
-                request.grammar = request.grammar.result(timeout=0.05)
-                request.status = RequestStatus.WAITING
-                newly_grammar_reqs.append(request)
-            except futures._base.TimeoutError:
-                scheduled_grammar_reqs.append(request)
-        self.grammar = scheduled_grammar_reqs
-
-        # append all newly ready requests to waiting queue with higher priority
-        for req in newly_grammar_reqs:
-            self.waiting.appendleft(req)
 
         req_to_new_block_ids: Dict[str, List[int]] = {}
         num_scheduled_tokens: Dict[str, int] = {}
@@ -238,13 +201,6 @@ class Scheduler:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
 
-            # Track if we need guided decoding
-            # Create individual bitmask for requests with grammar
-            if request.grammar is not None:
-                if request.request_id not in guided_decoding_bitmasks:
-                    bitmask = request.grammar.allocate_bitmask(1, vocab_size)
-                    guided_decoding_bitmasks[request.request_id] = bitmask
-
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             while self.waiting:
@@ -258,7 +214,8 @@ class Scheduler:
                 request = self.waiting[0]
 
                 # allocate bitmask on request on first round
-                if request.grammar: request.allocate_grammar_bitmask(vocab_size=vocab_size)
+                if request.grammar:
+                    request.allocate_grammar_bitmask(vocab_size=vocab_size)
 
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
@@ -356,8 +313,12 @@ class Scheduler:
         ]
         running_reqs_data = [
             self._make_running_request_data(
-                req, req_to_new_block_ids[req.request_id],
-                req.num_computed_tokens, grammar=req.grammar, grammar_bitmask=req.grammar_bitmask) for req in scheduled_running_reqs
+                req,
+                req_to_new_block_ids[req.request_id],
+                req.num_computed_tokens,
+                grammar=req.grammar,
+                grammar_bitmask=req.grammar_bitmask)
+            for req in scheduled_running_reqs
         ]
         preempted_req_ids = {req.request_id for req in preempted_reqs}
 
@@ -375,7 +336,6 @@ class Scheduler:
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
-            guided_decoding_bitmasks=guided_decoding_bitmasks,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
         )
 
@@ -398,7 +358,7 @@ class Scheduler:
             req_data.new_block_ids = new_block_ids
             req_data.num_computed_tokens = num_computed_tokens
             req_data.grammar = grammar
-            req_data.grammar_bitmask=grammar_bitmask
+            req_data.grammar_bitmask = grammar_bitmask
         else:
             req_data = RunningRequestData.from_request(request, new_block_ids,
                                                        num_computed_tokens)
@@ -480,6 +440,8 @@ class Scheduler:
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
     ) -> EngineCoreOutputs:
+        # concern: batchsize >>>1000
+        # compilation << update
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
@@ -560,11 +522,7 @@ class Scheduler:
 
     def add_request(self, request: Request) -> None:
         self.requests[request.request_id] = request
-
-        if self.guided_decoding_manager.collect(request):
-            self.grammar.append(request)
-        else:
-            self.waiting.append(request)
+        self.waiting.append(request)
 
     def finish_requests(
         self,
@@ -648,7 +606,8 @@ class NewRequestData:
                    sampling_params=request.sampling_params,
                    block_ids=block_ids,
                    num_computed_tokens=num_computed_tokens,
-                   grammar=request.grammar, grammar_bitmask=request.grammar_bitmask)
+                   grammar=request.grammar,
+                   grammar_bitmask=request.grammar_bitmask)
 
 
 @dataclass
@@ -671,7 +630,8 @@ class ResumedRequestData:
         return cls(req_id=request.request_id,
                    block_ids=block_ids,
                    num_computed_tokens=num_computed_tokens,
-                   grammar=request.grammar, grammar_bitmask=request.grammar_bitmask)
+                   grammar=request.grammar,
+                   grammar_bitmask=request.grammar_bitmask)
 
 
 @dataclass
@@ -694,7 +654,8 @@ class RunningRequestData:
         return cls(req_id=request.request_id,
                    new_block_ids=new_block_ids,
                    num_computed_tokens=num_computed_tokens,
-                   grammar=request.grammar, grammar_bitmask=request.grammar_bitmask)
+                   grammar=request.grammar,
+                   grammar_bitmask=request.grammar_bitmask)
 
 
 @dataclass

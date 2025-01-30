@@ -9,7 +9,7 @@ import torch
 
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.v1.core.guided_decoding.grammar import Grammar
+from vllm.v1.core.guided_decoding import Grammar
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import BlockTable
 
