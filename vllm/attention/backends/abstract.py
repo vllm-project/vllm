@@ -269,7 +269,7 @@ class AttentionImpl(ABC, Generic[T]):
         self,
         layer: AttentionLayer,
         query: torch.Tensor,  # For MLA hidden_states_or_cq
-        key: torch.Tensor,  # For MLA ckv_normed
+        key: torch.Tensor,  # For MLA kv_c_normed
         value: torch.Tensor,  # For MLA k_pe
         kv_cache: torch.Tensor,
         attn_metadata: T,

@@ -52,7 +52,7 @@ class MLAImplCommon(AttentionImpl):
 
         1. The hidden states (B, H) are projected down into cq (B, Lq) and
            kv_c_k_pe (B, Lkv+R).
-        2. The kv_c_k_pe is split into ckv (B, Lkv) and k_pe (B, R). cq
+        2. The kv_c_k_pe is split into kv_c (B, Lkv) and k_pe (B, R). cq
            and kv_c are normalized.
         
         #
@@ -249,7 +249,7 @@ class MLAImplCommon(AttentionImpl):
     def _forward_prefill(
         self,
         q: torch.Tensor,
-        ckv_normed: torch.Tensor,
+        kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         attn_metadata: MLAMetadataCommon,
     ) -> torch.Tensor:
