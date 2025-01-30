@@ -3,7 +3,9 @@ from typing import Dict, List, Optional
 
 import pytest
 
-from tests.v1.engine.utils import (STOP_STRINGS,
+from tests.v1.engine.utils import (NUM_PROMPT_LOGPROBS_UNDER_TEST,
+                                   NUM_SAMPLE_LOGPROBS_UNDER_TEST,
+                                   STOP_STRINGS,
                                    DummyOutputProcessorTestVectors,
                                    MockEngineCore)
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -309,8 +311,10 @@ def _validate_logprobs(
 @pytest.mark.parametrize(
     "request_output_kind",
     [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
-@pytest.mark.parametrize("num_sample_logprobs", [None, 5])
-@pytest.mark.parametrize("num_prompt_logprobs", [None, 5])
+@pytest.mark.parametrize("num_sample_logprobs",
+                         [None, NUM_SAMPLE_LOGPROBS_UNDER_TEST])
+@pytest.mark.parametrize("num_prompt_logprobs",
+                         [None, NUM_PROMPT_LOGPROBS_UNDER_TEST])
 def test_logprobs_processor(request_output_kind: RequestOutputKind,
                             num_sample_logprobs: Optional[int],
                             num_prompt_logprobs: Optional[int],
@@ -319,10 +323,10 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
                                        log_stats=False)
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
-        generated_logprobs_raw=dummy_test_vectors.generation_logprobs
-        if num_sample_logprobs else None,
-        prompt_logprobs_raw=dummy_test_vectors.prompt_logprobs
-        if num_prompt_logprobs else None)
+        generated_logprobs_raw=None if num_sample_logprobs is None else
+        dummy_test_vectors.generation_logprobs,
+        prompt_logprobs_raw=None
+        if num_prompt_logprobs is None else dummy_test_vectors.prompt_logprobs)
 
     # Make N requests.
     request_id_list = [
