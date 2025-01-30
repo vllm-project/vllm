@@ -376,7 +376,7 @@ steps:
   # here by PR authors, just remember to delete changes afterwards. 
   commands:
     - chmod +x check-performance.sh
-    - check-performance.sh --max-model-len 4096
+    - bash check-performance.sh --max-model-len 4096
 
 #####  models test  #####
 
