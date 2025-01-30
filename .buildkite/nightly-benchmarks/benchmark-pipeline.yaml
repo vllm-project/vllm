@@ -1,5 +1,6 @@
 steps:
   - label: "Wait for container to be ready"
+    key: wait-for-container-image
     agents:
       queue: A100
     plugins:
@@ -10,12 +11,11 @@ steps:
             command:
             - sh .buildkite/nightly-benchmarks/scripts/wait-for-image.sh
 
-  - wait
-
   - label: "A100"
     # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
       queue: A100
+    depends_on: wait-for-container-image
     plugins:
     - kubernetes:
         podSpec:
@@ -49,6 +49,7 @@ steps:
     # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
       queue: H200
+    depends_on: wait-for-container-image
     plugins:
     - docker#v5.12.0:
         image: public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT
@@ -73,7 +74,7 @@ steps:
     # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
       queue: H100
-    depends_on: ~
+    depends_on: wait-for-container-image
     plugins:
     - docker#v5.12.0:
         image: public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT

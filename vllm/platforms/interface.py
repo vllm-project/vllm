@@ -33,6 +33,7 @@ class _Backend(enum.Enum):
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
+    BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
 
 
@@ -45,6 +46,7 @@ class PlatformEnum(enum.Enum):
     CPU = enum.auto()
     NEURON = enum.auto()
     OPENVINO = enum.auto()
+    OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
 
@@ -77,10 +79,30 @@ class Platform:
     _enum: PlatformEnum
     device_name: str
     device_type: str
+
     # available dispatch keys:
     # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134 # noqa
     # use "CPU" as a fallback for platforms not registered in PyTorch
     dispatch_key: str = "CPU"
+
+    # available ray device keys:
+    # https://github.com/ray-project/ray/blob/10ba5adadcc49c60af2c358a33bb943fb491a171/python/ray/_private/ray_constants.py#L438 # noqa
+    # empty string means the device does not support ray
+    ray_device_key: str = ""
+
+    # platform-agnostic way to specify the device control environment variable,
+    # .e.g. CUDA_VISIBLE_DEVICES for CUDA.
+    # hint: search for "get_visible_accelerator_ids_env_var" in
+    # https://github.com/ray-project/ray/tree/master/python/ray/_private/accelerators # noqa
+    device_control_env_var: str = "VLLM_DEVICE_CONTROL_ENV_VAR_PLACEHOLDER"
+
+    # The torch.compile backend for compiling simple and
+    # standalone functions. The default value is "inductor" to keep
+    # the same behavior as PyTorch.
+    # NOTE: for the forward part of the model, vLLM has another separate
+    # compilation strategy.
+    simple_compile_backend: str = "inductor"
+
     supported_quantization: list[str] = []
 
     def is_cuda(self) -> bool:
@@ -107,14 +129,19 @@ class Platform:
     def is_openvino(self) -> bool:
         return self._enum == PlatformEnum.OPENVINO
 
+    def is_out_of_tree(self) -> bool:
+        return self._enum == PlatformEnum.OOT
+
     def is_cuda_alike(self) -> bool:
         """Stateless version of :func:`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend):
-        """Get the default attention backend of a device."""
-        return None
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool) -> str:
+        """Get the attention backend class of a device."""
+        return ""
 
     @classmethod
     def get_device_capability(
@@ -249,6 +276,22 @@ class Platform:
                            "This may slow down the performance.")
             return False
         return True
+
+    @classmethod
+    def get_current_memory_usage(cls,
+                                 device: Optional[torch.types.Device] = None
+                                 ) -> float:
+        """
+        Return the memory usage in bytes.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        """
+        Return the punica wrapper for current platform.
+        """
+        raise NotImplementedError
 
 
 class UnspecifiedPlatform(Platform):

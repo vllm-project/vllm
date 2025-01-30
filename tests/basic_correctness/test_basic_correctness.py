@@ -44,7 +44,6 @@ def test_vllm_gc_ed():
     assert weak_llm() is None
 
 
-@pytest.mark.skip_v1
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS", "FLASHINFER"])
 @pytest.mark.parametrize("dtype", ["half"])
@@ -62,9 +61,10 @@ def test_models(
     if backend == "FLASHINFER" and current_platform.is_rocm():
         pytest.skip("Flashinfer does not support ROCm/HIP.")
 
-    if backend == "XFORMERS" and model == "google/gemma-2-2b-it":
+    if backend in ("XFORMERS",
+                   "FLASHINFER") and model == "google/gemma-2-2b-it":
         pytest.skip(
-            "XFORMERS does not support gemma2 with full context length.")
+            f"{backend} does not support gemma2 with full context length.")
 
     os.environ["VLLM_ATTENTION_BACKEND"] = backend
 

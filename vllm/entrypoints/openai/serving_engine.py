@@ -26,7 +26,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeRequest,
                                               EmbeddingChatRequest,
                                               EmbeddingCompletionRequest,
-                                              ErrorResponse, ScoreRequest,
+                                              ErrorResponse, RerankRequest,
+                                              ScoreRequest,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -160,6 +161,11 @@ class OpenAIServing:
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
+        if (self.model_config.encoder_config is not None
+                and self.model_config.encoder_config.get(
+                    "do_lower_case", False)):
+            prompt = prompt.lower()
+
         if truncate_prompt_tokens is None:
             encoded = tokenizer(prompt, add_special_tokens=add_special_tokens)
         else:
@@ -198,15 +204,19 @@ class OpenAIServing:
     ) -> TextTokensPrompt:
         token_num = len(input_ids)
 
-        # Note: EmbeddingRequest doesn't have max_tokens
+        # Note: EmbeddingRequest and ScoreRequest doesn't have max_tokens
         if isinstance(request,
-                      (EmbeddingChatRequest, EmbeddingCompletionRequest)):
+                      (EmbeddingChatRequest, EmbeddingCompletionRequest,
+                       ScoreRequest, RerankRequest)):
+
+            operation = "score" if isinstance(request, ScoreRequest) \
+                else "embedding generation"
             if token_num > self.max_model_len:
                 raise ValueError(
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, you requested "
-                    f"{token_num} tokens in the input for embedding "
-                    f"generation. Please reduce the length of the input.")
+                    f"{token_num} tokens in the input for {operation}. "
+                    f"Please reduce the length of the input.")
             return TextTokensPrompt(prompt=input_text,
                                     prompt_token_ids=input_ids)
 

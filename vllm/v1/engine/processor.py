@@ -7,14 +7,15 @@ from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
 from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
-                             MultiModalRegistry)
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalHasher,
+                             MultiModalKwargs, MultiModalRegistry)
+from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.mm_input_mapper import MMHasher, MMInputMapperClient
+from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 
 
 class Processor:
@@ -47,11 +48,7 @@ class Processor:
         # Multi-modal hasher (for images)
         self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
             cache_config.enable_prefix_caching
-        self.mm_hasher = MMHasher()
 
-    # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
-    # This ideally should releases the GIL, so we should not block the
-    # asyncio loop while this is running.
     def process_inputs(
         self,
         request_id: str,
@@ -75,11 +72,6 @@ class Processor:
             arrival_time = time.time()
         assert priority == 0, "vLLM V1 does not support priority at the moment."
         assert trace_headers is None, "vLLM V1 does not support tracing yet."
-
-        # Compute MM hashes (if enabled)
-        mm_hashes = None
-        if self.use_hash:
-            mm_hashes = self.mm_hasher.hash_prompt_mm_data(prompt)
 
         # Process inputs.
         preprocessed_inputs = self.input_preprocessor.preprocess(
@@ -111,8 +103,20 @@ class Processor:
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
 
+        # Multimodal related.
+        # Compute MM hashes (if enabled)
+        mm_hashes = None
+        if self.use_hash:
+            # Use mm_hashes from processed inputs if the model has merged
+            # input processor.
+            if decoder_inputs.multi_modal_hashes:
+                mm_hashes = decoder_inputs.multi_modal_hashes
+            # Fallback to using MultiModalHasher directly.
+            else:
+                mm_hashes = MultiModalHasher.hash_prompt_mm_data(prompt)
+
         # For merged preprocessor, mm_data is already mm_inputs
-        precomputed_mm_inputs = None
+        precomputed_mm_inputs: Optional[list[MultiModalKwargs]] = None
         decoder_mm_data = decoder_inputs.multi_modal_data
         if isinstance(decoder_mm_data, MultiModalKwargs):
             # The output of merged multi-modal processor (`decoder_mm_data`)
@@ -125,27 +129,67 @@ class Processor:
                 for item in decoder_mm_data.get_items(modality)
             ]
 
-        # Apply MM mapper
-        mm_inputs = None
-        if len(decoder_mm_data) > 0:
-            mm_inputs = self.mm_input_mapper_client.process_inputs(
-                decoder_mm_data,
+        mm_positions = decoder_inputs.multi_modal_placeholders
+
+        # Last-mile processing of multimodal metadata and inputs.
+        if mm_positions:
+
+            # Merge and flatten multimodal placeholders, hashes and inputs
+            # from dictionaries to lists, and sort them by each item's position
+            # in the input sequence.
+            # NOTE: interleaved modalities are not supported.
+            (
+                sorted_modalities,
+                sorted_mm_positions,
+                sorted_mm_hashes,
+            ) = merge_and_sort_multimodal_metadata(
+                mm_positions,
                 mm_hashes,
-                decoder_inputs.mm_processor_kwargs,
-                precomputed_mm_inputs,
             )
 
+            # NOTE: Sort multimodal inputs/kwargs ONLY IF there are multiple
+            # modalities involved AND the model supports merged input processor.
+            if len(sorted_modalities) > 1 and precomputed_mm_inputs:
+
+                modality_order_dict = {
+                    modality: order
+                    for order, modality in enumerate(sorted_modalities)
+                }
+
+                # Sanity check to make sure each multimodal input has only one
+                # modality key.
+                for mm_input in precomputed_mm_inputs:
+                    assert len(mm_input.modalities) == 1
+
+                # Sort MultiModalKwags to match sorted_mm_positions
+                precomputed_mm_inputs = sorted(
+                    precomputed_mm_inputs,
+                    key=lambda mm_input: modality_order_dict[list(
+                        mm_input.modalities)[0]])
+
+            # Apply mm input cache update (and input mapper if necessary).
+            sorted_mm_inputs = self.mm_input_mapper_client.process_inputs(
+                mm_data=decoder_mm_data,
+                mm_hashes=sorted_mm_hashes,
+                mm_processor_kwargs=decoder_inputs.mm_processor_kwargs,
+                precomputed_mm_inputs=precomputed_mm_inputs,
+            )
+        else:
+            sorted_mm_inputs = None
+            sorted_mm_hashes = None
+            sorted_mm_positions = None
+
         return EngineCoreRequest(
-            request_id,
-            decoder_inputs.prompt,
-            decoder_inputs.prompt_token_ids,
-            mm_inputs,
-            mm_hashes,
-            decoder_inputs.multi_modal_placeholders,
-            sampling_params,
-            eos_token_id,
-            arrival_time,
-            lora_request,
+            request_id=request_id,
+            prompt=decoder_inputs.prompt,
+            prompt_token_ids=decoder_inputs.prompt_token_ids,
+            mm_inputs=sorted_mm_inputs,
+            mm_hashes=sorted_mm_hashes,
+            mm_placeholders=sorted_mm_positions,
+            sampling_params=sampling_params,
+            eos_token_id=eos_token_id,
+            arrival_time=arrival_time,
+            lora_request=lora_request,
         )
 
     def _validate_model_inputs(self, inputs: ProcessorInputs):

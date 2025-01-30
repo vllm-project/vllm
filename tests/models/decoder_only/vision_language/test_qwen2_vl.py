@@ -5,7 +5,6 @@ import pytest
 import torch
 from PIL import Image
 
-from vllm.entrypoints.llm import LLM
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import rescale_video_size, sample_frames_from_video
 
@@ -69,7 +68,7 @@ class Qwen2VLPromptVideoEmbeddingInput(TypedDict):
 
 def batch_make_image_embeddings(
         image_batches: List[Union[Image.Image, List[Image.Image]]], processor,
-        llm: LLM) -> List[Qwen2VLPromptImageEmbeddingInput]:
+        llm: VllmRunner) -> List[Qwen2VLPromptImageEmbeddingInput]:
     """batched image embeddings for Qwen2-VL
 
     This will infer all images' embeddings in a single batch, 
@@ -105,17 +104,19 @@ def batch_make_image_embeddings(
     pixel_values = preprocess_result["pixel_values"]
     image_grid_thw = preprocess_result["image_grid_thw"]
 
-    # pixel values to embeddinds & grid_thws
-    with torch.no_grad():
-        visual = llm.llm_engine.model_executor.driver_worker. \
-            model_runner.model.visual
+    # pixel values to embeddings & grid_thws
+    def get_image_embeds(model):
+        with torch.no_grad():
+            visual = model.visual
 
-        pixel_values_on_device = pixel_values.to(visual.device,
-                                                 dtype=visual.dtype)
-        image_grid_thw_on_device = image_grid_thw.to(visual.device,
-                                                     dtype=torch.int64)
-        image_embeds = visual(pixel_values_on_device,
-                              grid_thw=image_grid_thw_on_device)
+            pixel_values_on_device = pixel_values.to(visual.device,
+                                                     dtype=visual.dtype)
+            image_grid_thw_on_device = image_grid_thw.to(visual.device,
+                                                         dtype=torch.int64)
+            return visual(pixel_values_on_device,
+                          grid_thw=image_grid_thw_on_device)
+
+    image_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
     # split into original batches
     result: List[Qwen2VLPromptImageEmbeddingInput] = []
@@ -124,11 +125,10 @@ def batch_make_image_embeddings(
     for image_batch in image_batches_:
         cur_batch_image_count = len(image_batch)
         merge_size = image_processor.merge_size
-        cur_batch_embed_len = sum([
-            grid_thw.prod() // merge_size // merge_size
+        cur_batch_embed_len = sum(
+            grid_thw.prod(-1) // merge_size // merge_size
             for grid_thw in image_grid_thw[image_counter:image_counter +
-                                           cur_batch_image_count]
-        ])
+                                           cur_batch_image_count])
 
         result.append({
             "image_embeds":
@@ -151,7 +151,7 @@ def batch_make_image_embeddings(
 
 def batch_make_video_embeddings(
         video_batches: PromptVideoInput, processor,
-        llm: LLM) -> List[Qwen2VLPromptVideoEmbeddingInput]:
+        llm: VllmRunner) -> List[Qwen2VLPromptVideoEmbeddingInput]:
     """batched video embeddings for Qwen2-VL
 
     A NDArray represents a single video's all frames.
@@ -187,17 +187,19 @@ def batch_make_video_embeddings(
     pixel_values = preprocess_result["pixel_values_videos"]
     video_grid_thw = preprocess_result["video_grid_thw"]
 
-    # pixel values to embeddinds & grid_thws
-    with torch.no_grad():
-        visual = llm.llm_engine.model_executor.driver_worker.\
-            model_runner.model.visual
+    # pixel values to embeddings & grid_thws
+    def get_image_embeds(model):
+        with torch.no_grad():
+            visual = model.visual
 
-        pixel_values_on_device = pixel_values.to(visual.device,
-                                                 dtype=visual.dtype)
-        video_grid_thw_on_device = video_grid_thw.to(visual.device,
-                                                     dtype=torch.int64)
-        video_embeds = visual(pixel_values_on_device,
-                              grid_thw=video_grid_thw_on_device)
+            pixel_values_on_device = pixel_values.to(visual.device,
+                                                     dtype=visual.dtype)
+            video_grid_thw_on_device = video_grid_thw.to(visual.device,
+                                                         dtype=torch.int64)
+            return visual(pixel_values_on_device,
+                          grid_thw=video_grid_thw_on_device)
+
+    video_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
     # split into original batches
     result: List[Qwen2VLPromptVideoEmbeddingInput] = []
@@ -206,11 +208,10 @@ def batch_make_video_embeddings(
     for video_batch in video_batches_:
         cur_batch_video_count = len(video_batch)
         merge_size = image_processor.merge_size
-        cur_batch_embed_len = sum([
-            grid_thw.prod() // merge_size // merge_size
+        cur_batch_embed_len = sum(
+            grid_thw.prod(-1) // merge_size // merge_size
             for grid_thw in video_grid_thw[video_counter:video_counter +
-                                           cur_batch_video_count]
-        ])
+                                           cur_batch_video_count])
 
         result.append({
             "video_embeds":
@@ -280,9 +281,9 @@ def run_embedding_input_test(
                 max_tokens,
                 num_logprobs=num_logprobs,
                 images=batch_make_image_embeddings(
-                    images, processor, vllm_model.model) if images else None,
+                    images, processor, vllm_model) if images else None,
                 videos=batch_make_video_embeddings(
-                    videos, processor, vllm_model.model) if videos else None)
+                    videos, processor, vllm_model) if videos else None)
             for prompts, images, videos in inputs
         ]
 
@@ -418,133 +419,6 @@ def test_qwen2_vl_video_embeddings_input(vllm_runner, video_assets, model,
         ) for video, prompt in zip(sampled_vids, VIDEO_PROMPTS)]
 
     run_embedding_input_test(
-        vllm_runner,
-        inputs_per_case,
-        model,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        mm_limit=1,
-        tensor_parallel_size=1,
-    )
-
-
-def run_chunked_prefill_test(
-    vllm_runner: Type[VllmRunner],
-    inputs: List[Tuple[List[str], PromptImageInput, PromptVideoInput]],
-    model: str,
-    *,
-    dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
-    mm_limit: int,
-    tensor_parallel_size: int,
-    distributed_executor_backend: Optional[str] = None,
-):
-    """Compare inference result between
-    chunked prefill disabled and chunked prefill enabled
-    """
-
-    # NOTE:
-    # max_model_len should be greater than image_feature_size
-    with vllm_runner(model,
-                     task="generate",
-                     max_model_len=4000,
-                     max_num_seqs=4,
-                     dtype=dtype,
-                     limit_mm_per_prompt={
-                         "image": mm_limit,
-                         "video": mm_limit
-                     },
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend
-                     ) as vllm_model:
-
-        outputs_per_case = [
-            vllm_model.generate_greedy_logprobs(prompts,
-                                                max_tokens,
-                                                num_logprobs=num_logprobs,
-                                                images=images or None,
-                                                videos=videos or None)
-            for prompts, images, videos in inputs
-        ]
-
-    with vllm_runner(
-            model,
-            task="generate",
-            max_model_len=4000,
-            max_num_seqs=4,
-            dtype=dtype,
-            limit_mm_per_prompt={
-                "image": mm_limit,
-                "video": mm_limit
-            },
-            tensor_parallel_size=tensor_parallel_size,
-            distributed_executor_backend=distributed_executor_backend,
-            enable_chunked_prefill=True,
-            # should be small enough to ensure prefilling is chunked
-            max_num_batched_tokens=32,
-            mm_processor_kwargs={
-                "max_pixels": 16 * 28 * 28,
-            }) as vllm_model_chunked:
-        outputs_per_case_chunked = [
-            vllm_model_chunked.generate_greedy_logprobs(
-                prompts,
-                max_tokens,
-                num_logprobs=num_logprobs,
-                images=images or None,
-                videos=videos or None) for prompts, images, videos in inputs
-        ]
-
-    for outputs, \
-        outputs_chunked \
-        in zip(outputs_per_case,
-            outputs_per_case_chunked):
-        check_logprobs_close(
-            outputs_0_lst=outputs,
-            outputs_1_lst=outputs_chunked,
-            name_0="non_chunked",
-            name_1="chunked",
-        )
-
-
-@pytest.mark.core_model
-@pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("dtype", [target_dtype])
-@pytest.mark.parametrize("max_tokens", [1])
-@pytest.mark.parametrize("num_logprobs", [10])
-def test_qwen2_vl_mrope_chunked_prefill(vllm_runner, example_prompts,
-                                        model: str, dtype: str,
-                                        max_tokens: int,
-                                        num_logprobs: int) -> None:
-    """
-    Test Qwen2-VL's chunked prefill with M-RoPE
-    """
-    prompts = [
-        qwen2_vl_chat_template(IMAGE_PLACEHOLDER, prompt)
-        for prompt in example_prompts[:1]
-    ]
-
-    # 1. Qwen2-VL's M-RoPE works only when there are some multi-modal inputs,
-    #    so an image is included in the inputs
-    # 2. however, Qwen2-VL currently won't work properly
-    #    when chunked prefill is enabled and there are some multi-modal inputs,
-    #    here use a hacky way: provide a **zero-length** image to make it happy
-    #
-    # and finally we achieved:
-    # (1) chunked_prefill enabled; (2) M-RoPE works; to continue our tests
-    zero_len_image = {
-        "image_embeds": torch.empty((0, MODEL_HIDDEN_SIZE)),
-        "image_grid_thw": torch.tensor([[0, 0, 0]])
-    }
-    images = [zero_len_image] * len(prompts)
-
-    inputs_per_case: List[Tuple[List[str], PromptImageInput,
-                                PromptVideoInput]] = [
-                                    (prompts, images, []),
-                                ]
-
-    run_chunked_prefill_test(
         vllm_runner,
         inputs_per_case,
         model,
