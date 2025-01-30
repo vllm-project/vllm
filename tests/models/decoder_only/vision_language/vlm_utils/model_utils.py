@@ -339,6 +339,7 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                                                      trust_remote_code=True)
             self.vision_config = self.config.vision_config
             self.use_thumbnail = self.config.use_thumbnail
+            self.use_msac = self.config.use_msac
             self.min_num = self.config.min_dynamic_patch
             self.max_num = self.config.max_dynamic_patch
             self.image_size = self.vision_config.image_size
@@ -347,18 +348,19 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                      **kwargs):
             # yapf: disable
             from vllm.model_executor.models.h2ovl import (
-                IMG_CONTEXT, IMG_END, IMG_START, image_to_pixel_values)
+                IMG_CONTEXT, IMG_END, IMG_START, image_to_pixel_values_h2ovl)
 
             # yapf: enable
             images = [images] if isinstance(images, Image) else images
             pixel_values = [
-                image_to_pixel_values(image,
-                                      self.image_size,
-                                      self.min_num,
-                                      self.max_num,
-                                      self.use_thumbnail,
-                                      use_MSAC=self.config.use_msac).to(
-                                          self.dtype) for image in images
+                image_to_pixel_values_h2ovl(
+                    image,
+                    input_size=self.image_size,
+                    min_num=self.min_num,
+                    max_num=self.max_num,
+                    use_thumbnail=self.use_thumbnail,
+                    use_msac=self.use_msac,
+                ).to(self.dtype) for image in images
             ]
             num_patches_list = [
                 pixel_value.shape[0] for pixel_value in pixel_values
@@ -406,13 +408,17 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         def __call__(self, text: str, images: Union[Image, List[Image]],
                      **kwargs):
             from vllm.model_executor.models.internvl import (
-                IMG_CONTEXT, IMG_END, IMG_START, image_to_pixel_values)
+                IMG_CONTEXT, IMG_END, IMG_START,
+                image_to_pixel_values_internvl)
             images = [images] if isinstance(images, Image) else images
             pixel_values = [
-                image_to_pixel_values(image, self.image_size, self.min_num,
-                                      self.max_num,
-                                      self.use_thumbnail).to(self.dtype)
-                for image in images
+                image_to_pixel_values_internvl(
+                    image,
+                    input_size=self.image_size,
+                    min_num=self.min_num,
+                    max_num=self.max_num,
+                    use_thumbnail=self.use_thumbnail,
+                ).to(self.dtype) for image in images
             ]
             num_patches_list = [
                 pixel_value.shape[0] for pixel_value in pixel_values

@@ -13,14 +13,14 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .intern_vit import InternVisionModel
-from .internvl import (InternVLChatModel, InternVLDummyInputsBuilder,
-                       InternVLMultiModalProcessor, InternVLProcessingInfo,
-                       InternVLProcessor)
+from .internvl import (BaseInternVLProcessingInfo, BaseInternVLProcessor,
+                       InternVLChatModel, InternVLDummyInputsBuilder,
+                       InternVLMultiModalProcessor)
 
 IMG_PAD = "<|vision_pad|>"
 
 
-class NVLMProcessor(InternVLProcessor):
+class NVLMProcessor(BaseInternVLProcessor):
 
     @property
     def image_token_id(self) -> int:
@@ -51,7 +51,7 @@ class NVLMProcessor(InternVLProcessor):
         return "<Image>" + features + "</Image>"
 
 
-class NVLMProcessingInfo(InternVLProcessingInfo):
+class NVLMProcessingInfo(BaseInternVLProcessingInfo):
 
     def get_hf_processor(
         self,

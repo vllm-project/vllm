@@ -4,17 +4,16 @@
 # Copyright (c) 2023 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
+from abc import ABC, abstractmethod
 from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+                    TypedDict, TypeVar, Union)
 
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
-from transformers.image_utils import ImageInput
-from transformers.tokenization_utils_base import TextInput
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -76,22 +75,27 @@ InternVLImageInputs = Union[InternVLImagePixelInputs,
                             InternVLImageEmbeddingInputs]
 
 
-# copied from https://huggingface.co/OpenGVLab/InternVL2-1B
-def build_transform(input_size):
+# adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
+def build_transform(input_size: int):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
-    transform = T.Compose([
+    return T.Compose([
         T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
         T.Resize((input_size, input_size),
                  interpolation=T.InterpolationMode.BICUBIC),
         T.ToTensor(),
         T.Normalize(mean=MEAN, std=STD)
     ])
-    return transform
 
 
-# copied from https://huggingface.co/OpenGVLab/InternVL2-1B
-def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height,
-                              image_size):
+# adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
+def find_closest_aspect_ratio(
+    aspect_ratio: float,
+    target_ratios: list[tuple[int, int]],
+    *,
+    width: int,
+    height: int,
+    image_size: int,
+) -> tuple[int, int]:
     best_ratio_diff = float('inf')
     best_ratio = (1, 1)
     area = width * height
@@ -107,21 +111,51 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height,
     return best_ratio
 
 
-def calculate_targets(orig_width: int, orig_height: int, min_num: int,
-                      max_num: int, image_size: int,
-                      use_thumbnail: bool) -> Tuple[int, int, int]:
+def resolve_internvl_min_max_num(
+    *,
+    min_dynamic_patch: int,
+    max_dynamic_patch: int,
+    dynamic_image_size: bool,
+    use_thumbnail: bool,
+) -> tuple[int, int]:
+    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
+
+    if use_thumbnail and max_dynamic_patch > 1:
+        max_dynamic_patch += 1
+
+    return min_dynamic_patch, max_dynamic_patch
+
+
+def get_internvl_target_ratios(
+    min_num: int,
+    max_num: int,
+) -> list[tuple[int, int]]:
+    target_ratios = {(i, j)
+                     for n in range(min_num, max_num + 1)
+                     for i in range(1, n + 1)
+                     for j in range(1, n + 1)
+                     if i * j <= max_num and i * j >= min_num}
+    return sorted(target_ratios, key=lambda x: x[0] * x[1])
+
+
+def calculate_internvl_targets(
+    *,
+    orig_width: int,
+    orig_height: int,
+    target_ratios: list[tuple[int, int]],
+    image_size: int,
+    use_thumbnail: bool,
+) -> tuple[int, int, int]:
     aspect_ratio = orig_width / orig_height
 
-    # calculate the existing image aspect ratio
-    target_ratios = set((i, j) for n in range(min_num, max_num + 1)
-                        for i in range(1, n + 1) for j in range(1, n + 1)
-                        if i * j <= max_num and i * j >= min_num)
-    target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
-
     # find the closest aspect ratio to the target
-    target_aspect_ratio = find_closest_aspect_ratio(aspect_ratio,
-                                                    target_ratios, orig_width,
-                                                    orig_height, image_size)
+    target_aspect_ratio = find_closest_aspect_ratio(
+        aspect_ratio,
+        target_ratios,
+        width=orig_width,
+        height=orig_height,
+        image_size=image_size,
+    )
 
     # calculate the target width and height
     target_width = image_size * target_aspect_ratio[0]
@@ -134,19 +168,24 @@ def calculate_targets(orig_width: int, orig_height: int, min_num: int,
 
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
-def dynamic_preprocess(image: Image.Image, min_num: int, max_num: int,
-                       image_size: int,
-                       use_thumbnail: bool) -> List[Image.Image]:
+def dynamic_preprocess_internvl(
+    image: Image.Image,
+    *,
+    target_ratios: list[tuple[int, int]],
+    image_size: int,
+    use_thumbnail: bool,
+) -> list[Image.Image]:
     orig_width, orig_height = image.size
 
     # calculate the number of blocks without thumbnail
-    blocks, target_width, target_height = calculate_targets(
-        orig_width,
-        orig_height,
-        min_num,
-        max_num,
-        image_size,
-        use_thumbnail=False)
+    blocks, target_width, target_height = calculate_internvl_targets(
+        orig_width=orig_width,
+        orig_height=orig_height,
+        target_ratios=target_ratios,
+        image_size=image_size,
+        use_thumbnail=False,
+    )
+
     # resize the image
     resized_img = image.resize((target_width, target_height))
     processed_images = []
@@ -158,41 +197,40 @@ def dynamic_preprocess(image: Image.Image, min_num: int, max_num: int,
         # split the image
         split_img = resized_img.crop(box)
         processed_images.append(split_img)
+
     assert len(processed_images) == blocks
+
     if use_thumbnail and len(processed_images) != 1:
         thumbnail_img = image.resize((image_size, image_size))
         processed_images.append(thumbnail_img)
+
     return processed_images
 
 
-def _get_max_dynamic_patch(
-    *,
-    dynamic_image_size: bool,
-    max_dynamic_patch: int,
-    use_thumbnail: bool,
-) -> int:
-    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
-
-    if use_thumbnail and max_dynamic_patch > 1:
-        max_dynamic_patch += 1
-
-    return max_dynamic_patch
-
-
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
-def image_to_pixel_values(image: Image.Image, input_size: int, min_num: int,
-                          max_num: int, use_thumbnail: bool) -> torch.Tensor:
+def image_to_pixel_values_internvl(
+    image: Image.Image,
+    *,
+    input_size: int,
+    min_num: int,
+    max_num: int,
+    use_thumbnail: bool,
+) -> torch.Tensor:
+    target_ratios = get_internvl_target_ratios(min_num, max_num)
+
     transform = build_transform(input_size=input_size)
-    images = dynamic_preprocess(image,
-                                min_num=min_num,
-                                max_num=max_num,
-                                image_size=input_size,
-                                use_thumbnail=use_thumbnail)
-    pixel_values = [transform(image) for image in images]
-    return torch.stack(pixel_values)
+    images = dynamic_preprocess_internvl(
+        image,
+        target_ratios=target_ratios,
+        image_size=input_size,
+        use_thumbnail=use_thumbnail,
+    )
+
+    pixel_values = torch.stack([transform(image) for image in images])
+    return pixel_values
 
 
-class InternVLProcessor:
+class BaseInternVLProcessor(ABC):
     """
     This model doesn't define its own HF processor,
     so we implement our own one here.
@@ -234,28 +272,109 @@ class InternVLProcessor:
         self.use_thumbnail: bool = config.use_thumbnail
 
     @property
+    @abstractmethod
     def image_token_id(self) -> int:
-        return self.tokenizer.get_vocab()[IMG_CONTEXT]
+        raise NotImplementedError
 
+    @abstractmethod
     def get_image_repl_features(
         self,
         feature_size: int,
         num_patches: Optional[int],
     ) -> str:
-        return IMG_CONTEXT * feature_size
+        raise NotImplementedError
 
+    @abstractmethod
     def get_image_repl_full(
         self,
         feature_size: int,
         num_patches: Optional[int],
     ) -> str:
-        features = self.get_image_repl_features(feature_size, num_patches)
-        return IMG_START + features + IMG_END
+        raise NotImplementedError
+
+    def resolve_min_max_num(
+        self,
+        *,
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
+        use_thumbnail: Optional[bool] = None,
+    ) -> tuple[int, int]:
+        min_dynamic_patch = self.min_dynamic_patch
+        max_dynamic_patch = (self.max_dynamic_patch if max_dynamic_patch
+                             is None else max_dynamic_patch)
+        dynamic_image_size = (self.dynamic_image_size if dynamic_image_size
+                              is None else dynamic_image_size)
+        use_thumbnail = (self.use_thumbnail
+                         if use_thumbnail is None else use_thumbnail)
+
+        return resolve_internvl_min_max_num(
+            min_dynamic_patch=min_dynamic_patch,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+            use_thumbnail=use_thumbnail,
+        )
+
+    def resolve_target_ratios(
+        self,
+        *,
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
+        use_thumbnail: Optional[bool] = None,
+    ) -> list[tuple[int, int]]:
+        min_num, max_num = self.resolve_min_max_num(
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+            use_thumbnail=use_thumbnail,
+        )
+
+        return get_internvl_target_ratios(min_num, max_num)
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
+        target_ratios = self.resolve_target_ratios(
+            use_thumbnail=False,  # Applied in calculate_targets
+        )
+
+        num_patches, _, _ = calculate_internvl_targets(
+            orig_width=image_width,
+            orig_height=image_height,
+            image_size=self.image_size,
+            target_ratios=target_ratios,
+            use_thumbnail=self.use_thumbnail,
+        )
+
+        return num_patches * self.num_image_token
+
+    def _images_to_pixel_values_lst(
+        self,
+        images: list[Image.Image],
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
+    ) -> list[torch.Tensor]:
+        min_num, max_num = self.resolve_min_max_num(
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+            use_thumbnail=False,  # Applied in image_to_pixel_values
+        )
+
+        return [
+            image_to_pixel_values_internvl(
+                image,
+                input_size=self.image_size,
+                min_num=min_num,
+                max_num=max_num,
+                use_thumbnail=self.use_thumbnail,
+            ) for image in images
+        ]
 
     def __call__(
         self,
-        text: Optional[Union[TextInput, list[TextInput]]] = None,
-        images: Optional[Union[ImageInput, list[ImageInput]]] = None,
+        text: Optional[Union[str, list[str]]] = None,
+        images: Optional[Union[Image.Image, list[Image.Image]]] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
@@ -269,28 +388,14 @@ class InternVLProcessor:
         if not isinstance(images, list):
             images = [images]
 
-        max_dynamic_patch = (self.max_dynamic_patch if max_dynamic_patch
-                             is None else max_dynamic_patch)
-        dynamic_image_size = (self.dynamic_image_size if dynamic_image_size
-                              is None else dynamic_image_size)
-        max_dynamic_patch = _get_max_dynamic_patch(
-            dynamic_image_size=dynamic_image_size,
-            max_dynamic_patch=max_dynamic_patch,
-            use_thumbnail=False,  # Applied in image_to_pixel_values
-        )
-
         if len(images) == 0:
             image_inputs = {}
         else:
-            pixel_values_lst = [
-                image_to_pixel_values(
-                    image,
-                    input_size=self.image_size,
-                    min_num=self.min_dynamic_patch,
-                    max_num=max_dynamic_patch,
-                    use_thumbnail=self.use_thumbnail,
-                ) for image in images
-            ]
+            pixel_values_lst = self._images_to_pixel_values_lst(
+                images,
+                max_dynamic_patch=max_dynamic_patch,
+                dynamic_image_size=dynamic_image_size,
+            )
             image_inputs = {
                 "pixel_values_flat": torch.cat(pixel_values_lst),
                 "image_num_patches": list(map(len, pixel_values_lst)),
@@ -315,20 +420,38 @@ class InternVLProcessor:
         )
 
 
-class InternVLProcessingInfo(BaseProcessingInfo):
+class InternVLProcessor(BaseInternVLProcessor):
 
+    @property
+    def image_token_id(self) -> int:
+        return self.tokenizer.get_vocab()[IMG_CONTEXT]
+
+    def get_image_repl_features(
+        self,
+        feature_size: int,
+        num_patches: Optional[int],
+    ) -> str:
+        return IMG_CONTEXT * feature_size
+
+    def get_image_repl_full(
+        self,
+        feature_size: int,
+        num_patches: Optional[int],
+    ) -> str:
+        features = self.get_image_repl_features(feature_size, num_patches)
+        return IMG_START + features + IMG_END
+
+
+class BaseInternVLProcessingInfo(BaseProcessingInfo):
+
+    @abstractmethod
     def get_hf_processor(
         self,
         *,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
-    ) -> InternVLProcessor:
-        return InternVLProcessor(
-            self.get_hf_config(),
-            self.get_tokenizer(),
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-        )
+    ) -> BaseInternVLProcessor:
+        raise NotImplementedError
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -341,27 +464,15 @@ class InternVLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[InternVLProcessor],
+        processor: Optional[BaseInternVLProcessor],
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
 
-        max_dynamic_patch = _get_max_dynamic_patch(
-            dynamic_image_size=processor.dynamic_image_size,
-            max_dynamic_patch=processor.max_dynamic_patch,
-            use_thumbnail=False,  # Applied in calculate_targets
+        return processor.get_num_image_tokens(
+            image_width=image_width,
+            image_height=image_height,
         )
-
-        num_patches, _, _ = calculate_targets(
-            orig_width=image_width,
-            orig_height=image_height,
-            image_size=processor.image_size,
-            min_num=processor.min_dynamic_patch,
-            max_num=max_dynamic_patch,
-            use_thumbnail=processor.use_thumbnail,
-        )
-
-        return num_patches * processor.num_image_token
 
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
@@ -375,19 +486,8 @@ class InternVLProcessingInfo(BaseProcessingInfo):
     def get_image_size_with_most_features(self) -> ImageSize:
         processor = self.get_hf_processor()
 
-        min_num = processor.min_dynamic_patch
-        max_num = _get_max_dynamic_patch(
-            dynamic_image_size=processor.dynamic_image_size,
-            max_dynamic_patch=processor.max_dynamic_patch,
-            use_thumbnail=processor.use_thumbnail,
-        )
-
         base_size = processor.image_size
-        target_ratios = {(i, j)
-                         for n in range(min_num, max_num + 1)
-                         for i in range(1, n + 1)
-                         for j in range(1, n + 1)
-                         if i * j <= max_num and i * j >= min_num}
+        target_ratios = processor.resolve_target_ratios()
 
         largest_feature_size, largest_feature_pinpoint = 0, None
         for wr, hr in target_ratios:
@@ -409,8 +509,10 @@ class InternVLProcessingInfo(BaseProcessingInfo):
         return largest_feature_pinpoint
 
 
-class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[InternVLProcessingInfo]
-                                 ):
+_I = TypeVar("_I", bound=BaseInternVLProcessingInfo)
+
+
+class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
     def get_dummy_processor_inputs(
         self,
@@ -434,8 +536,7 @@ class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[InternVLProcessingInfo]
         )
 
 
-class InternVLMultiModalProcessor(
-        BaseMultiModalProcessor[InternVLProcessingInfo]):
+class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     def _call_hf_processor(
         self,
@@ -507,7 +608,10 @@ class InternVLMultiModalProcessor(
                     processor=hf_processor,
                 )
 
-            num_patches = image_num_patches[item_idx].item()
+            num_patches = image_num_patches[item_idx]
+            if num_patches is not None:
+                assert isinstance(num_patches, torch.Tensor)
+                num_patches = num_patches.item()
 
             return PromptReplacementDetails(
                 full=hf_processor.get_image_repl_full(feature_size,
@@ -523,6 +627,22 @@ class InternVLMultiModalProcessor(
                 replacement=get_replacement_internvl,
             )
         ]
+
+
+class InternVLProcessingInfo(BaseInternVLProcessingInfo):
+
+    def get_hf_processor(
+        self,
+        *,
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
+    ) -> InternVLProcessor:
+        return InternVLProcessor(
+            self.get_hf_config(),
+            self.get_tokenizer(),
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -717,7 +837,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     def _process_image_input(
         self,
         image_input: InternVLImageInputs,
-    ) -> Tuple[torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 

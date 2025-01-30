@@ -6,7 +6,7 @@ from PIL.Image import Image
 from transformers import AutoConfig
 
 # Import the functions to test
-from vllm.model_executor.models.h2ovl import (calculate_targets,
+from vllm.model_executor.models.h2ovl import (calculate_h2ovl_targets,
                                               image_to_pixel_values_wrapper)
 from vllm.multimodal.image import rescale_image_size
 
@@ -27,16 +27,16 @@ def run_preprocessing_test(
         max_dynamic_patch = config.max_dynamic_patch
 
     width, height = image.size
-    use_MSAC = config.use_msac
+    use_msac = config.use_msac
 
     # Create the mapper function with the provided configuration
-    mapper = image_to_pixel_values_wrapper(config, max_dynamic_patch, use_MSAC)
+    mapper = image_to_pixel_values_wrapper(config, max_dynamic_patch, use_msac)
     pixel_values = mapper(image)
 
     # Calculate the expected number of blocks
-    if use_MSAC:
+    if use_msac:
         # First pass
-        blocks1, _, _, aspect_ratio = calculate_targets(
+        blocks1, _, _, aspect_ratio = calculate_h2ovl_targets(
             width,
             height,
             config.min_dynamic_patch,
@@ -47,7 +47,7 @@ def run_preprocessing_test(
         )
 
         # Second pass
-        blocks2, _, _, _ = calculate_targets(
+        blocks2, _, _, _ = calculate_h2ovl_targets(
             width,
             height,
             config.min_dynamic_patch,
@@ -68,7 +68,7 @@ def run_preprocessing_test(
         expected_blocks = total_blocks
 
     else:
-        blocks, _, _, _ = calculate_targets(
+        blocks, _, _, _ = calculate_h2ovl_targets(
             width,
             height,
             config.min_dynamic_patch,

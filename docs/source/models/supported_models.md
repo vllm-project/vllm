@@ -650,7 +650,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc.
   *
   * ✅︎
-  *
+  * ✅︎
 - * `Idefics3ForConditionalGeneration`
   * Idefics3
   * T + I
