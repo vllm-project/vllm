@@ -22,8 +22,8 @@ Currently only the forward kernel is supported, and contains these features:
 
 import subprocess
 import sys
-import torch
 
+import torch
 import triton
 import triton.language as tl
 
