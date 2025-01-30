@@ -80,8 +80,7 @@ class Mixer2RMSNormGated(CustomOp):
                 variance = x.pow(2).mean(-1, keepdim=True)
             x = x * torch.rsqrt(variance + self.variance_epsilon)
         else:
-            #redundant_tp: bool = self.n_groups % self.tp_size != 0
-            redundant_tp: bool = True
+            redundant_tp: bool = self.n_groups % self.tp_size != 0
             if redundant_tp:
                 # To handle the general case, redundantly apply the variance
                 x = tensor_model_parallel_all_gather(x, -1)
