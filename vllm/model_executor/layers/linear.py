@@ -13,8 +13,8 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.envs import VLLM_USE_AITER
-if VLLM_USE_AITER:
+from vllm.envs import VLLM_USE_AITER_LINEAR
+if VLLM_USE_AITER_LINEAR:
     from aiter.tuned_gemm import tgemm
 else:
     from vllm.model_executor.layers.tuned_gemm import tgemm
@@ -140,7 +140,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None,
               out_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        if VLLM_USE_AITER:
+        if VLLM_USE_AITER_LINEAR:
             return tgemm.mm(x, layer.weight, bias, out_dtype)
         elif out_dtype:
             return tgemm.mm(x, layer.weight, bias).to(out_dtype)

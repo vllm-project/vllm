@@ -4,8 +4,8 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.envs import VLLM_USE_AITER
-if VLLM_USE_AITER:
+from vllm.envs import VLLM_USE_AITER_LINEAR
+if VLLM_USE_AITER_LINEAR:
     from aiter.tuned_gemm import tgemm
 
 # Input scaling factors are no longer optional in _scaled_mm starting
@@ -152,7 +152,7 @@ def apply_fp8_linear(
 
         if per_tensor_weights and per_tensor_activations:
             # Fused GEMM_DQ
-            if VLLM_USE_AITER:
+            if VLLM_USE_AITER_LINEAR:
                 output = tgemm.mm(qinput, 
                                 weight.t(), 
                                 otype=out_dtype, 

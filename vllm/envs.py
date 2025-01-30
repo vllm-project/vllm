@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     VLLM_USE_AITER: bool = False
     VLLM_USE_AITER_MOE: bool = False
     VLLM_USE_AITER_PAGED_ATTN: bool = False
+    VLLM_USE_AITER_LINEAR: bool = False
+    VLLM_USE_AITER_NORM: bool = False
     RANK: int = 0
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -278,6 +280,20 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_USE_AITER", "False").lower() in
              ("true", "1") and
              os.getenv("VLLM_USE_AITER_PAGED_ATTN", "True").lower() in
+             ("true", "1")),
+
+    # use ater linear op if ater ops are enabled
+    "VLLM_USE_AITER_LINEAR":
+    lambda: (os.getenv("VLLM_USE_AITER", "False").lower() in
+             ("true", "1") and
+             os.getenv("VLLM_USE_AITER_LINEAR", "True").lower() in
+             ("true", "1")),
+
+    # use ater rms norm op if ater ops are enabled
+    "VLLM_USE_AITER_NORM":
+    lambda: (os.getenv("VLLM_USE_AITER", "False").lower() in
+             ("true", "1") and
+             os.getenv("VLLM_USE_AITER_NORM", "True").lower() in
              ("true", "1")),
 
     # rank of the process in the distributed setting, used to determine
