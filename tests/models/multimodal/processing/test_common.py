@@ -139,7 +139,6 @@ def _test_processing_correctness(
 
 
 # yapf: disable
-# True if the model supports multiple data items of the modality per request
 @pytest.mark.parametrize("model_id", [
     "rhymes-ai/Aria",
     "Salesforce/blip2-opt-2.7b",
