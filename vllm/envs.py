@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     V_SCALE_CONSTANT: int = 100
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
+    VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
 
 
 def get_default_cache_root():
@@ -301,6 +302,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_FLASHINFER_FORCE_TENSOR_CORES":
     lambda: bool(int(os.getenv("VLLM_FLASHINFER_FORCE_TENSOR_CORES", "0"))),
 
+    # If set, vLLM will disable the MLA attention optimizations.
+    "VLLM_DISABLE_MLA":
+    lambda: bool(int(os.getenv("VLLM_DISABLE_MLA", "0"))),
+
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
@@ -506,6 +511,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # TTFT and overall throughput.
     "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_V1_OUTPUT_PROC_CHUNK_SIZE", "128")),
+
+    # Flag that can control whether
+    #
+    #
+    "VLLM_MLA_PERFORM_MATRIX_ABSORPTION":
+    lambda: bool(int(os.getenv("VLLM_MLA_PERFORM_MATRIX_ABSORPTION", "1")))
 }
 
 # end-env-vars-definition
