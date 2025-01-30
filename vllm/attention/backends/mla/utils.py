@@ -161,7 +161,7 @@ class MLAImplCommon(AttentionImpl):
 
     def _v_up_proj_and_o_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
-            return self.o_proj_absored(
+            return self.o_proj_absorbed(
                 x.reshape(-1, self.num_heads * self.kv_lora_rank))[0]
         else:
             x = torch.einsum("bnl,lnv->bnv", x, self.W_UV)
