@@ -130,6 +130,30 @@ Quantized models can be sensitive to the presence of the `bos` token. Make sure 
     - `dampening_frac` sets how much influence the GPTQ algorithm has. Lower values can improve accuracy, but can lead to numerical instabilities that cause the algorithm to fail.
     - `actorder` sets the activation ordering. When compressing the weights of a layer weight, the order in which channels are quantized matters. Setting `actorder="weight"` can improve accuracy without added latency.
 
+An example configuration for the recipe with non-default hyperparameters:
+
+```python
+recipe = GPTQModifier(
+    targets="Linear",
+    config_groups={
+        "config_group": QuantizationScheme(
+            targets=["Linear"],
+            weights=QuantizationArgs(
+                num_bits=NUM_BITS,
+                type=QuantizationType.INT,
+                strategy=QuantizationStrategy.GROUP,
+                group_size=128,
+                symmetric=True,
+                dynamic=False,
+                actorder="weight",
+            ),
+        ),
+    },
+    ignore=["lm_head"],
+    update_size=NUM_CALIBRATION_SAMPLES,
+    dampening_frac=0.01
+)
+```
 
 ## Troubleshooting and Support
 
