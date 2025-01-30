@@ -1,7 +1,7 @@
 """Utilities for selecting and loading models."""
 import contextlib
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 import transformers
@@ -27,13 +27,14 @@ def set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(old_dtype)
 
 
-def is_transformers_impl_compatible(arch: str, module=None) -> bool:
-    if module is None:
-        module: transformers.PreTrainedModel = getattr(transformers, arch)
-    if hasattr(module, "supports_backend"):
-        return module.is_backend_compatible()
+def is_transformers_impl_compatible(
+        arch: str,
+        module: Optional[transformers.PreTrainedModel] = None) -> bool:
+    mod = module if module is not None else getattr(transformers, arch)
+    if hasattr(mod, "supports_backend"):
+        return mod.is_backend_compatible()
     else:
-        return module._supports_flex_attn
+        return mod._supports_flex_attn
 
 
 def get_model_architecture(
