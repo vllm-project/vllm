@@ -354,14 +354,12 @@ class T5Attention(nn.Module):
             bias=False,
             quant_config=quant_config,
         )
-        self.attn = Attention(
-            self.n_heads,
-            self.inner_dim // self.n_heads,
-            scale=1,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=prefix
-        )
+        self.attn = Attention(self.n_heads,
+                              self.inner_dim // self.n_heads,
+                              scale=1,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=prefix)
 
     def forward(
         self,
@@ -396,14 +394,12 @@ class T5Attention(nn.Module):
 
 class T5LayerSelfAttention(nn.Module):
 
-    def __init__(
-        self,
-        config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        has_relative_attention_bias=False,
-        prefix: str = ""
-    ):
+    def __init__(self,
+                 config,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 has_relative_attention_bias=False,
+                 prefix: str = ""):
         super().__init__()
         self.SelfAttention = T5Attention(
             config,
@@ -439,13 +435,12 @@ class T5LayerCrossAttention(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        self.EncDecAttention = T5Attention(
-            config,
-            cache_config,
-            quant_config,
-            has_relative_attention_bias=False,
-            prefix=f"{prefix}.attn")
-        
+        self.EncDecAttention = T5Attention(config,
+                                           cache_config,
+                                           quant_config,
+                                           has_relative_attention_bias=False,
+                                           prefix=f"{prefix}.attn")
+
         self.layer_norm = T5LayerNorm(config.d_model,
                                       eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
@@ -489,9 +484,11 @@ class T5Block(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
         if self.is_decoder:
-            self.cross_attn = T5LayerCrossAttention(config, cache_config,
-                                                    quant_config,
-                                                    prefix=f"{prefix}.encoder_attn")
+            self.cross_attn = T5LayerCrossAttention(
+                config,
+                cache_config,
+                quant_config,
+                prefix=f"{prefix}.encoder_attn")
         self.fc = T5LayerFF(config, quant_config)
 
     def forward(
@@ -584,13 +581,12 @@ class T5Stack(nn.Module):
         self.is_decoder = config.is_decoder
 
         self.block = nn.ModuleList([
-            T5Block(
-                config,
-                cache_config,
-                quant_config,
-                has_relative_attention_bias=bool(i == 0),
-                prefix=f"{prefix}.block.{i}"
-            ) for i in range(config.num_layers)
+            T5Block(config,
+                    cache_config,
+                    quant_config,
+                    has_relative_attention_bias=bool(i == 0),
+                    prefix=f"{prefix}.block.{i}")
+            for i in range(config.num_layers)
         ])
         self.final_layer_norm = T5LayerNorm(config.d_model,
                                             eps=config.layer_norm_epsilon)
@@ -629,14 +625,15 @@ class T5Model(nn.Module):
         "encoder.embed_tokens.weight",
         "decoder.embed_tokens.weight",
     ]
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-    # def __init__(
-    #     self,
-    #     config: T5Config,
-    #     cache_config: Optional[CacheConfig] = None,
-    #     quant_config: Optional[QuantizationConfig] = None,
-    #     lora_config: Optional[LoRAConfig] = None,
-    # ):
+        # def __init__(
+        #     self,
+        #     config: T5Config,
+        #     cache_config: Optional[CacheConfig] = None,
+        #     quant_config: Optional[QuantizationConfig] = None,
+        #     lora_config: Optional[LoRAConfig] = None,
+        # ):
         super().__init__()
         # self.shared = nn.Embedding(config.vocab_size, config.d_model)
         config = vllm_config.model_config.hf_config
@@ -658,15 +655,21 @@ class T5Model(nn.Module):
         encoder_config.is_decoder = False
         encoder_config.use_cache = False
         encoder_config.is_encoder_decoder = False
-        self.encoder = T5Stack(encoder_config, cache_config, quant_config,
-                               self.shared, prefix=f"{prefix}.encoder")
+        self.encoder = T5Stack(encoder_config,
+                               cache_config,
+                               quant_config,
+                               self.shared,
+                               prefix=f"{prefix}.encoder")
 
         decoder_config = copy.deepcopy(config)
         decoder_config.is_decoder = True
         decoder_config.is_encoder_decoder = False
         decoder_config.num_layers = config.num_decoder_layers
-        self.decoder = T5Stack(decoder_config, cache_config, quant_config,
-                               self.shared, prefix=f"{prefix}.decoder")
+        self.decoder = T5Stack(decoder_config,
+                               cache_config,
+                               quant_config,
+                               self.shared,
+                               prefix=f"{prefix}.decoder")
 
     def forward(
         self,
@@ -703,20 +706,20 @@ class T5ForConditionalGeneration(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
 
-    # def __init__(
-    #     self,
-    #     config: T5Config,
-    #     cache_config: Optional[CacheConfig] = None,
-    #     quant_config: Optional[QuantizationConfig] = None,
-    #     lora_config: Optional[LoRAConfig] = None,
-    # ):
+        # def __init__(
+        #     self,
+        #     config: T5Config,
+        #     cache_config: Optional[CacheConfig] = None,
+        #     quant_config: Optional[QuantizationConfig] = None,
+        #     lora_config: Optional[LoRAConfig] = None,
+        # ):
         super().__init__()
         config = vllm_config.model_config.hf_config
         lora_config = vllm_config.lora_config
         self.config = config
         self.model_dim = config.d_model
         self.model = T5Model(vllm_config=vllm_config,
-                               prefix=maybe_prefix(prefix, "model"))
+                             prefix=maybe_prefix(prefix, "model"))
         # self.model = T5Model(config,
         #                      cache_config,
         #                      quant_config,
