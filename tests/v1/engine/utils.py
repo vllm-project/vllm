@@ -297,11 +297,11 @@ class DummyOutputProcessorTestVectors:
     generation_tokens: List[List[int]]
     # Each request is associated with a tuple of (top logprobs,top tokens)
     # prompt logprobs tensors
-    prompt_logprobs: List[Tuple[torch.Tensor, torch.Tensor]]
+    prompt_logprobs: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
     # Each request is associated with a sample logprobs; a request's
     # sample logprobs are a list of (top logprobs,top tokens)
     # sample logprobs tensors at each sequence position
-    generation_logprobs: List[List[Tuple[List[float], List[int]]]]
+    generation_logprobs: List[List[Tuple[List[float], List[int], int]]]
     prompt_strings: List[str]
     prompt_strings_len: List[int]
     generation_strings: List[str]
@@ -343,32 +343,44 @@ class MockEngineCore:
             if len(token_ids) > token_idx:
                 if do_logprobs:
                     assert self.generated_logprobs_raw is not None
-                    (logprobs, logprobs_token_ids) = (
+                    (logprobs, logprobs_token_ids, sampled_token_ranks) = (
                         self.generated_logprobs_raw[req_idx][token_idx])
                     logprobs = [logprobs]
                     logprobs_token_ids = [logprobs_token_ids]
+                    sampled_token_ranks = [sampled_token_ranks]
                 else:
                     logprobs = None
                     logprobs_token_ids = None
+                    sampled_token_ranks = None
                 if do_prompt_logprobs:
                     if self.current_idx == 0:
                         assert self.prompt_logprobs_raw is not None
-                        prompt_logprobs = self.prompt_logprobs_raw[req_idx][0]
-                        prompt_logprobs_token_ids = self.prompt_logprobs_raw[
-                            req_idx][1]
+                        pos_prompt_logprobs = self.prompt_logprobs_raw[req_idx]
+                        prompt_logprobs = pos_prompt_logprobs[0]
+                        prompt_logprobs_token_ids = pos_prompt_logprobs[1]
+                        prompt_token_ranks = pos_prompt_logprobs[2]
                     else:
-                        (prompt_logprobs,
-                         prompt_logprobs_token_ids) = (torch.empty(0, 0),
-                                                       torch.empty(0, 0))
+                        (
+                            prompt_logprobs,
+                            prompt_logprobs_token_ids,
+                            prompt_token_ranks,
+                        ) = (torch.empty(0, 0), torch.empty(0,
+                                                            0), torch.empty(0))
                 else:
-                    (prompt_logprobs, prompt_logprobs_token_ids) = (None, None)
+                    (
+                        prompt_logprobs,
+                        prompt_logprobs_token_ids,
+                        prompt_token_ranks,
+                    ) = (None, None, None)
                 output = EngineCoreOutput(
                     request_id=f"request-{req_idx}",
                     new_token_ids=[token_ids[token_idx]],
                     new_logprobs=logprobs,
                     new_logprobs_token_ids=logprobs_token_ids,
+                    new_sampled_token_ranks=sampled_token_ranks,
                     new_prompt_logprobs=prompt_logprobs,
-                    new_prompt_logprobs_token_ids=prompt_logprobs_token_ids)
+                    new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
+                    new_prompt_token_ranks=prompt_token_ranks)
                 if token_idx == len(token_ids) - 1:
                     output.finish_reason = "stopped"
                 outputs.append(output)

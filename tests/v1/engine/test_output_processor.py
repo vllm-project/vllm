@@ -127,7 +127,8 @@ def _validate_logprobs(
         cumulative_logprob = gen_cumulative_logprob[req_id]
         prompt_token_ids = dtv.prompt_tokens[req_idx]
         ref_logprobs = dtv.generation_logprobs[req_idx]
-        if num_sample_logprobs:
+        ref_prompt_logprobs = dtv.prompt_logprobs[req_idx]
+        if num_sample_logprobs is not None:
             # Validate sample logprobs
             assert logprobs is not None, (f"Request {req_id} requires sample"
                                           " logprobs but sample logprobs are"
@@ -149,15 +150,17 @@ def _validate_logprobs(
                                                          logprobs)):
                 # Break out the reference log probability value &
                 # logprob token id tensors associated with this
-                # position in the completion. B
-                (ref_pos_logprob_vals,
-                 ref_pos_logprob_toks) = ref_logprobs[idx]
+                # position in the completion. Also break out the
+                # sampled token ranks
+                (ref_pos_logprob_vals, ref_pos_logprob_toks,
+                 ref_sampled_token_rank) = ref_logprobs[idx]
                 # For each position in the completion sequence,
                 # ensure the actual sampled token is among the
                 # logprobs
                 assert sampled_token in pos_logprob_dict, (
                     f"Sampled token {sampled_token} not"
                     f" present in logprob at index {idx}")
+
                 # Validate number of sample logprobs
                 num_lp_toks = len(pos_logprob_dict)
                 assert (num_lp_toks == num_sample_logprobs
@@ -168,71 +171,58 @@ def _validate_logprobs(
                              f" {num_lp_toks} logprobs found at"
                              f" position {idx}. Logprobs dict:"
                              f" {pos_logprob_dict}")
+
+                # Validate sampled token logprob rank
+                smp_lp = pos_logprob_dict[sampled_token]
+                smp_lp_rank = smp_lp.rank
+                assert (ref_sampled_token_rank == smp_lp_rank), (
+                    "Sampled token logprob rank"
+                    f" {smp_lp_rank} does not match"
+                    " correct value"
+                    f" {ref_sampled_token_rank}"
+                    f" in Logprob {smp_lp}")
+
                 # Validate that the logprob processor yields
-                # the correct log probabilities and rankings
-                rank_dict: Dict[int, float] = {}
-                last_match_rank = -1
-                last_match_tok_id = -1
-                smp_lp_rank = pos_logprob_dict[sampled_token].rank
+                # the correct log probabilities and valid
+                # rankings
+                rank_one_appears = False
                 for jdx in range(1, len(ref_pos_logprob_toks)):
                     # Iterate over the (logprob val,logprob tok id)
                     # pairs expected by the test fixture at this
                     # position in the completion.
-                    ref_lp_val = float(ref_pos_logprob_vals[jdx])
-                    ref_tok_id = int(ref_pos_logprob_toks[jdx])
-                    if ref_tok_id in pos_logprob_dict:
-                        # Detect when one of the expected pairs
-                        # actually appears
-                        lp = pos_logprob_dict[ref_tok_id]
-                        lp_val = lp.logprob
-                        # Validate log probability
-                        assert math.isclose(lp_val, ref_lp_val), (
-                            f"Token id {ref_tok_id} appears in logprobs dict"
-                            f" at position {idx} in completion with log"
-                            f" probability {lp_val} but {ref_lp_val} was"
-                            f" expected. Logprob: {lp}")
-                        # Validate proper rank order
-                        lp_rank = lp.rank
-                        if last_match_rank == -1:
-                            # Validate that first rank is 1
-                            if lp_rank != 1:
-                                # Rank not being 1 must be explained
-                                # by sampled token being injected into
-                                # the logprobs at position 1
-                                assert lp_rank == 2 and smp_lp_rank == 1
-                        else:
-                            # Validate rank order
-                            assert lp_rank > last_match_rank, (
-                                f"At position {idx}, token {ref_tok_id}"
-                                f" (log prob={lp_val}) has rank {lp_rank}"
-                                " which should be greater than the rank"
-                                f" {last_match_rank} of token"
-                                f" {last_match_tok_id} (log prob="
-                                f"{rank_dict[lp_rank]}), but it isn't.")
-                            # Validate consecutive rankings
-                            if lp_rank - last_match_rank > 1:
-                                # Non-consecutive rankings must be explained
-                                # by the sampled token being injected into the
-                                # logprobs
-                                assert (smp_lp_rank - last_match_rank == 1
-                                        and lp_rank - smp_lp_rank
-                                        == 1), ("Sample logprobs rankings are"
-                                                " non-consecutive.")
-                        last_match_rank = lp_rank
-                        last_match_tok_id = ref_tok_id
-                        rank_dict[lp_rank] = lp_val
-                # Validate
-                assert last_match_rank >= num_lp_toks - 1
-                if last_match_rank == num_lp_toks - 1:
-                    assert smp_lp_rank == num_lp_toks
-                    last_match_rank = num_lp_toks
-                # Validate that the sample logprobs expected by the test
-                # fixture account for all of the sample logprobs
-                assert last_match_rank == num_lp_toks, (
-                    f"Only {last_match_rank} of the sample logprobs"
-                    f" at position {idx} match the sample"
-                    f" logprobs returned by the mock engine core;"
-                    f" expected {num_lp_toks} matches.")
+                    ref_lp_val = ref_pos_logprob_vals[jdx]
+                    ref_tok_id = ref_pos_logprob_toks[jdx]
+                    assert ref_tok_id in pos_logprob_dict, (
+                        f"Expected token {ref_tok_id} to be"
+                        f" in logprob dict but it is not.")
+
+                    # Extract actually-generated logprob
+                    # info
+                    lp = pos_logprob_dict[ref_tok_id]
+                    lp_val = lp.logprob
+                    lp_rank = lp.rank
+
+                    # A "top" (rank 1) logprob must be
+                    # present
+                    rank_one_appears = (True
+                                        if lp_rank == 1 else rank_one_appears)
+
+                    # Rank must be >= 1
+                    assert lp_rank >= 1, (f"Logprob {lp} has invalid"
+                                          f"rank {lp_rank} < 1")
+
+                    # Validate log probability
+                    assert math.isclose(lp_val, ref_lp_val), (
+                        f"Token id {ref_tok_id} appears in logprobs dict"
+                        f" at position {idx} in completion with log"
+                        f" probability {lp_val} but {ref_lp_val} was"
+                        f" expected. Logprob: {lp}")
+
+                assert rank_one_appears, (f"No Logprob has rank 1"
+                                          " in the following Logprob"
+                                          f" dict: {pos_logprob_dict}")
+
+                # Validate logprobs detokenization
                 for lp_tok in pos_logprob_dict:
                     # Confirm that sample logprob decoded token matches
                     # the logprob token id at this sequence position
@@ -254,7 +244,7 @@ def _validate_logprobs(
             assert logprobs is None
             assert cumulative_logprob is None
 
-        if num_prompt_logprobs:
+        if num_prompt_logprobs is not None:
             # Validate prompt logprobs
             assert prompt_logprobs is not None, (
                 f"Request {req_id} requires prompt"
@@ -274,8 +264,22 @@ def _validate_logprobs(
                 f"Request {req_id} first prompt logprob"
                 f" should be None but has following value"
                 f" instead: {first_plp_dict}")
+            # Break out the reference prompt log prob value &
+            # logprob token id matrices for the whole prompt.
+            # Also break out the prompt token rank vector
+            (ref_prompt_logprob_vals, ref_prompt_logprob_toks,
+             ref_prompt_token_ranks) = ref_prompt_logprobs
             for idx, (prompt_token, pos_logprob_dict) in enumerate(
                     zip(prompt_token_ids[1:], prompt_logprobs[1:])):
+
+                # Break out the reference prompt log prob value
+                # vector, prompt logprob token id vector, and
+                # prompt token rank at the current position.
+                (ref_pos_prompt_logprob_vals, ref_pos_prompt_logprob_toks,
+                 ref_pos_prompt_token_rank) = (ref_prompt_logprob_vals[idx, :],
+                                               ref_prompt_logprob_toks[idx, :],
+                                               ref_prompt_token_ranks[idx])
+
                 # For each position in the prompt sequence,
                 # ensure the actual prompt token is among the
                 # logprobs
@@ -292,6 +296,59 @@ def _validate_logprobs(
                              f" {num_plp_toks} logprobs found at"
                              f" position {idx}. Logprobs dict:"
                              f" {pos_logprob_dict}")
+
+                # Validate prompt token logprob rank
+                prmpt_lp = pos_logprob_dict[prompt_token]
+                prmpt_lp_rank = prmpt_lp.rank
+                ref_prmpt_lp_rank = ref_pos_prompt_token_rank
+                assert (ref_prmpt_lp_rank == prmpt_lp_rank), (
+                    "Prompt token logprob rank"
+                    f" {prmpt_lp_rank} does not match"
+                    " correct value"
+                    f" {ref_prmpt_lp_rank}"
+                    f" in Logprob {prmpt_lp}")
+
+                # Validate that the logprob processor yields
+                # the correct prompt log probs and valid
+                # rankings
+                rank_one_appears = False
+                for jdx in range(1, len(ref_pos_prompt_logprob_toks)):
+                    # Iterate over the (logprob val,logprob tok id)
+                    # pairs expected by the test fixture at this
+                    # position in the completion.
+                    ref_lp_val = float(ref_pos_prompt_logprob_vals[jdx])
+                    ref_tok_id = int(ref_pos_prompt_logprob_toks[jdx])
+                    assert ref_tok_id in pos_logprob_dict, (
+                        f"Expected token {ref_tok_id} to be"
+                        f" in logprob dict but it is not.")
+
+                    # Extract actually-generated logprob
+                    # info
+                    lp = pos_logprob_dict[ref_tok_id]
+                    lp_val = lp.logprob
+                    lp_rank = lp.rank
+
+                    # A "top" (rank 1) logprob must be
+                    # present
+                    rank_one_appears = (True
+                                        if lp_rank == 1 else rank_one_appears)
+
+                    # Rank must be >= 1
+                    assert lp_rank >= 1, (f"Logprob {lp} has invalid"
+                                          f"rank {lp_rank} < 1")
+
+                    # Validate log probability
+                    assert math.isclose(lp_val, ref_lp_val), (
+                        f"Token id {ref_tok_id} appears in logprobs dict"
+                        f" at position {idx} in completion with log"
+                        f" probability {lp_val} but {ref_lp_val} was"
+                        f" expected. Logprob: {lp}")
+
+                assert rank_one_appears, (f"No Logprob has rank 1"
+                                          " in the following Logprob"
+                                          f" dict: {pos_logprob_dict}")
+
+                # Validate prompt logprob detokenization
                 for plp_tok in pos_logprob_dict:
                     # Confirm that prompt logprob decoded token matches
                     # the logprob token id at this sequence position
