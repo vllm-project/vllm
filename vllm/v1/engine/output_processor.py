@@ -159,8 +159,10 @@ class OutputProcessor:
                 engine_core_output)
 
             # 3) Create and handle RequestOutput objects.
-            if request_output := self._make_request_output(
-                    req_state, detokenizer_output):
+            if detokenizer_output is not None:
+                request_output = self._make_request_output(
+                    req_state, detokenizer_output)
+
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put_nowait(request_output)
@@ -170,6 +172,8 @@ class OutputProcessor:
 
                 # Free completed requests.
                 if request_output.finished:
+                    assert detokenizer_output.finish_reason is not None
+
                     self.request_states.pop(req_id)
                     if not engine_core_output.finished:
                         # If req not finished in EngineCore, but Detokenizer
@@ -178,7 +182,8 @@ class OutputProcessor:
 
                     # Track per-request stats
                     iteration_stats.update_from_finished_request(
-                        request_output, req_state.stats)
+                        detokenizer_output.finish_reason, request_output,
+                        req_state.stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
@@ -189,12 +194,8 @@ class OutputProcessor:
     @staticmethod
     def _make_request_output(
         request_state: RequestState,
-        detokenizer_output: Optional[DetokenizerOutput],
-    ) -> Optional[RequestOutput]:
-
-        if detokenizer_output is None:
-            return None
-
+        detokenizer_output: DetokenizerOutput,
+    ) -> RequestOutput:
         request_output = RequestOutput.new(
             request_state.request_id,
             request_state.prompt,
