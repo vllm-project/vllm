@@ -13,6 +13,7 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
+from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -40,6 +41,20 @@ def main(args: argparse.Namespace):
         "prompt_token_ids": batch
     } for batch in dummy_prompt_token_ids.tolist()]
 
+    def llm_generate():
+        if not args.use_beam_search:
+            llm.generate(dummy_prompts,
+                         sampling_params=sampling_params,
+                         use_tqdm=False)
+        else:
+            llm.beam_search(
+                dummy_prompts,
+                BeamSearchParams(
+                    beam_width=args.n,
+                    max_tokens=args.output_len,
+                    ignore_eos=True,
+                ))
+
     def run_to_completion(profile_dir: Optional[str] = None):
         if profile_dir:
             with torch.profiler.profile(
@@ -49,15 +64,11 @@ def main(args: argparse.Namespace):
                     ],
                     on_trace_ready=torch.profiler.tensorboard_trace_handler(
                         str(profile_dir))) as p:
-                llm.generate(dummy_prompts,
-                             sampling_params=sampling_params,
-                             use_tqdm=False)
-            print(p.key_averages())
+                llm_generate()
+            print(p.key_averages().table(sort_by="self_cuda_time_total"))
         else:
             start_time = time.perf_counter()
-            llm.generate(dummy_prompts,
-                         sampling_params=sampling_params,
-                         use_tqdm=False)
+            llm_generate()
             end_time = time.perf_counter()
             latency = end_time - start_time
             return latency
