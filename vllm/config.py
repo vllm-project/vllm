@@ -748,8 +748,6 @@ class ModelConfig:
     def get_head_size(self) -> int:
         # TODO remove hard code
         if self.is_deepseek_mla:
-            # FlashAttention supports only head_size 32, 64, 128, 256,
-            # we need to pad head_size 192 to 256
             if self.should_use_mla:
                 return self.hf_text_config.kv_lora_rank
             else:
@@ -974,7 +972,7 @@ class ModelConfig:
     @property
     def should_use_mla(self) -> bool:
         use_mla = (self.is_deepseek_mla and not self.disable_mla
-                   and not envs.VLLM_DISABLE_MLA)
+                   and not envs.VLLM_MLA_DISABLE)
         return use_mla
 
     def supported_runner_types(self) -> Set[RunnerType]:
