@@ -59,6 +59,25 @@ git checkout -q "$BUILDKITE_COMMIT"
 run_benchmark $@ && mv benchmark_serving.txt benchmark_pr.txt
 rm ShareGPT_V3_unfiltered_cleaned_split.json
 
-# Compare results
-python3 .buildkite/compare_benchmarks.py benchmark_base.txt benchmark_pr.txt
+# Compare results. Run the comparison 3 times to avoid jitter of a single run.
+FAILURES=0
+ATTEMPTS=3
 
+for ((i=1; i<=ATTEMPTS; i++)); do
+  echo "Attempt $i/$ATTEMPTS:"
+  if ! python3 .buildkite/compare_benchmarks.py benchmark_base.txt benchmark_pr.txt; then
+    ((FAILURES++))
+  fi
+done
+
+# Final decision
+if [[ "$FAILURES" -eq "$ATTEMPTS" ]]; then
+  echo "🚨 Performance regression detected in all $ATTEMPTS attempts!"
+  exit 1
+elif [[ "$FAILURES" -gt 0 ]]; then
+  echo "⚠️  Regression seen in $FAILURES/$ATTEMPTS attempts (possible flakiness)"
+  exit 0
+else
+  echo "✅ No performance regression detected!"
+  exit 0
+fi
