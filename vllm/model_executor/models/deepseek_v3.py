@@ -251,7 +251,11 @@ class DeepseekV3Attention(nn.Module):
                                         bias=False,
                                         quant_config=quant_config,
                                         prefix=f"{prefix}.o_proj")
-        rope_scaling["rope_type"] = 'deepseek_yarn'
+        if rope_scaling:
+            rope_scaling["rope_type"] = 'deepseek_yarn'
+            self.use_normal_rope = False
+        else:
+            self.use_normal_rope = True
         self.rotary_emb = get_rope(qk_rope_head_dim,
                                    rotary_dim=qk_rope_head_dim,
                                    max_position=max_position_embeddings,
@@ -265,14 +269,8 @@ class DeepseekV3Attention(nn.Module):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
-        # self.attn = Attention(self.num_heads,
-        #                       self.qk_head_dim,
-        #                       self.scaling,
-        #                       num_kv_heads=self.num_heads)
-
-        # TODO, support head_size 192
         self.attn = Attention(self.num_local_heads,
-                              256,
+                              self.qk_head_dim,
                               self.scaling,
                               num_kv_heads=self.num_local_heads,
                               cache_config=cache_config,
@@ -306,23 +304,30 @@ class DeepseekV3Attention(nn.Module):
                      self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k_pe = latent_cache[:, :, self.kv_lora_rank:]
+
+        if self.use_normal_rope:
+            seq_len = positions.size(0)
+            ori_q_pe_shape, ori_k_pe_shape = q_pe.shape, k_pe.shape
+            q_pe = q_pe.reshape(seq_len, -1)
+            k_pe = k_pe.reshape(seq_len, -1)
+
         q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+
+        if self.use_normal_rope:
+            q_pe, k_pe = q_pe.view(ori_q_pe_shape), k_pe.view(ori_k_pe_shape)
+
         q[..., self.qk_nope_head_dim:] = q_pe
         k = torch.empty_like(q)
         k[..., :self.qk_nope_head_dim] = k_nope
         k[..., self.qk_nope_head_dim:] = k_pe
-        q = torch.nn.functional.pad(q, [0, 256 - self.qk_head_dim],
-                                    value=0).view(-1,
-                                                  self.num_local_heads * 256)
-        k = torch.nn.functional.pad(k, [0, 256 - self.qk_head_dim],
-                                    value=0).view(-1,
-                                                  self.num_local_heads * 256)
-        v = torch.nn.functional.pad(v, [0, 256 - self.v_head_dim],
-                                    value=0).view(-1,
-                                                  self.num_local_heads * 256)
+        # padding value to qk_head_dim for alignment
+        v = torch.nn.functional.pad(
+            v, [0, self.qk_head_dim - self.v_head_dim],
+            value=0).view(-1, self.num_local_heads * self.qk_head_dim)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         attn_output = attn_output.view(
-            -1, self.num_local_heads, 256)[..., :self.v_head_dim].reshape(
+            -1, self.num_local_heads,
+            self.qk_head_dim)[..., :self.v_head_dim].reshape(
                 -1, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
         return output
@@ -583,7 +588,8 @@ class DeepseekV3ForCausalLM(nn.Module, SupportsPP):
                 continue
 
             # TODO(simon): support nextn predict layers
-            if self.config.num_nextn_predict_layers > 0:
+            if hasattr(self.config, "num_nextn_predict_layers"
+                       ) and self.config.num_nextn_predict_layers > 0:
                 assert self.config.num_nextn_predict_layers == 1
                 layer_idx = self.config.num_hidden_layers
                 if name.startswith(f"model.layers.{layer_idx}"):
@@ -639,9 +645,6 @@ class DeepseekV3ForCausalLM(nn.Module, SupportsPP):
                     if is_pp_missing_parameter(name, self):
                         continue
 
-                    if name not in params_dict:
-                        for key in params_dict:
-                            print(key)
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)

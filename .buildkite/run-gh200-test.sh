@@ -24,5 +24,5 @@ remove_docker_container
 
 # Run the image and test offline inference
 docker run --name gh200-test --gpus=all --entrypoint="" gh200-test bash -c '
-    python3 examples/offline_inference.py
+    python3 examples/offline_inference/basic.py
 '

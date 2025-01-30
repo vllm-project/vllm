@@ -15,12 +15,12 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.sequence import SequenceGroupMetadata
 
-from .inputs import (MultiModalData, MultiModalDataDict, MultiModalKwargs,
+from .inputs import (ModalityData, MultiModalDataDict, MultiModalKwargs,
                      PlaceholderRange)
 
 logger = init_logger(__name__)
 
-MultiModalInputMapper = Callable[[InputContext, MultiModalData[object]],
+MultiModalInputMapper = Callable[[InputContext, ModalityData[object]],
                                  MultiModalKwargs]
 """
 Return a dictionary to be passed as keyword arguments to
@@ -49,9 +49,6 @@ class MultiModalPlugin(ABC):
     process the same data differently). This registry is in turn used by
     :class:`~MultiModalRegistry` which acts at a higher level
     (i.e., the modality of the data).
-
-    See also:
-        :ref:`adding-multimodal-plugin`
     """
 
     def __init__(self) -> None:
@@ -69,7 +66,7 @@ class MultiModalPlugin(ABC):
     def _default_input_mapper(
         self,
         ctx: InputContext,
-        data: MultiModalData[Any],
+        data: ModalityData[Any],
         **mm_processor_kwargs,
     ) -> MultiModalKwargs:
         """
@@ -93,10 +90,6 @@ class MultiModalPlugin(ABC):
         invoked to transform the data into a dictionary of model inputs.
 
         If `None` is provided, then the default input mapper is used instead.
-
-        See also:
-            - :ref:`input-processing-pipeline`
-            - :ref:`enabling-multimodal-inputs`
         """
 
         def wrapper(model_cls: N) -> N:
@@ -118,7 +111,7 @@ class MultiModalPlugin(ABC):
     def map_input(
         self,
         model_config: "ModelConfig",
-        data: MultiModalData[Any],
+        data: ModalityData[Any],
         mm_processor_kwargs: Optional[dict[str, Any]],
     ) -> MultiModalKwargs:
         """
@@ -129,10 +122,6 @@ class MultiModalPlugin(ABC):
 
         Raises:
             TypeError: If the data type is not supported.
-
-        See also:
-            - :ref:`input-processing-pipeline`
-            - :ref:`enabling-multimodal-inputs`
         """
 
         # Avoid circular import
@@ -189,9 +178,6 @@ class MultiModalPlugin(ABC):
         for a model class.
 
         If `None` is provided, then the default calculation is used instead.
-
-        See also:
-            :ref:`enabling-multimodal-inputs`
         """
 
         def wrapper(model_cls: N) -> N:
@@ -221,9 +207,6 @@ class MultiModalPlugin(ABC):
         If this registry is not applicable to the model, `0` is returned.
 
         The model is identified by ``model_config``.
-
-        See also:
-            :ref:`enabling-multimodal-inputs`
         """
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Gemma model compatible with HuggingFace weights."""
-from functools import lru_cache
+from functools import cache
 from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
@@ -48,7 +48,7 @@ from .utils import (is_pp_missing_parameter,
 logger = init_logger(__name__)
 
 
-@lru_cache(maxsize=None)
+@cache
 def _get_gemma_act_fn(
     hidden_act: Optional[str],
     hidden_activation: Optional[str],
@@ -349,15 +349,6 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "gate_up_proj",
         "down_proj",
     ]
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
-    }
 
     # Gemma does not apply LoRA to the embedding layer.
     embedding_modules = {}

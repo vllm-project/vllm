@@ -7,7 +7,7 @@ from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
-MODEL_PATH = "Qwen/Qwen2-VL-7B-Instruct"
+MODEL_PATH = "Qwen/Qwen2-VL-2B-Instruct"
 
 PROMPT_TEMPLATE = (
     "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
@@ -49,16 +49,15 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     # Print the outputs.
     generated_texts: List[str] = []
     for output in outputs:
-        prompt = output.prompt
         generated_text = output.outputs[0].text.strip()
         generated_texts.append(generated_text)
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Generated text: {generated_text!r}")
     return generated_texts
 
 
-@pytest.mark.xfail(current_platform.is_rocm(),
-                   reason="Qwen2-VL dependency xformers incompatible with ROCm"
-                   )
+@pytest.mark.xfail(
+    current_platform.is_rocm(),
+    reason="Qwen2-VL dependency xformers incompatible with ROCm")
 def test_qwen2vl_lora(qwen2vl_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
