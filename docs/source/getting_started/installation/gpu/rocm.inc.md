@@ -39,9 +39,9 @@ for instructions on how to use this prebuilt docker image.
     ```console
     python3 -m pip install ninja cmake wheel pybind11
     pip uninstall -y triton
-    git clone https://github.com/OpenAI/triton.git
+    git clone git://github.com/ROCm/triton.git
     cd triton
-    git checkout e192dba
+    git checkout triton-mlir
     cd python
     pip3 install .
     cd ../..
