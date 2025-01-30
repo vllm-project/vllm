@@ -18,7 +18,7 @@ from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 @dataclass(kw_only=True)
 class MLAMetadataCommon(AttentionMetadata):
-    # Input positions for rotrary embeddings since for MLA the rotarty
+    # Input positions for rotrary embeddings since for MLA the rotary
     # position embeddings are applied inside the attention backend
     input_positions: torch.Tensor
 
