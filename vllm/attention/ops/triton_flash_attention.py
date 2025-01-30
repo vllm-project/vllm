@@ -1464,13 +1464,6 @@ class _attention(torch.autograd.Function):
 
         atomic_counter = torch.zeros([1], device=q.device, dtype=torch.int32)
 
-        traceback.print_stack()
-        print(f"FLASH_ATTN_V2:q.shape = {q.shape},"
-              f"q.dtype = {q.dtype},"
-              f"k.shape = {k.shape},"
-              f"k.dtype = {k.dtype},"
-              f"v.shape = {v.shape},"
-              f"v.dtype = {v.dtype},")
         attn_fwd[grid](
             q,
             k,
