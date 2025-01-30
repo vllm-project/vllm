@@ -897,6 +897,8 @@ def get_pp_group() -> GroupCoordinator:
     assert _PP is not None, (
         "pipeline model parallel group is not initialized")
     return _PP
+
+
 # kept for backward compatibility
 get_pipeline_model_parallel_group = get_pp_group
 
@@ -1048,7 +1050,6 @@ def initialize_model_parallel(
                                     use_message_queue_broadcaster=True,
                                     group_name="tp")
     
-    
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size //
                                                pipeline_model_parallel_size)
@@ -1113,7 +1114,6 @@ def ensure_model_parallel_initialized(
     ), ("tensor parallel group already initialized, but of unexpected size: "
         f"{get_tensor_model_parallel_world_size()=} vs. "
         f"{tensor_model_parallel_size=}")
-    
     pp_world_size = get_pp_group().world_size
     assert (pp_world_size == pipeline_model_parallel_size), (
         "pipeline parallel group already initialized, but of unexpected size: "
@@ -1153,6 +1153,7 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
         _TP_STATE_PATCHED = False
         _TP = old_tp_group
 
+
 def get_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size
@@ -1162,9 +1163,11 @@ def get_tensor_model_parallel_rank():
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
 
+
 def get_expert_model_parallel_size():
     """Return the expert model parallel size."""
     return _EP_SIZE
+
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
@@ -1172,7 +1175,7 @@ def destroy_model_parallel():
     if _TP:
         _TP.destroy()
     _TP = None
-    
+
     global _PP
     if _PP:
         _PP.destroy()

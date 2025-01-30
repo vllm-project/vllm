@@ -204,8 +204,8 @@ def fused_moe_kernel(
 
 def moe_align_block_size(
         topk_ids: torch.Tensor, block_size: int, num_experts: int,
-        expert_map: torch.Tensor = None) \
-            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        expert_map: torch.Tensor = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
     size for matrix multiplication.

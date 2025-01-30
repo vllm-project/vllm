@@ -559,8 +559,8 @@ class FusedMoE(torch.nn.Module):
                        num_expert_group: Optional[int] = None,
                        custom_routing_function: Optional[Callable] = None,
                        scoring_func: str = "softmax",
-                       e_score_correction_bias: Optional[torch.Tensor] = None) \
-                           -> Tuple[torch.Tensor, torch.Tensor]:
+                       e_score_correction_bias: Optional[torch.Tensor] = None
+                    ) -> Tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_topk, grouped_topk)
                 

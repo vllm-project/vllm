@@ -146,7 +146,7 @@ class DeepseekV2MoE(nn.Module):
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
-            router_logits=router_logit) * self.routed_scaling_factor
+            router_logits=router_logits) * self.routed_scaling_factor
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1:
@@ -385,7 +385,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        residual: Optional[torch.Tensor]) -> torch.Tensor:
+        residual: Optional[torch.Tensor],
+    ) -> torch.Tensor:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -460,8 +461,6 @@ class DeepseekV2Model(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-
-        
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -475,14 +474,9 @@ class DeepseekV2Model(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            if i == self.start_layer + 1:
-                hidden_states, residual = layer(positions, hidden_states,
-                                                kv_caches[i - self.start_layer],
-                                                attn_metadata, residual)
-            else:
-                hidden_states, residual = layer(positions, hidden_states,
-                                                kv_caches[i - self.start_layer],
-                                                attn_metadata, residual)
+            hidden_states, residual = layer(positions, hidden_states,
+                                            kv_caches[i - self.start_layer],
+                                            attn_metadata, residual)
                                                 
 
         if not get_pp_group().is_last_rank:
