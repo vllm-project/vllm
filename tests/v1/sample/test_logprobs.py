@@ -1,4 +1,5 @@
-from typing import List
+import itertools
+from typing import List, Tuple
 
 import pytest
 import torch
@@ -12,6 +13,54 @@ from vllm import SamplingParams
 from ...conftest import VllmRunner
 
 MODELS = ["facebook/opt-125m"]
+
+
+def _repeat_logprob_config(
+    test_prompts,
+    logprob_prompt_logprob_list: List[Tuple],
+) -> List[Tuple]:
+    """Ensure each test prompt has a logprob config.
+    
+    A logprob config specifies the optional (i.e.
+    may-be-`None`) number of sample logprobs and
+    the optional number of prompt logprobs.
+
+    If more test prompts than logprob configs are
+    provided, the provided logprob configs are
+    tiled to match the number of test prompts.
+
+    If fewer test prompts than logprob configs
+    are provided, the list of logprob configs
+    is truncated to match the number of test
+    prompts.
+
+    Otherwise, the list of logprob configs
+    is returned as-is.
+
+    Args:
+      test_prompts: list of prompts under test
+      logprob_prompt_logprob_list: list of
+                            (optional num sample logprob,
+                             optional num prompt logprob)
+                             tuples
+    
+    Returns:
+      List of
+      (optional num sample logprob,optional num prompt logprob)
+      tuples which is either identical to
+      `logprob_prompt_logprob_list`, or else repeats
+      `logprob_prompt_logprob_list` enough times to match the
+      number of `test_prompts`, or else is truncated to match
+      the number of `test_prompts`
+    """
+    num_test_prompts = len(test_prompts)
+    # Make sure there is a logprobs configuration for each test prompt
+    logprob_prompt_logprob_list = list(
+        itertools.islice(itertools.cycle(logprob_prompt_logprob_list),
+                         num_test_prompts))
+    # Now the number of prompts should match the number of sample params combos
+    assert num_test_prompts == len(logprob_prompt_logprob_list)
+    return logprob_prompt_logprob_list
 
 
 def _test_case_get_logprobs_and_prompt_logprobs(
@@ -47,17 +96,9 @@ def _test_case_get_logprobs_and_prompt_logprobs(
     # (different logprobs/prompt logprobs combos)
     logprob_prompt_logprob_list = get_test_batch(batch_logprobs_composition)
 
-    # We rely on there being more prompts than combinations of
-    # logprobs & prompt logprobs which we want to test
-    assert len(test_prompts) >= len(logprob_prompt_logprob_list)
-    # Make sure there is a sample params for each prompt
-    num_extra_params = len(test_prompts) - len(logprob_prompt_logprob_list)
-    if num_extra_params > 0:
-        logprob_prompt_logprob_list = (
-            logprob_prompt_logprob_list +
-            logprob_prompt_logprob_list[-num_extra_params:])
-    # Now the number of prompts should match the number of sample params combos
-    assert len(test_prompts) == len(logprob_prompt_logprob_list)
+    # Ensure that each test prompt has a logprob config for testing
+    logprob_prompt_logprob_list = _repeat_logprob_config(
+        test_prompts, logprob_prompt_logprob_list)
     # Generate SamplingParams
     vllm_sampling_params = [
         SamplingParams(max_tokens=max_tokens,
