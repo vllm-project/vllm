@@ -21,10 +21,8 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               RequestResponseMetadata,
                                               UsageInfo)
 # yapf: enable
-from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
-                                                    LoRAModulePath,
-                                                    OpenAIServing,
-                                                    PromptAdapterPath)
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -41,18 +39,14 @@ class OpenAIServingCompletion(OpenAIServing):
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
-        base_model_paths: List[BaseModelPath],
+        models: OpenAIServingModels,
         *,
-        lora_modules: Optional[List[LoRAModulePath]],
-        prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
-                         base_model_paths=base_model_paths,
-                         lora_modules=lora_modules,
-                         prompt_adapters=prompt_adapters,
+                         models=models,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
         diff_sampling_param = self.model_config.get_diff_sampling_param()
@@ -64,7 +58,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def create_completion(
         self,
         request: CompletionRequest,
-        raw_request: Request,
+        raw_request: Optional[Request] = None,
     ) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
         """Completion API similar to OpenAI's API.
 
@@ -143,7 +137,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
-                trace_headers = (await
+                trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
 
                 if isinstance(sampling_params, BeamSearchParams):
@@ -170,7 +164,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         result_generator = merge_async_iterators(*generators)
 
-        model_name = self._get_model_name(lora_request)
+        model_name = self.models.model_name(lora_request)
         num_prompts = len(engine_prompts)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
@@ -377,7 +371,7 @@ class OpenAIServingCompletion(OpenAIServing):
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = final_usage_info
 
-        except ValueError as e:
+        except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
@@ -528,11 +522,10 @@ class OpenAIServingCompletion(OpenAIServing):
                 out_top_logprobs.append({
                     # Convert float("-inf") to the
                     # JSON-serializable float that OpenAI uses
-                    self._get_decoded_token(
-                        top_lp[1],
-                        top_lp[0],
-                        tokenizer,
-                        return_as_token_id=self.return_tokens_as_token_ids):
+                    self._get_decoded_token(top_lp[1],
+                                            top_lp[0],
+                                            tokenizer,
+                                            return_as_token_id=self.return_tokens_as_token_ids):
                     max(top_lp[1].logprob, -9999.0)
                     for i, top_lp in enumerate(step_top_logprobs.items())
                     if num_output_top_logprobs >= i

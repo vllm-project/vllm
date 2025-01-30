@@ -18,12 +18,10 @@ struct VLLMCollectiveBuilder<
     ElementAccumulator, TileShape_MNK, ClusterShape_MNK, StageCountType,
     KernelScheduleType,
     cute::enable_if_t<(
+        cute::is_same_v<KernelScheduleType, KernelTmaWarpSpecialized> ||
+        cute::is_same_v<KernelScheduleType, KernelTmaWarpSpecializedPingpong> ||
         cute::is_same_v<KernelScheduleType,
-                        KernelTmaWarpSpecializedMixedInput> ||
-        cute::is_same_v<KernelScheduleType,
-                        KernelTmaWarpSpecializedPingpongMixedInput> ||
-        cute::is_same_v<KernelScheduleType,
-                        KernelTmaWarpSpecializedCooperativeMixedInput>)>> {
+                        KernelTmaWarpSpecializedCooperative>)>> {
   using CollectiveOp = machete::MacheteCollectiveMma<
       ElementPairA_, GmemLayoutA_, AlignmentA, ElementPairB_, GmemLayoutB_,
       AlignmentB, ElementAccumulator, TileShape_MNK, ClusterShape_MNK,

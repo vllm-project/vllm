@@ -18,7 +18,6 @@ import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 
 from .interfaces import (has_inner_state, is_attention_free, is_hybrid,
                          supports_cross_encoding, supports_multimodal,
@@ -48,6 +47,7 @@ _TEXT_GENERATION_MODELS = {
     "DeepseekV3ForCausalLM": ("deepseek_v3", "DeepseekV3ForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
+    "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
@@ -61,6 +61,7 @@ _TEXT_GENERATION_MODELS = {
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
+    "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -113,6 +114,7 @@ _EMBEDDING_MODELS = {
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "GritLM": ("gritlm", "GritLM"),
+    "InternLM2ForRewardModel": ("internlm2", "InternLM2ForRewardModel"),
     "JambaForSequenceClassification": ("jamba", "JambaForSequenceClassification"),  # noqa: E501
     "LlamaModel": ("llama", "LlamaForCausalLM"),
     **{
@@ -125,6 +127,7 @@ _EMBEDDING_MODELS = {
     "Qwen2Model": ("qwen2", "Qwen2EmbeddingModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
+    "Qwen2ForProcessRewardModel": ("qwen2_rm", "Qwen2ForProcessRewardModel"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     # [Multimodal]
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
@@ -149,6 +152,7 @@ _MULTIMODAL_MODELS = {
     "ChameleonForConditionalGeneration": ("chameleon", "ChameleonForConditionalGeneration"),  # noqa: E501
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
+    "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
@@ -158,6 +162,7 @@ _MULTIMODAL_MODELS = {
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": ("llava_onevision", "LlavaOnevisionForConditionalGeneration"),  # noqa: E501
     "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),  # noqa: E501
+    "MiniCPMO": ("minicpmo", "MiniCPMO"),
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
@@ -170,6 +175,7 @@ _MULTIMODAL_MODELS = {
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     # [Encoder-decoder]
     "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
+    "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
 }
 
 _SPECULATIVE_DECODING_MODELS = {
@@ -185,31 +191,6 @@ _VLLM_MODELS = {
     **_CROSS_ENCODER_MODELS,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
-}
-
-# Models not supported by ROCm.
-_ROCM_UNSUPPORTED_MODELS: List[str] = []
-
-# Models partially supported by ROCm.
-# Architecture -> Reason.
-_ROCM_SWA_REASON = ("Sliding window attention (SWA) is not yet supported in "
-                    "Triton flash attention. For half-precision SWA support, "
-                    "please use CK flash attention by setting "
-                    "`VLLM_USE_TRITON_FLASH_ATTN=0`")
-_ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
-    "Qwen2ForCausalLM":
-    _ROCM_SWA_REASON,
-    "MistralForCausalLM":
-    _ROCM_SWA_REASON,
-    "MixtralForCausalLM":
-    _ROCM_SWA_REASON,
-    "PaliGemmaForConditionalGeneration":
-    ("ROCm flash attention does not yet "
-     "fully support 32-bit precision on PaliGemma"),
-    "Phi3VForCausalLM":
-    ("ROCm Triton flash attention may run into compilation errors due to "
-     "excessive use of shared memory. If this happens, disable Triton FA "
-     "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`")
 }
 
 
@@ -297,17 +278,8 @@ def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
 ) -> Optional[Type[nn.Module]]:
-    if current_platform.is_rocm():
-        if model_arch in _ROCM_UNSUPPORTED_MODELS:
-            raise ValueError(f"Model architecture '{model_arch}' is not "
-                             "supported by ROCm for now.")
-
-        if model_arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
-            msg = _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch]
-            logger.warning(
-                "Model architecture '%s' is partially "
-                "supported by ROCm: %s", model_arch, msg)
-
+    from vllm.platforms import current_platform
+    current_platform.verify_model_arch(model_arch)
     try:
         return model.load_model_cls()
     except Exception:
@@ -491,7 +463,8 @@ class _ModelRegistry:
 
 
 ModelRegistry = _ModelRegistry({
-    model_arch: _LazyRegisteredModel(
+    model_arch:
+    _LazyRegisteredModel(
         module_name=f"vllm.model_executor.models.{mod_relname}",
         class_name=cls_name,
     )

@@ -29,8 +29,7 @@ from transformers import LlamaConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -38,16 +37,13 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    get_compressed_tensors_cache_scale)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -97,20 +93,19 @@ class LlamaMLP(nn.Module):
 
 class LlamaAttention(nn.Module):
 
-    def __init__(
-        self,
-        config: LlamaConfig,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        max_position_embeddings: int = 8192,
-        quant_config: Optional[QuantizationConfig] = None,
-        bias: bool = False,
-        cache_config: Optional[CacheConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self,
+                 config: LlamaConfig,
+                 hidden_size: int,
+                 num_heads: int,
+                 num_kv_heads: int,
+                 rope_theta: float = 10000,
+                 rope_scaling: Optional[Dict[str, Any]] = None,
+                 max_position_embeddings: int = 8192,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 bias: bool = False,
+                 bias_o_proj: bool = False,
+                 cache_config: Optional[CacheConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
@@ -150,13 +145,14 @@ class LlamaAttention(nn.Module):
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
-            bias=bias,
+            bias=bias_o_proj,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
 
         is_neox_style = True
-        if quant_config is not None and quant_config.get_name() == "gguf":
+        is_gguf = quant_config and quant_config.get_name() == "gguf"
+        if is_gguf and config.model_type == "llama":
             is_neox_style = False
 
         self.rotary_emb = get_rope(
@@ -230,6 +226,11 @@ class LlamaDecoderLayer(nn.Module):
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
+        bias_o_proj = attention_bias
+        # support internlm/internlm3-8b with qkv_bias
+        if hasattr(config, 'qkv_bias'):
+            attention_bias = config.qkv_bias
+
         self.self_attn = LlamaAttention(
             config=config,
             hidden_size=self.hidden_size,
@@ -241,6 +242,7 @@ class LlamaDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=attention_bias,
+            bias_o_proj=bias_o_proj,
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
         )
@@ -300,6 +302,7 @@ class LlamaModel(nn.Module):
         lora_config = vllm_config.lora_config
 
         self.config = config
+        self.quant_config = quant_config
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
@@ -390,15 +393,22 @@ class LlamaModel(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if scale_name := get_compressed_tensors_cache_scale(name):
-                # Loading kv cache scales for compressed-tensors quantization
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                loaded_weight = loaded_weight[0]
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
+            if "scale" in name:
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -418,10 +428,6 @@ class LlamaModel(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
 
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -432,31 +438,6 @@ class LlamaModel(nn.Module):
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
-
-    # If this function is called, it should always initialize KV cache scale
-    # factors (or else raise an exception). Thus, handled exceptions should
-    # make sure to leave KV cache scale factors in a known good (dummy) state
-    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        for layer_idx, scaling_factor in kv_cache_scales_loader(
-                quantization_param_path, tp_rank, tp_size,
-                self.config.num_hidden_layers,
-                self.config.__class__.model_type):
-            if not isinstance(self.layers[layer_idx], nn.Identity):
-                layer_self_attn = self.layers[layer_idx].self_attn
-
-            if current_platform.is_rocm():
-                # The scaling factor convention we are assuming is
-                # quantized_value * scaling_factor ~= true_value
-                # which is consistent with the practice of setting
-                # scaling_factor = tensor_amax / FPtype_max
-                scaling_factor *= 2
-            if hasattr(layer_self_attn, "kv_scale"):
-                layer_self_attn.attn._kv_scale = scaling_factor
-            else:
-                raise RuntimeError("Self attention has no KV cache scaling "
-                                   "factor attribute!")
 
 
 class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
@@ -475,16 +456,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "lm_head": "output_embeddings"
     }
     embedding_padding_modules = ["lm_head"]
-
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
-    }
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
@@ -594,9 +565,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return loader.load_weights(
             self.maybe_remap_mistral(name, loaded_weight)
             for name, loaded_weight in weights)
-
-    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
-        self.model.load_kv_cache_scales(quantization_param_path)
 
     # This function is used to remap the mistral format as
     # used by Mistral and Llama <=2

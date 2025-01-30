@@ -1,5 +1,9 @@
 from dataclasses import dataclass, field
-from typing import AbstractSet, Mapping, Optional
+from typing import AbstractSet, Any, Literal, Mapping, Optional
+
+import pytest
+from packaging.version import Version
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 
 @dataclass(frozen=True)
@@ -22,6 +26,11 @@ class _HfExamplesInfo:
     for speculative decoding.
     """
 
+    min_transformers_version: Optional[str] = None
+    """
+    The minimum version of HF Transformers that is required to run this model.
+    """
+
     is_available_online: bool = True
     """
     Set this to ``False`` if the name of this architecture no longer exists on
@@ -33,6 +42,50 @@ class _HfExamplesInfo:
     trust_remote_code: bool = False
     """The ``trust_remote_code`` level required to load the model."""
 
+    hf_overrides: dict[str, Any] = field(default_factory=dict)
+    """The ``hf_overrides`` required to load the model."""
+
+    def check_transformers_version(
+        self,
+        *,
+        on_fail: Literal["error", "skip"],
+    ) -> None:
+        """
+        If the installed transformers version does not meet the requirements,
+        perform the given action.
+        """
+        if self.min_transformers_version is None:
+            return
+
+        current_version = TRANSFORMERS_VERSION
+        required_version = self.min_transformers_version
+        if Version(current_version) < Version(required_version):
+            msg = (
+                f"You have `transformers=={current_version}` installed, but "
+                f"`transformers>={required_version}` is required to run this "
+                "model")
+
+            if on_fail == "error":
+                raise RuntimeError(msg)
+            else:
+                pytest.skip(msg)
+
+    def check_available_online(
+        self,
+        *,
+        on_fail: Literal["error", "skip"],
+    ) -> None:
+        """
+        If the model is not available online, perform the given action.
+        """
+        if not self.is_available_online:
+            msg = "Model is not available online"
+
+            if on_fail == "error":
+                raise RuntimeError(msg)
+            else:
+                pytest.skip(msg)
+
 
 # yapf: disable
 _TEXT_GENERATION_EXAMPLE_MODELS = {
@@ -43,8 +96,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "ArcticForCausalLM": _HfExamplesInfo("Snowflake/snowflake-arctic-instruct",
                                          trust_remote_code=True),
-    "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria",
-                                                    trust_remote_code=True),
     "BaiChuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan-7B",
                                          trust_remote_code=True),
     "BaichuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan2-7B-chat",
@@ -64,6 +115,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "DeepseekV3ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3",  # noqa: E501
                                          trust_remote_code=True),
     "ExaoneForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct"),  # noqa: E501
+    "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),  # noqa: E501
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-2b"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
@@ -80,6 +132,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "InternLM2VEForCausalLM": _HfExamplesInfo("OpenGVLab/Mono-InternVL-2B",
                                               trust_remote_code=True),
+    "InternLM3ForCausalLM": _HfExamplesInfo("internlm/internlm3-8b-instruct",
+                                            trust_remote_code=True),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini"),
     "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Meta-Llama-3-8B"),
@@ -140,11 +194,14 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
+    "InternLM2ForRewardModel": _HfExamplesInfo("internlm/internlm2-1_8b-reward",
+                                               trust_remote_code=True),
     "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),  # noqa: E501
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),
     "Qwen2ForRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-RM-72B"),
+    "Qwen2ForProcessRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-PRM-7B"),
     "Qwen2ForSequenceClassification": _HfExamplesInfo("jason9693/Qwen2.5-1.5B-apeach"),  # noqa: E501
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2"),  # noqa: E501
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),  # noqa: E501
@@ -165,6 +222,8 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
 
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
+    "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria",
+                                                    min_transformers_version="4.48"),
     "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b"),  # noqa: E501
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),  # noqa: E501
     "ChatGLMModel": _HfExamplesInfo("THUDM/glm-4v-9b",
@@ -172,6 +231,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                     trust_remote_code=True),
     "ChatGLMForConditionalGeneration": _HfExamplesInfo("chatglm2-6b",
                                                        is_available_online=False),
+    "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
+                                               hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]}),  # noqa: E501
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m"),
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
@@ -182,8 +243,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-v1.6-mistral-7b-hf"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": _HfExamplesInfo("llava-hf/LLaVA-NeXT-Video-7B-hf"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),  # noqa: E501
-    "MantisForConditionalGeneration": _HfExamplesInfo("TIGER-Lab/Mantis-8B-siglip-llama3"),  # noqa: E501
-    "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
+    "MantisForConditionalGeneration": _HfExamplesInfo("TIGER-Lab/Mantis-8B-siglip-llama3",  # noqa: E501
+                                                      hf_overrides={"architectures": ["MantisForConditionalGeneration"]}),  # noqa: E501
+    "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
+                                trust_remote_code=True),
+    "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-V-2_6",
                                 trust_remote_code=True),
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
                                         trust_remote_code=True),
@@ -199,9 +263,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                        trust_remote_code=True),
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-Audio-7B-Instruct"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
-    "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_3"),
+    "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_3",
+                                     trust_remote_code=True),
     # [Encoder-decoder]
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
+    "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
 }
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
@@ -233,6 +299,18 @@ class HfExampleModels:
 
     def get_hf_info(self, model_arch: str) -> _HfExamplesInfo:
         return self.hf_models[model_arch]
+
+    def find_hf_info(self, model_id: str) -> _HfExamplesInfo:
+        for info in self.hf_models.values():
+            if info.default == model_id:
+                return info
+
+        # Fallback to extras
+        for info in self.hf_models.values():
+            if any(extra == model_id for extra in info.extras.values()):
+                return info
+
+        raise ValueError(f"No example model defined for {model_id}")
 
 
 HF_EXAMPLE_MODELS = HfExampleModels(_EXAMPLE_MODELS)

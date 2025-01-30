@@ -98,8 +98,7 @@ struct PrepackedLayoutBTemplate {
   // For coop schedules we have two warp groups cooperatively issuing wgmma
   // instructions so we use 2 atoms along the M dim (one for each warpgroup)
   using AtomLayoutMNK = cute::conditional_t<
-      cute::is_same_v<KernelSchedule,
-                      KernelTmaWarpSpecializedCooperativeMixedInput>,
+      cute::is_same_v<KernelSchedule, KernelTmaWarpSpecializedCooperative>,
       Layout<Shape<_2, _1, _1>>, Layout<Shape<_1, _1, _1>>>;
 
   using TiledMma = decltype(cute::make_tiled_mma(

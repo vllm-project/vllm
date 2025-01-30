@@ -23,8 +23,7 @@ with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
     supports_moe_ops = True
 
-# neuron has torch version that doesn't even have impl_abstract
-if TYPE_CHECKING or current_platform.is_neuron():
+if TYPE_CHECKING:
 
     def register_fake(fn):
         return lambda name: fn
@@ -33,37 +32,6 @@ else:
         from torch.library import register_fake
     except ImportError:
         from torch.library import impl_abstract as register_fake
-
-
-# activation ops
-def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.silu_and_mul(out, x)
-
-
-def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_and_mul(out, x)
-
-
-def gelu_tanh_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_tanh_and_mul(out, x)
-
-
-def fatrelu_and_mul(out: torch.Tensor,
-                    x: torch.Tensor,
-                    threshold: float = 0.0) -> None:
-    torch.ops._C.fatrelu_and_mul(out, x, threshold)
-
-
-def gelu_fast(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_fast(out, x)
-
-
-def gelu_new(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_new(out, x)
-
-
-def gelu_quick(out: torch.Tensor, x: torch.Tensor) -> None:
-    torch.ops._C.gelu_quick(out, x)
 
 
 # page attention ops
@@ -80,8 +48,8 @@ def paged_attention_v1(
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
     tp_rank: int = 0,
     blocksparse_local_blocks: int = 0,
     blocksparse_vert_stride: int = 0,
@@ -112,8 +80,8 @@ def paged_attention_v2(
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
     tp_rank: int = 0,
     blocksparse_local_blocks: int = 0,
     blocksparse_vert_stride: int = 0,
@@ -144,8 +112,8 @@ def paged_attention_rocm(
     max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
 ) -> None:
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
@@ -852,8 +820,8 @@ def scaled_int8_quant(
     if scale is not None:
         # static-per-tensor quantization.
         assert symmetric == (
-            azp is
-            None), "azp must only be provided for asymmetric quantization."
+            azp
+            is None), "azp must only be provided for asymmetric quantization."
         torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
         return output, scale, azp
 
@@ -988,8 +956,8 @@ def reshape_and_cache(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache(key, value, key_cache,
                                              value_cache, slot_mapping,
@@ -1003,8 +971,8 @@ def reshape_and_cache_flash(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
                                                    value_cache, slot_mapping,
