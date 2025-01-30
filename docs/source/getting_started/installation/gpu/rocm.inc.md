@@ -2,6 +2,8 @@
 
 vLLM supports AMD GPUs with ROCm 6.2.
 
+There are no pre-built wheels for this device, so you must either use the pre-built Docker image or build vLLM from source.
+
 ## Requirements
 
 - GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100)
