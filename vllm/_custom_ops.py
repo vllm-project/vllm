@@ -230,7 +230,6 @@ def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
     return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
-# gptq
 def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
               b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,
               b_g_idx: torch.Tensor, use_exllama: bool,

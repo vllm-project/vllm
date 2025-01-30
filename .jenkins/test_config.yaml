@@ -69,3 +69,8 @@ stages:
       - name: test_long_context
         flavor: g2
         command: VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_long_context_hpu.py::test_quality
+  - name: tests_int4_quantization
+    steps:
+      - name: test_gptq
+        flavor: g2
+        command: VLLM_SKIP_WARMUP=true pytest -v tests/quantization/test_gptq.py::test_gptq
