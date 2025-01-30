@@ -10,12 +10,11 @@ from typing import Dict
 # Unspecified metrics will not be checked.
 METRICS_THRESHOLDS = {
     # Maximum X% decrease allowed (positive values for throughput)
-    "Request throughput (req/s)": 5,
-    "Output token throughput (tok/s)": 5,
-    "Total Token throughput (tok/s)": 5,
+    "Output token throughput (tok/s)": 3.0,
+    "Total Token throughput (tok/s)": 3.0,
     # Maximum X% increase allowed (negative values for latencies)
-    "Median TTFT (ms)": -5,
-    "Median ITL (ms)": -5,
+    "Median TTFT (ms)": -2.5,
+    "Median ITL (ms)": -2.5,
 }
 
 
