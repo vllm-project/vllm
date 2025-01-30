@@ -76,11 +76,7 @@ from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 
 # Configure the quantization algorithms
-recipe = [
-    # TODO (Brian/Kyle) SmoothQuant is only meant for W8A8, should this be something else?
-    SmoothQuantModifier(smoothing_strength=0.8),
-    GPTQModifier(targets="Linear", scheme="W4A16", ignore=["lm_head"]),
-]
+recipe = GPTQModifier(targets="Linear", scheme="W4A16", ignore=["lm_head"])
 
 # Apply quantization
 oneshot(
@@ -130,10 +126,11 @@ Quantized models can be sensitive to the presence of the `bos` token. Make sure 
 - Use a sequence length of 2048 as a starting point
 - Employ the chat template or instruction template that the model was trained with
 - If you've fine-tuned a model, consider using a sample of your training data for calibration
-<!-- TODO (Brian/Kyle) include description of activation ordering and dampening_frac hyperparameters -->
-<!-- TODO (Brian/Kyle) "choosing the correct quantization scheme/ compression technique" -->
-<!-- TODO (Brian/Kyle) include vision or audio calibration datasets as well -->
+- Tune key hyperparameters to the quantization algorithm:
+    - `dampening_frac` sets how much influence the GPTQ algorithm has. Lower values can improve accuracy, but can lead to numerical instabilities that cause the algorithm to fail.
+    - `actorder` sets the activation ordering. When compressing the weights of a layer weight, the order in which channels are quantized matters. Setting `actorder="weight"` can improve accuracy without added latency.
+
 
 ## Troubleshooting and Support
 
-If you encounter any issues or have feature requests, please open an issue on the [`vllm-project/llm-compressor`](https://github.com/vllm-project/llm-compressor) GitHub repository. The full INT4 quantization example is available in `llm-compressor` [here](https://github.com/vllm-project/llm-compressor/blob/main/examples/quantization_w4a16/llama3_example.py).
+If you encounter any issues or have feature requests, please open an issue on the [`vllm-project/llm-compressor`](https://github.com/vllm-project/llm-compressor) GitHub repository. The full INT4 quantization example in `llm-compressor` is available [here](https://github.com/vllm-project/llm-compressor/blob/main/examples/quantization_w4a16/llama3_example.py).
