@@ -263,16 +263,21 @@ class CompressedTensors24(CompressedTensorsScheme):
             self, compressed: torch.Tensor, bitmask: torch.Tensor,
             layer: torch.nn.Module) -> torch.Tensor:
         """
-        Decompress a compressed 2:4 sparse weight tensor 
-        using the bitmask and return the result.
-        
+        Decompress a compressed 2:4 sparse weight tensor using the bitmask and 
+        return the result.
+
         This function also supports sharded decompression.
 
-        :param compressed: The 2:4 sparse weight tensor 
-            compressed using the sparse-24-bitmask compressor.
-        :param bitmask: The 2:4 bitmask associated with the compressed weights.
-        :param layer: The layer whose weights need to be processed 
-            after loading.
+        :param compressed: The 2:4 sparse weight tensor compressed using the 
+            sparse-24-bitmask compressor. This is different from 
+            `cutlass_sparse_compress` which uses a different scheme (2 bits for 
+            every nonzero element that represent the coordinate within the block 
+            of 4). The bitmask compression here uses a bitmask to indicate the 
+            positions of non-zero elements.
+        :param bitmask: The 2:4 bitmask associated with the compressed weights, 
+            representing the positions of non-zero elements in the compressed 
+            tensor.
+        :param layer: The layer whose weights need to be processed after loading.
         :return: The decompressed 2:4 sparse weight tensor.
         """
 
