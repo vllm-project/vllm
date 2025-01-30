@@ -288,7 +288,7 @@ class DeepseekV3Attention(nn.Module):
         batch_size, seq_len = hidden_states.size(0), hidden_states.size(1)
         hidden_states = hidden_states.view(batch_size * seq_len, *hidden_states.shape[2:])
         positions = positions.view(-1)
-        print(f"hidden_states: {hidden_states.shape}, positions: {positions.shape}")
+        # print(f"hidden_states: {hidden_states.shape}, positions: {positions.shape}")
         if self.q_lora_rank is not None:
             q = self.q_a_proj(hidden_states)[0]
             q = q.view(batch_size, seq_len, self.q_lora_rank)
@@ -337,7 +337,7 @@ class DeepseekV3Attention(nn.Module):
         k = k.view(batch_size, seq_len, self.num_local_heads * self.qk_head_dim)
         v = v.view(batch_size, seq_len, self.num_local_heads * self.qk_head_dim)
 
-        print(f"before sending to attn, q shape is {q.shape}, k shape is {k.shape}, v shape is {v.shape}")
+        # print(f"before sending to attn, q shape is {q.shape}, k shape is {k.shape}, v shape is {v.shape}")
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         attn_output = attn_output.view(
             batch_size, seq_len, self.num_local_heads,
@@ -629,6 +629,9 @@ class DeepseekV3ForCausalLM(nn.Module, SupportsPP):
                 if is_pp_missing_parameter(name, self):
                     continue
 
+                if name not in params_dict:
+                    continue
+
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -641,6 +644,9 @@ class DeepseekV3ForCausalLM(nn.Module, SupportsPP):
                     name = name.replace(weight_name, param_name)
 
                     if is_pp_missing_parameter(name, self):
+                        continue
+
+                    if name not in params_dict:
                         continue
 
                     param = params_dict[name]
@@ -657,6 +663,9 @@ class DeepseekV3ForCausalLM(nn.Module, SupportsPP):
                         continue
 
                     if is_pp_missing_parameter(name, self):
+                        continue
+
+                    if name not in params_dict:
                         continue
 
                     param = params_dict[name]

@@ -792,6 +792,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.model_memory_usage = m.consumed_device_memory
         msg = f"Loading model weights took in total {m.get_summary_string()}"
         logger.info(msg)
+        logger.info(f"")
 
     def _add_dummy_seq(self, seq_group_metadata_list, is_prompt):
         real_batch_size = len(seq_group_metadata_list)
