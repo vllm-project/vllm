@@ -599,6 +599,8 @@ class Scheduler:
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             gpu_cache_usage=self.kv_cache_manager.usage,
+            gpu_prefix_cache_hit_rate=self.kv_cache_manager.
+            prefix_cache_hit_rate,
         )
 
 
