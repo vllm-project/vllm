@@ -56,7 +56,6 @@ def maybe_serialize_tool_calls(request: ChatCompletionRequest):
     # TODO: remove when pydantic v2.11 is released
     for i, message in enumerate(request.messages):
         if message.get("role") == 'assistant':
-            logger.info("found an assistant")
             tool_calls_validator = message.get("tool_calls", ().__iter__())
             validated_tool_calls = []
             while True:
@@ -73,7 +72,8 @@ def maybe_serialize_tool_calls(request: ChatCompletionRequest):
 
                     if not re.match(r"^[a-zA-Z0-9]{9}$", tool_call["id"]):
                         raise RuntimeError(
-                            "Invalid tool_call ID after truncation: %s (must be exactly 9 alphanumeric characters)",
+                            "Invalid tool_call ID after truncation: %s",
+                            "(must be exactly 9 alphanumeric characters)",
                             tool_call["id"],
                         )
 
@@ -97,7 +97,8 @@ def maybe_serialize_tool_calls(request: ChatCompletionRequest):
 
                 if not re.match(r"^[a-zA-Z0-9]{9}$", tool_call_id):
                     raise RuntimeError(
-                        "Invalid tool_call_id after truncation: %s (must be exactly 9 alphanumeric characters)",
+                        "Invalid tool_call_id after truncation: %s",
+                        "(must be exactly 9 alphanumeric characters)",
                         tool_call_id,
                     )
 
