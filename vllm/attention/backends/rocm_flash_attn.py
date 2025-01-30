@@ -11,7 +11,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
-if envs.VLLM_USE_AITER:
+if envs.VLLM_USE_AITER_PAGED_ATTN:
     from vllm.attention.ops.paged_attn_ater import (PagedAttention, PagedAttentionMetadata)
 else:
     from vllm.attention.ops.paged_attn import (PagedAttention, PagedAttentionMetadata)
@@ -614,8 +614,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         else:
             assert value is None
         
-        if envs.VLLM_USE_AITER and kv_cache.dtype.itemsize == 1 and \
-            self.init_kv_scales is False and kv_cache.shape != torch.Size([0]):
+        if (envs.VLLM_USE_AITER_PAGED_ATTN and kv_cache.dtype.itemsize == 1 and
+            self.init_kv_scales is False and kv_cache.shape != torch.Size([0])):
             num_blocks = kv_cache.shape[1]
             block_size = kv_cache.shape[2] // (self.num_kv_heads * self.head_size)
             self.k_scale = torch.ones((self.num_kv_heads, num_blocks * block_size), 
@@ -798,7 +798,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             use_custom = _use_rocm_custom_paged_attention(
                 decode_query.dtype, head_size, block_size, gqa_ratio,
                 decode_meta.max_decode_seq_len)
-            if envs.VLLM_USE_AITER:
+            if envs.VLLM_USE_AITER_PAGED_ATTN:
                 out = output[num_prefill_tokens:]
                 PagedAttention.forward_decode(
                     decode_query,

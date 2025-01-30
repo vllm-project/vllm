@@ -31,7 +31,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import is_navi
 
-if envs.VLLM_USE_AITER:
+if envs.VLLM_USE_AITER_MOE:
     from aiter.fused_moe_bf16_asm import asm_moe
     from aiter.ops.shuffle import shuffle_weight
 
@@ -670,7 +670,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
 
-            if envs.VLLM_USE_AITER:
+            if envs.VLLM_USE_AITER_MOE:
                 max_w13_scales = max_w13_scales.unsqueeze(-1).unsqueeze(-1).expand((-1, layer.w13_weight.shape[1], -1))
                 w2_scales = layer.w2_weight_scale.data.unsqueeze(-1).unsqueeze(-1).expand((-1, layer.w2_weight.shape[1], -1))
                 layer.w2_weight_scale = torch.nn.Parameter(w2_scales.contiguous(),
@@ -710,7 +710,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        if envs.VLLM_USE_AITER:
+        if envs.VLLM_USE_AITER_MOE:
             return asm_moe(hidden_states=x, 
                            w1=layer.w13_weight,
                            w2=layer.w2_weight,

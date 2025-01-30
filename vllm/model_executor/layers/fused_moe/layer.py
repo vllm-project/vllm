@@ -9,7 +9,7 @@ import vllm.envs as envs
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.envs import VLLM_USE_AITER
+from vllm.envs import VLLM_USE_AITER_MOE
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
@@ -18,7 +18,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
-if VLLM_USE_AITER:
+if VLLM_USE_AITER_MOE:
     from aiter.fused_moe_bf16_asm import asm_moe
 
 if current_platform.is_cuda_alike():
@@ -168,7 +168,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        if VLLM_USE_AITER:
+        if VLLM_USE_AITER_MOE:
             return asm_moe(hidden_states=x,
                            w1=layer.w13_weight,
                            w2=layer.w2_weight,

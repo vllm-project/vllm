@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
     VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
     VLLM_USE_AITER: bool = False
+    VLLM_USE_AITER_MOE: bool = False
+    VLLM_USE_AITER_PAGED_ATTN: bool = False
     RANK: int = 0
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -259,9 +261,23 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
              ("true", "1")),
 
-    # use ater ops
+    # use ater ops unless specifically disabled
     "VLLM_USE_AITER":
     lambda: (os.getenv("VLLM_USE_AITER", "False").lower() in
+             ("true", "1")),
+
+    # use ater moe op if ater ops are enabled
+    "VLLM_USE_AITER_MOE":
+    lambda: (os.getenv("VLLM_USE_AITER", "False").lower() in
+             ("true", "1") and
+             os.getenv("VLLM_USE_AITER_MOE", "True").lower() in
+             ("true", "1")),
+
+    # use ater paged attn op if ater ops are enabled
+    "VLLM_USE_AITER_PAGED_ATTN":
+    lambda: (os.getenv("VLLM_USE_AITER", "False").lower() in
+             ("true", "1") and
+             os.getenv("VLLM_USE_AITER_PAGED_ATTN", "True").lower() in
              ("true", "1")),
 
     # rank of the process in the distributed setting, used to determine
