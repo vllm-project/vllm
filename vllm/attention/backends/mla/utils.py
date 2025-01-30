@@ -188,8 +188,9 @@ class MLAImplCommon(AttentionImpl):
             return torch.matmul(x, self.W_Q_UK)\
                 .view(-1, self.num_heads, self.kv_lora_rank)
         else:
-            x = torch.matmul(x, self.W_Q)
-            return torch.matmul(x, self.W_UK.T)\
+            x = torch.matmul(x, self.W_Q)\
+                .view(-1, self.num_heads, self.qk_nope_head_dim)
+            return torch.einsum("bnp,lnp->bnl", x, self.W_UK)\
                 .view(-1, self.num_heads, self.kv_lora_rank)
 
     def process_weights_after_loading(self):
@@ -249,13 +250,15 @@ class MLAImplCommon(AttentionImpl):
                 self.W_UV_O.shape[0] * tp_size,
                 self.W_UV_O.shape[1],
                 bias=False,
-                #quant_config=self.o_proj.quant_method, TODO
+                # TODO(lucas) figure out how to properly forward quant_method
+                #quant_config=self.o_proj.quant_method,
             )
 
             self.o_proj_absored.weight = torch.nn.Parameter(self.W_UV_O.T)
         else:
-            print("Not absorbing weights")
-            self.W_UK, self.W_UV, self.W_Q = W_UK, W_UV, W_Q
+            self.W_UV = W_UV
+            self.W_UK = W_UK
+            self.W_Q = W_Q.flatten(start_dim=1)
 
     @abstractmethod
     def _forward_prefill(

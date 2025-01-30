@@ -124,7 +124,7 @@ class TritonMLAState(AttentionState):
 
 @dataclass(kw_only=True)
 class TritonMLAMetadata(MLAMetadataCommon):
-    """Metadata for FlashAttentionBackend.
+    """Metadata for TritonMLAMetadata.
 
     NOTE: Any python object stored here is not updated when it is
     cuda-graph replayed. If you have values that need to be changed
@@ -189,7 +189,7 @@ class TritonMLAMetadata(MLAMetadataCommon):
 
     num_prefill_tokens: int
 
-    num_kv_splits: int = 4
+    num_kv_splits: int = 4  # TODO(lucas) add heuristic
     attn_logits: Optional[torch.Tensor] = None
     req_idx: Optional[torch.Tensor] = None
 
