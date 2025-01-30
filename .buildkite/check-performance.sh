@@ -35,7 +35,7 @@ git fetch origin "$BASE_BRANCH" --depth=1 >/dev/null 2>&1
 
 # Find the common ancestor between PR and base/main
 # TODO double check if origin is fine here or if we need to add upstream, though it might break forks
-BASE_COMMIT=$(git merge-base "upstream/$BASE_BRANCH" HEAD || echo "") 
+BASE_COMMIT=$(git merge-base "origin/$BASE_BRANCH" HEAD || echo "") 
 
 if [[ -z "$BASE_COMMIT" ]]; then
   echo "Unable to determine PR base commit! Make sure 'origin' is set and pointing to the right remote." >&2
