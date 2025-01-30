@@ -2,7 +2,7 @@
 
 # INT4 W4A16
 
-vLLM supports quantizing weights and activations to INT4 for memory savings and inference acceleration. This quantization method is particularly useful for reducing model size and maintaining low latency in workloads with low queries per second (QPS).
+vLLM supports quantizing weights to INT4 for memory savings and inference acceleration. This quantization method is particularly useful for reducing model size and maintaining low latency in workloads with low queries per second (QPS).
 
 Please visit the HF collection of [quantized INT4 checkpoints of popular LLMs ready to use with vLLM](https://huggingface.co/collections/neuralmagic/int4-llms-for-vllm-668ec34bf3c9fa45f857df2c).
 
@@ -43,7 +43,7 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
 ### 2. Preparing Calibration Data
 
-When quantizing activations to INT8, you need sample data to estimate the activation scales.
+When quantizing weights to INT4, you need sample data to estimate the weight updates and calibrated scales.
 It's best to use calibration data that closely matches your deployment data.
 For a general-purpose instruction-tuned model, you can use a dataset like `ultrachat`:
 
@@ -93,7 +93,7 @@ model.save_pretrained(SAVE_DIR, save_compressed=True)
 tokenizer.save_pretrained(SAVE_DIR)
 ```
 
-This process creates a W4A16 model with weights and activations quantized to 4-bit integers.
+This process creates a W4A16 model with weights quantized to 4-bit integers.
 
 ### 4. Evaluating Accuracy
 
