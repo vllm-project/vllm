@@ -19,10 +19,14 @@ if TYPE_CHECKING:
     from vllm.v1.core.guided_decoding import Grammar
     from vllm.v1.core.kv_cache_utils import BlockHashType
 
-GuidedDecodingObject = Union[str, Dict[str, Any]]
-GuidedDecodingKey = Tuple[Literal["json", "regex", "grammar", "choice"],
-                          GuidedDecodingObject]
+class GuidedDecodingOptions(enum.Enum):
+  json = enum.auto()
+  regex = enum.auto()
+  grammar = enum.auto()
+  choice = enum.auto()
 
+GuidedDecodingObject = Union[str, Dict[str, Any]]
+GuidedDecodingKey = Tuple[GuidedDecodingOptions, GuidedDecodingObject]
 
 class Request:
 
@@ -83,7 +87,8 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
 
         # grammar objects
-        self.grammar: Optional[Grammar[Any] | Future[Grammar[Any]]] = grammar
+        self.grammar: Optional[Union[Grammar, Future[Grammar]]] = grammar
+        self._grammar_bitmask = None
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -150,14 +155,21 @@ class Request:
     def use_guided_decoding(self) -> bool:
         return self.sampling_params.guided_decoding is not None
 
+    @property
+    def grammar_bitmask(self): return self._grammar_bitmask
+
     @cached_property
     def guided_decoding_key(self) -> GuidedDecodingKey:
         params = self.sampling_params.guided_decoding
-        if params.json is not None: return ("json", params.json)
-        elif params.regex is not None: return ("regex", params.regex)
-        elif params.choice is not None: return ("choice", params.choice)
-        elif params.grammar is not None: return ("grammar", params.grammar)
+        if params.json is not None: return (GuidedDecodingOptions.json, params.json)
+        elif params.regex is not None: return (GuidedDecodingOptions.regex, params.regex)
+        elif params.choice is not None: return (GuidedDecodingOptions.choice, params.choice)
+        elif params.grammar is not None: return (GuidedDecodingOptions.grammar, params.grammar)
         else: raise ValueError("No valid guided decoding parameter found")
+
+    def allocate_grammar_bitmask(self, vocab_size: int):
+        if self._grammar_bitmask is None: self._grammar_bitmask = self.grammar.allocate_bitmask(1, vocab_size=vocab_size)
+        return self._grammar_bitmask
 
 
 class RequestStatus(enum.IntEnum):

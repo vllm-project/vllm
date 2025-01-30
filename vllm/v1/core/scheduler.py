@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from concurrent import futures
 from dataclasses import dataclass
+from re import A
 from typing import (TYPE_CHECKING, Any, Deque, Dict, Iterable, List, Literal,
                     Optional, Set, Tuple, Union)
 
@@ -38,7 +39,7 @@ class Scheduler:
         model_config: ModelConfig,
         cache_config: CacheConfig,
         parallel_config: ParallelConfig,
-        lora_config: LoRAConfig | None,
+        lora_config: Optional[LoRAConfig],
         decoding_config: DecodingConfig,
     ) -> None:
         self.scheduler_config = scheduler_config
@@ -112,7 +113,7 @@ class Scheduler:
             lora_config=lora_config)
         tokenizer_group.ping()
         # setup guided decoding, right now uses xgrammar
-        self.guided_decoding_manager = GuidedDecodingManager.from_backend(
+        self.guided_decoding_manager = GuidedDecodingManager(
             backend=decoding_config.guided_decoding_backend,
             tokenizer_group=tokenizer_group,
             model_config=model_config)
@@ -138,6 +139,8 @@ class Scheduler:
         while self.grammar:
             request = self.grammar.popleft()
             try:
+                # When request first added via add_request, then it will be a future call
+                # check timeout and add it directly to previous queue
                 request.grammar = request.grammar.result(timeout=0.05)
                 request.status = RequestStatus.WAITING
                 newly_grammar_reqs.append(request)
@@ -158,8 +161,6 @@ class Scheduler:
 
         # Create a shared bitmask tensor for the whole batch
         vocab_size = self.model_config.get_vocab_size()
-        guided_decoding_bitmasks: Dict[str, torch.Tensor] = {}
-        guided_decoding_reqs: List[Request] = []
 
         # First, schedule the RUNNING requests.
         # NOTE(woosuk): At most 1 request in the RUNNING queue is allowed to be
@@ -256,17 +257,8 @@ class Scheduler:
 
                 request = self.waiting[0]
 
-                # Skip requests waiting for FSM
-                if request.status == RequestStatus.WAITING_FOR_FSM:
-                    self.waiting.rotate(-1)
-                    continue
-
-                # Track guided decoding needs
-                if request.grammar is not None:
-                    if request.request_id not in guided_decoding_bitmasks:
-                        bitmask = request.grammar.allocate_bitmask(
-                            1, vocab_size)
-                        guided_decoding_bitmasks[request.request_id] = bitmask
+                # allocate bitmask on request on first round
+                if request.grammar: request.allocate_grammar_bitmask(vocab_size=vocab_size)
 
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
@@ -365,7 +357,7 @@ class Scheduler:
         running_reqs_data = [
             self._make_running_request_data(
                 req, req_to_new_block_ids[req.request_id],
-                req.num_computed_tokens) for req in scheduled_running_reqs
+                req.num_computed_tokens, grammar=req.grammar, grammar_bitmask=req.grammar_bitmask) for req in scheduled_running_reqs
         ]
         preempted_req_ids = {req.request_id for req in preempted_reqs}
 
@@ -395,6 +387,9 @@ class Scheduler:
         request: Request,
         new_block_ids: List[int],
         num_computed_tokens: int,
+        *,
+        grammar: Optional[Grammar] = None,
+        grammar_bitmask: Optional[Any] = None,
     ) -> "RunningRequestData":
         # OPTIMIZATION: Cache the RunningRequestData objects to avoid creating
         # them at each scheduling step.
@@ -402,6 +397,8 @@ class Scheduler:
             req_data = self.running_reqs_data[request.request_id]
             req_data.new_block_ids = new_block_ids
             req_data.num_computed_tokens = num_computed_tokens
+            req_data.grammar = grammar
+            req_data.grammar_bitmask=grammar_bitmask
         else:
             req_data = RunningRequestData.from_request(request, new_block_ids,
                                                        num_computed_tokens)
@@ -632,6 +629,9 @@ class NewRequestData:
     sampling_params: SamplingParams
     block_ids: List[int]
 
+    grammar: Optional[Grammar]
+    grammar_bitmask: Any
+
     @classmethod
     def from_request(
         cls,
@@ -648,7 +648,7 @@ class NewRequestData:
                    sampling_params=request.sampling_params,
                    block_ids=block_ids,
                    num_computed_tokens=num_computed_tokens,
-                   grammar=request.grammar)
+                   grammar=request.grammar, grammar_bitmask=request.grammar_bitmask)
 
 
 @dataclass
@@ -657,7 +657,9 @@ class ResumedRequestData:
     req_id: str
     block_ids: List[int]
     num_computed_tokens: int
+
     grammar: Optional[Grammar]
+    grammar_bitmask: Any
 
     @classmethod
     def from_request(
@@ -669,7 +671,7 @@ class ResumedRequestData:
         return cls(req_id=request.request_id,
                    block_ids=block_ids,
                    num_computed_tokens=num_computed_tokens,
-                   grammar=request.grammar)
+                   grammar=request.grammar, grammar_bitmask=request.grammar_bitmask)
 
 
 @dataclass
@@ -678,7 +680,9 @@ class RunningRequestData:
     req_id: str
     new_block_ids: List[int]
     num_computed_tokens: int
+
     grammar: Optional[Grammar]
+    grammar_bitmask: Any
 
     @classmethod
     def from_request(
@@ -690,7 +694,7 @@ class RunningRequestData:
         return cls(req_id=request.request_id,
                    new_block_ids=new_block_ids,
                    num_computed_tokens=num_computed_tokens,
-                   grammar=request.grammar)
+                   grammar=request.grammar, grammar_bitmask=request.grammar_bitmask)
 
 
 @dataclass
@@ -704,9 +708,6 @@ class SchedulerOutput:
     total_num_scheduled_tokens: int
     scheduled_encoder_inputs: Dict[str, List[int]]
     num_common_prefix_blocks: int
-
-    # request_id -> bitmask
-    guided_decoding_bitmasks: Dict[str, torch.Tensor]
 
     preempted_req_ids: Set[str]
     finished_req_ids: Set[str]

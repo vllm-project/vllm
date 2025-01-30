@@ -22,7 +22,6 @@ import tempfile
 import threading
 import time
 import traceback
-import types
 import uuid
 import warnings
 import weakref
