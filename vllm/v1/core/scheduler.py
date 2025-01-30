@@ -204,7 +204,7 @@ class Scheduler:
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
                 if num_new_tokens == 0:
-                    # The happens when prompt length is divisible by the block
+                    # This happens when prompt length is divisible by the block
                     # size and all blocks are cached. Now we force to recompute
                     # the last block. Note that we have to re-compute an entire
                     # block because allocate_slots() assumes num_computed_tokens
@@ -272,6 +272,7 @@ class Scheduler:
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
+        num_common_prefix_blocks = 0
         if self.running:
             any_request = self.running[0]
             num_common_prefix_blocks = (
@@ -441,7 +442,8 @@ class Scheduler:
                     if start_pos + num_tokens <= request.num_computed_tokens:
                         # The encoder output is already processed and stored
                         # in the decoder's KV cache.
-                        self.encoder_cache_manager.free(request, input_id)
+                        self.encoder_cache_manager.free_encoder_input(
+                            request, input_id)
 
             # Extract prompt logprobs for this req if needed.
             prompt_logprobs, prompt_logprobs_token_ids, prompt_token_ranks = (
@@ -457,8 +459,10 @@ class Scheduler:
                 # TODO: Update the KV cache manager for prefix caching.
 
                 # Check for stop and update request state.
-                # This must be called before me make the EngineCoreOutput.
+                # This must be called before we make the EngineCoreOutput.
                 stopped = self._check_stop(request)
+                if stopped:
+                    self._free_request(request)
 
                 # Extract sample logprobs if needed.
                 logprobs_token_ids: List[List[int]] = []
@@ -521,7 +525,6 @@ class Scheduler:
         if (request.num_tokens >= self.max_model_len
                 or request.num_output_tokens >= request.max_tokens):
             request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-            self._free_request(request)
             return True
 
         sampling_params = request.sampling_params
@@ -529,13 +532,11 @@ class Scheduler:
         if (not sampling_params.ignore_eos
                 and last_token_id == request.eos_token_id):
             request.status = RequestStatus.FINISHED_STOPPED
-            self._free_request(request)
             return True
 
         if last_token_id in (sampling_params.stop_token_ids or ()):
             request.status = RequestStatus.FINISHED_STOPPED
             request.stop_reason = last_token_id
-            self._free_request(request)
             return True
         return False
 
@@ -574,6 +575,7 @@ class Scheduler:
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
         self.kv_cache_manager.free(request)
+        self.encoder_cache_manager.free(request)
         self.running_reqs_data.pop(request.request_id, None)
         del self.requests[request.request_id]
         self.finished_req_ids.add(request.request_id)
@@ -591,6 +593,7 @@ class Scheduler:
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
+            gpu_cache_usage=self.kv_cache_manager.usage,
         )
 
 
