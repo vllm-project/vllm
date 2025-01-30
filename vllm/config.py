@@ -970,7 +970,7 @@ class ModelConfig:
         return ModelRegistry.is_cross_encoder_model(architectures)
 
     @property
-    def should_use_mla(self) -> bool:
+    def use_mla(self) -> bool:
         use_mla = (self.is_deepseek_mla and not self.disable_mla
                    and not envs.VLLM_MLA_DISABLE)
         return use_mla
