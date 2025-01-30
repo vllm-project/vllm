@@ -2,7 +2,9 @@
 
 This tab provides instructions on running vLLM with Intel Gaudi devices.
 
+:::{attention}
 There are no pre-built wheels or images for this device, so you must build vLLM from source.
+:::
 
 ## Requirements
 
