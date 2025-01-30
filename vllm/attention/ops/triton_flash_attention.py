@@ -340,27 +340,6 @@ def _attn_fwd_inner(
             encoded_sm_ptrs += BLOCK_N
     return acc, l_i, m_i
 
-
-def get_gfx_version():
-    try:
-        # Run the rocminfo command
-        result = subprocess.run(['rocminfo'],
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE,
-                                text=True)
-        output = result.stdout
-
-        # Parse the output to find the gfx version
-        for line in output.splitlines():
-            line = line.strip()
-            if line.startswith("Name: gfx"):
-                gfx_version = line.split("Name:")[1].strip()
-                return gfx_version
-    except Exception as e:
-        print(f"Error: {e}")
-    return None
-
-
 def is_hip():
     return triton.runtime.driver.active.get_current_target().backend == "hip"
 
