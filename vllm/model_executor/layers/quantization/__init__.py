@@ -6,6 +6,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 QUANTIZATION_METHODS: List[str] = [
     "aqlm",
     "awq",
+    "awq_hpu",
     "deepspeedfp",
     "tpu_int8",
     "fp8",
@@ -76,6 +77,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         raise ValueError(f"Invalid quantization method: {quantization}")
 
     # lazy import to avoid triggering `torch.compile` too early
+    from vllm_hpu_extension.awq_hpu import AWQHPUConfig
     from vllm_hpu_extension.gptq_hpu import GPTQHPUConfig
 
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
@@ -106,6 +108,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     method_to_config: Dict[str, Type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,
         "awq": AWQConfig,
+        "awq_hpu": AWQHPUConfig,
         "deepspeedfp": DeepSpeedFPConfig,
         "tpu_int8": Int8TpuConfig,
         "fp8": Fp8Config,

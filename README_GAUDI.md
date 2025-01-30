@@ -109,16 +109,17 @@ $ python setup.py develop
 | Inference with torch.compile (experimental) 	| vLLM HPU backend experimentally supports inference with torch.compile. 	| [vLLM HPU backend execution modes](https://docs.vllm.ai/en/stable/getting_started/gaudi-installation.html#execution-modes) 	|
 | Attention with Linear Biases (ALiBi) 	| vLLM HPU backend supports models utilizing Attention with Linear Biases (ALiBi) such as mpt-7b. 	| [vLLM supported models](https://docs.vllm.ai/en/latest/models/supported_models.html) 	|
 | INC quantization 	| vLLM HPU backend supports FP8 model and KV cache quantization and calibration with Intel Neural Compressor (INC). 	| [Documentation](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_FP8.html) 	|
+| AutoAWQ quantization | vLLM HPU backend supports the inference with models quantized using AutoAWQ library. | [Library](https://github.com/casper-hansen/AutoAWQ) |
 | AutoGPTQ quantization | vLLM HPU backend supports the inference with models quantized using AutoGPTQ library. | [Library](https://github.com/AutoGPTQ/AutoGPTQ) |
 | LoRA/MultiLoRA support 	| vLLM HPU backend includes support for LoRA and MultiLoRA on supported models. 	| [Documentation](https://docs.vllm.ai/en/stable/models/lora.html)<br>[Example](https://docs.vllm.ai/en/stable/getting_started/examples/multilora_inference.html)<br>[vLLM supported models](https://docs.vllm.ai/en/latest/models/supported_models.html) 	|
 | Multi-step scheduling support 	| vLLM HPU backend includes multi-step scheduling support for host overhead reduction, configurable by standard `--num-scheduler-seqs` parameter.  	| [Feature RFC](https://github.com/vllm-project/vllm/issues/6854) 	|
 | Automatic prefix caching (experimental) 	| vLLM HPU backend includes automatic prefix caching (APC) support for more efficient prefills, configurable by standard `--enable-prefix-caching` parameter. 	| [Documentation](https://docs.vllm.ai/en/stable/automatic_prefix_caching/apc.html)<br>[Details](https://docs.vllm.ai/en/stable/automatic_prefix_caching/details.html) 	|
 | Speculative decoding (experimental) 	| vLLM HPU backend includes experimental speculative decoding support for improving inter-token latency in some scenarios, configurabie via standard `--speculative_model` and `--num_speculative_tokens` parameters. 	| [Documentation](https://docs.vllm.ai/en/stable/models/spec_decode.html)<br>[Example](https://docs.vllm.ai/en/stable/getting_started/examples/offline_inference_mlpspeculator.html) 	|
 
+
 # Unsupported Features
 
 - Beam search
-- AWQ quantization
 - Prefill chunking (mixed-batch inferencing)
 
 # Supported Configurations
