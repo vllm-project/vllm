@@ -541,7 +541,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz,
         num_tiles_total = num_tiles_per_sample * B  # times the num of samples
         if PERSISTENT_DYNAMIC:
             tile_id = atomic_counter.atomic_add(
-                1)  # retuns the value BEFORE the atomic operation
+                1)  # returns the value BEFORE the atomic operation
         else:
             tile_id = tl.program_id(0)
     else:  # standard, kernel processes only one tile
