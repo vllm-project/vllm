@@ -441,6 +441,28 @@ def cutlass_scaled_mm(a: torch.Tensor,
                       scale_b: torch.Tensor,
                       out_dtype: torch.dtype,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    `cutlass_scaled_mm` implements a fused version of 
+        `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
+    where scale_a * a and scale_b * b are implemented using numpy-style 
+    broadcasting. 
+    
+    In order to support blockwise scaling like found in DeepSeek V3 we also 
+    support extended "group" broadcast rules. We extend the numpy-style 
+    broadcasting rules with the following rule: 
+        "if the extent of a dimension in the source shape is between 1 and 
+        corresponding extent in the target shape we repeat each element along 
+        that dimension  src_shape[dim] // target_shape[dim] times consecutively"
+    example if we have:
+          a = [[1, 2], and target_shape = (2, 4)
+               [3, 4]]
+    then we would expand a to:
+          a = [[1, 1, 2, 2],
+               [3, 3, 4, 4]]
+    currently we only support the case:
+        scale_a.shape * [1, 128] == a.shape
+        scale_b.shape * [128, 128] == b.shape
+    """
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
     assert bias is None or bias.shape[0] == b.shape[
