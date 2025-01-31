@@ -4,6 +4,10 @@ vLLM has been adapted to work on ARM64 CPUs with NEON support, leveraging the CP
 
 ARM CPU backend currently supports Float32, FP16 and BFloat16 datatypes.
 
+:::{attention}
+There are no pre-built wheels or images for this device, so you must build vLLM from source.
+:::
+
 ## Requirements
 
 - OS: Linux
