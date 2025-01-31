@@ -250,7 +250,7 @@ def generate_dummy_prompt_logprobs_tensors(
     prompt_tokens_list: List,
     num_logprobs: int,
     tokenizer: PreTrainedTokenizer,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generate dummy prompt logprobs tensors
 
     Generate a test data structure which imitates the torch Tensors of prompt
@@ -344,11 +344,11 @@ class MockEngineCore:
             if len(token_ids) > token_idx:
                 if do_logprobs:
                     assert self.generated_logprobs_raw is not None
-                    (logprobs, logprobs_token_ids, sampled_token_ranks) = (
+                    (logprobs_, logprobs_token_ids_, sampled_token_ranks_) = (
                         self.generated_logprobs_raw[req_idx][token_idx])
-                    logprobs = [logprobs]
-                    logprobs_token_ids = [logprobs_token_ids]
-                    sampled_token_ranks = [sampled_token_ranks]
+                    logprobs = [logprobs_]
+                    logprobs_token_ids = [logprobs_token_ids_]
+                    sampled_token_ranks = [sampled_token_ranks_]
                 else:
                     logprobs = None
                     logprobs_token_ids = None
