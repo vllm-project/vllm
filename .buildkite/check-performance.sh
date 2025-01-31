@@ -34,7 +34,9 @@ BASE_BRANCH="$BUILDKITE_PULL_REQUEST_BASE_BRANCH"
 # Avoid hard links to vllm-project that break forks.
 git remote -v
 git branch | cat
-git fetch origin "$BASE_BRANCH" --depth=1 >/dev/null 2>&1
+# Shallow clone in buildkite prevents git-merge base
+# TODO auto-rebase if no conflicts are detected?
+git fetch origin "$BASE_BRANCH" --unshallow >/dev/null 2>&1
 git log --oneline -n 20 | cat
 git rev-parse HEAD
 
