@@ -5,7 +5,7 @@ import pytest
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock,
+                                         KVCacheBlock, PrefixCachingMetrics,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens)
@@ -277,3 +277,34 @@ def test_hash_request_tokens_no_mm_inputs():
     assert block_hashes[0].extra_keys is None
     assert block_hashes[1].token_ids == (3, 4, 5)
     assert block_hashes[1].extra_keys is None
+
+
+def test_metrics():
+    """
+    Test the prefix caching metrics.
+    """
+    metrics = PrefixCachingMetrics(interval=5)
+    assert metrics.hit_rate == 0.0
+
+    metrics.add_request_query(20, 9)
+    # 9 / 20 = 0.45
+    assert metrics.hit_rate == 0.45
+
+    for _ in range(4):
+        metrics.add_request_query(20, 4)
+
+    # 25 / 100 = 0.25
+    assert metrics.hit_rate == 0.25
+
+    metrics.add_request_query(10, 2)
+
+    # Remove (20, 9) and add (10, 2): 18 / 90 = 0.2
+    assert metrics.aggregated_query_total == 90
+    assert metrics.aggregated_query_hit == 18
+    assert metrics.hit_rate == 0.2
+
+    metrics.reset()
+    assert metrics.hit_rate == 0.0
+    assert metrics.aggregated_query_total == 0
+    assert metrics.aggregated_query_hit == 0
+    assert not metrics.query_queue

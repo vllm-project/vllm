@@ -39,9 +39,11 @@ class PrefixCachingMetrics:
 
     def __init__(self, interval: int = 1000):
         self.interval = interval
+        # The current aggregated query total and hit.
         self.aggregated_query_total = 0
         self.aggregated_query_hit = 0
-        self.request_queries: deque[Tuple[int, int]] = deque()
+        # A deque of (num_queries, num_hits) for the most recent requests.
+        self.query_queue: deque[Tuple[int, int]] = deque()
 
     def add_request_query(self, num_queries: int, num_hits: int):
         """Add a request to the metrics. This function is called when
@@ -54,9 +56,9 @@ class PrefixCachingMetrics:
             num_hits: The number of hits in the request.
         """
 
-        self.request_queries.append((num_queries, num_hits))
-        if len(self.request_queries) > self.interval:
-            old_num_queries, old_num_hits = self.request_queries.popleft()
+        self.query_queue.append((num_queries, num_hits))
+        if len(self.query_queue) > self.interval:
+            old_num_queries, old_num_hits = self.query_queue.popleft()
             self.aggregated_query_total -= old_num_queries
             self.aggregated_query_hit -= old_num_hits
 
@@ -67,7 +69,7 @@ class PrefixCachingMetrics:
         """Reset the metrics."""
         self.aggregated_query_total = 0
         self.aggregated_query_hit = 0
-        self.request_queries.clear()
+        self.query_queue.clear()
 
     @property
     def hit_rate(self) -> float:
