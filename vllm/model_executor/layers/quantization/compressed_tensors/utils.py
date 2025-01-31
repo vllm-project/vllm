@@ -101,11 +101,10 @@ def find_matched_target(layer_name: Optional[str], module: Module,
     if layer_name is None:
         layer_name = ""
 
-    matched_target = (
-        _find_first_match(layer_name, targets)
-        or _find_first_match(module.__class__.__name__, targets, True)
-        or _match_fused_layer(layer_name, targets)
-    )
+    matched_target = (_find_first_match(layer_name, targets)
+                      or _find_first_match(module.__class__.__name__, targets,
+                                           True)
+                      or _match_fused_layer(layer_name, targets))
 
     if matched_target is None:
         raise ValueError(f"Unable to find matching target for {module} in the "
@@ -184,7 +183,7 @@ def _match_fused_layer(layer_name: str,
     for target in target_layers:
         is_same_parent = parent_path in target
         is_matching_type = any(type_suffix in target
-                             for type_suffix in possible_layer_types)
+                               for type_suffix in possible_layer_types)
 
         if is_same_parent and is_matching_type:
             return target
