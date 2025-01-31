@@ -1,4 +1,3 @@
-import os
 import json
 import argparse
 from tqdm import tqdm
@@ -8,6 +7,7 @@ from pathlib import Path
 from pkg_resources import resource_filename
 from PIL import Image as PIL_Image
 import numpy as np
+from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm import ModelRegistry
@@ -26,6 +26,9 @@ def register_tt_models():
     
     from models.demos.llama3.tt.generator_vllm import TtMllamaForConditionalGeneration
     ModelRegistry.register_model("TTMllamaForConditionalGeneration", TtMllamaForConditionalGeneration)
+    
+    from models.demos.llama3.tt.generator_vllm import TtQwen2ForCausalLM
+    ModelRegistry.register_model("TTQwen2ForCausalLM", TtQwen2ForCausalLM)
 
 register_tt_models()  # Import and register models from tt-metal
 
@@ -65,8 +68,42 @@ def check_tt_model_supported(model):
         "meta-llama/Llama-3.2-3B",
         "meta-llama/Llama-3.2-3B-Instruct",
         "meta-llama/Llama-3.2-11B-Vision-Instruct",
+        "Qwen/Qwen2.5-7B",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "Qwen/Qwen2.5-72B",
+        "Qwen/Qwen2.5-72B-Instruct",
     ]
     assert model in supported_models, f"Invalid model: {model}"
+
+
+def run_seq_len_tests(engine_kw_args, sampling_params):
+    '''
+    Test generation of a few simple counting prompts with arbitrary increasing sequence lengths
+    '''
+
+    model = engine_kw_args["model"]
+    is_instruct = "Instruct" in model
+    count_sizes = [10, 100, 2000, 16000, 40000]
+    
+    if is_instruct:
+        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+    
+    prompts = []
+    for size in count_sizes:
+        prompt = "Continue this counting sequence (with no explanation): " + " ".join(str(i) for i in range(1, size+1))
+        if is_instruct:
+            prompt = {"role": "user", "content": prompt}
+            prompt = tokenizer.apply_chat_template([prompt],
+                                                    tokenize=False,
+                                                    add_generation_prompt=True)
+        prompts.append(prompt)    
+    
+    llm = LLM(**engine_kw_args)
+    
+    # Run generation one prompt at a time
+    for i in range(len(count_sizes)):
+        generate_tokens(llm, [prompts[i]], sampling_params, print_output=True)
+    
 
 def run_inference(
     model,
@@ -81,6 +118,7 @@ def run_inference(
     num_scheduler_steps=10,
     disable_async_output_proc=False,
     multi_modal=False,
+    test_increasing_seq_lens=False,
 ):
     check_tt_model_supported(model)
     
@@ -104,6 +142,13 @@ def run_inference(
         sampling_params = SamplingParams(max_tokens=max_tokens, ignore_eos=ignore_eos, temperature=0.0)
     else:
         sampling_params = SamplingParams(max_tokens=max_tokens, ignore_eos=ignore_eos, top_k=10, top_p=0.9, temperature=1.0)
+
+    if test_increasing_seq_lens:
+        assert not measure_perf, "measure_perf option not supported with test_increasing_seq_lens"
+        assert not async_engine, "async_engine option not supported with test_increasing_seq_lens"
+        print("Ignoring prompts json for sequence length testing")
+        run_seq_len_tests(engine_kw_args, sampling_params)
+        return
 
     # Prepare inputs
     if not measure_perf:
@@ -243,6 +288,7 @@ if __name__ == "__main__":
     parser.add_argument("--disable_async_output_proc", action="store_true", help="Disable async output processing")
     parser.add_argument("--num_scheduler_steps", type=int, default=10, help="Number of scheduler steps")
     parser.add_argument("--multi_modal", action="store_true", help="Run multi-modal inference with Llama3.2-11b")
+    parser.add_argument("--test_increasing_seq_lens", action="store_true", help="Test generations of small to large sequences")
     args = parser.parse_args()
 
     run_inference(
@@ -258,4 +304,5 @@ if __name__ == "__main__":
         num_scheduler_steps=args.num_scheduler_steps,
         disable_async_output_proc=args.disable_async_output_proc,
         multi_modal=args.multi_modal,
+        test_increasing_seq_lens=args.test_increasing_seq_lens,
     )
