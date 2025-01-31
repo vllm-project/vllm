@@ -2,21 +2,30 @@
 import functools
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import triton
 import triton.language as tl
+
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     group_broadcast)
-from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    apply_fp8_linear)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
 
-def is_fp8(x: 
-           [torch.dtype, torch.Tensor]) -> bool:
+def _normalize_quant_group_shape(x: torch.Tensor, group_shape: Tuple[int,
+                                                                     int]):
+    # -1 means full extent
+    return (group_shape[0] if group_shape[0] > 0 else x.shape[-2],
+            group_shape[1] if group_shape[1] > 0 else x.shape[-1])
+
+
+def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
     if isinstance(x, torch.Tensor):
         x = x.dtype
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
@@ -48,6 +57,41 @@ def apply_w8a8_block_fp8_linear(
     return output.to(dtype=input.dtype).view(*output_shape)
 
 
+# Unify the interface between `apply_w8a8_block_fp8_linear` and
+# `apply_fp8_linear`
+# NOTE(lucas): this is quite messy, we should think through this more formally
+def apply_fp8_linear_generic(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        input_group_shape: Tuple[int, int],
+        weight_group_shape: Tuple[int, int],
+        input_scale: Optional[torch.Tensor] = None,  # static scale if one
+) -> torch.Tensor:
+    # View input as 2D matrix for fp8 methods
+    input = input.view(-1, input.shape[-1])
+
+    weight_group_shape = _normalize_quant_group_shape(\
+        weight, weight_group_shape)
+    input_group_shape = _normalize_quant_group_shape(input, input_group_shape)
+
+    def is_dim_blocked(dim, shape, group_shape):
+        return group_shape < shape[dim] and group_shape > 1
+
+    if is_dim_blocked(0, weight.shape, weight_group_shape[0])\
+     and is_dim_blocked(1, weight.shape, weight_group_shape[1]) and\
+     input_group_shape == (1, weight_group_shape[1]):
+        return apply_w8a8_block_fp8_linear(input, weight, weight_group_shape,
+                                           weight_scale)
+    else:
+        # Despite having linear in the it doesn't conform to
+        # `torch.nn.functional.linear` which is defined as `input @ weight.T`
+        # so we explicitly transpose the weight matrix here
+        return apply_fp8_linear(input, weight.T, weight_scale.T,
+                         use_per_token_if_dynamic=\
+                             (input_group_shape == (1, input.shape[1])))
+
+
 def input_to_float8(
         x: torch.Tensor,
         dtype: Optional[torch.dtype] = None
@@ -68,14 +112,35 @@ def input_to_float8(
 def scaled_dequant(
     x_q: torch.Tensor,
     x_s: torch.Tensor,
-    block_size: Optional[Tuple[int, int]] = None,
+    group_shape: Optional[Tuple[int, int]] = None,
+    out_dtype: torch.dtype = torch.float32,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if block_size is not None:
-        assert x_s.shape[-1] == x_q.shape[-1] // block_size[1]
-        assert x_s.shape[-2] == x_q.shape[-2] // block_size[0]
+    if group_shape is not None:
+        group_shape = _normalize_quant_group_shape(x_q, group_shape)
 
-    x_s = group_broadcast(x_s, x_q.shape)
-    return x_q.to(torch.float32) * x_s
+    if x_s.ndim == 0:  # scalar
+        x_s = x_s.unsqueeze(-1).unsqueeze(-1)  # convert to (1, 1) tensor
+    if x_s.ndim == 1:
+        if group_shape is None:
+            raise AssertionError(
+                "if x_s is 1D tensor, group_shape must be provided otherwise "
+                "its ambiguous which dimension to broadcast x_s to")
+        # unsqueeze the scales for the dimension where we want to broadcast
+        # across the full extent
+        if group_shape[0] == x_q.shape[-2]:
+            x_s = x_s.unsqueeze(-2)
+        elif group_shape[1] == x_q.shape[-1]:
+            x_s = x_s.unsqueeze(-1)
+        else:
+            raise AssertionError(
+                "if x_s is a vector we should be broadcasting it to the full "
+                "extent of one of the dimensions")
+
+    if group_shape is not None:
+        assert x_s.shape[-1] == x_q.shape[-1] // group_shape[1]
+        assert x_s.shape[-2] == x_q.shape[-2] // group_shape[0]
+    x_s = group_broadcast(x_s.to(torch.float32), x_q.shape)
+    return (x_q.to(torch.float32) * x_s).to(out_dtype)
 
 
 def block_quant_to_tensor_quant(
@@ -93,11 +158,14 @@ def block_quant_to_tensor_quant(
     return x_q_tensor, scale
 
 
-def block_quantize(
+# Quantize to fp8 assuming once scale per group of elements with shape
+# group_shape
+def fp8_quantize(
     x: torch.Tensor,
-    block_size: Tuple[int, int],
+    group_shape: Tuple[int, int],
     dtype: Optional[torch.dtype] = None,
 ):
+    group_shape = _normalize_quant_group_shape(x, group_shape)
     if dtype is None:
         dtype = (torch.float8_e4m3fnuz
                  if current_platform.is_rocm() else torch.float8_e4m3fn)
@@ -105,21 +173,25 @@ def block_quantize(
 
     # Reshape (M, N) into (BLK_M, BLOCK_SIZE_M, BLK_N, BLOCK_SIZE_N)
     assert x.ndim == 2
-    assert x.shape[0] % block_size[0] == 0 and x.shape[1] % block_size[1] == 0
-    blk_m, blk_n = x.shape[0] // block_size[0], x.shape[1] // block_size[1]
-    x_blkd = x.reshape(blk_m, block_size[0], blk_n, block_size[1])
+    assert x.shape[0] % group_shape[0] == 0 and x.shape[1] % group_shape[1] == 0
+    blk_m, blk_n = x.shape[0] // group_shape[0], x.shape[1] // group_shape[1]
+    x_blkd = x.reshape(blk_m, group_shape[0], blk_n, group_shape[1])
+
     # Permute to (BLK_M, BLK_N, BLOCK_SIZE_M, BLOCK_SIZE_N)
     x_blkd_permd = x_blkd.permute(0, 2, 1, 3)
     # Flatten to (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N)
     x_blkd_permd = x_blkd_permd.flatten(start_dim=2)
+
+    # Compute scales
     min_val, max_val = x_blkd_permd.aminmax(dim=-1)
     amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
     scale = finfo.max / amax
+
     # Apply scale and convert form:
     # (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) to (M, N)
     x_scl_sat = (x_blkd_permd * scale.unsqueeze(-1))\
         .clamp(min=finfo.min, max=finfo.max)\
-        .reshape(blk_m, blk_n, block_size[0], block_size[1])\
+        .reshape(blk_m, blk_n, group_shape[0], group_shape[1])\
         .permute(0, 2, 1, 3)\
         .reshape(x.shape)
 
