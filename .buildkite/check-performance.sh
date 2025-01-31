@@ -30,14 +30,17 @@ run_benchmark() {
 # Compare against *latest* PR base commit. If a rebase happens in the PR,
 # compare against current "rebased" base commit. 
 BASE_BRANCH="$BUILDKITE_PULL_REQUEST_BASE_BRANCH"
+CURRENT_BRANCH="pr-performance-check"
 
 # Avoid hard links to vllm-project that break forks.
 git remote -v
 git branch | cat
 echo "$BUILDKITE_COMMIT"
-git checkout -b pr-performance-check
 # TODO auto-rebase if no conflicts are detected?
 git fetch origin "$BASE_BRANCH" >/dev/null 2>&1
+# Buildkite detached head state prevents 'merge-base' from finding common ancestor.
+git switch "$BUILDKITE_BRANCH"
+git checkout -b "$CURRENT_BRANCH" 
 git log --oneline -n 20 | cat
 git rev-parse HEAD
 
@@ -54,6 +57,8 @@ wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/r
 
 # Base Commit vs. PR Commit
 echo "--- Testing BASE commit ($BASE_COMMIT)"
+git status
+git diff
 git checkout -q "$BASE_COMMIT"
 
 # Extra arguments passed to the script are used here to spin up the server.
@@ -61,7 +66,9 @@ run_benchmark $@ && mv benchmark_serving.txt benchmark_base.txt
 
 # Test PR commit
 echo "--- Testing PR commit ($BUILDKITE_COMMIT)"
-git checkout -q "$BUILDKITE_COMMIT"
+git status
+git diff
+git switch "$CURRENT_BRANCH"
 
 run_benchmark $@ && mv benchmark_serving.txt benchmark_pr.txt
 rm ShareGPT_V3_unfiltered_cleaned_split.json
