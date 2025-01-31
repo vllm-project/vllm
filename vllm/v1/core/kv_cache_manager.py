@@ -94,17 +94,21 @@ class KVCacheManager:
         return 1.0 - (self.free_block_queue.num_free_blocks /
                       self.num_gpu_blocks)
 
-    @property
-    def prefix_cache_hit_rate(self) -> float:
-        """Get the overall hit rate of prefix caching.
+    def get_and_reset_prefix_cache_hit_rate(self) -> float:
+        """Get the overall hit rate of prefix caching and reset
+        the metrics.
 
         Returns:
             The hit rate of prefix caching (between 0.0 and 1.0).
         """
-        if self.prefix_caching_metrics["query_total"] == 0:
-            return 0.0
-        return self.prefix_caching_metrics[
-            "query_hit"] / self.prefix_caching_metrics["query_total"]
+        hit_rate = 0.0
+        if self.prefix_caching_metrics["query_total"] > 0:
+            hit_rate = self.prefix_caching_metrics[
+                "query_hit"] / self.prefix_caching_metrics["query_total"]
+
+        self.prefix_caching_metrics["query_hit"] = 0
+        self.prefix_caching_metrics["query_total"] = 0
+        return hit_rate
 
     def get_computed_blocks(
             self, request: Request) -> Tuple[List[KVCacheBlock], int]:
