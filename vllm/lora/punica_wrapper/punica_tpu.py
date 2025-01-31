@@ -2,9 +2,8 @@ from typing import Callable, Optional, Tuple, Union
 
 import torch
 
-from vllm.lora.ops.xla_ops import (bgmv_expand, bgmv_expand_slice,
-                                     bgmv_shrink, sgmv_expand,
-                                     sgmv_expand_slice, sgmv_shrink)
+from vllm.lora.ops.xla_ops import (bgmv_expand, bgmv_expand_slice, bgmv_shrink,
+                                   sgmv_expand, sgmv_expand_slice, sgmv_shrink)
 
 from .punica_base import PunicaWrapperBase
 
@@ -139,17 +138,18 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         """
 
         x = x.view(-1, x.shape[-1])
-        
-        shrink_fun: Callable = (self._shrink_prefill if self.is_prefill else self._shrink_decode)
-        
+
+        shrink_fun: Callable = (self._shrink_prefill
+                                if self.is_prefill else self._shrink_decode)
+
         # TODO fuse these kernels
         for slice_idx in range(len(lora_a_stacked)):
             y_s = y[slice_idx]
             lora_s = lora_a_stacked[slice_idx]
-            
+
             y_org = y_s
             y_s = y_s.view(-1, y_s.shape[-1])
-            
+
             shrink_fun(y_s, x, lora_s, scale)
             y_s = y_s.view_as(y_org)
 
@@ -181,8 +181,10 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             output_slices (Tuple[int, ...]): Every slice's size
             add_inputs (bool):  Defaults to True.
         """
-        expand_slice_fun: Callable = (self._expand_slice_prefill if self.is_prefill else self._expand_slice_decode)
-        
+        expand_slice_fun: Callable = (self._expand_slice_prefill
+                                      if self.is_prefill else
+                                      self._expand_slice_decode)
+
         y_org = y
         y = y.view(-1, y.shape[-1])
         offset_left = offset_start

@@ -32,7 +32,8 @@ def bgmv_expand(inputs: torch.Tensor,
     inputs = inputs.to(dtype=output_tensor.dtype)
     # outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras)
     batch_size, output_size, input_size = selected_loras.shape
-    outputs = (selected_loras @ inputs.reshape((batch_size, input_size, 1))).reshape((batch_size, output_size))
+    outputs = (selected_loras @ inputs.reshape(
+        (batch_size, input_size, 1))).reshape((batch_size, output_size))
 
     limit = output_tensor.shape[0]
     if outputs.shape[0] == 1 and output_tensor.shape[0] != 1:
@@ -75,7 +76,8 @@ def bgmv_shrink(inputs: torch.Tensor,
     inputs = inputs.to(dtype=output_tensor.dtype)
     # outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras)
     batch_size, output_size, input_size = selected_loras.shape
-    outputs = (selected_loras @ inputs.reshape((batch_size, input_size, 1))).reshape((batch_size, output_size))
+    outputs = (selected_loras @ inputs.reshape(
+        (batch_size, input_size, 1))).reshape((batch_size, output_size))
 
     output_tensor[:, :outputs.shape[1]] = scaling * outputs[:]
 
@@ -112,7 +114,8 @@ def bgmv_expand_slice(inputs: torch.Tensor,
     if len(selected_loras.shape) == 4:
         selected_loras = selected_loras.squeeze(dim=1)
     batch_size, output_size, input_size = selected_loras.shape
-    outputs = (selected_loras @ inputs.reshape((batch_size, input_size, 1))).reshape((batch_size, output_size))
+    outputs = (selected_loras @ inputs.reshape(
+        (batch_size, input_size, 1))).reshape((batch_size, output_size))
 
     if add_inputs:
         output_tensor[:, slice_offset:slice_offset + slice_size] += outputs[:]

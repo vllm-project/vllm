@@ -1,5 +1,7 @@
 import torch
+
 from ..torch_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
+
 
 def sgmv_expand(inputs: torch.Tensor,
                 lora_b_weights: torch.Tensor,
@@ -16,6 +18,7 @@ def sgmv_expand(inputs: torch.Tensor,
 
     bgmv_expand(inputs, lora_b_weights, output_tensor, exploded_indices,
                 add_inputs)
+
 
 def sgmv_shrink(
     inputs: torch.Tensor,
