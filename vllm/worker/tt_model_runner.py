@@ -120,7 +120,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
 
         self.cached_step_outputs: List[torch.Tensor] = []  # Only used for multi-step execution
         
-        self.cached_enc_dec_data: Optional[Dict[int, Dict[str, Any]]] = None  # seq_id -> enc_dec_data
+        if self.model_config.is_encoder_decoder_model:
+            self.cached_enc_dec_data: Optional[Dict[int, Dict[str, Any]]] = None  # seq_id -> enc_dec_data
 
         if self.model_is_mrope:
             assert "TTModelRunner does not currently support models with mrope rope_scaling"
@@ -140,6 +141,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             scheduler_config=self.scheduler_config,
             cache_config=self.cache_config
         )
+        if self.model_config.is_encoder_decoder_model:
+            self.max_cross_blocks = self.model.max_cross_attn_tokens // self.cache_config.block_size
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
@@ -260,7 +263,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         )
         
         # Remove cached encoder-decoder data for any seq ids that are not in the current batch (assume they were either finished or preempted)
-        if not is_prompt and self.cached_enc_dec_data:
+        if self.model_config.is_encoder_decoder_model and not is_prompt and self.cached_enc_dec_data:
             seq_ids_to_del = []
             for seq_id in self.cached_enc_dec_data:
                 if seq_id not in seq_groups:
@@ -331,6 +334,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     block_tables,
                     torch.zeros(block_tables.shape[0], self.cache_config.num_gpu_blocks - block_tables.shape[1], dtype=torch.int32, device="cpu")
                 ], dim=1)
+                if self.model_config.is_encoder_decoder_model:
+                    # Note for vision models: the number of cross blocks may change if the number of image tiles changes or if prompts are text-only
+                    cross_block_tables = torch.cat([
+                        cross_block_tables,
+                        torch.zeros(cross_block_tables.shape[0], self.max_cross_blocks - cross_block_tables.shape[1], dtype=torch.int32, device="cpu")
+                    ], dim=1)
         
         return TTModelInput(input_tokens, input_positions, prompt_lens, seq_groups, block_tables, unpadded_batch_size, tt_sampling_params, multi_modal_kwargs, cross_block_tables)
 
