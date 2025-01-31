@@ -114,6 +114,7 @@ def _create_random_top_token_test_vector(
                           vector when sorted in descending order by
                           logprob
     """
+
     # Calculate the final number of logprobs required
     total_logprobs = num_logprobs + 1 if adjust_num_logprobs else num_logprobs
 
@@ -125,8 +126,8 @@ def _create_random_top_token_test_vector(
 
     # Check if the sampled_token_id occurs in choice_tensor[1:]
     if sampled_token_id in choice_tensor[1:]:
-        sampled_token_rank = (choice_tensor == sampled_token_id).nonzero(
-            as_tuple=True)[0].item() - 1
+        sampled_token_rank = (choice_tensor[1:] == sampled_token_id).nonzero(
+            as_tuple=True)[0].item()
     else:
         # If not found, assign a random int between num_logprobs and 50700
         sampled_token_rank = random.randint(num_logprobs, 50700)
