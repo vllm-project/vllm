@@ -260,7 +260,16 @@ class Fp8LinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
-            assert self.quant_config.activation_scheme == "dynamic"
+            if current_platform.is_hpu():
+                from vllm.model_executor.layers.quantization.utils.fp8_utils import pad_block_fp8_weight_naive
+                layer.weight, orig_M, orig_N = pad_block_fp8_weight_naive(
+                    layer.weight,
+                    layer.weight_scale_inv,
+                    self.quant_config.weight_block_size)
+                orig_M = torch.nn.Parameter(torch.tensor(orig_M, dtype=torch.int32), requires_grad=False)
+                orig_N = torch.nn.Parameter(torch.tensor(orig_N, dtype=torch.int32), requires_grad=False)
+                layer.register_parameter("orig_M", orig_M)
+                layer.register_parameter("orig_N", orig_N)
             if current_platform.is_rocm():
                 weight, weight_scale_inv, _ = \
                     normalize_e4m3fn_to_e4m3fnuz(
@@ -373,6 +382,8 @@ class Fp8LinearMethod(LinearMethodBase):
                     weight_scale=layer.weight_scale_inv,
                     input_scale=layer.input_scale,
                     bias=bias,
+                    original_M=layer.orig_M,
+                    original_N=layer.orig_N,
                 )
             else:
                 return apply_w8a8_block_fp8_linear(
@@ -537,7 +548,24 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
-            assert self.quant_config.activation_scheme == "dynamic"
+            if current_platform.is_hpu():
+                from vllm.model_executor.layers.quantization.utils.fp8_utils import pad_block_fp8_weight_naive
+                layer.w13_weight, orig_M_w13, orig_N_w13 = pad_block_fp8_weight_naive(
+                    layer.w13_weight,
+                    layer.w13_weight_scale_inv,
+                    self.quant_config.weight_block_size)
+                layer.w2_weight, orig_M_w2, orig_N_w2 = pad_block_fp8_weight_naive(
+                    layer.w2_weight,
+                    layer.w2_weight_scale_inv,
+                    self.quant_config.weight_block_size)
+                orig_M_w13 = torch.nn.Parameter(torch.tensor(orig_M_w13, dtype=torch.int32), requires_grad=False)
+                orig_N_w13 = torch.nn.Parameter(torch.tensor(orig_N_w13, dtype=torch.int32), requires_grad=False)
+                layer.register_parameter("orig_M_w13", orig_M_w13)
+                layer.register_parameter("orig_N_w13", orig_N_w13)
+                orig_M_w2 = torch.nn.Parameter(torch.tensor(orig_M_w2, dtype=torch.int32), requires_grad=False)
+                orig_N_w2 = torch.nn.Parameter(torch.tensor(orig_N_w2, dtype=torch.int32), requires_grad=False)
+                layer.register_parameter("orig_M_w2", orig_M_w2)
+                layer.register_parameter("orig_N_w2", orig_N_w2)
             if current_platform.is_rocm():
                 w13_weight, w13_weight_scale_inv, w13_input_scale = \
                     normalize_e4m3fn_to_e4m3fnuz(
@@ -770,28 +798,29 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # w2_list = layer.hpu_fused_moe.MoeOp.w2_list
         from vllm.model_executor.layers.quantization.utils.fp8_utils import dequant_block_fp8_weight_naive
 
+        orig_M_w13 = layer.orig_M_w13.data
+        orig_N_w13 = layer.orig_N_w13.data
+        orig_M_w2 = layer.orig_M_w2.data
+        orig_N_w2 = layer.orig_N_w2.data
+        w13_weight = dequant_block_fp8_weight_naive(layer.w13_weight,
+                                                    layer.w13_weight_scale_inv,
+                                                    block_size=self.quant_config.weight_block_size,
+                                                    dtype=x.dtype,
+                                                    original_M=orig_M_w13,
+                                                    original_N=orig_N_w13)
+        w2_weight = dequant_block_fp8_weight_naive(layer.w2_weight,
+                                                    layer.w2_weight_scale_inv,
+                                                    block_size=self.quant_config.weight_block_size,
+                                                    dtype=x.dtype,
+                                                    original_M=orig_M_w2,
+                                                    original_N=orig_N_w2)
         for i in range(8):
             min_expert = i * n_expert_slice
             max_expert = (i + 1) * n_expert_slice
-            # w13_list_slice = [w13_list[i].weight.squeeze() for i in range(min_expert, max_expert)]
-            # w2_list_slice = [w2_list[i].weight.squeeze() for i in range(min_expert, max_expert)]
-            # w13_list_slice = [layer.w13_weight[j].squeeze().clone() for j in range(min_expert, max_expert)]
-            # w2_list_slice = [layer.w2_weight[j].squeeze().clone() for j in range(min_expert, max_expert)]
 
-            w13_list_slice = [dequant_block_fp8_weight_naive(layer.w13_weight[j].squeeze(),
-                                                             layer.w13_weight_scale_inv[j],
-                                                             block_size=self.quant_config.weight_block_size,
-                                                             dtype=x.dtype) for j in range(min_expert, max_expert)]
-            w2_list_slice = [dequant_block_fp8_weight_naive(layer.w2_weight[j].squeeze(),
-                                                            layer.w2_weight_scale_inv[j],
-                                                            block_size=self.quant_config.weight_block_size,
-                                                            dtype=x.dtype) for j in range(min_expert, max_expert)]
-            # print(f"w13_list_slice[0].shape: {w13_list_slice[0].shape}, device: {w13_list_slice[0].device}, dtype: {w13_list_slice[0].dtype}")
-            # print(f"w2_list_slice[0].shape: {w2_list_slice[0].shape}, device: {w2_list_slice[0].device}, dtype: {w2_list_slice[0].dtype}")
-            # print(f"hidden_states.shape: {x.shape}, device: {x.device}, dtype: {x.dtype}")
-            # print(f"topk_ids.shape: {topk_ids.shape}, device: {topk_ids.device}, dtype: {topk_ids.dtype}")
-            # print(f"topk_weights.shape: {topk_weights.shape}, device: {topk_weights.device}, dtype: {topk_weights.dtype}")
-            # print(f"min_expert: {min_expert}, max_expert: {max_expert}")
+            w13_list_slice = [w13_weight[j] for j in range(min_expert, max_expert)]
+            w2_list_slice = [w2_weight[j] for j in range(min_expert, max_expert)]
+
             final_hidden_states += torch.ops.hpu.mixture_of_experts(hidden_states=x,
                                          expert_routing_table=topk_ids.to(torch.int64),
                                          router_weights=topk_weights.to(x.dtype),
@@ -801,9 +830,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                          activation="silu",
                                          experts_min=min_expert,
                                          experts_max=max_expert - 1)
-            # print(f"final_hidden_states.shape: {final_hidden_states.shape}, device: {final_hidden_states.device}, dtype: {final_hidden_states.dtype}")
             htorch.core.mark_step()
-            # print(f"done mark step {i}")
         return final_hidden_states.view(-1, x.shape[1])
 
 
