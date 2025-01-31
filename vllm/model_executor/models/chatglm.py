@@ -770,7 +770,7 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
                          SupportsMultiModal):
     # Ensure that the LoRA support check passes when the class is not
     # initialized, but set all these attributes to empty.
-    # These will be updated when a model class is selected
+    # These will be updated when an instance class is selected
     packed_modules_mapping = {}
     supported_lora_modules = []
     embedding_modules = {}
