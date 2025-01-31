@@ -1468,9 +1468,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=self.model_config.dtype,
                 device=self.device)
 
-        with self.attn_state.graph_capture(
-                max_batch_size, input_positions), graph_capture(
-                    self.device) as graph_capture_context:
+        with self.attn_state.graph_capture(max_batch_size), graph_capture(
+                self.device) as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for virtual_engine in range(
