@@ -67,7 +67,8 @@ class KVCacheManager:
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
-        self.req_to_blocks: DefaultDict[str, List[KVCacheBlock]] = defaultdict(list)
+        self.req_to_blocks: DefaultDict[str,
+                                        List[KVCacheBlock]] = defaultdict(list)
 
     def get_computed_blocks(
             self, request: Request) -> Tuple[List[KVCacheBlock], int]:
@@ -111,9 +112,7 @@ class KVCacheManager:
         return computed_blocks, num_computed_tokens
 
     def allocate_slots(
-        self,
-        request: Request,
-        num_tokens: int,
+        self, request: Request, num_tokens: int,
         new_computed_blocks: List[KVCacheBlock]
     ) -> Optional[List[KVCacheBlock]]:
         """Add slots for a new prefill or a new decode request.
@@ -212,8 +211,7 @@ class KVCacheManager:
                 # The new full blocks are the full blocks that are not computed.
                 full_blocks=new_full_blocks,
                 prev_block=(req_blocks[num_computed_full_blocks - 1]
-                            if num_computed_full_blocks > 0 else None)
-            )
+                            if num_computed_full_blocks > 0 else None))
 
         return new_blocks
 
