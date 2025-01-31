@@ -123,10 +123,7 @@ class TritonMLAState(AttentionState):
         return self.__class__(self.runner)
 
     def graph_capture_get_metadata_for_batch(
-            self,
-            batch_size: int,
-            is_encoder_decoder_model: bool = False,
-            positions: Optional[torch.Tensor] = None):
+            self, batch_size: int, is_encoder_decoder_model: bool = False):
         assert self._is_graph_capturing
 
         attn_metadata = self.runner.attn_backend.make_metadata(
@@ -175,15 +172,16 @@ class TritonMLAState(AttentionState):
                                     input_buffers,
                                     attn_metadata,
                                     is_encoder_decoder_model: bool = False):
+        input_positions = attn_metadata.input_positions
+        num_positions = input_positions.shape[0]
         input_buffers["seq_lens_tensor"].copy_(
             attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
         input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
-        input_buffers["input_positions"][:attn_metadata.decode_metadata.
-                                         input_positions.shape[0]].copy_(
-                                             attn_metadata.decode_metadata.
-                                             input_positions,
-                                             non_blocking=True)
+        # CUDA graph buffer is padded so only perform a partial copy based on
+        # num_positions
+        input_buffers["input_positions"][:num_positions].copy_(
+            input_positions, non_blocking=True)
         if is_encoder_decoder_model:
             raise NotImplementedError(
                 "TritonMLAState does not support encoder/decoder yet")

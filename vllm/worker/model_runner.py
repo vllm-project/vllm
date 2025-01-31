@@ -1483,13 +1483,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                            self.vllm_config.compilation_config.
                                            cudagraph_capture_sizes)
                 for batch_size in cudagraph_capture_sizes:
-                    cur_input_positions = input_positions[..., :batch_size]
                     attn_metadata = (
                         self.attn_state.graph_capture_get_metadata_for_batch(
                             batch_size,
                             is_encoder_decoder_model=self.model_config.
-                            is_encoder_decoder,
-                            positions=cur_input_positions))
+                            is_encoder_decoder))
                     # Disable KV Scale Calculation for graph capture
                     attn_metadata.enable_kv_scales_calculation = False
                     if self.lora_config:
@@ -1515,7 +1513,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "input_ids":
                         input_tokens[:batch_size],
                         "positions":
-                        cur_input_positions,
+                        input_positions[..., :batch_size],
                         "intermediate_inputs":
                         intermediate_inputs[:batch_size]
                         if intermediate_inputs is not None else None,
