@@ -645,10 +645,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz,
             if continue_condition:
                 # If MQA / GQA, set the K and V head offsets appropriately.
                 GROUP_SIZE: tl.constexpr = HQ // HK
-                if GROUP_SIZE != 1:
-                    off_h_k = off_h_q // GROUP_SIZE
-                else:
-                    off_h_k = off_h_q
+                off_h_k = off_h_q // GROUP_SIZE if GROUP_SIZE != 1 else off_h_q
 
                 n_extra_tokens = 0
                 if seqlen_k < BLOCK_N:
@@ -858,7 +855,7 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz,
                 start_m_idx = start_m * BLOCK_M
                 causal_start_idx = seqlen_q - seqlen_k
                 acc = acc.to(Out.type.element_ty)
-                if IS_CAUSAL:
+                if IS_CAUSAL: # noqa: SIM102
                     if (causal_start_idx > start_m_idx
                             and causal_start_idx < end_m_idx):
                         out_mask_boundary = tl.full((BLOCK_DMODEL, ),
