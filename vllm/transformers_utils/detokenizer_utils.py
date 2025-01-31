@@ -7,6 +7,7 @@ def replace_none_with_empty(tokens: List[Optional[str]]):
     for i, token in enumerate(tokens):
         if token is None:
             tokens[i] = ""
+    return tokens
 
 
 def _convert_tokens_to_string_with_added_encoders(
