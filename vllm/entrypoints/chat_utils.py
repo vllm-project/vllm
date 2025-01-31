@@ -408,7 +408,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
-            if model_type == "qwen2_vl":
+            if model_type in ("qwen2_vl", "qwen_2_5_vl"):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
             if model_type == "molmo":
                 return ""
@@ -428,7 +428,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "(<audio>./</audio>)"
             raise TypeError(f"Unknown model type: {model_type}")
         elif modality == "video":
-            if model_type == "qwen2_vl":
+            if model_type in ("qwen2_vl", "qwen_2_5_vl"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
             if model_type in ("minicpmo", "minicpmv"):
                 return "(<video>./</video>)"
