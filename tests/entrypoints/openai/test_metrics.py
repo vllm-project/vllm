@@ -105,8 +105,6 @@ EXPECTED_VALUES = {
 @pytest.mark.asyncio
 async def test_metrics_counts(server: RemoteOpenAIServer,
                               client: openai.AsyncClient, use_v1: bool):
-    if use_v1:
-        pytest.skip("Skipping test on vllm V1")
     for _ in range(_NUM_REQUESTS):
         # sending a request triggers the metrics to be logged.
         await client.completions.create(
@@ -120,6 +118,9 @@ async def test_metrics_counts(server: RemoteOpenAIServer,
 
     # Loop over all expected metric_families
     for metric_family, suffix_values_list in EXPECTED_VALUES.items():
+        if use_v1 and metric_family not in EXPECTED_METRICS_V1:
+            continue
+
         found_metric = False
 
         # Check to see if the metric_family is found in the prom endpoint.
@@ -199,6 +200,21 @@ EXPECTED_METRICS = [
 EXPECTED_METRICS_V1 = [
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
+    "vllm:gpu_cache_usage_perc",
+    "vllm:prompt_tokens_total",
+    "vllm:generation_tokens_total",
+    "vllm:request_prompt_tokens_sum",
+    "vllm:request_prompt_tokens_bucket",
+    "vllm:request_prompt_tokens_count",
+    "vllm:request_generation_tokens_sum",
+    "vllm:request_generation_tokens_bucket",
+    "vllm:request_generation_tokens_count",
+    "vllm:time_to_first_token_seconds_sum",
+    "vllm:time_to_first_token_seconds_bucket",
+    "vllm:time_to_first_token_seconds_count",
+    "vllm:time_per_output_token_seconds_sum",
+    "vllm:time_per_output_token_seconds_bucket",
+    "vllm:time_per_output_token_seconds_count",
 ]
 
 

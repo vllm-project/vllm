@@ -245,6 +245,51 @@ __global__ void reshape_and_cache_flash_kernel(
     }
   }
 }
+
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void concat_and_cache_mla_kernel(
+    const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
+    const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
+    cache_t* __restrict__ kv_cache,  // [num_blocks, block_size, (kv_lora_rank
+                                     // + pe_dim)]
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int block_stride,                    //
+    const int kv_c_stride,                     //
+    const int k_pe_stride,                     //
+    const int kv_lora_rank,                    //
+    const int pe_dim,                          //
+    const int block_size,                      //
+    const float* scale                         //
+) {
+  const int64_t token_idx = blockIdx.x;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  // NOTE: slot_idx can be -1 if the token is padded
+  if (slot_idx < 0) {
+    return;
+  }
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
+
+  auto copy = [&](const scalar_t* __restrict__ src, cache_t* __restrict__ dst,
+                  int src_stride, int dst_stride, int size, int offset) {
+    for (int i = threadIdx.x; i < size; i += blockDim.x) {
+      const int64_t src_idx = token_idx * src_stride + i;
+      const int64_t dst_idx = block_idx * block_stride +
+                              block_offset * (kv_lora_rank + pe_dim) + i +
+                              offset;
+      if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+        dst[dst_idx] = src[src_idx];
+      } else {
+        dst[dst_idx] =
+            fp8::scaled_convert<cache_t, scalar_t, kv_dt>(src[src_idx], *scale);
+      }
+    }
+  };
+
+  copy(kv_c, kv_cache, kv_c_stride, block_stride, kv_lora_rank, 0);
+  copy(k_pe, kv_cache, k_pe_stride, block_stride, pe_dim, kv_lora_rank);
+}
+
 }  // namespace vllm
 
 // KV_T is the stored data type of kv-cache.
@@ -341,6 +386,56 @@ void reshape_and_cache_flash(
 
   DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype,
                              CALL_RESHAPE_AND_CACHE_FLASH);
+}
+
+// KV_T is the stored data type of kv-cache.
+// CACHE_T is the data type of key and value tensors.
+// KV_DTYPE is the real data type of kv-cache.
+#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)             \
+  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>           \
+      <<<grid, block, 0, stream>>>(                                    \
+          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                    \
+          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                    \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),             \
+          slot_mapping.data_ptr<int64_t>(), block_stride, kv_c_stride, \
+          k_pe_stride, kv_lora_rank, pe_dim, block_size,               \
+          reinterpret_cast<const float*>(scale.data_ptr()));
+
+void concat_and_cache_mla(
+    torch::Tensor& kv_c,          // [num_tokens, kv_lora_rank]
+    torch::Tensor& k_pe,          // [num_tokens, pe_dim]
+    torch::Tensor& kv_cache,      // [num_blocks, block_size, (kv_lora_rank +
+                                  // pe_dim)]
+    torch::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
+    const std::string& kv_cache_dtype, torch::Tensor& scale) {
+  // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
+  // slot_mapping.size(0) because of padding for CUDA graphs.
+  // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
+  // both include padding.
+  // In vLLM V1, however, key.size(0) can be larger than slot_mapping.size(0)
+  // since key includes padding for CUDA graphs, while slot_mapping does not.
+  // In this case, slot_mapping.size(0) represents the actual number of tokens
+  // before padding.
+  // For compatibility with both cases, we use slot_mapping.size(0) as the
+  // number of tokens.
+  int num_tokens = slot_mapping.size(0);
+  int kv_lora_rank = kv_c.size(1);
+  int pe_dim = k_pe.size(1);
+  int block_size = kv_cache.size(1);
+
+  TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
+
+  int kv_c_stride = kv_c.stride(0);
+  int k_pe_stride = k_pe.stride(0);
+  int block_stride = kv_cache.stride(0);
+
+  dim3 grid(num_tokens);
+  dim3 block(std::min(kv_lora_rank, 512));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(kv_c));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  DISPATCH_BY_KV_CACHE_DTYPE(kv_c.dtype(), kv_cache_dtype,
+                             CALL_CONCAT_AND_CACHE_MLA);
 }
 
 namespace vllm {

@@ -23,6 +23,7 @@ from torch import nn
 from transformers import AutoModelForCausalLM
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
+from vllm.attention import Attention
 from vllm.config import (LoadConfig, LoadFormat, ModelConfig, ParallelConfig,
                          VllmConfig, set_current_vllm_config)
 from vllm.distributed import (get_tensor_model_parallel_rank,
@@ -397,6 +398,11 @@ class DefaultModelLoader(BaseModelLoader):
                     # parameters onto device for processing and back off after.
                     with device_loading_context(module, target_device):
                         quant_method.process_weights_after_loading(module)
+                elif isinstance(module, Attention) and \
+                    hasattr(module, "process_weights_after_loading"):
+                    # When attention modules need to process weights after
+                    # currently only used by MLA
+                    module.process_weights_after_loading()
         return model.eval()
 
 
@@ -1121,8 +1127,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 # from being incorrectly identified as being present in
                 # 'vpm.encoder.layers.0.self_attn.qkv_proj.weight
                 shard_pos = quant_param_name.find(shard_name)
-                can_correct_rename = (shard_pos > 0) and (
-                    quant_param_name[shard_pos - 1] == ".")
+                can_correct_rename = (shard_pos
+                                      > 0) and (quant_param_name[shard_pos - 1]
+                                                == ".")
                 # If the quant_param_name is packed, it won't occur in the
                 # param_dict before renaming.
                 new_quant_param_name = quant_param_name.replace(

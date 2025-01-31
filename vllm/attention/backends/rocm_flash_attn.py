@@ -781,9 +781,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 decode_query.dtype, head_size, block_size, gqa_ratio,
                 decode_meta.max_decode_seq_len)
             if use_custom:
-                max_seq_len = (decode_meta.max_decode_seq_len if
-                               self.attn_type != AttentionType.ENCODER_DECODER
-                               else decode_meta.max_encoder_seq_len)
+                max_seq_len = (decode_meta.max_decode_seq_len if self.attn_type
+                               != AttentionType.ENCODER_DECODER else
+                               decode_meta.max_encoder_seq_len)
                 assert max_seq_len is not None
                 max_num_partitions = (
                     (max_seq_len + _PARTITION_SIZE_ROCM - 1) //
