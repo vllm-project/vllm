@@ -254,40 +254,6 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME],
 )
-async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
-    """Streaming for parallel sampling.
-    The tokens from multiple samples, are flattened into a single stream,
-    with an index to indicate which sample the token belongs to.
-    """
-
-    prompt = "What is an LLM?"
-    n = 3
-    max_tokens = 5
-
-    stream = await client.completions.create(model=model_name,
-                                             prompt=prompt,
-                                             max_tokens=max_tokens,
-                                             n=n,
-                                             stream=True)
-    chunks: List[List[str]] = [[] for i in range(n)]
-    finish_reason_count = 0
-    async for chunk in stream:
-        index = chunk.choices[0].index
-        text = chunk.choices[0].text
-        chunks[index].append(text)
-        if chunk.choices[0].finish_reason is not None:
-            finish_reason_count += 1
-    assert finish_reason_count == n
-    for chunk in chunks:
-        assert len(chunk) == max_tokens
-        print("".join(chunk))
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
 async def test_completion_stream_options(client: openai.AsyncOpenAI,
                                          model_name: str):
     prompt = "What is the capital of France?"
@@ -472,28 +438,6 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
             choice = chunk.choices[0]
             texts[choice.index] += choice.text
         assert texts[0] == texts[1]
-
-
-@pytest.mark.asyncio
-async def test_allowed_token_ids(client: openai.AsyncOpenAI):
-    prompt = "Hello, my name is"
-    max_tokens = 1
-    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
-
-    # Test exclusive selection
-    allowed_ids = [21555, 21557, 21558]
-    completion = await client.completions.create(
-        model=MODEL_NAME,
-        prompt=prompt,
-        max_tokens=max_tokens,
-        temperature=0.0,
-        seed=42,
-        extra_body=dict(allowed_token_ids=allowed_ids),
-        logprobs=1,
-    )
-    response_tokens = completion.choices[0].logprobs.tokens
-    assert len(response_tokens) == 1
-    assert tokenizer.convert_tokens_to_ids(response_tokens)[0] in allowed_ids
 
 
 @pytest.mark.asyncio

@@ -186,7 +186,6 @@ class LogprobsProcessor:
         for tok_idx, prompt_token_id in zip(range(num_chunk_tokens),
                                             prompt_token_ids_lst[prompt_idx:]):
             # Iterate over prefill chunk
-            assert prompt_token_id
             assert prompt_token_id == token_ids[tok_idx, 0].item(), (
                 "Sampler concats the prompt token logprob in front of "
                 f"the topk logprobs, but got {prompt_token_id=} and "
