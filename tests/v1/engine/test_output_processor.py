@@ -469,8 +469,10 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
 
 
 @pytest.mark.parametrize("include_stop_str_in_output", [True, False])
-@pytest.mark.parametrize("num_sample_logprobs", [None, 5])
-@pytest.mark.parametrize("num_prompt_logprobs", [None, 5])
+@pytest.mark.parametrize("num_sample_logprobs",
+                         [None, NUM_SAMPLE_LOGPROBS_UNDER_TEST])
+@pytest.mark.parametrize("num_prompt_logprobs",
+                         [None, NUM_PROMPT_LOGPROBS_UNDER_TEST])
 def test_stop_string(include_stop_str_in_output: bool,
                      num_sample_logprobs: Optional[int],
                      num_prompt_logprobs: Optional[int], dummy_test_vectors):
