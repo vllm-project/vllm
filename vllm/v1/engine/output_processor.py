@@ -109,6 +109,17 @@ class OutputProcessor:
             new_token_ids = engine_core_output.new_token_ids
             finish_reason = engine_core_output.finish_reason
 
+            # TODO(andy): prompt logprobs + chunked prefill can
+            # result in engine core returning an output for a
+            # partial prefill (in order to send back partial
+            # prompt logprobs.) This breaks the invariant that
+            # process_outputs is only operating on engine core
+            # outputs associated with non-partial completions.
+            # Currently this is handled by having `is_prefilling`
+            # check for new decoded tokens, indicating that
+            # the completion is not partial. A better solution
+            # would be to aggregate prompt logprobs in the
+            # engine core.
             req_state.is_prefilling = not new_token_ids
 
             # 2) Detokenize the token ids into text and check for stop

@@ -827,13 +827,19 @@ class GPUModelRunner:
             end_idx_in_tokens = start_idx_in_tokens + num_prompt_logits
 
             # Compute prompt logprobs.
-            prompt_logprobs_dict[request_id] = self.model.sampler.get_logprobs(
-                logits,
-                num_prompt_logprobs,
-                token_ids=prompt_token_ids[
-                    start_idx_in_tokens:end_idx_in_tokens].to(
-                        self.device)  # copy to gpu
-            )
+            req_plp: Tuple[torch.Tensor, torch.Tensor,
+                           torch.Tensor] = self.model.sampler.get_logprobs(
+                               logits,
+                               num_prompt_logprobs,
+                               token_ids=prompt_token_ids[
+                                   start_idx_in_tokens:end_idx_in_tokens].to(
+                                       self.device)  # copy to gpu
+                           )
+
+            # GPU -> CPU
+            prompt_logprobs_dict[request_id] = (req_plp[0].cpu(),
+                                                req_plp[1].cpu(),
+                                                req_plp[2].cpu())
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
