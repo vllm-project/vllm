@@ -1093,9 +1093,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         lora_logits = lora_logits.mT
         indices_padded = self.punica_wrapper.sampler_indices_padded
         
-        # KRAI: Temporary change
-        neg_inf = torch.finfo(lora_logits.dtype).min
-        pos_inf = torch.finfo(lora_logits.dtype).max
+        if current_platform.is_tpu():
+            # Because nan_to_num_ doesn't work with actual -inf values on TPU
+            neg_inf = torch.finfo(lora_logits.dtype).min
+            pos_inf = torch.finfo(lora_logits.dtype).max
+        else:
+            neg_inf = float("-inf")
+            pos_inf = float("inf")
         
         lora_logits = (lora_logits.reshape(
             lora_logits.shape[0] * lora_logits.shape[1],
