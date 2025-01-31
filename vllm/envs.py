@@ -77,6 +77,8 @@ if TYPE_CHECKING:
     V_SCALE_CONSTANT: int = 100
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
+    VLLM_MLA_DISABLE: bool = False
+    VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
 
 
 def get_default_cache_root():
@@ -506,6 +508,18 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # TTFT and overall throughput.
     "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_V1_OUTPUT_PROC_CHUNK_SIZE", "128")),
+
+    # If set, vLLM will disable the MLA attention optimizations.
+    "VLLM_MLA_DISABLE":
+    lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
+
+    # Flag that can control whether or not we perform matrix-absorption for MLA
+    # decode, i.e. absorb W_UK into W_Q/W_UK and W_UV into W_O, absorbing the
+    # matrices reduces the runtime FLOPs needed to compute MLA but requires
+    # storing more weights, W_Q_UK and W_UV_O, so can increase memory usage,
+    # the is enabled by default
+    "VLLM_MLA_PERFORM_MATRIX_ABSORPTION":
+    lambda: bool(int(os.getenv("VLLM_MLA_PERFORM_MATRIX_ABSORPTION", "1")))
 }
 
 # end-env-vars-definition
