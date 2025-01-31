@@ -26,6 +26,8 @@ class BlockHashType(NamedTuple):
     hash_value: int
     # Token IDs in the block.
     token_ids: Tuple[int, ...]
+    # The KV cache group that the block belongs to.
+    kv_cache_group_id: int
     # Extra keys for the block.
     extra_keys: Optional[Any] = None
 
@@ -66,6 +68,19 @@ class KVCacheBlock:
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
+
+    def __repr__(self):
+        # print block_id instead of KVCacheBlock object to avoid printing the
+        # KVCacheBlock object recursively.
+        prev_block_id = self.prev_free_block.block_id \
+            if self.prev_free_block else None
+        next_block_id = self.next_free_block.block_id \
+            if self.next_free_block else None
+        return (f"KVCacheBlock(block_id={self.block_id}, "
+                f"ref_cnt={self.ref_cnt}), "
+                f"_block_hash={self._block_hash}, "
+                f"prev_free_block={prev_block_id}, "
+                f"next_free_block={next_block_id})")
 
 
 """When a model needs different types of kv_caches (e.g., full attention + 
@@ -259,6 +274,7 @@ def generate_block_hash_extra_keys(
 def hash_block_tokens(
         parent_block_hash: Optional[int],
         curr_block_token_ids: Sequence[int],
+        kv_cache_group_id: int,
         extra_keys: Optional[Tuple[Any, ...]] = None) -> BlockHashType:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
@@ -279,19 +295,20 @@ def hash_block_tokens(
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
     """
-    return BlockHashType(hash((parent_block_hash, *curr_block_token_ids)),
-                         tuple(curr_block_token_ids), extra_keys)
+    return BlockHashType(
+        hash((parent_block_hash, kv_cache_group_id, *curr_block_token_ids)),
+        tuple(curr_block_token_ids), kv_cache_group_id, extra_keys)
 
 
 def hash_request_tokens(block_size: int, request: Request,
-                        group_id: int) -> List[BlockHashType]:
+                        kv_cache_group_id: int) -> List[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
     Args:
         block_size: The size of each block.
         request: The request object.
-        group_id: TODO
+        kv_cache_group_id: The KV cache group that the blocks belong to
 
     Returns:
         The list of computed hash values.
@@ -303,7 +320,8 @@ def hash_request_tokens(block_size: int, request: Request,
             "The number of multi-modal positions and hashes must match.")
 
     # TODO: Extend this to support other features such as LoRA.
-    need_mm_keys = bool(mm_positions)
+    need_extra_keys = bool(mm_positions)
+    extra_keys = None
     curr_mm_idx = 0
 
     ret = []
@@ -315,19 +333,18 @@ def hash_request_tokens(block_size: int, request: Request,
         if len(block_token_ids) < block_size:
             break
 
-        extra_keys = [group_id]
-
         # Add extra keys if the block is a multi-modal block.
-        if need_mm_keys:
-            mm_keys, curr_mm_idx = generate_block_hash_extra_keys(
+        if need_extra_keys:
+            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
                 request, start, end, curr_mm_idx)
-        if mm_keys is not None:
-            extra_keys.extend(mm_keys)
 
         block_hash = hash_block_tokens(parent_block_hash_value,
-                                       block_token_ids, tuple(extra_keys))
+                                       block_token_ids, kv_cache_group_id,
+                                       extra_keys)
         ret.append(block_hash)
         parent_block_hash_value = block_hash.hash_value
+        if start < 5 * block_size:
+            print("block_hash", start // block_size, block_hash)
     return ret
 
 
@@ -518,7 +535,6 @@ def get_kv_cache_config(vllm_config: VllmConfig,
                         available_memory: int) -> KVCacheConfig:
     """
     Generates the KV cache configuration for a model
-    TODO: support hybrid models with more than one type of KV cache.
 
     Args:
         vllm_config: The global VllmConfig

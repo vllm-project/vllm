@@ -150,12 +150,11 @@ class SlidingWindowManager(FullAttentionManager):
         # the time complexity from O(num_block) to
         # O(num_block / num_block_sliding_window) + O(num_computed_block),
         # which is good for low cache hit rate senarios.
-        # TODO: add test for this function
         start = 0
         ranges = []
         computed_blocks: List[KVCacheBlock] = []
 
-        dummy_block_hash = BlockHashType(-1, ())
+        dummy_block_hash = BlockHashType(-1, (), -1)
         # Add a dummy block hash to support the case that the last block is
         # cached.
         for i, block_hash in enumerate(chain(block_hashes,

@@ -138,10 +138,9 @@ class KVCacheManager:
             # for the single group case, but it is less efficient.
             num_computed_tokens = self._get_common_computed_tokens(
                 computed_tokens)
-
         for i, manager in enumerate(self.managers):
-            computed_blocks[i] = computed_blocks[:num_computed_tokens //
-                                                 manager.block_size]
+            computed_blocks[i] = computed_blocks[i][:num_computed_tokens //
+                                                    manager.block_size]
         self._free_blocks_for_sliding_window(computed_blocks,
                                              num_computed_tokens)
         return computed_blocks, num_computed_tokens
@@ -208,9 +207,10 @@ class KVCacheManager:
                 )
                 assert num_block_to_allocate > 0
 
-                new_blocks_of_group = self._get_new_blocks(num_new_blocks)
+                new_blocks_of_group = self._get_new_blocks(
+                    num_block_to_allocate)
                 new_blocks.append(new_blocks_of_group)
-                req_blocks[i].extend(new_blocks)
+                req_blocks[i].extend(new_blocks_of_group)
 
         if not self.enable_caching:
             return new_blocks
@@ -226,7 +226,7 @@ class KVCacheManager:
             # are full after appending the actual tokens.
             num_full_blocks_after_append = (request.num_computed_tokens +
                                             num_tokens) // manager.block_size
-            assert num_full_blocks_after_append <= len(req_blocks)
+            assert num_full_blocks_after_append <= len(req_blocks[i])
 
             new_full_blocks = req_blocks[i][
                 num_computed_full_blocks:num_full_blocks_after_append]
@@ -289,7 +289,7 @@ class KVCacheManager:
         if self.enable_caching:
             self._touch(computed_blocks)
         else:
-            assert not computed_blocks, (
+            assert all(len(blks) == 0 for blks in computed_blocks), (
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
 
@@ -325,22 +325,21 @@ class KVCacheManager:
 
         if not self.enable_caching:
             return new_blocks
-
         for i, manager in enumerate(self.managers):
-            num_computed_tokens = len(computed_blocks) * manager.block_size
+            num_computed_tokens = len(computed_blocks[i]) * manager.block_size
             num_full_blocks = (num_computed_tokens +
                                num_tokens) // manager.block_size
 
-            new_full_blocks = req_to_blocks[i][len(computed_blocks
+            new_full_blocks = req_to_blocks[i][len(computed_blocks[i]
                                                    ):num_full_blocks]
             if new_full_blocks:
                 self._cache_full_blocks(
                     request=request,
-                    blk_start_idx=len(computed_blocks),
+                    blk_start_idx=len(computed_blocks[i]),
                     # The new full blocks are the full blocks that are not computed.
                     full_blocks=new_full_blocks,
-                    prev_block=computed_blocks[-1]
-                    if computed_blocks else None,
+                    prev_block=computed_blocks[i][-1]
+                    if computed_blocks[i] else None,
                     kv_cache_group_id=i,
                 )
 
@@ -405,6 +404,8 @@ class KVCacheManager:
             ordered_blocks = self._get_ordered_blocks_multiple_kv_cache_groups(
                 blocks)
         for block in ordered_blocks:
+            if block == self._null_block:
+                continue
             block.decr_ref()
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
@@ -627,7 +628,8 @@ class KVCacheManager:
 
                 # Compute the hash of the current block.
                 block_hash = hash_block_tokens(prev_block_hash_value,
-                                               block_tokens, extra_keys)
+                                               block_tokens, kv_cache_group_id,
+                                               extra_keys)
                 request.append_kv_block_hashes(kv_cache_group_id, block_hash)
 
             # Update and added the full block to the cache.
