@@ -122,8 +122,6 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         def __init__(self, use_mrope: bool):
             self.use_mrope = use_mrope
             self.input_tokens: List[int] = []
-            self.input_positions: Optional[
-                List[int]] = [] if not self.use_mrope else None
             self.input_positions: List[int] = []
             self.num_orig_input_tokens_list: List[int] = []
             self.token_type_ids: Optional[List[int]] = []
@@ -284,7 +282,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     next_pos[idx])
         else:
             data.input_positions.append(token_positions)  # type: ignore
-            data.num_orig_input_tokens_list.append(seq_data.get_prompt_len())
+            data.num_orig_input_tokens_list.append(
+                seq_data.get_prompt_len())  # type: ignore
 
         # Update fields
         data.input_tokens.append(tokens)
