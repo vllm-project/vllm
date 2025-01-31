@@ -32,15 +32,17 @@ run_benchmark() {
 BASE_BRANCH="$BUILDKITE_PULL_REQUEST_BASE_BRANCH"
 
 # Avoid hard links to vllm-project that break forks.
-git remote add upstream	"$BUILDKITE_REPO"
 git remote -v
-git fetch upstream "$BASE_BRANCH" --depth=1 >/dev/null 2>&1
+git branch | cat
+git fetch origin "$BASE_BRANCH" --depth=1 >/dev/null 2>&1
+git log --oneline -n 20 | cat
+git rev-parse HEAD
 
 # Find the common ancestor between PR and base/main
-BASE_COMMIT=$(git merge-base "upstream/$BASE_BRANCH" HEAD || echo "") 
+BASE_COMMIT=$(git merge-base "origin/$BASE_BRANCH" HEAD || echo "") 
 
 if [[ -z "$BASE_COMMIT" ]]; then
-  echo "Unable to determine PR base commit! Make sure 'upstream' is set and pointing to the right remote." >&2
+  echo "Unable to determine PR base commit! Make sure 'origin' is set and pointing to the right remote." >&2
   exit 1
 fi
 echo "Using merge-base commit ($BASE_COMMIT) as base reference"
