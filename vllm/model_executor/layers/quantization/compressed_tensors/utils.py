@@ -101,9 +101,11 @@ def find_matched_target(layer_name: Optional[str], module: Module,
     if layer_name is None:
         layer_name = ""
 
-    matched_target = (_find_first_match(layer_name, targets)
-                      or _find_first_match(module.__class__.__name__, targets, True)
-                      or _match_fused_layer(layer_name, targets))
+    matched_target = (
+        _find_first_match(layer_name, targets)
+        or _find_first_match(module.__class__.__name__, targets, True)
+        or _match_fused_layer(layer_name, targets)
+    )
 
     if matched_target is None:
         raise ValueError(f"Unable to find matching target for {module} in the "
@@ -157,7 +159,8 @@ def _is_equal_or_regex_match(value: str,
 def _match_fused_layer(layer_name: str,
                        target_layers: Iterable[str]) -> Optional[str]:
     """
-    Match a fused layer name to its corresponding individual layer in target_layers.
+    Match a fused layer name to its corresponding individual layer in 
+    target_layers.
 
     Examples:
         layer_name = "model.layers.0.self_attn.qkv_proj"
