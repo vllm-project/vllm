@@ -1483,11 +1483,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                            self.vllm_config.compilation_config.
                                            cudagraph_capture_sizes)
                 for batch_size in cudagraph_capture_sizes:
+                    cur_input_positions = input_positions[..., :batch_size]
                     attn_metadata = (
                         self.attn_state.graph_capture_get_metadata_for_batch(
                             batch_size,
                             is_encoder_decoder_model=self.model_config.
-                            is_encoder_decoder))
+                            is_encoder_decoder,
+                            positions=cur_input_positions))
                     # Disable KV Scale Calculation for graph capture
                     attn_metadata.enable_kv_scales_calculation = False
                     if self.lora_config:
@@ -1513,7 +1515,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "input_ids":
                         input_tokens[:batch_size],
                         "positions":
-                        input_positions[..., :batch_size],
+                        cur_input_positions,
                         "intermediate_inputs":
                         intermediate_inputs[:batch_size]
                         if intermediate_inputs is not None else None,
@@ -1974,7 +1976,8 @@ class CUDAGraphRunner(nn.Module):
 
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
-        self.input_buffers["positions"].copy_(positions, non_blocking=True)
+        if positions is not None:
+            self.input_buffers["positions"].copy_(positions, non_blocking=True)
 
         if self.backend_name != "NO_ATTENTION":
             self.input_buffers["slot_mapping"].copy_(
