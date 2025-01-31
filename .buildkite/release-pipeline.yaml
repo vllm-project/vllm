@@ -56,7 +56,7 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
-  - input: "Release version"
+  - input: "Provide Release version here"
     fields:
       - text: "What is the release version?"
         key: "release-version"
