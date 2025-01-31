@@ -51,9 +51,10 @@ class OpenAIServingCompletion(OpenAIServing):
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
         diff_sampling_param = self.model_config.get_diff_sampling_param()
         if diff_sampling_param:
-            logger.info(
-                "Overwriting default completion sampling param with: %s",
-                diff_sampling_param)
+            source = self.model_config.generation_config
+            source = "model" if source == "auto" else source
+            logger.info("Using default completion sampling params from %s: %s",
+                        source, diff_sampling_param)
 
     async def create_completion(
         self,

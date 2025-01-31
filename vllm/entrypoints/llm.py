@@ -268,6 +268,10 @@ class LLM:
         diff_sampling_param = (
             self.llm_engine.model_config.get_diff_sampling_param())
         if diff_sampling_param:
+            source = self.llm_engine.model_config.generation_config
+            source = "model" if source == "auto" else source
+            logger.info("Using default sampling params from %s: %s", source,
+                        diff_sampling_param)
             return SamplingParams.from_optional(**diff_sampling_param)
         return SamplingParams()
 

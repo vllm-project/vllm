@@ -103,8 +103,10 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         diff_sampling_param = self.model_config.get_diff_sampling_param()
         if diff_sampling_param:
-            logger.info("Overwriting default chat sampling param with: %s",
-                        diff_sampling_param)
+            source = self.model_config.generation_config
+            source = "model" if source == "auto" else source
+            logger.info("Using default chat sampling params from %s: %s",
+                        source, diff_sampling_param)
 
     async def create_chat_completion(
         self,
