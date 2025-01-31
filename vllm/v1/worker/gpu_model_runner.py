@@ -531,7 +531,7 @@ class GPUModelRunner:
                 max_seq_len=max_seq_len,
                 seq_start_loc=seq_start_loc,
                 block_table=(self.input_batch.block_table.get_device_tensor()[
-                    i, :num_reqs]),
+                    group_id, :num_reqs]),
                 slot_mapping=slot_mapping,
                 use_cascade=use_cascade,
                 common_prefix_len=common_prefix_len,

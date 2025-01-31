@@ -18,9 +18,8 @@ model_config = {
 }
 
 
-# @pytest.mark.parametrize("model",
-#                          ["bigcode/starcoder2-3b", "google/gemma-2-2b-it"])
-@pytest.mark.parametrize("model", ["google/gemma-2-2b-it"])
+@pytest.mark.parametrize("model",
+                         ["bigcode/starcoder2-3b", "google/gemma-2-2b-it"])
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])
 def test_sliding_window_retrival(monkeypatch, model, batch_size, seed):
