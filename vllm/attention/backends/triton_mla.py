@@ -292,6 +292,9 @@ class TritonMLAMetadata(MLACommonMetadata):
                     self.seq_lens[:self.num_prefills])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
                            self.seq_lens_tensor[:self.num_prefills])
+        num_orig_input_tokens_tensor = (
+            None if self.num_orig_input_tokens_tensor is None else
+            self.num_orig_input_tokens_tensor[:self.num_prefills])
         seq_start_loc = (None if self.seq_start_loc is None else
                          self.seq_start_loc[:self.num_prefills + 1])
         context_lens_tensor = (None if self.context_lens_tensor is None else
@@ -312,6 +315,7 @@ class TritonMLAMetadata(MLACommonMetadata):
             input_positions=input_positions,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=self.max_prefill_seq_len,
             max_decode_query_len=0,
@@ -338,6 +342,9 @@ class TritonMLAMetadata(MLACommonMetadata):
                         self.slot_mapping[self.num_prefill_tokens:])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
                            self.seq_lens_tensor[self.num_prefills:])
+        num_orig_input_tokens_tensor = (
+            None if self.num_orig_input_tokens_tensor is None else
+            self.num_orig_input_tokens_tensor[self.num_prefills:])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[self.num_prefills:])
         input_positions = (None if self.input_positions is None else
@@ -352,6 +359,7 @@ class TritonMLAMetadata(MLACommonMetadata):
             enable_kv_scales_calculation=True,
             seq_lens=None,
             seq_lens_tensor=seq_lens_tensor,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
             max_decode_query_len=self.max_decode_query_len,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
@@ -554,12 +562,15 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             device=self.runner.device, non_blocking=True)
 
     def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int):
+              num_orig_input_tokens_list: List[int], cuda_graph_pad_size: int,
+              batch_size: int):
         """Build attention metadata with on-device tensors.
 
         Args:
             seq_lens: The maybe padded sequence lengths of the input sequences.
             query_lens: The query lengths of the input sequences.
+            num_orig_input_tokens_list (List[int]): The original number of
+                                             input tokens for each sequence.
             cuda_graph_pad_size: The padding size for cuda graph.
                                  -1 if cuda graph is not used.
             batch_size: The maybe padded batch size.
@@ -623,6 +634,9 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             for modality, placeholder_map in
             self.multimodal_placeholder_maps.items()
         }
+        num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list,
+                                                    dtype=torch.long,
+                                                    device=device)
 
         num_kv_splits = 8
 
@@ -636,6 +650,7 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             enable_kv_scales_calculation=True,
             input_positions=input_positions,
             seq_lens_tensor=seq_lens_tensor,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
             max_query_len=max_query_len,
             max_decode_query_len=max_decode_query_len,
             max_prefill_seq_len=max_prefill_seq_len,

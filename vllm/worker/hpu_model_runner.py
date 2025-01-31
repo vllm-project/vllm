@@ -736,6 +736,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     ) -> PreparePromptMetadata:
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
+        # The number of original input tokens of each sequence
+        num_orig_input_tokens_list: List[int] = []
         slot_mapping: List[List[int]] = []
         lora_index_mapping: List[List[int]] = []
         lora_prompt_mapping: List[List[int]] = []
@@ -802,6 +804,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.append(list(range(context_len, seq_len)))
+            num_orig_input_tokens_list.extend([seq_data.get_prompt_len()] *
+                                              (seq_len - context_len))
 
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data:
@@ -886,6 +890,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                        dtype=torch.long,
                                        device=self.device)
 
+        num_orig_input_tokens_tensor = torch.tensor(
+            num_orig_input_tokens_list, dtype=torch.long,
+            device=self.device)  # type: ignore
+
         block_indices, block_offsets = precompute_indices_and_offsets(
             self.block_size, slot_mapping, True)
         attn_metadata = self.attn_backend.make_metadata(
@@ -905,6 +913,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             multi_modal_placeholder_index_maps=
             None,  # FIXME(kzawora): mutli-modality will not work here
             enable_kv_scales_calculation=False,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
         )
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
@@ -926,6 +935,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     ) -> PrepareDecodeMetadata:
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
+        # The number of original input tokens of each sequence
+        num_orig_input_tokens_list: List[int] = []
         slot_mapping: List[List[int]] = []
         seq_lens: List[int] = []
         block_tables: List[List[int]] = []
@@ -959,6 +970,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
                 input_positions.append([position])
+                num_orig_input_tokens_list.append(seq_data.get_prompt_len())
 
                 seq_len = seq_len if self.sliding_window is None else min(
                     seq_len, self.sliding_window)
@@ -1038,6 +1050,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                     dtype=torch.long,
                                     device=self.device)
 
+        num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list,
+                                                    dtype=torch.long,
+                                                    device=self.device)
+
         block_indices, block_offsets = precompute_indices_and_offsets(
             self.block_size, slot_mapping, False)
         block_scales = torch.tensor(block_scales,
@@ -1060,6 +1076,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
         )
         return PrepareDecodeMetadata(input_tokens=input_tokens,
                                      input_positions=input_positions,
