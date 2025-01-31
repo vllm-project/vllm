@@ -200,6 +200,7 @@ EXPECTED_METRICS = [
 EXPECTED_METRICS_V1 = [
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
+    "vllm:gpu_cache_usage_perc",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
     "vllm:request_prompt_tokens_sum",
@@ -208,6 +209,12 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_generation_tokens_sum",
     "vllm:request_generation_tokens_bucket",
     "vllm:request_generation_tokens_count",
+    "vllm:time_to_first_token_seconds_sum",
+    "vllm:time_to_first_token_seconds_bucket",
+    "vllm:time_to_first_token_seconds_count",
+    "vllm:time_per_output_token_seconds_sum",
+    "vllm:time_per_output_token_seconds_bucket",
+    "vllm:time_per_output_token_seconds_count",
 ]
 
 

@@ -4,7 +4,7 @@
 
 Quantization trades off model precision for smaller memory footprint, allowing large models to be run on a wider range of devices.
 
-```{toctree}
+:::{toctree}
 :caption: Contents
 :maxdepth: 1
 
@@ -15,4 +15,4 @@ gguf
 int8
 fp8
 quantized_kvcache
-```
+:::

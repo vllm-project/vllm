@@ -6,9 +6,9 @@ conda create -n myenv python=3.12 -y
 conda activate myenv
 ```
 
-```{note}
+:::{note}
 [PyTorch has deprecated the conda release channel](https://github.com/pytorch/pytorch/issues/138506). If you use `conda`, please only use it to create Python environment rather than installing packages.
-```
+:::
 
 Or you can create a new Python environment using [uv](https://docs.astral.sh/uv/), a very fast Python environment manager. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment using the following command:
 

@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List
 
@@ -13,7 +14,7 @@ class SchedulerStats:
     num_running_reqs: int = 0
     num_waiting_reqs: int = 0
 
-    # gpu_cache_usage: float = 0.0
+    gpu_cache_usage: float = 0.0
     # gpu_prefix_cache_hit_rate: float = 0.0
 
 
@@ -22,6 +23,7 @@ class RequestStateStats:
     """Stats that need to be tracked across delta updates."""
 
     num_generation_tokens: int = 0
+    last_token_time: float = 0.0
 
 
 @dataclass
@@ -40,6 +42,8 @@ class IterationStats:
         self.num_generation_tokens = 0
         self.num_prompt_tokens = 0
         self.finished_requests: List[FinishedRequestStats] = []
+        self.time_to_first_tokens_iter: List[float] = []
+        self.time_per_output_tokens_iter: List[float] = []
 
     def update_from_output(self, output: "EngineCoreOutput",
                            is_prefilling: bool, prompt_len: int,
@@ -48,6 +52,8 @@ class IterationStats:
             return
 
         num_new_generation_tokens = len(output.new_token_ids)
+        now = time.time()
+        last_token_latency = now - request_state_stats.last_token_time
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:
@@ -58,7 +64,12 @@ class IterationStats:
             assert (num_new_generation_tokens > 0)
             self.num_prompt_tokens += prompt_len
 
+            self.time_to_first_tokens_iter.append(last_token_latency)
+        else:
+            self.time_per_output_tokens_iter.append(last_token_latency)
+
         request_state_stats.num_generation_tokens += num_new_generation_tokens
+        request_state_stats.last_token_time = now
 
     def update_from_finished_request(self, request_output: "RequestOutput",
                                      request_state_stats: RequestStateStats):

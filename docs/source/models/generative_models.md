@@ -70,10 +70,10 @@ The {class}`~vllm.LLM.chat` method implements chat functionality on top of {clas
 In particular, it accepts input similar to [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
 and automatically applies the model's [chat template](https://huggingface.co/docs/transformers/en/chat_templating) to format the prompt.
 
-```{important}
+:::{important}
 In general, only instruction-tuned models have a chat template.
 Base models may perform poorly as they are not trained to respond to the chat conversation.
-```
+:::
 
 ```python
 llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
