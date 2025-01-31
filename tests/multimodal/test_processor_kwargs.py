@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from array import array
 from typing import Callable, Dict, Mapping, Optional
 from unittest.mock import patch

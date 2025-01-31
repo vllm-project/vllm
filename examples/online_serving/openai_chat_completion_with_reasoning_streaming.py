@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 An example shows how to generate chat completions from reasoning models
 like DeepSeekR1.
