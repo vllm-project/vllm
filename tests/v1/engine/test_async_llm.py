@@ -69,7 +69,8 @@ async def generate(
 @pytest.mark.parametrize(
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
 @pytest.mark.asyncio
-async def test_async_llm_refuses_prompt_logprobs_with_apc(monkeypatch):
+async def test_async_llm_refuses_prompt_logprobs_with_apc(
+        monkeypatch, output_kind: RequestOutputKind):
     """Test passes if AsyncLLM raises an exception when it is configured
     for automatic prefix caching and it receives a request with
     prompt_logprobs enabled, which is incompatible."""
@@ -89,6 +90,8 @@ async def test_async_llm_refuses_prompt_logprobs_with_apc(monkeypatch):
             await asyncio.create_task(
                 generate(engine,
                          "request-0",
+                         output_kind,
+                         10,
                          sampling_params=SamplingParams(max_tokens=10,
                                                         temperature=0,
                                                         prompt_logprobs=5)))
