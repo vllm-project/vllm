@@ -931,7 +931,6 @@ class EngineArgs:
             type=str,
             default="auto",
             help='The worker class to use for distributed execution.')
-
         parser.add_argument(
             "--generation-config",
             type=nullable_str,

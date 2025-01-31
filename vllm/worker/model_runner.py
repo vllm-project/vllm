@@ -1066,6 +1066,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
+            use_mla=self.model_config.use_mla,
         ) if needs_attn_backend else None
         if self.attn_backend:
             self.attn_state = self.attn_backend.get_state_cls()(
@@ -1973,7 +1974,8 @@ class CUDAGraphRunner(nn.Module):
 
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
-        self.input_buffers["positions"].copy_(positions, non_blocking=True)
+        if positions is not None:
+            self.input_buffers["positions"].copy_(positions, non_blocking=True)
 
         if self.backend_name != "NO_ATTENTION":
             self.input_buffers["slot_mapping"].copy_(
