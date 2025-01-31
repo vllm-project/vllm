@@ -144,6 +144,12 @@ class Scheduler:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
+
+                    # Track token evictions before freeing
+                    if preempted_req.num_computed_tokens > 0:
+                        preempted_req.increment_evicted_tokens(
+                            preempted_req.num_computed_tokens)
+
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0

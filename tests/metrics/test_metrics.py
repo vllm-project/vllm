@@ -366,6 +366,7 @@ def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
             "vllm:request_generation_tokens",
             "vllm:request_params_n",
             "vllm:request_params_max_tokens",
+            "vllm:time_per_prefill_token_requests_milliseconds",
         ]
         for metric_name in request_histogram_metrics:
             metric_value = REGISTRY.get_sample_value(f"{metric_name}_count",
