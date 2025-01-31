@@ -261,7 +261,7 @@ def _attn_fwd_inner(
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
         # TODO: This can be optimized to only be true for the padded block.
-        if MASK_STEPS:
+        if MASK_STEPS: # noqa SIM102
             # If this is the last block / iteration, we want to
             # mask if the sequence length is not a multiple of block size
             # a solution is to always do BLOCK_M // BLOCK_N + 1 steps if
