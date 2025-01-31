@@ -82,8 +82,7 @@ class LogprobsProcessor:
         need_non_sampled_logprobs = num_logprobs > 0
 
         for sampled_token_rank, logprobs, token_ids in zip(
-                sampled_token_ranks_lst,
-                sample_logprobs_lst, token_ids_lst):
+                sampled_token_ranks_lst, sample_logprobs_lst, token_ids_lst):
 
             # First token in `token_ids` is sampled token
             sampled_token_id = token_ids[0]
@@ -108,11 +107,11 @@ class LogprobsProcessor:
                 # If the sampled token is not one of the top tokens
                 # at this sequence offset, inject the sampled token
                 # & its Logprob instance into the dict
-                sample_logprob_obj = Logprob(logprob=sampled_token_logprob,
-                                             decoded_token=convert_ids_list_to_tokens(
-                                                 self.tokenizer,
-                                                 [sampled_token_id])[0],
-                                             rank=sampled_token_rank)
+                sample_logprob_obj = Logprob(
+                    logprob=sampled_token_logprob,
+                    decoded_token=convert_ids_list_to_tokens(
+                        self.tokenizer, [sampled_token_id])[0],
+                    rank=sampled_token_rank)
                 pos_logprobs_dict = self._make_pos_logprob_dict(
                     topk_logprobs, topk_token_ids, decoded_tokens,
                     num_logprobs, (sampled_token_id, sample_logprob_obj))
@@ -180,7 +179,8 @@ class LogprobsProcessor:
         # NOTE(rob): the output is flattened:
         # [num_tok, num_lps] -> [num_tok * num_lps]
         decoded_tokens = convert_ids_list_to_tokens(
-            self.tokenizer, token_ids.tolist()) if need_non_prompt_logprobs else []
+            self.tokenizer,
+            token_ids.tolist()) if need_non_prompt_logprobs else []
 
         # Make Logprob for each token.
         num_chunk_tokens, decoded_tokens_stride = prompt_logprobs.shape
@@ -217,19 +217,17 @@ class LogprobsProcessor:
                 # If the prompt token is not one of the top tokens
                 # at this prompt offset, inject the prompt token
                 # & its Logprob instance into the dict
-                prompt_logprob_obj = Logprob(logprob=prompt_token_logprob,
-                                             decoded_token=convert_ids_list_to_tokens(
-                                                 self.tokenizer,
-                                                 [prompt_token_id])[0],
-                                             rank=prompt_token_rank)
+                prompt_logprob_obj = Logprob(
+                    logprob=prompt_token_logprob,
+                    decoded_token=convert_ids_list_to_tokens(
+                        self.tokenizer, [prompt_token_id])[0],
+                    rank=prompt_token_rank)
                 self.prompt_logprobs.append(
                     self._make_pos_logprob_dict(
                         topk_logprobs, topk_token_ids,
                         decoded_tokens[decoded_tokens_offset:],
                         num_prompt_logprobs,
                         (prompt_token_id, prompt_logprob_obj)))
-
-
 
     def pop_prompt_logprobs(self) -> Optional[PromptLogprobs]:
         """Pop and return all request prompt logprobs
