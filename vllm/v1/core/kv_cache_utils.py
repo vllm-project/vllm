@@ -343,8 +343,6 @@ def hash_request_tokens(block_size: int, request: Request,
                                        extra_keys)
         ret.append(block_hash)
         parent_block_hash_value = block_hash.hash_value
-        if start < 5 * block_size:
-            print("block_hash", start // block_size, block_hash)
     return ret
 
 

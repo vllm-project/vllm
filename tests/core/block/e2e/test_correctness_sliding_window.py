@@ -1,5 +1,5 @@
 import random
-from typing import List
+from typing import List, Tuple
 
 import pytest
 
@@ -118,7 +118,7 @@ def test_sliding_window_chunked_prefill(test_llm_generator, batch_size, seed,
     check_answers(indices, answer, test_texts)
 
 
-def prep_prompts(batch_size: int):
+def prep_prompts(batch_size: int, assign_range: Tuple[int, int] = (800, 1100)):
     """
     Generate prompts which a bunch of assignments,
     then asking for the value of one of them.
@@ -134,7 +134,7 @@ def prep_prompts(batch_size: int):
         indices.append(idx)
         prompt = "```python\n# We set a number of variables, " + \
                  f"x{idx} will be important later\n"
-        ln = random.randint(800, 1100)
+        ln = random.randint(*assign_range)
         for k in range(30, ln):
             v = random.randint(10, 99)
             if k == idx:
@@ -146,7 +146,10 @@ def prep_prompts(batch_size: int):
     return prompts, answer, indices
 
 
-def check_answers(indices: List[int], answer: List[int], outputs: List[str]):
+def check_answers(indices: List[int],
+                  answer: List[int],
+                  outputs: List[str],
+                  accept_rate=0.7):
     answer2 = [int(text[0:2].strip()) for text in outputs]
     print(list(zip(indices, zip(answer, answer2))))
     numok = 0
@@ -155,7 +158,7 @@ def check_answers(indices: List[int], answer: List[int], outputs: List[str]):
             numok += 1
     frac_ok = numok / len(answer)
     print(f"Num OK: {numok}/{len(answer)} {frac_ok}")
-    assert frac_ok > 0.7
+    assert frac_ok >= accept_rate
 
 
 def check_window(prompts: List[str]):
