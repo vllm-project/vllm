@@ -3,6 +3,8 @@
 # We will launch 2 vllm instances (1 for prefill and 1 for decode),
 # and then transfer the KV cache between them.
 
+set -xe
+
 echo "🚧🚧 Warning: The usage of disaggregated prefill is experimental and subject to change 🚧🚧"
 sleep 1
 
@@ -69,7 +71,7 @@ wait_for_server 8200
 #   instance
 # NOTE: the usage of this API is subject to change --- in the future we will 
 # introduce "vllm connect" to connect between prefill and decode instances
-python3 ../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
+python3 ../../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
 sleep 1
 
 # serve two example requests

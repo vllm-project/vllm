@@ -26,14 +26,12 @@ def run_aria(question: str, modality: str):
 
     # NOTE: Need L40 (or equivalent) to avoid OOM
     llm = LLM(model=model_name,
-              tokenizer_mode="slow",
-              dtype="bfloat16",
               max_model_len=4096,
               max_num_seqs=2,
-              trust_remote_code=True,
+              dtype="bfloat16",
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
 
-    prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>\n{question}"
+    prompt = (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>{question}"
               "<|im_end|>\n<|im_start|>assistant\n")
 
     stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]
@@ -62,6 +60,23 @@ def run_chameleon(question: str, modality: str):
               max_model_len=4096,
               max_num_seqs=2,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+# Deepseek-VL2
+def run_deepseek_vl2(question: str, modality: str):
+    assert modality == "image"
+
+    model_name = "deepseek-ai/deepseek-vl2-tiny"
+
+    llm = LLM(model=model_name,
+              max_model_len=4096,
+              max_num_seqs=2,
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+              hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]})
+
+    prompt = f"<|User|>: <image>\n{question}\n\n<|Assistant|>:"
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -250,8 +265,9 @@ def run_mantis(question: str, modality: str):
 
 
 # MiniCPM-V
-def run_minicpmv(question: str, modality: str):
-    assert modality == "image"
+def run_minicpmv_base(question: str, modality: str, model_name):
+    assert modality in ["image", "video"]
+    # If you want to use `MiniCPM-o-2_6` with audio inputs, check `audio_language.py` # noqa
 
     # 2.0
     # The official repo doesn't work yet, so we need to use a fork for now
@@ -262,7 +278,15 @@ def run_minicpmv(question: str, modality: str):
     # model_name = "openbmb/MiniCPM-Llama3-V-2_5"
 
     # 2.6
-    model_name = "openbmb/MiniCPM-V-2_6"
+    # model_name = "openbmb/MiniCPM-V-2_6"
+    # o2.6
+
+    # modality supports
+    # 2.0: image
+    # 2.5: image
+    # 2.6: image, video
+    # o2.6: image, video, audio
+    # model_name = "openbmb/MiniCPM-o-2_6"
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
     llm = LLM(
@@ -279,18 +303,31 @@ def run_minicpmv(question: str, modality: str):
     # 2.5
     # stop_token_ids = [tokenizer.eos_id, tokenizer.eot_id]
 
-    # 2.6
+    # 2.6 / o2.6
     stop_tokens = ['<|im_end|>', '<|endoftext|>']
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
 
+    modality_placeholder = {
+        "image": "(<image>./</image>)",
+        "video": "(<video>./</video>)",
+    }
+
     messages = [{
         'role': 'user',
-        'content': f'(<image>./</image>)\n{question}'
+        'content': f'{modality_placeholder[modality]}\n{question}'
     }]
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
                                            add_generation_prompt=True)
     return llm, prompt, stop_token_ids
+
+
+def run_minicpmo(question: str, modality: str):
+    return run_minicpmv_base(question, modality, "openbmb/MiniCPM-o-2_6")
+
+
+def run_minicpmv(question: str, modality: str):
+    return run_minicpmv_base(question, modality, "openbmb/MiniCPM-V-2_6")
 
 
 # LLama 3.2
@@ -308,7 +345,6 @@ def run_mllama(question: str, modality: str):
         model=model_name,
         max_model_len=4096,
         max_num_seqs=16,
-        enforce_eager=True,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
@@ -498,6 +534,7 @@ model_example_map = {
     "aria": run_aria,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
+    "deepseek_vl_v2": run_deepseek_vl2,
     "fuyu": run_fuyu,
     "glm4v": run_glm4v,
     "h2ovl_chat": run_h2ovl,
@@ -508,6 +545,7 @@ model_example_map = {
     "llava-next-video": run_llava_next_video,
     "llava-onevision": run_llava_onevision,
     "mantis": run_mantis,
+    "minicpmo": run_minicpmo,
     "minicpmv": run_minicpmv,
     "mllama": run_mllama,
     "molmo": run_molmo,

@@ -862,12 +862,14 @@ def init_model_parallel_group(
 ) -> GroupCoordinator:
     if use_custom_allreduce is None:
         use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
+    from vllm.platforms import current_platform
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
         torch_distributed_backend=backend,
-        use_pynccl=True,
-        use_custom_allreduce=use_custom_allreduce,
+        use_pynccl=current_platform.is_cuda_alike(),
+        use_custom_allreduce=current_platform.is_cuda_alike()
+        and use_custom_allreduce,
         use_tpu_communicator=True,
         use_hpu_communicator=True,
         use_xpu_communicator=True,
@@ -1012,8 +1014,8 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
-    if (world_size !=
-            tensor_model_parallel_size * pipeline_model_parallel_size):
+    if (world_size
+            != tensor_model_parallel_size * pipeline_model_parallel_size):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
@@ -1067,8 +1069,8 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
         return
 
     if all([
-            vllm_config.kv_transfer_config.need_kv_parallel_group,
-            _KV_TRANSFER is None
+            vllm_config.kv_transfer_config.need_kv_parallel_group, _KV_TRANSFER
+            is None
     ]):
         _KV_TRANSFER = kv_transfer.KVTransferAgent(
             rank=get_world_group().rank,
@@ -1181,6 +1183,11 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     from vllm.platforms import current_platform
     if not current_platform.is_cpu():
         torch.cuda.empty_cache()
+    try:
+        torch._C._host_emptyCache()
+    except AttributeError:
+        logger.warning(
+            "torch._C._host_emptyCache() only available in Pytorch >=2.5")
 
 
 def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],

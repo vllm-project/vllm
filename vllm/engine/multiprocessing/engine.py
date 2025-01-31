@@ -16,11 +16,11 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCAdapterLoadedResponse, RPCError,
                                          RPCLoadAdapterRequest,
-                                         RPCProcessRequest, RPCStartupRequest,
-                                         RPCStartupResponse,
+                                         RPCProcessRequest,
+                                         RPCResetPrefixCacheRequest,
+                                         RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
-from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
@@ -238,6 +238,8 @@ class MQLLMEngine:
                         self.stop_profile()
                 elif isinstance(request, RPCLoadAdapterRequest):
                     self._handle_load_adapter_request(request)
+                elif isinstance(request, RPCResetPrefixCacheRequest):
+                    self.reset_prefix_cache()
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -297,6 +299,7 @@ class MQLLMEngine:
                                is_engine_errored=False,
                                exception=e)
             self._send_outputs(rpc_err)
+            return
         # Otherwise, send back the successful load message
         self._send_outputs(
             RPCAdapterLoadedResponse(request_id=request.request_id))
@@ -356,16 +359,13 @@ class MQLLMEngine:
             self._errored_with = e
 
     def start_profile(self) -> None:
-        if type(self.engine.model_executor) is GPUExecutor:
-            self.engine.model_executor.start_profile()
-        else:
-            self.engine.model_executor._run_workers("start_profile")
+        self.engine.start_profile()
 
     def stop_profile(self) -> None:
-        if type(self.engine.model_executor) is GPUExecutor:
-            self.engine.model_executor.stop_profile()
-        else:
-            self.engine.model_executor._run_workers("stop_profile")
+        self.engine.stop_profile()
+
+    def reset_prefix_cache(self) -> bool:
+        return self.engine.reset_prefix_cache()
 
 
 def signal_handler(*_) -> None:

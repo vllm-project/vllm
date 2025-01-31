@@ -19,18 +19,17 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize(
-    "kv_cache_dtype,base_model,test_model,scale_path",
+    "kv_cache_dtype,base_model,test_model",
     [
         # Test FP8 checkpoint w. fp8_e4m3 kv-cache scaling factors.
         ("fp8_e4m3", "meta-llama/Llama-3.2-1B-Instruct",
-         "nm-testing/Llama-3.2-1B-Instruct-FP8-KV", None),
+         "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"),
         # Test FP16 checkpoint w. fp8_e5m2 kv-cache.
         ("fp8_e5m2", "meta-llama/Llama-3.2-1B-Instruct",
-         "meta-llama/Llama-3.2-1B-Instruct", None),
+         "meta-llama/Llama-3.2-1B-Instruct"),
         # Test FP16 checkpoint w. fp8_e4m3 kv-cache scaling factors in json.
         ("fp8_e4m3", "meta-llama/Llama-2-7b-chat-hf",
-         "meta-llama/Llama-2-7b-chat-hf",
-         "./tests/fp8_kv/llama2-7b-fp8-kv/kv_cache_scales.json")
+         "meta-llama/Llama-2-7b-chat-hf")
     ])
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
@@ -48,7 +47,6 @@ def test_models(
     kv_cache_dtype: str,
     base_model: str,
     test_model: str,
-    scale_path: Optional[str],
     max_tokens: int,
     enforce_eager: bool,
     backend: str,
@@ -76,10 +74,6 @@ def test_models(
         baseline_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, NUM_LOG_PROBS)
 
-    extra_kwargs = {}
-    if scale_path is not None:
-        extra_kwargs["quantization_param_path"] = scale_path
-
     with vllm_runner(
             test_model,
             max_model_len=MAX_MODEL_LEN,
@@ -87,7 +81,6 @@ def test_models(
             enforce_eager=enforce_eager,
             kv_cache_dtype=kv_cache_dtype,
             disable_async_output_proc=disable_async_output_proc,
-            **extra_kwargs,
     ) as vllm_model:
         test_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, NUM_LOG_PROBS)

@@ -183,6 +183,14 @@ def paligemma_vllm_to_hf_output(vllm_output: RunnerOutput,
 
 
 ####### Post-processors for HF outputs
+def deepseekvl2_trunc_hf_output(hf_output: RunnerOutput,
+                                model: str) -> RunnerOutput:
+    output_ids, output_str, out_logprobs = hf_output
+    if output_str.endswith("<｜end▁of▁sentence｜>"):
+        output_str = output_str.split("<｜end▁of▁sentence｜>")[0]
+    return output_ids, output_str, out_logprobs
+
+
 def minicpmv_trunc_hf_output(hf_output: RunnerOutput,
                              model: str) -> RunnerOutput:
     output_ids, output_str, out_logprobs = hf_output
@@ -261,6 +269,34 @@ def qwen_prompt_path_encoder(
 
 
 ####### Model-specific HuggingFace runner patchers
+def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for GLM4."""
+    hf_processor = hf_model.processor
+
+    def processor(*args, text="", images=None, **kwargs):
+        if isinstance(images, Image):
+            images = [images]
+        # inputs is a custom class instead of dict or BatchFeature
+        inputs = hf_processor(
+            *args,
+            prompt=text,
+            images=images,
+            **kwargs,
+        )
+        inputs = {
+            k: inputs[k]
+            for k in inputs.keys()  # noqa
+            if k not in ("seq_lens", "sft_format")
+        }
+        inputs = BatchEncoding(data=inputs, tensor_type="pt")
+        return inputs
+
+    hf_model.processor = processor
+    hf_model.model.get_output_embeddings = lambda: \
+        hf_model.model.language.model.embed_tokens
+    return hf_model
+
+
 def glm_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4."""
     hf_processor = hf_model.processor
@@ -455,6 +491,17 @@ def mantis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                 tokenizer.convert_tokens_to_ids("<|eot_id|>"),
             ],
         )
+
+    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
+
+    return hf_model
+
+
+def minicpmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    orig_generate = hf_model.model.generate
+
+    def _generate(self, *args, **kwargs):
+        return orig_generate(*args, decode_text=False, **kwargs)
 
     hf_model.model.generate = types.MethodType(_generate, hf_model.model)
 

@@ -1,6 +1,7 @@
 from typing import List, Optional, Set, Tuple
 
 import torch
+import torch.nn as nn
 
 from vllm.distributed.parallel_state import (get_tp_group,
                                              init_model_parallel_group,
@@ -13,6 +14,10 @@ from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 
 logger = init_logger(__name__)
+
+
+class _DummyModel(nn.Module):
+    pass
 
 
 class SmallerTpProposerWorker(ProposerWorkerBase):
@@ -138,6 +143,13 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         with self._patch_tensor_parallel_group():
             return self._worker.get_spec_proposals(
                 execute_model_req, seq_ids_with_bonus_token_in_last_step)
+
+    def get_model(self) -> nn.Module:
+        if self._is_dummy:
+            return _DummyModel()
+
+        with self._patch_tensor_parallel_group():
+            return self._worker.get_model()
 
     def execute_model(
         self,
