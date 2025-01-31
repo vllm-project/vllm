@@ -72,6 +72,7 @@ def check_tt_model_supported(model):
         "Qwen/Qwen2.5-7B-Instruct",
         "Qwen/Qwen2.5-72B",
         "Qwen/Qwen2.5-72B-Instruct",
+        "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
     ]
     assert model in supported_models, f"Invalid model: {model}"
 

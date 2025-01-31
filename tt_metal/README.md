@@ -67,12 +67,13 @@ MESH_DEVICE=T3K_LINE WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python e
 
 **Note 2 (Llama70B)**: By default, this will run the newer tt-metal implementation of Llama70B from the [Llama3 demo](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3). To run with the [old Llama70B implemenentation](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/t3000/llama3_70b), set `MESH_DEVICE=T3K_RING` and modify the `TtLlamaForCausalLM` model import in [offline_inference_tt.py](https://github.com/tenstorrent/vllm/blob/dev/examples/offline_inference_tt.py) to `from models.demos.t3000.llama2_70b.tt.generator_vllm import TtLlamaForCausalLM`.
 
-**Note 3 (Other Models)**: By default, the inference example will run with Llama-3.1-70B. To run with Llama-3.1-8B, Llama-3.2-1B, Llama-3.2-3B, Qwen-2.5-7B, or Qwen-2.5-72B, ensure that the apprioriate environment variables are set as per the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3), then set `MESH_DEVICE=<device>` (valid options for `<device>` are `N150`, `N300`, `T3K_LINE`, or `TG`) and one of the following:
+**Note 3 (Other Models)**: By default, the inference example will run with Llama-3.1-70B. To run with other Llama models, or Qwen-2.5, ensure that the apprioriate environment variables are set as per the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3), then set `MESH_DEVICE=<device>` (valid options for `<device>` are `N150`, `N300`, `T3K_LINE`, or `TG`) and one of the following:
 - Llama-3.1-8B: `--model "meta-llama/Meta-Llama-3.1-8B"`
 - Llama-3.2-1B: `--model "meta-llama/Llama-3.2-1B"`
 - Llama-3.2-3B: `--model "meta-llama/Llama-3.2-3B"`
 - Qwen-2.5-7B: `--model "Qwen/Qwen2.5-7B"` (currently only supported on N300)
 - Qwen-2.5-72B: `--model "Qwen/Qwen2.5-72B"` (currently only supported on T3K)
+- DeepSeek-R1-Distill-Llama-70B: `--model "deepseek-ai/DeepSeek-R1-Distill-Llama-70B"`
 
 ### Llama-3.2-11B-Vision-Instruct
 
