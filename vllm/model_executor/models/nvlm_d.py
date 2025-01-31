@@ -77,6 +77,12 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
             dynamic_image_size=dynamic_image_size,
         )
 
+    def get_max_image_tokens(self) -> int:
+        # FIXME(Isotr0py): How to get the number of non-image tokens(39)?
+        # <Image> and </Image> has 2 and 3 token respectively.
+        # and <tile_1> etc has 5 tokens.
+        return super().get_max_image_tokens() + 39
+
 
 class NVLMDummyInputsBuilder(InternVLDummyInputsBuilder[NVLMProcessingInfo]):
 
