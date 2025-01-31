@@ -6,6 +6,7 @@ import os
 # Parse the command-line arguments.
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, default="/software/data/DeepSeek-R1/", help="The model path.")
+#parser.add_argument("--model", type=str, default="/data/models/DeepSeek-R1/", help="The model path.")
 parser.add_argument("--tokenizer", type=str, default="deepseek-ai/DeepSeek-R1", help="The model path.")
 #parser.add_argument("--model", type=str, default="/data/models/DeepSeek-R1-bf16-small/", help="The model path.")
 #parser.add_argument("--tokenizer", type=str, default="opensourcerelease/DeepSeek-R1-bf16", help="The model path.")
@@ -17,6 +18,7 @@ os.environ["HABANA_VISIBLE_DEVICES"] = "ALL"
 os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] = "true"
 os.environ["VLLM_RAY_DISABLE_LOG_TO_DRIVER"] = "1"
 os.environ["RAY_IGNORE_UNHANDLED_ERRORS"] = "1"
+os.environ["VLLM_MOE_N_SLICE"] = "8"
 
 
 # Sample prompts.
