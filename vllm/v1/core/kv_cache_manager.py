@@ -148,9 +148,7 @@ class KVCacheManager:
             computed_blocks[i] = computed_blocks[i][:num_computed_tokens //
                                                     manager.block_size]
 
-        # Free the blocks that are not needed. E.g., sliding window layer
-        # with window size 2 and block size 1, we can change the computed
-        # blocks from [1, 2, 3] to [-1, 2, 3] (-1 refers to null block)
+        # Free the blocks that are not needed.
         self._free_useless_blocks(computed_blocks, num_computed_tokens)
         return computed_blocks, num_computed_tokens
 
@@ -173,6 +171,8 @@ class KVCacheManager:
         """
         # We can free blocks that are no longer needed even if we cannot
         # schedule this request due to the limit of free blocks.
+        # Should call this function before allocating new blocks to reduce
+        # the number of evicted blocks.
         self._free_useless_blocks(self.req_to_blocks[request.request_id],
                                   request.num_computed_tokens)
         req_blocks = self.req_to_blocks[request.request_id]
@@ -360,64 +360,44 @@ class KVCacheManager:
 
         return new_blocks
 
-    def _get_ordered_blocks_one_kv_cache_group(
-            self, blocks: KVCacheBlocks) -> Iterable[KVCacheBlock]:
-        # TODO (Chen): rethink where to do the reverse operation
-        ordered_blocks: Iterable[KVCacheBlock] = blocks
-        if self.enable_caching:
-            # Free blocks in reverse order so that the tail blocks are
-            # freed first.
-            ordered_blocks = reversed(blocks)
-        return ordered_blocks
+    def _merge_blocks_by_eviction_order(
+            self, blocks: ReqKVCacheBlocks) -> List[KVCacheBlock]:
+        """
+        Merge the blocks of different groups to one list. The returned blocks 
+        are sorted by eviction order, with the first block having the highest 
+        eviction priority.
 
-    def _get_ordered_blocks_multiple_kv_cache_groups(
-            self, blocks: ReqKVCacheBlocks) -> Iterable[KVCacheBlock]:
-        # Fast path: if all blocks are empty, return. This will happen during
-        # append_slots
-        blocks = [b for b in blocks if len(b) > 0]
-        if len(blocks) == 0:
-            return []
-        # Free blocks in reverse order so that the tail blocks are
-        # freed first.
+        Args:
+            blocks: the blocks of each kv cache group, ordered by eviction 
+            priority.
+
+        Returns:
+            A list of KVCacheBlocks sorted by eviction order.
+        """
+
         if self.enable_caching:
-            # TODO(Chen): add comments
-            # merge blocks from different groups based on the block size
-            block_size_set = set(manager.block_size
-                                 for manager in self.managers)
-            if len(block_size_set) == 1:
-                # O(n) time complexity if block_size of all groups are the same
-                ordered_blocks = []
-                for i in range(len(blocks[0]) - 1, -1, -1):
-                    for blocks_of_group in blocks:
+            # NOTE (Chen): A simple strategy that interleaves the blocks of
+            # different KV cache groups. We can investigate more advanced
+            # strategies in the future.
+            ordered_blocks = []
+            max_len = max(len(blocks_of_group) for blocks_of_group in blocks)
+            for i in range(max_len):
+                for blocks_of_group in blocks:
+                    if i < len(blocks_of_group):
                         ordered_blocks.append(blocks_of_group[i])
-            else:
-                # O(n * log(n)) time complexity
-                # TODO(Chen): optimize it to O(n*len(self.managers)) time complexity
-                # NOTE: untested
-                ordered_blocks_with_key = []
-
-                for i, blocks_of_group in enumerate(blocks):
-                    block_size = self.managers[i].block_size
-                    for i, block in enumerate(blocks_of_group):
-                        ordered_blocks_with_key.append((block_size * i, block))
-
-                ordered_blocks_with_key.sort(reverse=True)
-                ordered_blocks = [
-                    block for _, block in ordered_blocks_with_key
-                ]
         else:
-            # TODO: need to implement this path
-            raise NotImplementedError
+            ordered_blocks = []
+            for blocks_of_group in blocks:
+                ordered_blocks.extend(blocks_of_group)
 
         return ordered_blocks
 
     def _free_blocks(self, blocks: ReqKVCacheBlocks) -> None:
         if len(self.kv_cache_config.groups) == 1:
-            ordered_blocks = self._get_ordered_blocks_one_kv_cache_group(
-                blocks[0])
+            # Fast path for single kv cache group models.
+            ordered_blocks = blocks[0]
         else:
-            ordered_blocks = self._get_ordered_blocks_multiple_kv_cache_groups(
-                blocks)
+            ordered_blocks = self._merge_blocks_by_eviction_order(blocks)
         for block in ordered_blocks:
             if block == self._null_block:
                 continue
@@ -439,7 +419,9 @@ class KVCacheManager:
             # This request is freed before alloc. just return
             return
         else:
-            self._free_blocks(blocks)
+            # Reverse the blocks so that the tail blocks can have higher
+            # eviction priority.
+            self._free_blocks([list(reversed(blks)) for blks in blocks])
 
     def get_num_common_prefix_blocks(
         self,
@@ -657,7 +639,17 @@ class KVCacheManager:
 
     def _get_common_computed_tokens(self,
                                     prefix_length: List[PrefixLength]) -> int:
-        # TODO: add comments: the largest in the intersection, and alignment
+        """
+        Find a prefix that is cached by all KV cache groups. Returns the number
+        of tokens of that prefix.
+
+        Args:
+            prefix_length (List[PrefixLength]): The valid cached prefix lengths 
+            of each KV cache group.
+    
+        Returns:
+            The number of tokens of the common prefix.
+        """
         intersection = intersect_ranges(prefix_length)
 
         # Since incomplete blocks are not eligible for sharing,
@@ -666,6 +658,7 @@ class KVCacheManager:
         alignment = math.lcm(
             *[manager.block_size for manager in self.managers])
 
+        # Get the longest common prefix that is aligned with the block size.
         num_computed_tokens = 0
         for range_ in intersection:
             aligned_end = cdiv(range_.end, alignment) * alignment
@@ -677,13 +670,19 @@ class KVCacheManager:
 
     def _free_useless_blocks(self, req_blocks: ReqKVCacheBlocks,
                              num_computed_tokens: int) -> None:
-        # NOTE(Chen): do all free before allocation to make less eviction
-        # req_blocks = self.req_to_blocks[request.request_id]
+        """
+        Frees memory blocks that are not needed. E.g., sliding window 
+        layer with window size 2 and block size 1, we have req_blocks as 
+        [[1, 2, 3]], this function will free block 1 and change the req_blocks
+        to [[-1, 2, 3]] (-1 refers to null block)
+
+        Args:
+            req_blocks: The KV cache blocks of one request.
+            num_computed_tokens: The number of computed tokens.
+        """
         removed_blocks = []
         for manager, req_blocks_of_group in zip(self.managers, req_blocks):
             removed_blocks.append(
                 manager.remove_useless_blocks(req_blocks_of_group,
                                               num_computed_tokens))
-        # TODO: better handling of free order (e.g., this order have problem
-        # when different layer has different sliding window size)
         self._free_blocks(removed_blocks)
