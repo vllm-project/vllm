@@ -7,36 +7,78 @@ from vllm.utils import direct_register_custom_op
 from .utils import get_lora_op_configs
 
 
+def next_power_of_two(n: int) -> int:
+    """
+    Returns the smallest power-of-two integer >= n.
+    For example:
+    - n=1 -> 1
+    - n=3 -> 4
+    - n=5 -> 8
+    - n=8 -> 8
+    - n=9 -> 16
+    """
+    return 1 << ((n - 1).bit_length())
+
+
 @triton.jit
-def _bgmv_sample_kernel(hidden_state_ptr, lm_heads_all_ptr, lm_head_base_ptr,
-                        logits_ptr, sampling_indices_tensor_ptr,
-                        HIDDEN_DIM: tl.constexpr, VOCAB_SIZE: tl.constexpr,
-                        BLOCK_N: tl.constexpr):
+def _bgmv_sample_kernel_arbitrary(
+        hidden_state_ptr,  # float32[ ..., HIDDEN_DIM ]
+        lm_heads_all_ptr,  # float32[ VOCAB_SIZE * HIDDEN_DIM_P2 * num_lora? ]
+        lm_head_base_ptr,  # float32[ VOCAB_SIZE * HIDDEN_DIM_P2 ]
+        logits_ptr,  # float32[ ..., VOCAB_SIZE ]
+        sampling_indices_tensor_ptr,  # int32[ ... ]
+        HIDDEN_DIM: tl.constexpr,
+        HIDDEN_DIM_P2: tl.constexpr,  # internal power-of-two dimension
+        VOCAB_SIZE: tl.constexpr,
+        BLOCK_N: tl.constexpr):
+    """
+    A Triton kernel that:
+    - Rounds HIDDEN_DIM up to HIDDEN_DIM_P2 (a power of two)
+    - Applies a mask for the out-of-bounds region (if any)
+    """
 
+    # Program IDs for parallelization
     cur_token = tl.program_id(axis=0)
-
     logits_start_idx = tl.program_id(axis=1) * BLOCK_N
 
+    # Read which LoRA index to use for this token
     lora_index = tl.load(sampling_indices_tensor_ptr + cur_token)
 
-    hidden_state = tl.load(hidden_state_ptr + HIDDEN_DIM * cur_token +
-                           tl.arange(0, HIDDEN_DIM))
+    # Create index range [0..HIDDEN_DIM_P2)
+    offsets_embed = tl.arange(0, HIDDEN_DIM_P2)
+    # Boolean mask to disable out-of-range indices
+    mask = offsets_embed < HIDDEN_DIM
+
+    # Load hidden_state (size = HIDDEN_DIM_P2),
+    # using a mask to skip invalid positions
+    hidden_ptr = hidden_state_ptr + cur_token * HIDDEN_DIM + offsets_embed
+    hidden_state = tl.load(hidden_ptr, mask=mask, other=0.0)
+    # Expand dims so we can do [Block_N, HIDDEN_DIM_P2] * [1, HIDDEN_DIM_P2]
     hidden_state = hidden_state.expand_dims(0)
 
-    offsets_embed = tl.arange(0, HIDDEN_DIM)
+    # Offsets in the logits dimension
     offsets_logits = logits_start_idx + tl.arange(0, BLOCK_N)
 
-    offset_base_layer = offsets_embed[
-        None, :] + offsets_logits[:, None] * HIDDEN_DIM
+    # Compute memory offsets for loading weights
+    # We scale by HIDDEN_DIM_P2 because that's the *internally used* dimension
+    offset_base_layer = offsets_embed[None, :] + (offsets_logits[:, None] *
+                                                  HIDDEN_DIM)
     offset_lora = lora_index * (VOCAB_SIZE * HIDDEN_DIM) + offset_base_layer
 
+    # Depending on lora_index, load from lm_head_base_ptr or lm_heads_all_ptr
     if lora_index == -1:
-        weights = tl.load(lm_head_base_ptr + offset_base_layer)
+        weights = tl.load(lm_head_base_ptr + offset_base_layer,
+                          mask=mask[None, :],
+                          other=0.0)
     else:
-        weights = tl.load(lm_heads_all_ptr + offset_lora)
+        weights = tl.load(lm_heads_all_ptr + offset_lora,
+                          mask=mask[None, :],
+                          other=0.0)
 
+    # Compute logits by summation over the masked dimension
     logits = tl.sum(weights * hidden_state, axis=1)
 
+    # Store the result
     tl.store(logits_ptr + cur_token * VOCAB_SIZE + offsets_logits, logits)
 
 
@@ -70,16 +112,24 @@ def _bgmv_sample(
 
     config = get_lora_op_configs("sample", num_tokens, hidden_dim)
 
-    _bgmv_sample_kernel[grid](
-        hidden_state,
-        lm_heads_all,
-        lm_head_base,
-        logits,
-        sampling_indices_tensor,
-        HIDDEN_DIM=hidden_dim,
-        VOCAB_SIZE=vocab_size,
-        **config,
-    )
+    assert num_tokens / config['BLOCK_N'] < 65535, (
+        "increase BLOCK_N,"
+        "triton can not handle grid size larger 2**31-1")
+
+    HIDDEN_DIM_P2 = next_power_of_two(hidden_dim)
+
+    # For example, if you want to 2D-launch the kernel:
+    # - dimension 0 = number of tokens
+    # - dimension 1 = how many BLOCK_N segments needed for the vocab
+    _bgmv_sample_kernel_arbitrary[grid](hidden_state,
+                                        lm_heads_all,
+                                        lm_head_base,
+                                        logits,
+                                        sampling_indices_tensor,
+                                        HIDDEN_DIM=hidden_dim,
+                                        HIDDEN_DIM_P2=HIDDEN_DIM_P2,
+                                        VOCAB_SIZE=vocab_size,
+                                        **config)
     return logits
 
 

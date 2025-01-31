@@ -674,6 +674,8 @@ class PeftRunner(HfRunner):
                          auto_cls=auto_cls,
                          postprocess_inputs=postprocess_inputs)
 
+        tokenizer = AutoTokenizer.from_pretrained(adapter_name)
+        self.model.resize_token_embeddings(len(tokenizer))
         self.model = PeftModel.from_pretrained(self.model,
                                                model_id=adapter_name)
 

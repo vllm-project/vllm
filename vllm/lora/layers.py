@@ -270,6 +270,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
+        if lora_config.enable_lora_modules_to_save:
+            return False
         return type(source_layer) is VocabParallelEmbedding
 
 
@@ -1297,7 +1299,8 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA):
         # lora_tensors - lm_head tensors in case of ParallelLMHead base
         # or embed_tokens tensors in case of VocabParallelEmbedding
         self._lora_tensors = torch.zeros(
-            (max_loras, self.padded_vocab_size, self.base_layer.embedding_dim),
+            (max_loras, self.padded_vocab_size +
+             lora_config.lora_extra_vocab_size, self.base_layer.embedding_dim),
             dtype=self.base_layer.weight.dtype,
             device=self.device,
         )

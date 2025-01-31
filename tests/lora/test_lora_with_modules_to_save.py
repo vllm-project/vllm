@@ -7,9 +7,15 @@ import pytest
 from tests.models.utils import check_logprobs_close
 from vllm.lora.request import LoRARequest
 
-MODELS = ["AnatoliiPotapov/T-lite-instruct-0.1"]
+MODELS = ["/workspace/models/t-lite-it-1-0/1/t-lite-it-1-0/"]
+#["AnatoliiPotapov/T-lite-instruct-0.1"]
 
-LORAS = ["SergeyKochetkovT/llama3-lora-with-modules-to-save"]
+LORAS = ["/workspace/models/t-lite-it-1-0/1/junior-december/"]
+#["SergeyKochetkovT/llama3-lora-with-modules-to-save"]
+
+#
+
+#
 
 
 @pytest.mark.parametrize("model", MODELS)
