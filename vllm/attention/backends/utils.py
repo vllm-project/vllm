@@ -291,7 +291,6 @@ class CommonAttentionState(AttentionState):
     @contextmanager
     def graph_capture(self, max_batch_size: int,
                       positions: Optional[torch.Tensor]):
-        assert positions is None
 
         self._is_graph_capturing = True
 

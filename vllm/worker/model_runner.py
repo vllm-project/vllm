@@ -1975,7 +1975,8 @@ class CUDAGraphRunner(nn.Module):
 
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
-        self.input_buffers["positions"].copy_(positions, non_blocking=True)
+        if positions is not None:
+            self.input_buffers["positions"].copy_(positions, non_blocking=True)
 
         if self.backend_name != "NO_ATTENTION":
             self.input_buffers["slot_mapping"].copy_(
