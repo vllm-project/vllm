@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import List, Optional, Tuple, Union, Set
+from typing import List, Optional, Set, Tuple, Union
 
 import torch
 import torch_xla.core.xla_model as xm
@@ -18,8 +18,7 @@ from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, bind_kv_cache, get_dtype_size
 from vllm.worker.tpu_model_runner import ExecutionMode, TPUModelRunner
-from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
-                                     WorkerBase,
+from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
 logger = init_logger(__name__)
@@ -289,10 +288,10 @@ class TPUWorker(LocalOrDistributedWorkerBase):
             if src_indices.numel() > 0:
                 attn_backend.copy_blocks(self.tpu_cache,
                                          (src_indices, dst_indices))
-                
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
-    
+
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_runner.remove_lora(lora_id)
 
