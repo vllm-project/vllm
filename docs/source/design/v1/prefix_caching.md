@@ -107,6 +107,10 @@ There are two design points to highlight:
 
 As a result, we will have the following components when the KV cache manager is initialized:
 
+:::{image} /assets/design/v1/prefix_caching/overview.png
+:alt: Component Overview
+:::
+
 * Block Pool: A list of KVCacheBlock.  
 * Free Block Queue: Only store the pointers of head and tail blocks for manipulations.  
 * Cache blocks: Mapping from hash key to block IDs.  
