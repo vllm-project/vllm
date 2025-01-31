@@ -366,23 +366,25 @@ def test_zero_logprobs(vllm_runner, model, example_prompts, monkeypatch):
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
     ) as vllm_model:
-        sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
+        sampling_params_logprobs_zero = SamplingParams(max_tokens=max_tokens,
                                                        logprobs=0,
                                                        prompt_logprobs=0,
                                                        temperature=0.0)
-        results_logprobs_none = vllm_model.model.generate(
-            example_prompts, sampling_params=sampling_params_logprobs_none)
+        results_logprobs_zero = vllm_model.model.generate(
+            example_prompts, sampling_params=sampling_params_logprobs_zero)
 
-    for i in range(len(results_logprobs_none)):
-        # Check sample logprobs are None
-        logprobs = results_logprobs_none[i].outputs[0].logprobs
-        prompt_logprobs = results_logprobs_none[i].prompt_logprobs
-        sampled_token_ids = results_logprobs_none[i].outputs[0].token_ids
-        prompt_token_ids = results_logprobs_none[i].prompt_token_ids
+    for i in range(len(results_logprobs_zero)):
+        # Check that there is one sample logprob dict for each
+        # sample token
+        logprobs = results_logprobs_zero[i].outputs[0].logprobs
+        prompt_logprobs = results_logprobs_zero[i].prompt_logprobs
+        sampled_token_ids = results_logprobs_zero[i].outputs[0].token_ids
+        prompt_token_ids = results_logprobs_zero[i].prompt_token_ids
         assert logprobs is not None
         assert len(sampled_token_ids) == len(logprobs)
-        assert results_logprobs_none[i].outputs[
+        assert results_logprobs_zero[i].outputs[
             0].cumulative_logprob is not None
-        # Check prompt logprobs are None
-        assert results_logprobs_none[i].prompt_logprobs is not None
+        # Check that there is one prompt logprob dict for each
+        # prompt token
+        assert prompt_logprobs is not None
         assert len(prompt_token_ids) == len(prompt_logprobs)
