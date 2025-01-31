@@ -746,11 +746,11 @@ class ModelConfig:
     def get_head_size(self) -> int:
         # TODO remove hard code
         if self.is_deepseek_mla:
+            qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim",
+                                       0)
             if self.use_mla:
-                return self.hf_text_config.kv_lora_rank
+                return self.hf_text_config.kv_lora_rank + qk_rope_head_dim
             else:
-                qk_rope_head_dim = getattr(self.hf_text_config,
-                                           "qk_rope_head_dim", 0)
                 qk_nope_head_dim = getattr(self.hf_text_config,
                                            "qk_nope_head_dim", 0)
                 if qk_rope_head_dim and qk_nope_head_dim:
@@ -969,6 +969,10 @@ class ModelConfig:
 
     @property
     def use_mla(self) -> bool:
+        if self.quantization is not None and self.quantization not in [\
+            "fp8", "compressed-tensors"]:
+            return False
+
         use_mla = (self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE)
         return use_mla
 
