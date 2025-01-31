@@ -209,7 +209,8 @@ def _validate_logprobs(
 
                     # Rank must be >= 1
                     assert lp_rank >= 1, (f"Logprob {lp} has invalid"
-                                          f"rank {lp_rank} < 1")
+                                          f" rank {lp_rank} < 1."
+                                          f" Logprob dict: {pos_logprob_dict}")
 
                     # Validate log probability
                     assert math.isclose(lp_val, ref_lp_val), (
@@ -298,15 +299,15 @@ def _validate_logprobs(
                              f" {pos_logprob_dict}")
 
                 # Validate prompt token logprob rank
-                prmpt_lp = pos_logprob_dict[prompt_token]
-                prmpt_lp_rank = prmpt_lp.rank
-                ref_prmpt_lp_rank = ref_pos_prompt_token_rank
-                assert (ref_prmpt_lp_rank == prmpt_lp_rank), (
+                prmpt_tok_lp = pos_logprob_dict[prompt_token]
+                prmpt_tok_lp_rank = prmpt_tok_lp.rank
+                ref_prmpt_tok_lp_rank = ref_pos_prompt_token_rank
+                assert (ref_prmpt_tok_lp_rank == prmpt_tok_lp_rank), (
                     "Prompt token logprob rank"
-                    f" {prmpt_lp_rank} does not match"
+                    f" {prmpt_tok_lp_rank} does not match"
                     " correct value"
-                    f" {ref_prmpt_lp_rank}"
-                    f" in Logprob {prmpt_lp}")
+                    f" {ref_prmpt_tok_lp_rank}"
+                    f" in Logprob {prmpt_tok_lp}")
 
                 # Validate that the logprob processor yields
                 # the correct prompt log probs and valid
@@ -316,7 +317,7 @@ def _validate_logprobs(
                     # Iterate over the (logprob val,logprob tok id)
                     # pairs expected by the test fixture at this
                     # position in the completion.
-                    ref_lp_val = float(ref_pos_prompt_logprob_vals[jdx])
+                    ref_plp_val = float(ref_pos_prompt_logprob_vals[jdx])
                     ref_tok_id = int(ref_pos_prompt_logprob_toks[jdx])
                     assert ref_tok_id in pos_logprob_dict, (
                         f"Expected token {ref_tok_id} to be"
@@ -324,25 +325,27 @@ def _validate_logprobs(
 
                     # Extract actually-generated logprob
                     # info
-                    lp = pos_logprob_dict[ref_tok_id]
-                    lp_val = lp.logprob
-                    lp_rank = lp.rank
+                    plp = pos_logprob_dict[ref_tok_id]
+                    plp_val = plp.logprob
+                    plp_rank = plp.rank
 
                     # A "top" (rank 1) logprob must be
                     # present
                     rank_one_appears = (True
-                                        if lp_rank == 1 else rank_one_appears)
+                                        if plp_rank == 1 else rank_one_appears)
 
                     # Rank must be >= 1
-                    assert lp_rank >= 1, (f"Logprob {lp} has invalid"
-                                          f"rank {lp_rank} < 1")
+                    assert plp_rank >= 1, (
+                        f"Logprob {plp} has invalid"
+                        f" rank {plp_rank} < 1."
+                        f" Logprob dict: {pos_logprob_dict}")
 
                     # Validate log probability
-                    assert math.isclose(lp_val, ref_lp_val), (
+                    assert math.isclose(plp_val, ref_plp_val), (
                         f"Token id {ref_tok_id} appears in logprobs dict"
                         f" at position {idx} in completion with log"
-                        f" probability {lp_val} but {ref_lp_val} was"
-                        f" expected. Logprob: {lp}")
+                        f" probability {plp_val} but {ref_plp_val} was"
+                        f" expected. Logprob: {plp}")
 
                 assert rank_one_appears, (f"No Logprob has rank 1"
                                           " in the following Logprob"

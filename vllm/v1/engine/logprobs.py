@@ -84,7 +84,7 @@ class LogprobsProcessor:
             ranks: Iterable[int]
 
             if self.num_logprobs:
-                ranks = range(self.num_logprobs)
+                ranks = range(1, self.num_logprobs + 1)
                 topk_token_ids = token_ids[1:]
                 if sampled_token_id in topk_token_ids:
                     # Slice off the sampled token first element since
@@ -184,7 +184,7 @@ class LogprobsProcessor:
             ranks: Iterable[int]
 
             if num_prompt_logprobs:
-                ranks = range(num_prompt_logprobs)
+                ranks = range(1, num_prompt_logprobs + 1)
                 topk_token_ids_tensor = token_ids[tok_idx, 1:]
                 if prompt_token_id in topk_token_ids_tensor:
                     # Slice off the prompt token first element since
