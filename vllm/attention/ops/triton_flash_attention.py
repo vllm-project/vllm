@@ -858,19 +858,20 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz,
                 causal_start_idx = seqlen_q - seqlen_k
                 acc = acc.to(Out.type.element_ty)
                 if IS_CAUSAL:
-                    if (causal_start_idx > start_m_idx and causal_start_idx < end_m_idx):
+                    if (causal_start_idx > start_m_idx
+                            and causal_start_idx < end_m_idx):
                         out_mask_boundary = tl.full((BLOCK_DMODEL, ),
                                                     causal_start_idx,
                                                     dtype=tl.int32)
                         mask_m_offsets = start_m_idx + tl.arange(0, BLOCK_M)
-                        out_ptrs_mask = mask_m_offsets[:,
-                                                       None] >= out_mask_boundary[
-                                                           None, :]
+                        out_ptrs_mask = (mask_m_offsets[:, None]
+                                         >= out_mask_boundary[None, :])
                         z = 0.0
                         acc = tl.where(out_ptrs_mask, acc,
                                        z.to(acc.type.element_ty))
                 # write back LSE
-                l_ptrs = (L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m)
+                l_ptrs = (L + off_z * HQ * MAX_SEQLENS_Q +
+                          off_h_q * MAX_SEQLENS_Q + offs_m)
                 # If seqlen_q not multiple of BLOCK_M, we need to mask out the
                 # last few rows. This is only true for the last M block. For
                 # others, overflow_size will be -ve
