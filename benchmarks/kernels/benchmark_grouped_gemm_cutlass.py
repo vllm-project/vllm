@@ -134,7 +134,6 @@ def bench_run(results: List[benchmark.Measurement], model: str,
 
     # Warmup
     for _ in range(num_warmup):
-        # fused_experts(a, w1, w2, topk_weights, topk_ids)
         fused_experts(a,
                       w1_q_notransp,
                       w2_q_notransp,
@@ -147,7 +146,6 @@ def bench_run(results: List[benchmark.Measurement], model: str,
 
     results.append(
         benchmark.Timer(
-            # stmt="fused_experts(a, w1, w2, topk_weights, topk_ids)",
             stmt=
             "fused_experts(a, w1_q_notransp, w2_q_notransp, topk_weights, topk_ids, use_fp8_w8a8=True, w1_scale=w1_scale, w2_scale=w2_scale, a1_scale=a_scale)",  # noqa: E501
             globals=globals,

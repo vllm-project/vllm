@@ -142,13 +142,12 @@ cutlass::platform::unique_ptr<T, ItemDeleter<T>> allocate_device_ptr(
 }
 
 template <typename Gemm>
-void cutlass_group_gemm_caller(torch::Tensor& out_tensors,
-                               torch::Tensor const& a_tensors,
-                               torch::Tensor const& b_tensors,
-                               torch::Tensor const& a_scales,
-                               torch::Tensor const& b_scales,
-                               torch::Tensor const& expert_offsets,
-                               torch::Tensor const& problem_sizes) {
+void cutlass_group_gemm_caller(
+    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementC = typename Gemm::ElementC;
 
@@ -198,15 +197,6 @@ void cutlass_group_gemm_caller(torch::Tensor& out_tensors,
   using StrideA = Stride<int64_t, Int<1>, Int<0>>;
   using StrideB = Stride<int64_t, Int<1>, Int<0>>;
   using StrideC = typename GemmKernel::InternalStrideC;
-
-  int64_t lda = a_tensors.stride(0);    // row-major (m x k)
-  int64_t ldb = a_tensors.stride(0);    // column-major (k x n)
-  int64_t ldc = out_tensors.stride(0);  // row-major (m x n)
-
-  // TODO move creation of these outside this function
-  torch::Tensor a_strides = torch::full({groups}, lda, options_int);
-  torch::Tensor b_strides = torch::full({groups}, ldb, options_int);
-  torch::Tensor c_strides = torch::full({groups}, ldc, options_int);
 
   ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
       reinterpret_cast<ProblemShape::UnderlyingProblemShape*>(
@@ -300,13 +290,12 @@ struct sm90_fp8_config_M64 {
 }  // namespace
 
 // TODO
-void cutlass_grouped_mm_sm90(torch::Tensor& out_tensors,
-                             torch::Tensor const& a_tensors,
-                             torch::Tensor const& b_tensors,
-                             torch::Tensor const& a_scales,
-                             torch::Tensor const& b_scales,
-                             torch::Tensor const& expert_offsets,
-                             torch::Tensor const& problem_sizes) {
+void cutlass_grouped_mm_sm90(
+    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides) {
   TORCH_CHECK(a_tensors.size(0) > 0, "No input A tensors provided.");
   TORCH_CHECK(b_tensors.size(0) > 0, "No input B tensors provided.");
   TORCH_CHECK(out_tensors.size(0) > 0, "No output tensors provided.");
@@ -321,7 +310,7 @@ void cutlass_grouped_mm_sm90(torch::Tensor& out_tensors,
       vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
   cutlass_group_gemm_caller<Cutlass3xGemmDefault>(
       out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-      problem_sizes);
+      problem_sizes, a_strides, b_strides, c_strides);
 }
 
 __global__ void get_a_expert_offsets(const int* __restrict__ topk_ids,
@@ -354,50 +343,6 @@ __global__ void get_a_expert_offsets(const int* __restrict__ topk_ids,
   }
 }
 
-// // For a given "a" of size [M,K] performs a permutation of the M rows based
-// // on the given "perm" indices.
-// __global__ void permute_fp8_rows_kernel(cutlass::float_e4m3_t const*
-// __restrict__ a_ptr,
-//                                     int const* __restrict__ perm_int_ptr,
-//                                     cutlass::float_e4m3_t* __restrict__
-//                                     out_ptr, int size_m, int size_k, int
-//                                     block_rows) {
-//   int start_row = block_rows * blockIdx.x;
-//   int finish_row = start_row + block_rows;
-//   if (finish_row > size_m) {
-//     finish_row = size_m;
-//   }
-//   int cur_block_rows = finish_row - start_row;
-
-//   int row_stride = size_k * sizeof(cutlass::float_e4m3_t) / 16;
-
-//   auto permute_row = [&](int row) {
-//     int iters = size_k / blockDim.x;
-//     int rest = size_k % blockDim.x;
-
-//     int a_offset = perm_int_ptr[row] * row_stride;
-//     int out_offset = row * row_stride;
-
-//     cutlass::float_e4m3_t const* a_row_fp8 = a_ptr + a_offset;
-//     cutlass::float_e4m3_t* out_fp8 = out_ptr + out_offset;
-
-//     int base_k = 0;
-
-//     for (int i = 0; i < iters; i++) {
-//       int cur_k = base_k + threadIdx.x;
-//       out_fp8[cur_k] = a_row_fp8[cur_k];
-//       base_k += blockDim.x;
-//     }
-
-//     if (rest) {
-//       if (threadIdx.x < rest) {
-//         int cur_k = base_k + threadIdx.x;
-//         out_fp8[cur_k] = a_row_fp8[cur_k];
-//       }
-//     }
-//   };
-// }
-
 void compute_expert_offsets_caller(const torch::Tensor& topk_ids,
                                    torch::Tensor& expert_offsets,
                                    torch::Tensor& problem_sizes1,
@@ -409,14 +354,3 @@ void compute_expert_offsets_caller(const torch::Tensor& topk_ids,
       (int32_t*)problem_sizes1.data_ptr(), (int32_t*)problem_sizes2.data_ptr(),
       topk_ids.numel(), n, k);
 }
-
-// void permute_fp8_rows(torch::Tensor& a_ptr,
-//                       torch::Tensor& perm_ptr,
-//                       torch::Tensor& out_ptr,
-//                       int size_m, int size_k, int topk, int block_rows) {
-//     permute_fp8_rows_kernel<<<blocks, num_threads, 0, stream>>>(
-//           (cutlass::float_e4m3_t const*)a_ptr.data_ptr(),
-//           (const int*)perm_ptr.data_ptr(),
-//           (cutlass::float_e4m3_t const*)out_ptr.data_ptr(), size_m * topk,
-//           size_k, block_rows);
-// }

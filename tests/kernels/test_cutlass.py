@@ -535,11 +535,21 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
                                       device=device,
                                       dtype=out_dtype)
 
+    ab_strides = torch.full((num_groups),
+                            a_tensors_stacked.stride(0),
+                            device="cuda",
+                            dtype=torch.int64)
+    c_strides = torch.full((num_groups),
+                           out_tensors_stacked.stride(0),
+                           device="cuda",
+                           dtype=torch.int64)
+
     torch.ops._C.cutlass_grouped_mm(out_tensors_stacked, a_tensors_stacked,
                                     b_tensors_stacked,
                                     a_scales_tensors_stacked,
                                     b_scales_tensors_stacked,
-                                    expert_offsets[:-1], problem_sizes)
+                                    expert_offsets[:-1], problem_sizes,
+                                    ab_strides, ab_strides, c_strides)
 
     # Validate each group's result against the baseline
     for g in range(num_groups):
