@@ -5,7 +5,8 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} x86
+::::{tab-item} Intel/AMD x86
+:selected:
 :sync: x86
 
 :::{include} x86.inc.md
@@ -15,7 +16,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ::::
 
-::::{tab-item} ARM
+::::{tab-item} ARM AArch64
 :sync: arm
 
 :::{include} arm.inc.md
@@ -44,7 +45,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} x86
+::::{tab-item} Intel/AMD x86
 :sync: x86
 
 :::{include} x86.inc.md
@@ -54,7 +55,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ::::
 
-::::{tab-item} ARM
+::::{tab-item} ARM AArch64
 :sync: arm
 
 :::{include} arm.inc.md
@@ -92,7 +93,7 @@ Currently, there are no pre-built CPU wheels.
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} x86
+::::{tab-item} Intel/AMD x86
 :sync: x86
 
 :::{include} x86.inc.md
@@ -102,7 +103,7 @@ Currently, there are no pre-built CPU wheels.
 
 ::::
 
-::::{tab-item} ARM
+::::{tab-item} ARM AArch64
 :sync: arm
 
 :::{include} arm.inc.md

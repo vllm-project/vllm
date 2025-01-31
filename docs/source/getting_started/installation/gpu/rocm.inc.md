@@ -2,6 +2,10 @@
 
 vLLM supports AMD GPUs with ROCm 6.2.
 
+:::{attention}
+There are no pre-built wheels for this device, so you must either use the pre-built Docker image or build vLLM from source.
+:::
+
 ## Requirements
 
 - GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100)
@@ -12,14 +16,6 @@ vLLM supports AMD GPUs with ROCm 6.2.
 ### Pre-built wheels
 
 Currently, there are no pre-built ROCm wheels.
-
-However, the [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
-docker image designed for validating inference performance on the AMD Instinct™ MI300X accelerator.
-
-:::{tip}
-Please check [LLM inference performance validation on AMD Instinct MI300X](https://rocm.docs.amd.com/en/latest/how-to/performance-validation/mi300x/vllm-benchmark.html)
-for instructions on how to use this prebuilt docker image.
-:::
 
 ### Build wheel from source
 
@@ -112,7 +108,13 @@ for instructions on how to use this prebuilt docker image.
 
 ### Pre-built images
 
-Currently, there are no pre-built ROCm images.
+The [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
+docker image designed for validating inference performance on the AMD Instinct™ MI300X accelerator.
+
+:::{tip}
+Please check [LLM inference performance validation on AMD Instinct MI300X](https://rocm.docs.amd.com/en/latest/how-to/performance-validation/mi300x/vllm-benchmark.html)
+for instructions on how to use this prebuilt docker image.
+:::
 
 ### Build image from source
 

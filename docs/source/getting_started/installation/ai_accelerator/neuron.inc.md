@@ -4,6 +4,10 @@ vLLM 0.3.3 onwards supports model inferencing and serving on AWS Trainium/Infere
 Paged Attention and Chunked Prefill are currently in development and will be available soon.
 Data types currently supported in Neuron SDK are FP16 and BF16.
 
+:::{attention}
+There are no pre-built wheels or images for this device, so you must build vLLM from source.
+:::
+
 ## Requirements
 
 - OS: Linux

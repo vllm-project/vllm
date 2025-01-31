@@ -5,7 +5,8 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} TPU
+::::{tab-item} Google TPU
+:selected:
 :sync: tpu
 
 :::{include} tpu.inc.md
@@ -25,7 +26,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-::::{tab-item} Neuron
+::::{tab-item} AWS Neuron
 :sync: neuron
 
 :::{include} neuron.inc.md
@@ -52,7 +53,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} TPU
+::::{tab-item} Google TPU
 :sync: tpu
 
 :::{include} tpu.inc.md
@@ -72,7 +73,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-::::{tab-item} Neuron
+::::{tab-item} AWS Neuron
 :sync: neuron
 
 :::{include} neuron.inc.md
@@ -99,7 +100,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} TPU
+::::{tab-item} Google TPU
 :sync: tpu
 
 :::{include} tpu.inc.md
@@ -119,7 +120,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-::::{tab-item} Neuron
+::::{tab-item} AWS Neuron
 :sync: neuron
 
 :::{include} neuron.inc.md
@@ -146,7 +147,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} TPU
+::::{tab-item} Google TPU
 :sync: tpu
 
 :::{include} tpu.inc.md
@@ -166,7 +167,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-::::{tab-item} Neuron
+::::{tab-item} AWS Neuron
 :sync: neuron
 
 :::{include} neuron.inc.md
@@ -193,7 +194,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} TPU
+::::{tab-item} Google TPU
 :sync: tpu
 
 :::{include} tpu.inc.md
@@ -213,7 +214,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-::::{tab-item} Neuron
+::::{tab-item} AWS Neuron
 :sync: neuron
 
 :::{include} neuron.inc.md
@@ -242,7 +243,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} TPU
+::::{tab-item} Google TPU
 :sync: tpu
 
 :::{include} tpu.inc.md
@@ -262,7 +263,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-::::{tab-item} Neuron
+::::{tab-item} AWS Neuron
 :sync: neuron
 
 :::{include} neuron.inc.md
@@ -289,7 +290,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} TPU
+::::{tab-item} Google TPU
 :sync: tpu
 
 :::{include} tpu.inc.md
@@ -309,7 +310,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-::::{tab-item} Neuron
+::::{tab-item} AWS Neuron
 :sync: neuron
 
 :::{include} neuron.inc.md
@@ -336,7 +337,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} TPU
+::::{tab-item} Google TPU
 :sync: tpu
 
 :::{include} tpu.inc.md
@@ -354,7 +355,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-::::{tab-item} Neuron
+::::{tab-item} AWS Neuron
 :sync: neuron
 
 :::{include} neuron.inc.md
