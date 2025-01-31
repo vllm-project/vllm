@@ -631,11 +631,11 @@ def attn_fwd(Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz,
                     # We store inf to LSE, not -inf because in the bwd pass,
                     # we subtract this from qk which makes it -inf, such that
                     # exp(qk - inf) = 0 for these masked blocks.
-                    l = tl.full([BLOCK_M],
+                    l_value = tl.full([BLOCK_M],
                                 value=float("inf"),
                                 dtype=tl.float32)
                     l_ptrs_mask = offs_m < MAX_SEQLENS_Q
-                    tl.store(l_ptrs, l, mask=l_ptrs_mask)
+                    tl.store(l_ptrs, l_value, mask=l_ptrs_mask)
                     # TODO: Should dropout and return encoded softmax be
                     # handled here too?
                     continue_condition = False
@@ -1359,6 +1359,8 @@ def _attn_bwd(
 
 
 def get_shape_from_layout(q, k, metadata):
+    SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
+    assert metadata.layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
     if metadata.layout == 'thd':
         nheads_q, nheads_k = q.shape[1], k.shape[1]
         head_size = q.shape[-1]
@@ -1369,8 +1371,6 @@ def get_shape_from_layout(q, k, metadata):
     elif metadata.layout == 'bshd':
         batch, _, nheads_q, head_size = q.shape
         nheads_k = k.shape[2]
-    else:
-        assert False, "Got unsupported layout."
     return batch, nheads_q, nheads_k, head_size
 
 
