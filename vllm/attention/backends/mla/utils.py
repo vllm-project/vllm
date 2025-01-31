@@ -9,9 +9,13 @@ from vllm import envs
 from vllm.attention.backends.abstract import (AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl, T)
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear)
+                                               LinearBase, RowParallelLinear)
+from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    apply_w8a8_block_fp8_linear, block_quantize, is_fp8, scaled_dequant)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.vllm_flash_attn import flash_attn_varlen_func
 
@@ -162,8 +166,21 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
     def _v_up_proj_and_o_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
-            return self.o_proj_absorbed(
-                x.reshape(-1, self.num_heads * self.kv_lora_rank))[0]
+            if is_fp8(self.W_UV_O):
+                output_parallel = apply_w8a8_block_fp8_linear(
+                    x.flatten(start_dim=1),
+                    self.W_UV_O,
+                    [128, 128],
+                    self.W_UV_O_scales,
+                )
+            else:
+                output_parallel = torch.matmul(x.flatten(start_dim=1),
+                                               self.W_UV_O)
+            if self.tp_size > 1:
+                output = tensor_model_parallel_all_reduce(output_parallel)
+            else:
+                output = output_parallel
+            return output
         else:
             x = torch.einsum("bnl,lnv->bnv", x, self.W_UV)
             return self.o_proj(x.reshape(-1,
@@ -171,6 +188,13 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
     def _q_proj_and_k_up_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
+            if is_fp8(self.W_Q_UK):
+                return apply_w8a8_block_fp8_linear(
+                    x,
+                    self.W_Q_UK,
+                    [128, 128],
+                    self.W_Q_UK_scales,
+                ).view(-1, self.num_heads, self.kv_lora_rank)
             return torch.matmul(x, self.W_Q_UK)\
                 .view(-1, self.num_heads, self.kv_lora_rank)
         else:
@@ -180,7 +204,24 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 .view(-1, self.num_heads, self.kv_lora_rank)
 
     def process_weights_after_loading(self):
-        kv_b_proj_weight = self.kv_b_proj.weight.T
+
+        def get_and_maybe_dequant_weights(layer: LinearBase):
+            if isinstance(layer.quant_method, Fp8LinearMethod):
+                # TODO(lucas) support non block quantized
+                assert hasattr(layer, "weight_scale_inv") and \
+                    layer.quant_method.block_quant is not None
+                return scaled_dequant(
+                    layer.weight, layer.weight_scale_inv,
+                    layer.quant_method.quant_config.weight_block_size)\
+                        .to(torch.bfloat16)
+            else:
+                return layer.weight
+
+        weight_dtype = self.kv_b_proj.weight.dtype
+        assert self.o_proj.weight.dtype == weight_dtype
+        assert self.q_proj.weight.dtype == weight_dtype
+
+        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)), (
@@ -198,15 +239,15 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         W_UK, W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        q_proj = self.q_proj.weight.T\
+        q_proj_weight = get_and_maybe_dequant_weights(self.q_proj).T\
                 .view(-1, self.num_heads, self.qk_head_dim)
 
         # can be W_Q or W_UQ depending q_lora_rank, the former if
         # q_lora_rank is None, the latter otherwise. From the Attention backend
         # perspective though we call these both W_Q and rely on the layer
         # to pass in the correct matrix
-        W_Q = q_proj[..., :self.qk_nope_head_dim]
-        self.W_QR = q_proj[..., self.qk_nope_head_dim:]\
+        W_Q = q_proj_weight[..., :self.qk_nope_head_dim]
+        self.W_QR = q_proj_weight[..., self.qk_nope_head_dim:]\
             .flatten(start_dim=1).contiguous()
 
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
@@ -223,25 +264,38 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             # latter otherwise
             # basically if q_lora_rank is none we are absorbing into q_proj
             # instead of UQ
-            self.W_Q_UK = torch.einsum("qnd,lnd -> qnl", W_Q, W_UK)\
+            W_Q_UK = torch.einsum("qnd,lnd -> qnl", W_Q, W_UK)\
                 .flatten(start_dim=1).contiguous()
 
-            W_O = self.o_proj.weight\
+            if is_fp8(weight_dtype):
+                W_Q_UK, W_Q_UK_scales = block_quantize(W_Q_UK, (128, 128))
+                # For FP8 save the transpose so we can use
+                # `apply_w8a8_block_fp8_linear` directly
+                self.W_Q_UK = W_Q_UK.T.contiguous()
+                self.W_Q_UK_scales = W_Q_UK_scales.T.contiguous()
+            else:
+                self.W_Q_UK = W_Q_UK
+
+            W_O = get_and_maybe_dequant_weights(self.o_proj)\
                 .view(-1, self.num_heads, self.v_head_dim)
-            self.W_UV_O = torch.einsum("lnd,hnd -> nlh", W_UV, W_O)\
+            W_UV_O = torch.einsum("lnd,hnd -> nlh", W_UV, W_O)\
                 .flatten(start_dim=0, end_dim=1).contiguous()
 
-            tp_size = get_tensor_model_parallel_world_size()
-            self.o_proj_absorbed = RowParallelLinear(
-                self.W_UV_O.shape[0] * tp_size,
-                self.W_UV_O.shape[1],
-                bias=False,
-                # TODO(lucas) figure out how to properly forward quant_method
-                #quant_config=self.o_proj.quant_method,
-            )
+            if is_fp8(weight_dtype):
+                W_UV_O, W_UV_O_scales = block_quantize(W_UV_O, (128, 128))
+                # For FP8 save the transpose so we can use
+                # `apply_w8a8_block_fp8_linear` directly
+                self.W_UV_O = W_UV_O.T.contiguous()
+                self.W_UV_O_scales = W_UV_O_scales.T.contiguous()
+            else:
+                self.W_UV_O = W_UV_O
 
-            self.o_proj_absorbed.weight = torch.nn.Parameter(self.W_UV_O.T)
+            self.tp_size = get_tensor_model_parallel_world_size()
         else:
+            if is_fp8(weight_dtype):
+                raise NotImplementedError(
+                    "Currently fp8 requires matrix absorption")
+
             self.W_UV = W_UV
             self.W_UK = W_UK
             self.W_Q = W_Q.flatten(start_dim=1)

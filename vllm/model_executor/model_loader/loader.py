@@ -398,7 +398,7 @@ class DefaultModelLoader(BaseModelLoader):
                     # parameters onto device for processing and back off after.
                     with device_loading_context(module, target_device):
                         quant_method.process_weights_after_loading(module)
-                elif isinstance(module, Attention) and \
+                if isinstance(module, Attention) and \
                     hasattr(module, "process_weights_after_loading"):
                     # When attention modules need to process weights after
                     # currently only used by MLA

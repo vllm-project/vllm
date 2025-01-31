@@ -1,11 +1,19 @@
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 import triton
 import triton.language as tl
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    group_broadcast)
 from vllm.platforms import current_platform
+
+
+def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
+    if isinstance(x, torch.Tensor):
+        x = x.dtype
+    return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
 
 
 def apply_w8a8_block_fp8_linear(
@@ -51,10 +59,22 @@ def input_to_float8(
     return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
 
+def scaled_dequant(
+    x_q: torch.Tensor,
+    x_s: torch.Tensor,
+    block_size: Optional[Tuple[int, int]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if block_size is not None:
+        assert x_s.shape[-1] == x_q.shape[-1] // block_size[1]
+        assert x_s.shape[-2] == x_q.shape[-2] // block_size[0]
+
+    x_s = group_broadcast(x_s, x_q.shape)
+    return x_q.to(torch.float32) * x_s
+
+
 def block_quant_to_tensor_quant(
     x_q_block: torch.Tensor,
     x_s: torch.Tensor,
-    block_size: List[int],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """This function converts block-wise quantization to tensor-wise
     quantization. The inputs are block-wise quantization tensor `x_q_block`,
@@ -62,28 +82,42 @@ def block_quant_to_tensor_quant(
     The outputs are tensor-wise quantization tensor and tensor-wise
     quantization scale. Note only float8 is supported for now.
     """
-    block_n, block_k = block_size[0], block_size[1]
-    n, k = x_q_block.shape
-    n_tiles = (n + block_n - 1) // block_n
-    k_tiles = (k + block_k - 1) // block_k
-    assert n_tiles == x_s.shape[0]
-    assert k_tiles == x_s.shape[1]
-
-    x_dq_block = x_q_block.to(torch.float32)
-
-    x_dq_block_tiles = [[
-        x_dq_block[
-            j * block_n:min((j + 1) * block_n, n),
-            i * block_k:min((i + 1) * block_k, k),
-        ] for i in range(k_tiles)
-    ] for j in range(n_tiles)]
-
-    for i in range(k_tiles):
-        for j in range(n_tiles):
-            x_dq_block_tiles[j][i][:, :] = x_dq_block_tiles[j][i] * x_s[j][i]
-
+    x_dq_block = scaled_dequant(x_q_block, x_s)
     x_q_tensor, scale = input_to_float8(x_dq_block, dtype=x_q_block.dtype)
     return x_q_tensor, scale
+
+
+def block_quantize(
+    x: torch.Tensor,
+    block_size: Tuple[int, int],
+    dtype: Optional[torch.dtype] = None,
+):
+    if dtype is None:
+        dtype = (torch.float8_e4m3fnuz
+                 if current_platform.is_rocm() else torch.float8_e4m3fn)
+    finfo = torch.finfo(dtype)
+
+    # Reshape (M, N) into (BLK_M, BLOCK_SIZE_M, BLK_N, BLOCK_SIZE_N)
+    assert x.ndim == 2
+    assert x.shape[0] % block_size[0] == 0 and x.shape[1] % block_size[1] == 0
+    blk_m, blk_n = x.shape[0] // block_size[0], x.shape[1] // block_size[1]
+    x_blkd = x.reshape(blk_m, block_size[0], blk_n, block_size[1])
+    # Permute to (BLK_M, BLK_N, BLOCK_SIZE_M, BLOCK_SIZE_N)
+    x_blkd_permd = x_blkd.permute(0, 2, 1, 3)
+    # Flatten to (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N)
+    x_blkd_permd = x_blkd_permd.flatten(start_dim=2)
+    min_val, max_val = x_blkd_permd.aminmax(dim=-1)
+    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
+    scale = finfo.max / amax
+    # Apply scale and convert form:
+    # (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) to (M, N)
+    x_scl_sat = (x_blkd_permd * scale.unsqueeze(-1))\
+        .clamp(min=finfo.min, max=finfo.max)\
+        .reshape(blk_m, blk_n, block_size[0], block_size[1])\
+        .permute(0, 2, 1, 3)\
+        .reshape(x.shape)
+
+    return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
 
 @triton.jit
