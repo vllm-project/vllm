@@ -2,7 +2,8 @@ import pytest
 
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.hybrid_cache_manager.utils import PrefixLengthRange, intersect_ranges
+from vllm.v1.core.hybrid_cache_manager.utils import (PrefixLengthRange,
+                                                     intersect_ranges)
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock,
                                          generate_block_hash_extra_keys,

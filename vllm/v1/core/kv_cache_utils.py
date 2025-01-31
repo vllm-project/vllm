@@ -1,8 +1,8 @@
 """KV-Cache Utilities."""
+import math
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-import math
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from vllm.config import VllmConfig
@@ -397,7 +397,8 @@ def is_kv_cache_type_uniform(kv_cache_spec: Dict[str, KVCacheSpec]) -> bool:
     return len(layer_keys) == 1
 
 
-def is_kv_cache_page_size_uniform(kv_cache_spec: KVCacheSpec):
+def is_kv_cache_page_size_uniform(
+        kv_cache_spec: Dict[str, KVCacheSpec]) -> bool:
     """
     Whether all layers in the given KVCacheSpec have the same page size.
 
@@ -490,18 +491,28 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
 def _get_kv_cache_config_uniform_page_size(
         vllm_config: VllmConfig, kv_cache_spec: Dict[str, KVCacheSpec],
         available_memory: int) -> KVCacheConfig:
-    # Grouped allocation
-    # TODO(Chen): explain it, need test
+    """
+    Generates the KV cache configuration for a model with one page size.
 
-    # Group all layers by type_id
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_spec: The KVCacheSpec of each attention layer in the model
+        available_memory: Memory available for KV cache in bytes.
+
+    Returns:
+        The generated KVCacheConfig
+    """
+    # Group all layers by type_id.
+    # E.g., 2 full attention layers and 4 sliding window attention layers,
+    # -> (full.0, full.1), (sw.0, sw.1, sw.2, sw.3).
     same_type_layers: Dict[str, List[str]] = defaultdict(list)
     for layer_name, layer_spec in kv_cache_spec.items():
         same_type_layers[layer_spec.type_id].append(layer_name)
 
     # Split each group into smaller groups, to make the number of layers in
-    # each group identical
-    # E.g., 2 full attention layers and 4 sliding window attention layers,
-    # split from (full * 2), (sw * 4) to (full * 2), (sw * 2), (sw * 2).
+    # each group identical.
+    # E.g., (full.0, full.1), (sw.0, sw.1, sw.2, sw.3) is split to 3 groups:
+    # (full.0, full.1), (sw.0, sw.1), (sw.2, sw.3).
     group_size_gcd = math.gcd(
         *[len(layers) for layers in same_type_layers.values()])
     grouped_layers = []
@@ -509,7 +520,10 @@ def _get_kv_cache_config_uniform_page_size(
         for i in range(0, len(layers), group_size_gcd):
             grouped_layers.append(layers[i:i + group_size_gcd])
 
-    # TODO: explain it
+    # Divide the available memory equally among all layers in the first group.
+    # The memory layout in the example will be:
+    # full.0: Tensor with size=available_memory//2
+    # full.1: Tensor with size=available_memory//2
     kv_cache_spec_first_group = {
         layer_name: kv_cache_spec[layer_name]
         for layer_name in grouped_layers[0]
@@ -517,6 +531,12 @@ def _get_kv_cache_config_uniform_page_size(
     kv_cache_config = _get_kv_cache_config_uniform_type(
         vllm_config, kv_cache_spec_first_group, available_memory)
 
+    # Reuse the KV cache tensors of the first group for the other groups.
+    # The memory layout in the example will be:
+    # full.0, sw.0, sw.2: share a Tensor with size=available_memory//2
+    # full.1, sw.1, sw.3: share another Tensor with size=available_memory//2
+    # Layers of different groups have different block table, so they will
+    # use different parts of the shared Tensor.
     for layers in grouped_layers[1:]:
         for layer_name, layer_name_first_group in zip(layers,
                                                       grouped_layers[0]):
@@ -549,7 +569,7 @@ def get_kv_cache_config(vllm_config: VllmConfig,
         return _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
                                                  available_memory)
     elif is_kv_cache_page_size_uniform(kv_cache_spec):
-        # TODO: add comments
+        # KV cache of all layers have the same page size.
         return _get_kv_cache_config_uniform_page_size(vllm_config,
                                                       kv_cache_spec,
                                                       available_memory)

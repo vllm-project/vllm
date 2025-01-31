@@ -1,9 +1,12 @@
 from dataclasses import dataclass
 from typing import List, Tuple
-from vllm import LLM, SamplingParams
-from ...core.block.e2e.test_correctness_sliding_window import (prep_prompts,
-                                                               check_answers)
+
 import pytest
+
+from vllm import LLM, SamplingParams
+
+from ...core.block.e2e.test_correctness_sliding_window import (check_answers,
+                                                               prep_prompts)
 
 
 @dataclass

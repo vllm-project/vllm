@@ -1,6 +1,10 @@
 from collections import deque
+from typing import Deque
+
 import torch
-from vllm.v1.core.hybrid_cache_manager.specialized_manager import BlockPoolOperations, SlidingWindowManager
+
+from vllm.v1.core.hybrid_cache_manager.specialized_manager import (
+    BlockPoolOperations, SlidingWindowManager)
 from vllm.v1.core.hybrid_cache_manager.utils import PrefixLengthRange
 from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
@@ -15,7 +19,7 @@ def test_sliding_window_possible_cached_prefix():
         sliding_window=4,
     )
 
-    block_pool_result = deque()
+    block_pool_result: Deque[bool] = deque()
     null_block = KVCacheBlock(-1, 0)
 
     def get_cached_block(_block_hash):

@@ -1,12 +1,14 @@
 from abc import ABC, abstractmethod
-from collections import deque
 from dataclasses import dataclass
 from itertools import chain
-from typing import Callable, Deque, Dict, List, Optional, Tuple, TypedDict
+from typing import Callable, Dict, List, Optional, Tuple, Type
+
 from vllm.utils import cdiv
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec, SlidingWindowSpec
+from vllm.v1.core.hybrid_cache_manager.utils import (PrefixLength,
+                                                     PrefixLengthRange)
 from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
-from vllm.v1.core.hybrid_cache_manager.utils import PrefixLength, PrefixLengthRange
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec, SlidingWindowSpec)
 from vllm.v1.utils import ConstantList
 
 
@@ -149,7 +151,7 @@ class SlidingWindowManager(FullAttentionManager):
         # TODO: check the hit every num_block_sliding_window blocks, to optimize
         # the time complexity from O(num_block) to
         # O(num_block / num_block_sliding_window) + O(num_computed_block),
-        # which is good for low cache hit rate senarios.
+        # which is good for low cache hit rate scenarios.
         start = 0
         ranges = []
         computed_blocks: List[KVCacheBlock] = []
@@ -202,7 +204,7 @@ class SlidingWindowManager(FullAttentionManager):
         return removed_blocks
 
 
-spec_manager_map: Dict[KVCacheSpec, SpecializedManager] = {
+spec_manager_map: Dict[Type[KVCacheSpec], Type[SpecializedManager]] = {
     FullAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager
 }

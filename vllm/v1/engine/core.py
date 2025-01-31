@@ -4,7 +4,7 @@ import signal
 import threading
 import time
 from multiprocessing.connection import Connection
-from typing import List, Tuple, Type
+from typing import List, Type
 
 import psutil
 import zmq
@@ -78,6 +78,7 @@ class EngineCore:
         # Get the kv cache tensor size
         kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                               availble_gpu_memory)
+        print("kv_cache_config", kv_cache_config)
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize(kv_cache_config)

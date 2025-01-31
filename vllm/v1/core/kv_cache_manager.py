@@ -1,17 +1,18 @@
-from collections import defaultdict
 import math
-from typing import Dict, Iterable, List, Optional, Tuple
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
-from vllm.v1.core.hybrid_cache_manager.specialized_manager import BlockPoolOperations, get_managers
+from vllm.v1.core.hybrid_cache_manager.specialized_manager import (
+    BlockPoolOperations, get_managers)
+from vllm.v1.core.hybrid_cache_manager.utils import (PrefixLength,
+                                                     intersect_ranges)
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock, KVCacheBlocks,
-                                         ReqKVCacheBlocks,
+                                         KVCacheBlock, ReqKVCacheBlocks,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens)
-from vllm.v1.core.hybrid_cache_manager.utils import PrefixLength, intersect_ranges
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 
@@ -207,7 +208,7 @@ class KVCacheManager:
                 # preallocated blocks.
                 num_block_to_allocate = min(
                     num_new_blocks[i] + num_preallocate_blocks,
-                    # Should not exceed the maximum number of blocks per request.
+                    # Should not exceed the maximum number of blocks per request
                     # This is especially because the block table has the shape
                     # [..., max_num_blocks_per_req].
                     # TODO(woosuk): Check and reject requests if
@@ -351,7 +352,8 @@ class KVCacheManager:
                 self._cache_full_blocks(
                     request=request,
                     blk_start_idx=len(computed_blocks[i]),
-                    # The new full blocks are the full blocks that are not computed.
+                    # The new full blocks are the full blocks that are not
+                    # computed.
                     full_blocks=new_full_blocks,
                     prev_block=computed_blocks[i][-1]
                     if computed_blocks[i] else None,
@@ -640,15 +642,15 @@ class KVCacheManager:
     def _get_common_computed_tokens(self,
                                     prefix_length: List[PrefixLength]) -> int:
         """
-        Find a prefix that is cached by all KV cache groups. Returns the number
-        of tokens of that prefix.
+        Find the longest prefix that is cached by all KV cache groups. Returns 
+        the number of tokens in that prefix.
 
         Args:
             prefix_length (List[PrefixLength]): The valid cached prefix lengths 
             of each KV cache group.
     
         Returns:
-            The number of tokens of the common prefix.
+            The number of tokens in the common prefix.
         """
         intersection = intersect_ranges(prefix_length)
 
