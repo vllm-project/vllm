@@ -2,6 +2,7 @@ import pytest
 
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.hybrid_cache_manager.utils import PrefixLengthRange, intersect_ranges
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock,
                                          generate_block_hash_extra_keys,
@@ -243,3 +244,25 @@ def test_hash_request_tokens_no_mm_inputs():
     assert block_hashes[0].extra_keys is None
     assert block_hashes[1].token_ids == (3, 4, 5)
     assert block_hashes[1].extra_keys is None
+
+
+def test_prefix_length_range_intersection():
+    range0 = [
+        PrefixLengthRange(1, 5),
+        PrefixLengthRange(10, 14),
+        PrefixLengthRange(16, 18)
+    ]
+    range1 = [
+        PrefixLengthRange(2, 6),
+        PrefixLengthRange(8, 12),
+        PrefixLengthRange(15, 17)
+    ]
+    range2 = [PrefixLengthRange(3, 11), PrefixLengthRange(13, 19)]
+    ranges = [range0, range1, range2]
+
+    intersection = intersect_ranges(ranges)
+    assert intersection == [
+        PrefixLengthRange(3, 5),
+        PrefixLengthRange(10, 11),
+        PrefixLengthRange(16, 17)
+    ]
