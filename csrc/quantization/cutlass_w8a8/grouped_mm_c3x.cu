@@ -32,14 +32,14 @@ using namespace cute;
   #define ENABLE_SM90_KERNEL_LEVEL 1
 #endif
 
-template <typename StrideA, typename StrideB, typename StrideC>
-__global__ void make_mm_strides(StrideA* stride_a, StrideB* stride_b,
-                                StrideC* stride_c, int64_t lda, int64_t ldb,
-                                int64_t ldc) {
-  int expert_id = threadIdx.x;
-  stride_a[expert_id] = StrideA{lda, Int<1>{}, Int<0>{}};
-  stride_b[expert_id] = StrideB{ldb, Int<1>{}, Int<0>{}};
-  stride_c[expert_id] = StrideC{ldc, Int<1>{}, Int<0>{}};
+// for debugging
+__global__ void print_elements(int64_t* tensor, int64_t elements) {
+  if (threadIdx.x == 0) {
+    for (int64_t i = 0; i < elements; ++i) {
+      printf("%ld/%ld ", i, tensor[i]);
+    }
+    printf("\n---\n");
+  }
 }
 
 namespace {
@@ -159,39 +159,40 @@ void cutlass_group_gemm_caller(torch::Tensor& out_tensors,
   bool per_act_token = a_scales.numel() != groups;
   bool per_out_ch = b_scales.numel() != groups;
 
-  int b_single_size = k_size * n_size;
-  int b_scale_single_size = per_out_ch ? out_tensors.size(1) : 1;
+  int b_single_size = k_size * n_size * sizeof(ElementAB_Type);
+  int b_scale_single_size =
+      (per_out_ch ? out_tensors.size(1) : 1) * sizeof(ElementAccumulator);
 
+  // TODO b and b scales pointers can be computed outside this function
   auto options_int =
       torch::TensorOptions().dtype(torch::kInt64).device(a_tensors.device());
   torch::Tensor a_ptrs_base = torch::full(
       groups, reinterpret_cast<int64_t>(a_tensors.data_ptr()), options_int);
   torch::Tensor out_ptrs_base = torch::full(
       groups, reinterpret_cast<int64_t>(out_tensors.data_ptr()), options_int);
-  torch::Tensor b_ptrs_base = torch::full(
-      groups, reinterpret_cast<int64_t>(b_tensors.data_ptr()), options_int);
   torch::Tensor a_scales_base = torch::full(
       groups, reinterpret_cast<int64_t>(a_scales.data_ptr()), options_int);
-  torch::Tensor b_scales_base = torch::full(
-      groups, reinterpret_cast<int64_t>(b_scales.data_ptr()), options_int);
 
-  torch::Tensor b_offsets =
-      torch::arange(0, b_single_size * groups, b_single_size, options_int);
   torch::Tensor a_scales_offsets = torch::arange(0, groups, options_int);
-  torch::Tensor b_scales_offsets = torch::arange(
-      0, b_scale_single_size * groups, b_scale_single_size, options_int);
 
   torch::Tensor a_ptrs = a_ptrs_base.add(
       expert_offsets, sizeof(ElementAB_Type) * a_tensors.size(1));
   torch::Tensor out_ptrs = out_ptrs_base.add(
       expert_offsets, sizeof(ElementC_Type) * out_tensors.size(1));
-  torch::Tensor b_ptrs = b_ptrs_base.add(b_offsets, sizeof(ElementAB_Type));
 
   torch::Tensor a_scales_ptrs =
       a_scales_base.add(per_act_token ? expert_offsets : a_scales_offsets,
                         sizeof(ElementAccumulator));
-  torch::Tensor b_scales_ptrs =
-      b_scales_base.add(b_scales_offsets, sizeof(ElementAccumulator));
+
+  int64_t b_tensor_base_addr = reinterpret_cast<int64_t>(b_tensors.data_ptr());
+  int64_t b_scales_base_addr = reinterpret_cast<int64_t>(b_scales.data_ptr());
+
+  torch::Tensor b_ptrs = torch::arange(
+      b_tensor_base_addr, b_tensor_base_addr + b_single_size * groups,
+      b_single_size, options_int);
+  torch::Tensor b_scales_ptrs = torch::arange(
+      b_scales_base_addr, b_scales_base_addr + b_scale_single_size * groups,
+      b_scale_single_size, options_int);
 
   using GemmKernel = typename Gemm::GemmKernel;
   using StrideA = Stride<int64_t, Int<1>, Int<0>>;
@@ -201,17 +202,11 @@ void cutlass_group_gemm_caller(torch::Tensor& out_tensors,
   int64_t lda = a_tensors.stride(0);    // row-major (m x k)
   int64_t ldb = a_tensors.stride(0);    // column-major (k x n)
   int64_t ldc = out_tensors.stride(0);  // row-major (m x n)
-  auto a_stride_ptr = allocate_device_ptr<StrideA>(groups);
-  auto b_stride_ptr = allocate_device_ptr<StrideB>(groups);
-  auto c_stride_ptr = allocate_device_ptr<StrideC>(groups);
-  make_mm_strides<<<1, groups>>>(a_stride_ptr.get(), b_stride_ptr.get(),
-                                 c_stride_ptr.get(), lda, ldb, ldc);
 
-  cutlass::KernelHardwareInfo hw_info;
-  hw_info.device_id = 0;
-  hw_info.sm_count =
-      cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
-          hw_info.device_id);
+  // TODO move creation of these outside this function
+  torch::Tensor a_strides = torch::full({groups}, lda, options_int);
+  torch::Tensor b_strides = torch::full({groups}, ldb, options_int);
+  torch::Tensor c_strides = torch::full({groups}, ldc, options_int);
 
   ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
       reinterpret_cast<ProblemShape::UnderlyingProblemShape*>(
@@ -220,9 +215,9 @@ void cutlass_group_gemm_caller(torch::Tensor& out_tensors,
 
   typename GemmKernel::MainloopArguments mainloop_args{
       reinterpret_cast<const ElementAB_Type**>(a_ptrs.data_ptr()),
-      a_stride_ptr.get(),
+      reinterpret_cast<StrideA*>(a_strides.data_ptr()),
       reinterpret_cast<const ElementAB_Type**>(b_ptrs.data_ptr()),
-      b_stride_ptr.get()};
+      reinterpret_cast<StrideB*>(b_strides.data_ptr())};
 
   // Currently, we are only able to do broadcast on either all or none a_scales
   // and on either all or none b_scales
@@ -233,13 +228,13 @@ void cutlass_group_gemm_caller(torch::Tensor& out_tensors,
                                        b_scales_ptrs.data_ptr()),
                                    per_act_token, per_out_ch),
       reinterpret_cast<const ElementC_Type**>(out_ptrs.data_ptr()),
-      c_stride_ptr.get(),
+      reinterpret_cast<StrideC*>(c_strides.data_ptr()),
       reinterpret_cast<ElementC_Type**>(out_ptrs.data_ptr()),
-      c_stride_ptr.get()};
+      reinterpret_cast<StrideC*>(c_strides.data_ptr())};
 
   typename GemmKernel::Arguments args{
       cutlass::gemm::GemmUniversalMode::kGrouped, prob_shape, mainloop_args,
-      epilogue_args, hw_info};
+      epilogue_args};
 
   using GemmOp = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
   GemmOp gemm_op;

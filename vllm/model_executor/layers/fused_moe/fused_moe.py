@@ -680,7 +680,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     ]
 
     num_tokens, _ = hidden_states.shape
-    E, N, K = w1.shape
+    E, N, _ = w1.shape
     # We execute the fused_moe kernel in chunks to circumvent this issue:
     # https://github.com/vllm-project/vllm/issues/5938
     CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE

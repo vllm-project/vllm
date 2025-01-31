@@ -5,6 +5,7 @@ import torch.utils.benchmark as benchmark
 from benchmark_shapes import WEIGHT_SHAPES_MOE
 
 from vllm import _custom_ops as ops
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe,
                                                             fused_experts,
                                                             fused_topk)
@@ -22,32 +23,24 @@ PER_OUT_CH_OPTS = [False]  #[False, True]
 TOPKS = [2, 6]
 
 
+def run_from_graph(a_q: torch.Tensor, a_scale: torch.Tensor,
+                   w1_q: torch.Tensor, w2_q: torch.Tensor,
+                   w1_scale: torch.Tensor, w2_scale: torch.Tensor,
+                   topk_weights: torch.Tensor, topk_ids: torch.Tensor, m: int,
+                   n: int, k: int, e: int):
+    with set_current_vllm_config(
+            VllmConfig(parallel_config=ParallelConfig(
+                pipeline_parallel_size=1))):
+        return cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
+                           topk_weights, topk_ids, m, n, k, e)
+
+
 def to_fp8(tensor: torch.Tensor):
     finfo = torch.finfo(torch.float8_e4m3fn)
     return torch.round(tensor.clamp(
         min=finfo.min, max=finfo.max)).to(dtype=torch.float8_e4m3fn)
 
 
-def grouped_gemm(a_g_tensors: List[torch.Tensor],
-                 b_g_tensors: List[torch.Tensor],
-                 out_g_tensors: List[torch.Tensor],
-                 a_scales_tensors: List[torch.Tensor],
-                 b_scales_tensors: List[torch.Tensor]):
-    ops.cutlass_grouped_mm(out_g_tensors, a_g_tensors, b_g_tensors,
-                           a_scales_tensors, b_scales_tensors)
-
-
-def baseline_gemm(num_groups: int, a_tensors: List[torch.Tensor],
-                  b_tensors: List[torch.Tensor],
-                  out_tensors: List[torch.Tensor]):
-    for g in range(num_groups):
-        a = a_tensors[g]
-        b = b_tensors[g]
-        out = torch.mm(a, b)
-        out_tensors[g] = out
-
-
-# TODO marlin baseline
 def bench_run(results: List[benchmark.Measurement], model: str,
               num_experts: int, topk: int, per_act_token: bool,
               per_out_ch: bool, mkn: Tuple[int, int, int]):
@@ -82,9 +75,28 @@ def bench_run(results: List[benchmark.Measurement], model: str,
                            device="cuda",
                            dtype=torch.float32)
 
+    for expert in range(num_experts):
+        w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(w1[expert])
+        w2_q[expert], w2_scale[expert] = ops.scaled_fp8_quant(w2[expert])
+    w1_q_notransp = w1_q.clone()
+    w2_q_notransp = w2_q.clone()
+    w1_q = w1_q.transpose(1, 2)
+    w2_q = w2_q.transpose(1, 2)
+
     score = torch.randn((m, num_experts), device="cuda", dtype=dtype)
 
     topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
+
+    def replay_graph(graph):
+        graph.replay()
+        torch.cuda.synchronize()
+
+    stream = torch.cuda.Stream()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        run_from_graph(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
+                       topk_weights, topk_ids, m, n, k, num_experts)
+    torch.cuda.synchronize()
 
     globals = {
         # Baseline params
@@ -93,6 +105,8 @@ def bench_run(results: List[benchmark.Measurement], model: str,
         "w2": w2,
         "score": score,
         "topk": topk,
+        "w1_q_notransp": w1_q_notransp,
+        "w2_q_notransp": w2_q_notransp,
         # Cutlass params
         "a_q": a_q,
         "a_scale": a_scale,
@@ -104,31 +118,45 @@ def bench_run(results: List[benchmark.Measurement], model: str,
         "n": n,
         "k": k,
         "num_experts": num_experts,
+        # Cutlass cuda graph params
+        "graph": graph,
         # Gen params
         "topk_weights": topk_weights,
         "topk_ids": topk_ids,
         # Kernels
         "fused_experts": fused_experts,
         "cutlass_moe": cutlass_moe,
+        "replay_graph": replay_graph,
     }
 
     min_run_time = 1
     num_warmup = 5
 
-    # Warmup pytorch
+    # Warmup
     for _ in range(num_warmup):
-        fused_experts(a, w1, w2, topk_weights, topk_ids)
+        # fused_experts(a, w1, w2, topk_weights, topk_ids)
+        fused_experts(a,
+                      w1_q_notransp,
+                      w2_q_notransp,
+                      topk_weights,
+                      topk_ids,
+                      use_fp8_w8a8=True,
+                      w1_scale=w1_scale,
+                      w2_scale=w2_scale,
+                      a1_scale=a_scale)
 
     results.append(
         benchmark.Timer(
-            stmt="fused_experts(a, w1, w2, topk_weights, topk_ids)",
+            # stmt="fused_experts(a, w1, w2, topk_weights, topk_ids)",
+            stmt=
+            "fused_experts(a, w1_q_notransp, w2_q_notransp, topk_weights, topk_ids, use_fp8_w8a8=True, w1_scale=w1_scale, w2_scale=w2_scale, a1_scale=a_scale)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
-            description="baseline_gemm",
+            description="triton_moe",
         ).blocked_autorange(min_run_time=min_run_time))
 
-    # Warmup pytorch
+    # Warmup
     for _ in range(num_warmup):
         cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights,
                     topk_ids, m, n, k, num_experts)
@@ -140,7 +168,20 @@ def bench_run(results: List[benchmark.Measurement], model: str,
             globals=globals,
             label=label,
             sub_label=sub_label,
-            description="grouped_gemm",
+            description="grouped_gemm_moe",
+        ).blocked_autorange(min_run_time=min_run_time))
+
+    # Warmup
+    for _ in range(num_warmup):
+        replay_graph(graph)
+
+    results.append(
+        benchmark.Timer(
+            stmt="replay_graph(graph)",
+            globals=globals,
+            label=label,
+            sub_label=sub_label,
+            description="grouped_gemm_moe_cuda_graphs",
         ).blocked_autorange(min_run_time=min_run_time))
 
 

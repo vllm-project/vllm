@@ -49,14 +49,16 @@ struct ScaledEpilogueBase {
       Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
 
   template <typename T>
-  using ColOrScalarLoadArray = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcastArray<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
-      Stride<Int<1>, Int<0>, Int<0>>>;
+  using ColOrScalarLoadArray =
+      cutlass::epilogue::fusion::Sm90ColOrScalarBroadcastArray<
+          0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
+          Stride<Int<1>, Int<0>, Int<0>>>;
 
   template <typename T>
-  using RowOrScalarLoadArray = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcastArray<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
-      Stride<Int<0>, Int<1>, Int<0>>>;
+  using RowOrScalarLoadArray =
+      cutlass::epilogue::fusion::Sm90RowOrScalarBroadcastArray<
+          0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
+          Stride<Int<0>, Int<1>, Int<0>>>;
 
   // This utility function constructs the arguments for the load descriptors
   // from a tensor. It can handle both row and column, as well as row/column or
@@ -93,7 +95,6 @@ struct ScaledEpilogueBase {
                   std::is_same_v<Descriptor, RowOrScalarLoadArray<T>>);
     return Arguments{data_ptr, do_broadcast};
   }
-
 };
 
 /*
@@ -368,10 +369,11 @@ struct ScaledEpilogueArray
 
   static ArgumentType prepare_args(const float* const* a_scales_ptr,
                                    const float* const* b_scales_ptr,
-                                   bool a_col_broadcast,
-                                   bool b_row_broadcast) {
-    auto a_args = SUPER::template args_from_tensor<ScaleAArray, float>(a_scales_ptr, a_col_broadcast);
-    auto b_args = SUPER::template args_from_tensor<ScaleBArray, float>(b_scales_ptr, b_row_broadcast);
+                                   bool a_col_broadcast, bool b_row_broadcast) {
+    auto a_args = SUPER::template args_from_tensor<ScaleAArray, float>(
+        a_scales_ptr, a_col_broadcast);
+    auto b_args = SUPER::template args_from_tensor<ScaleBArray, float>(
+        b_scales_ptr, b_row_broadcast);
 
     typename EVTCompute0::Arguments evt0_args{b_args};
     return ArgumentType{a_args, evt0_args};

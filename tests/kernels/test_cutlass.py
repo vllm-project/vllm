@@ -478,7 +478,7 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
         m_a_scales = m_g if per_act_token else 1
         n_b_scales = n_g if per_out_ch else 1
 
-        print(m_g, n_g, k_g)
+        print("shape:", m_g, n_g, k_g)
 
         # Create group-specific A and B (FP8) and output (FP16/FP32)
         a_g = to_fp8(torch.randn((m_g, k_g), device=device))
