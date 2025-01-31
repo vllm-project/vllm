@@ -24,6 +24,7 @@ import torch
 import triton
 import triton.language as tl
 
+SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
 
 class MetaData:
     cu_seqlens_q = None
@@ -1358,8 +1359,9 @@ def _attn_bwd(
     tl.store(DQ_block_ptr, dq.to(q.dtype))
 
 
+SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
+
 def get_shape_from_layout(q, k, metadata):
-    SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
     assert metadata.layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
     if metadata.layout == 'thd':
         nheads_q, nheads_k = q.shape[1], k.shape[1]
@@ -1376,6 +1378,7 @@ def get_shape_from_layout(q, k, metadata):
 
 # TODO: This can probably optimized to have fewer lines of code.
 def get_strides_from_layout(q, k, v, o, metadata):
+    assert metadata.layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
     if metadata.layout == 'thd':
         q_strides = (0, q.stride(1), q.stride(0), q.stride(2))
         k_strides = (0, k.stride(1), k.stride(0), k.stride(2))
@@ -1391,8 +1394,6 @@ def get_strides_from_layout(q, k, v, o, metadata):
         k_strides = (k.stride(0), k.stride(2), k.stride(1), k.stride(3))
         v_strides = (v.stride(0), v.stride(2), v.stride(1), v.stride(3))
         o_strides = (o.stride(0), o.stride(2), o.stride(1), o.stride(3))
-    else:
-        assert False, 'Got unsupported layout.'
     return q_strides, k_strides, v_strides, o_strides
 
 
