@@ -1272,7 +1272,7 @@ class GGUFModelLoader(BaseModelLoader):
 
 class RunaiModelStreamerLoader(BaseModelLoader):
     """
-        Model loader that can load safetensors 
+        Model loader that can load safetensors
         files from local FS or S3 bucket.
     """
 

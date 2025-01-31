@@ -29,11 +29,11 @@ class MLACommonMetadata(AttentionMetadata):
 
 class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     """
-    Common class for implementing repeated parts 
-    
+    Common class for implementing repeated parts
+
     Main reference: DeepseekV2 paper, and FlashInfer Implementation
     (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
-    
+
     Deepseek's MLA attention works the following way:
     * Use a single latent vector to represent the entire KV cache.
     * The attention "simulates" a multi-head attention, while the compute is
@@ -50,7 +50,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         * V: V head dim.
         * kv_c: latent/compressed KV
         * q_c: latent/compressed Q
-        
+
         #
         # Outside the MLA attention backend
         #
@@ -59,21 +59,21 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
            kv_c_k_pe (B, Lkv+R).
         2. The kv_c_k_pe is split into kv_c (B, Lkv) and k_pe (B, R). cq
            and kv_c are normalized.
-        
+
         #
         # Inside the MLA attention backend
         #
 
         * if prefill:
-        
-        3. The q_c is then projected up into the multi-head version. 
-           * q_c goes from (B, Lq) to (B, N, (P+R)), which is split into q_nope 
-             (B, N, P) and q_pe (B, N, R). 
+
+        3. The q_c is then projected up into the multi-head version.
+           * q_c goes from (B, Lq) to (B, N, (P+R)), which is split into q_nope
+             (B, N, P) and q_pe (B, N, R).
         4. q_pe, k_pe are then passed through rotary embeddings.
         5. kv_c and k_pe are concatenated and inserted into the cache
-        6. The kv_c is then projected up into the multi-head version. 
-           * kv_c goes from (B, Lkv) to (B, N, (P+V)) which has the nope 
-             dimensions for K and V, which is split into k_nope (B, N, P) 
+        6. The kv_c is then projected up into the multi-head version.
+           * kv_c goes from (B, Lkv) to (B, N, (P+V)) which has the nope
+             dimensions for K and V, which is split into k_nope (B, N, P)
              and v (B, N, V).
         7. q (B, N, (P+R)) and k (B, N, (P+R)) matrices are assembled from
            q_nope, q_pe, k_nope, k_pe.
@@ -116,7 +116,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     From @tsu-bin's calculation, we only want to use the absorption technique
     for decode. The prefill algorithm should still use the up-projected MHA
     for less flops and memory usage.
-    
+
     """
 
     def __init__(
