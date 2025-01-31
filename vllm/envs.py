@@ -289,7 +289,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # use ater paged attn op if ater ops are enabled
     "VLLM_USE_AITER_PAGED_ATTN":
     lambda: (os.getenv("VLLM_USE_AITER", "False").lower() in
-             ("true", "1") and os.getenv("VLLM_USE_AITER_PAGED_ATTN", "True"
+             ("true", "1") and os.getenv("VLLM_USE_AITER_PAGED_ATTN", "False"
                                          ).lower() in ("true", "1")),
 
     # use ater linear op if ater ops are enabled
