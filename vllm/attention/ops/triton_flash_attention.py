@@ -627,8 +627,8 @@ def attn_fwd(
                                         causal_start_idx,
                                         dtype=tl.int32)
             mask_m_offsets = start_m_idx + tl.arange(0, BLOCK_M)
-            out_ptrs_mask = (mask_m_offsets[:, None] >=
-                             out_mask_boundary[None, :])
+            out_ptrs_mask = (mask_m_offsets[:, None]
+                             >= out_mask_boundary[None, :])
             z = 0.0
             acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
     # write back LSE

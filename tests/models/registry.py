@@ -245,7 +245,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),  # noqa: E501
     "MantisForConditionalGeneration": _HfExamplesInfo("TIGER-Lab/Mantis-8B-siglip-llama3",  # noqa: E501
                                                       hf_overrides={"architectures": ["MantisForConditionalGeneration"]}),  # noqa: E501
-    "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
+    "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
+                                trust_remote_code=True),
+    "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-V-2_6",
                                 trust_remote_code=True),
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
                                         trust_remote_code=True),
@@ -261,7 +263,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                        trust_remote_code=True),
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-Audio-7B-Instruct"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
-    "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_3"),
+    "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_3",
+                                     trust_remote_code=True),
     # [Encoder-decoder]
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501

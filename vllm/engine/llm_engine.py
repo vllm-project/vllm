@@ -230,7 +230,7 @@ class LLMEngine:
         )
 
         logger.info(
-            "Initializing an LLM engine (v%s) with config: %s, "
+            "Initializing a V0 LLM engine (v%s) with config: %s, "
             "use_cached_outputs=%s, ",
             VLLM_VERSION,
             vllm_config,
@@ -914,6 +914,14 @@ class LLMEngine:
         """
         return self.scheduler[virtual_engine].has_unfinished_seqs()
 
+    def reset_prefix_cache(self) -> bool:
+        """Reset prefix cache for all devices."""
+
+        success = True
+        for scheduler in self.scheduler:
+            success = success and scheduler.reset_prefix_cache()
+        return success
+
     @staticmethod
     def _process_sequence_group_outputs(
         seq_group: SequenceGroup,
@@ -1002,8 +1010,23 @@ class LLMEngine:
                      self.speculative_config
             # Organize outputs by [step][sequence group] instead of
             # [sequence group][step].
-            outputs_by_sequence_group = create_output_by_sequence_group(
-                outputs, num_seq_groups=len(seq_group_metadata_list))
+            if self.scheduler_config.is_multi_step:
+                outputs_by_sequence_group = create_output_by_sequence_group(
+                    outputs, len(seq_group_metadata_list))
+            elif self.speculative_config:
+                # Decodes are multi-steps while prefills are not, outputting at
+                # most 1 token. Separate them so that we can trigger chunk
+                # processing without having to pad or copy over prompts K times
+                # to match decodes structure (costly with prompt_logprobs).
+                num_prefills = sum(sg.is_prompt
+                                   for sg in seq_group_metadata_list)
+                prefills, decodes = outputs[:num_prefills], outputs[
+                    num_prefills:]
+                outputs_by_sequence_group = create_output_by_sequence_group(
+                    decodes,
+                    num_seq_groups=len(seq_group_metadata_list) - num_prefills)
+                outputs_by_sequence_group = [p.outputs for p in prefills
+                                             ] + outputs_by_sequence_group
             # We have outputs for multiple steps submitted in a single burst,
             # so invalidate is_first_step_output.
             is_first_step_output = None
@@ -1817,6 +1840,16 @@ class LLMEngine:
 
     def stop_profile(self) -> None:
         self.model_executor.stop_profile()
+
+    def sleep(self, level: int = 1) -> None:
+        assert self.vllm_config.model_config.enable_sleep_mode, (
+            "Sleep mode is not enabled in the model config")
+        self.model_executor.sleep(level=level)
+
+    def wake_up(self) -> None:
+        assert self.vllm_config.model_config.enable_sleep_mode, (
+            "Sleep mode is not enabled in the model config")
+        self.model_executor.wake_up()
 
     def check_health(self) -> None:
         if self.tokenizer:

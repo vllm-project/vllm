@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = False
+    VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
@@ -72,6 +73,12 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
+    K_SCALE_CONSTANT: int = 200
+    V_SCALE_CONSTANT: int = 100
+    VLLM_SERVER_DEV_MODE: bool = False
+    VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
+    VLLM_MLA_DISABLE: bool = False
+    VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
 
 
 def get_default_cache_root():
@@ -86,6 +93,12 @@ def get_default_config_root():
         "XDG_CONFIG_HOME",
         os.path.join(os.path.expanduser("~"), ".config"),
     )
+
+
+def maybe_convert_int(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    return int(value)
 
 
 # The begin-* and end* here are used by the documentation generator
@@ -200,6 +213,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRITON_FLASH_ATTN":
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
+
+    # Force vllm to use a specific flash-attention version (2 or 3), only valid
+    # when using the flash-attention backend.
+    "VLLM_FLASH_ATTN_VERSION":
+    lambda: maybe_convert_int(os.environ.get("VLLM_FLASH_ATTN_VERSION", None)),
 
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
@@ -460,6 +478,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
 
+    # Divisor for dynamic key scale factor calculation for FP8 KV Cache
+    "K_SCALE_CONSTANT":
+    lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
+
+    # Divisor for dynamic value scale factor calculation for FP8 KV Cache
+    "V_SCALE_CONSTANT":
+    lambda: int(os.getenv("V_SCALE_CONSTANT", "100")),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING":
     lambda: bool(int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))),
@@ -467,6 +492,34 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: float(os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")),
     "VLLM_DISABLE_COMPILE_CACHE":
     lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
+
+    # If set, vllm will run in development mode, which will enable
+    # some additional endpoints for developing and debugging,
+    # e.g. `/reset_prefix_cache`
+    "VLLM_SERVER_DEV_MODE":
+    lambda: bool(int(os.getenv("VLLM_SERVER_DEV_MODE", "0"))),
+
+    # Controls the maximum number of requests to handle in a
+    # single asyncio task when processing per-token outputs in the
+    # V1 AsyncLLM interface. It is applicable when handling a high
+    # concurrency of streaming requests.
+    # Setting this too high can result in a higher variance of
+    # inter-message latencies. Setting it too low can negatively impact
+    # TTFT and overall throughput.
+    "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE":
+    lambda: int(os.getenv("VLLM_V1_OUTPUT_PROC_CHUNK_SIZE", "128")),
+
+    # If set, vLLM will disable the MLA attention optimizations.
+    "VLLM_MLA_DISABLE":
+    lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
+
+    # Flag that can control whether or not we perform matrix-absorption for MLA
+    # decode, i.e. absorb W_UK into W_Q/W_UK and W_UV into W_O, absorbing the
+    # matrices reduces the runtime FLOPs needed to compute MLA but requires
+    # storing more weights, W_Q_UK and W_UV_O, so can increase memory usage,
+    # the is enabled by default
+    "VLLM_MLA_PERFORM_MATRIX_ABSORPTION":
+    lambda: bool(int(os.getenv("VLLM_MLA_PERFORM_MATRIX_ABSORPTION", "1")))
 }
 
 # end-env-vars-definition

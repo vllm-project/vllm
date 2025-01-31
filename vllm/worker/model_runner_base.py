@@ -201,6 +201,11 @@ class ModelRunnerInputBuilderBase(ABC, Generic[T]):
   """
 
     @abstractmethod
+    def prepare(self,
+                finished_requests_ids: Optional[List[str]] = None) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def add_seq_group(self, seq_group_metadata):
         """TBA"""
         raise NotImplementedError
