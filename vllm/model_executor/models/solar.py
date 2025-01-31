@@ -30,8 +30,7 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -39,16 +38,13 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    get_compressed_tensors_cache_scale)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -401,14 +397,6 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "lm_head": "output_embeddings",
     }
     embedding_padding_modules = ["lm_head"]
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
-    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -417,6 +405,7 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
+        self.quant_config = quant_config
 
         self.model = SolarModel(
             vllm_config=vllm_config,
@@ -443,9 +432,10 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                     config.vocab_size,
                                                     logit_scale)
-            self.sampler = get_sampler()
         else:
             self.lm_head = PPMissingLayer()
+
+        self.sampler = get_sampler()
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
@@ -498,12 +488,14 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if scale_name := get_compressed_tensors_cache_scale(name):
-                # Loading kv cache scales for compressed-tensors quantization
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                loaded_weight = loaded_weight[0]
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
@@ -541,31 +533,3 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
-
-    # If this function is called, it should always initialize KV cache scale
-    # factors (or else raise an exception). Thus, handled exceptions should
-    # make sure to leave KV cache scale factors in a known good (dummy) state
-    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        for layer_idx, scaling_factor in kv_cache_scales_loader(
-                quantization_param_path,
-                tp_rank,
-                tp_size,
-                self.config.num_hidden_layers,
-                self.config.__class__.model_type,
-        ):
-            if not isinstance(self.model.layers[layer_idx], nn.Identity):
-                layer_self_attn = self.model.layers[layer_idx].self_attn
-
-            if current_platform.is_rocm():
-                # The scaling factor convention we are assuming is
-                # quantized_value * scaling_factor ~= true_value
-                # which is consistent with the practice of setting
-                # scaling_factor = tensor_amax / FPtype_max
-                scaling_factor *= 2
-            if hasattr(layer_self_attn, "kv_scale"):
-                layer_self_attn.attn._kv_scale = scaling_factor
-            else:
-                raise RuntimeError("Self attention has no KV cache scaling "
-                                   "factor attribute!")

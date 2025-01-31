@@ -305,7 +305,8 @@ class CPUEncoderDecoderModelRunner(
             intermediate_tensors,
         }
 
-        with set_forward_context(model_input.attn_metadata, self.vllm_config):
+        with set_forward_context(model_input.attn_metadata, self.vllm_config,
+                                 model_input.virtual_engine):
             hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.

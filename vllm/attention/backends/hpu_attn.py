@@ -11,6 +11,7 @@ import vllm_hpu_extension.ops as ops
 from vllm_hpu_extension.utils import Matmul, Softmax, VLLMKVCache
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.hpu_paged_attn import (HPUPagedAttention,
@@ -102,6 +103,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         max_seq_len: int = 4096,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         super(AttentionImpl, self).__init__()
         self.kv_cache_dtype = kv_cache_dtype
@@ -111,8 +113,16 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.matmul_qk = Matmul()
         self.softmax = Softmax()
         self.matmul_av = Matmul()
+        self.batch2block_matmul = Matmul()
+        self.block2batch_matmul = Matmul()
+        # NOTE(kzawora): Contiguous PA is off until model runner supports it
         self.k_cache = VLLMKVCache()
+        self.k_cache.use_contiguous_pa = False
         self.v_cache = VLLMKVCache()
+        self.v_cache.use_contiguous_pa = False
+        # NOTE(kzawora): Pipelined PA is off until model runner supports it
+        ops.pa_impl = ops.pa
+
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.sliding_window = sliding_window
         self.alibi_slopes = alibi_slopes
@@ -135,16 +145,21 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "HPUAttentionImpl")
+
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: HPUAttentionMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
-        attn_type: str = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -157,11 +172,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "HPUAttentionImpl")
         batch_size, seq_len, hidden_size = query.shape
         _, seq_len_kv, _ = key.shape
 
@@ -227,9 +237,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 block_mapping=attn_metadata.block_mapping,
                 block_bias=attn_metadata.attn_bias,
                 block_scales=attn_metadata.block_scales,
+                block_groups=None,
                 scale=self.scale,
                 matmul_qk_op=self.matmul_qk,
                 matmul_av_op=self.matmul_av,
+                batch2block_matmul_op=self.batch2block_matmul,
+                block2batch_matmul_op=self.block2batch_matmul,
                 keys_fetch_func=self.k_cache.fetch_from_cache,
                 values_fetch_func=self.v_cache.fetch_from_cache)
         # Reshape the output tensor.

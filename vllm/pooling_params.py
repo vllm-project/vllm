@@ -7,7 +7,7 @@ class PoolingParams(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
         array_like=True):  # type: ignore[call-arg]
-    """Pooling parameters for embeddings API.
+    """API parameters for pooling models. This is currently a placeholder.
 
     Attributes:
         additional_data: Any additional data needed for pooling.

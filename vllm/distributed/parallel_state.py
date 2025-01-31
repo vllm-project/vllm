@@ -27,17 +27,22 @@ from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 from unittest.mock import patch
 
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
 
+import vllm.distributed.kv_transfer.kv_transfer_agent as kv_transfer
 import vllm.envs as envs
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op, supports_custom_op
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 @dataclass
@@ -188,6 +193,7 @@ class GroupCoordinator:
         assert self.cpu_group is not None
         assert self.device_group is not None
 
+        from vllm.platforms import current_platform
         if current_platform.is_cuda_alike():
             self.device = torch.device(f"cuda:{local_rank}")
         else:
@@ -299,15 +305,7 @@ class GroupCoordinator:
             stream.wait_stream(curr_stream)
 
         with torch.cuda.stream(stream), maybe_ca_context:
-            pynccl_comm = self.pynccl_comm
-            maybe_pynccl_context: Any
-            if not pynccl_comm:
-                maybe_pynccl_context = nullcontext()
-            else:
-                maybe_pynccl_context = pynccl_comm.change_state(
-                    stream=torch.cuda.current_stream())
-            with maybe_pynccl_context:
-                yield graph_capture_context
+            yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         """
@@ -359,10 +357,7 @@ class GroupCoordinator:
             return out
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
-        # TODO: pynccl should not use `stream=`
-        # it can just always use the current stream.
-        out = pynccl_comm.all_reduce(input_,
-                                     stream=torch.cuda.current_stream())
+        out = pynccl_comm.all_reduce(input_)
         if out is None:
             # fall back to the default all-reduce using PyTorch.
             # this usually happens during testing.
@@ -867,12 +862,14 @@ def init_model_parallel_group(
 ) -> GroupCoordinator:
     if use_custom_allreduce is None:
         use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
+    from vllm.platforms import current_platform
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
         torch_distributed_backend=backend,
-        use_pynccl=True,
-        use_custom_allreduce=use_custom_allreduce,
+        use_pynccl=current_platform.is_cuda_alike(),
+        use_custom_allreduce=current_platform.is_cuda_alike()
+        and use_custom_allreduce,
         use_tpu_communicator=True,
         use_hpu_communicator=True,
         use_xpu_communicator=True,
@@ -904,9 +901,17 @@ def get_pp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_pipeline_model_parallel_group = get_pp_group
 
+_KV_TRANSFER: Optional[kv_transfer.KVTransferAgent] = None
+
+
+def get_kv_transfer_group() -> kv_transfer.KVTransferAgent:
+    assert _KV_TRANSFER is not None, (
+        "disaggregated KV cache transfer parallel group is not initialized")
+    return _KV_TRANSFER
+
 
 @contextmanager
-def graph_capture():
+def graph_capture(device: torch.device):
     """
     `graph_capture` is a context manager which should surround the code that
     is capturing the CUDA graph. Its main purpose is to ensure that the
@@ -920,8 +925,9 @@ def graph_capture():
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
     """
-    with get_tp_group().graph_capture() as context, get_pp_group(
-    ).graph_capture(context):
+    context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    with get_tp_group().graph_capture(context), get_pp_group().graph_capture(
+            context):
         yield context
 
 
@@ -1008,8 +1014,8 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
-    if (world_size !=
-            tensor_model_parallel_size * pipeline_model_parallel_size):
+    if (world_size
+            != tensor_model_parallel_size * pipeline_model_parallel_size):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
@@ -1050,6 +1056,26 @@ def initialize_model_parallel(
                                     backend,
                                     use_custom_allreduce=False,
                                     group_name="pp")
+
+
+def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
+    """
+    Initialize KV cache transfer parallel group.
+    """
+
+    global _KV_TRANSFER
+
+    if vllm_config.kv_transfer_config is None:
+        return
+
+    if all([
+            vllm_config.kv_transfer_config.need_kv_parallel_group, _KV_TRANSFER
+            is None
+    ]):
+        _KV_TRANSFER = kv_transfer.KVTransferAgent(
+            rank=get_world_group().rank,
+            local_rank=get_world_group().local_rank,
+            config=vllm_config)
 
 
 def ensure_model_parallel_initialized(
@@ -1154,28 +1180,40 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         import ray  # Lazy import Ray
         ray.shutdown()
     gc.collect()
+    from vllm.platforms import current_platform
     if not current_platform.is_cpu():
         torch.cuda.empty_cache()
+    try:
+        torch._C._host_emptyCache()
+    except AttributeError:
+        logger.warning(
+            "torch._C._host_emptyCache() only available in Pytorch >=2.5")
 
 
-def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
+def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
+                        source_rank: int = 0) -> List[bool]:
     """
     This is a collective operation that returns if each rank is in the same node
     as the source rank. It tests if processes are attached to the same
     memory system (shared access to shared memory).
     """
-    assert torch.distributed.get_backend(
-        pg) != torch.distributed.Backend.NCCL, (
-            "in_the_same_node_as should be tested with a non-NCCL group.")
-    # local rank inside the group
-    rank = torch.distributed.get_rank(group=pg)
-    world_size = torch.distributed.get_world_size(group=pg)
+    if isinstance(pg, ProcessGroup):
+        assert torch.distributed.get_backend(
+            pg) != torch.distributed.Backend.NCCL, (
+                "in_the_same_node_as should be tested with a non-NCCL group.")
+        # local rank inside the group
+        rank = torch.distributed.get_rank(group=pg)
+        world_size = torch.distributed.get_world_size(group=pg)
+
+        # global ranks of the processes in the group
+        ranks = torch.distributed.get_process_group_ranks(pg)
+    else:
+        rank = pg.rank
+        world_size = pg.world_size
+        ranks = list(range(world_size))
 
     # local tensor in each process to store the result
     is_in_the_same_node = torch.tensor([0] * world_size, dtype=torch.int32)
-
-    # global ranks of the processes in the group
-    ranks = torch.distributed.get_process_group_ranks(pg)
 
     magic_message = b"magic_message"
     shm = None
@@ -1186,17 +1224,21 @@ def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
                 # create a shared memory segment
                 shm = shared_memory.SharedMemory(create=True, size=128)
                 shm.buf[:len(magic_message)] = magic_message
-                torch.distributed.broadcast_object_list([shm.name],
-                                                        src=ranks[source_rank],
-                                                        group=pg)
+                if isinstance(pg, ProcessGroup):
+                    torch.distributed.broadcast_object_list(
+                        [shm.name], src=ranks[source_rank], group=pg)
+                else:
+                    pg.broadcast_obj(shm.name, src=source_rank)
                 is_in_the_same_node[rank] = 1
             else:
                 # try to open the shared memory segment
-                recv = [None]
-                torch.distributed.broadcast_object_list(recv,
-                                                        src=ranks[source_rank],
-                                                        group=pg)
-                name = recv[0]
+                if isinstance(pg, ProcessGroup):
+                    recv = [None]
+                    torch.distributed.broadcast_object_list(
+                        recv, src=ranks[source_rank], group=pg)
+                    name = recv[0]
+                else:
+                    name = pg.broadcast_obj(None, src=source_rank)
                 # fix to https://stackoverflow.com/q/62748654/9191338
                 # Python incorrectly tracks shared memory even if it is not
                 # created by the process. The following patch is a workaround.
@@ -1211,12 +1253,23 @@ def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
         if shm:
             shm.close()
 
-    torch.distributed.barrier(group=pg)
+    if isinstance(pg, ProcessGroup):
+        torch.distributed.barrier(group=pg)
+    else:
+        pg.barrier()
 
     # clean up the shared memory segment
     with contextlib.suppress(OSError):
         if rank == source_rank and shm:
             shm.unlink()
-    torch.distributed.all_reduce(is_in_the_same_node, group=pg)
 
-    return [x == 1 for x in is_in_the_same_node.tolist()]
+    if isinstance(pg, ProcessGroup):
+        torch.distributed.all_reduce(is_in_the_same_node, group=pg)
+        aggregated_data = is_in_the_same_node
+    else:
+        aggregated_data = torch.zeros_like(is_in_the_same_node)
+        for i in range(world_size):
+            rank_data = pg.broadcast_obj(is_in_the_same_node, src=i)
+            aggregated_data += rank_data
+
+    return [x == 1 for x in aggregated_data.tolist()]

@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Type, Union, cast
 import numpy as np
 import prometheus_client
 
+from vllm.config import VllmConfig
 from vllm.engine.metrics_types import (StatLoggerBase, Stats,
                                        SupportsMetricsInfo)
 from vllm.executor.ray_utils import ray
@@ -44,9 +45,11 @@ class Metrics:
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
 
-    def __init__(self, labelnames: List[str], max_model_len: int):
+    def __init__(self, labelnames: List[str], vllm_config: VllmConfig):
         # Unregister any existing vLLM collectors (for CI/CD)
         self._unregister_vllm_metrics()
+
+        max_model_len = vllm_config.model_config.max_model_len
 
         # System stats
         #   Scheduler State
@@ -115,11 +118,16 @@ class Metrics:
             name="vllm:tokens_total",
             documentation="Number of prefill plus generation tokens processed.",
             labelnames=labelnames)
+        buckets = [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
+        if not vllm_config.model_config.enforce_eager:
+            buckets = vllm_config.compilation_config.\
+                cudagraph_capture_sizes.copy()
+            buckets.sort()
         self.histogram_iteration_tokens = self._histogram_cls(
             name="vllm:iteration_tokens_total",
             documentation="Histogram of number of tokens per engine_step.",
             labelnames=labelnames,
-            buckets=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096])
+            buckets=buckets)
         self.histogram_time_to_first_token = self._histogram_cls(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
@@ -251,21 +259,6 @@ class Metrics:
             documentation="Number of emitted tokens.",
             labelnames=labelnames))
 
-        # Deprecated in favor of vllm:prompt_tokens_total
-        self.gauge_avg_prompt_throughput = self._gauge_cls(
-            name="vllm:avg_prompt_throughput_toks_per_s",
-            documentation="Average prefill throughput in tokens/s.",
-            labelnames=labelnames,
-            multiprocess_mode="sum",
-        )
-        # Deprecated in favor of vllm:generation_tokens_total
-        self.gauge_avg_generation_throughput = self._gauge_cls(
-            name="vllm:avg_generation_throughput_toks_per_s",
-            documentation="Average generation throughput in tokens/s.",
-            labelnames=labelnames,
-            multiprocess_mode="sum",
-        )
-
 
 # end-metrics-definitions
 
@@ -361,10 +354,10 @@ class RayMetrics(Metrics):
     _histogram_cls: Type[prometheus_client.Histogram] = cast(
         Type[prometheus_client.Histogram], _RayHistogramWrapper)
 
-    def __init__(self, labelnames: List[str], max_model_len: int):
+    def __init__(self, labelnames: List[str], vllm_config: VllmConfig):
         if ray_metrics is None:
             raise ImportError("RayMetrics requires Ray to be installed.")
-        super().__init__(labelnames, max_model_len)
+        super().__init__(labelnames, vllm_config)
 
     def _unregister_vllm_metrics(self) -> None:
         # No-op on purpose
@@ -421,8 +414,8 @@ def get_throughput(tracked_stats: List[int], now: float,
 class LoggingStatLogger(StatLoggerBase):
     """LoggingStatLogger is used in LLMEngine to log to Stdout."""
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, local_interval: float, vllm_config: VllmConfig) -> None:
+        super().__init__(local_interval, vllm_config)
         self.last_prompt_throughput: Optional[float] = None
         self.last_generation_throughput: Optional[float] = None
 
@@ -473,13 +466,13 @@ class LoggingStatLogger(StatLoggerBase):
             )
             if (stats.cpu_prefix_cache_hit_rate >= 0
                     or stats.gpu_prefix_cache_hit_rate >= 0):
-                logger.info(
+                log_fn(
                     "Prefix cache hit rate: GPU: %.2f%%, CPU: %.2f%%",
                     stats.gpu_prefix_cache_hit_rate * 100,
                     stats.cpu_prefix_cache_hit_rate * 100,
                 )
             if self.spec_decode_metrics is not None:
-                logger.info(
+                log_fn(
                     self._format_spec_decode_metrics_str(
                         self.spec_decode_metrics))
 
@@ -515,12 +508,12 @@ class PrometheusStatLogger(StatLoggerBase):
     _gauge_cls = prometheus_client.Gauge
 
     def __init__(self, local_interval: float, labels: Dict[str, str],
-                 max_model_len: int) -> None:
-        super().__init__(local_interval)
+                 vllm_config: VllmConfig) -> None:
+        super().__init__(local_interval, vllm_config)
         # Prometheus metrics
         self.labels = labels
         self.metrics = self._metrics_cls(labelnames=list(labels.keys()),
-                                         max_model_len=max_model_len)
+                                         vllm_config=vllm_config)
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
@@ -599,9 +592,9 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.time_queue_requests)
         self._log_histogram(self.metrics.histogram_inference_time_request,
                             stats.time_inference_requests)
-        self._log_histogram(self.metrics.histogram_decode_time_request,
-                            stats.time_prefill_requests)
         self._log_histogram(self.metrics.histogram_prefill_time_request,
+                            stats.time_prefill_requests)
+        self._log_histogram(self.metrics.histogram_decode_time_request,
                             stats.time_decode_requests)
         self._log_histogram(self.metrics.histogram_time_in_queue_request,
                             stats.time_in_queue_requests)
@@ -627,20 +620,6 @@ class PrometheusStatLogger(StatLoggerBase):
         self._log_histogram(self.metrics.histogram_max_tokens_request,
                             stats.max_tokens_requests)
 
-    def _log_prometheus_interval(self, prompt_throughput: float,
-                                 generation_throughput: float) -> None:
-        # Logs metrics to prometheus that are computed every logging_interval.
-        # Support legacy gauge metrics that make throughput calculations on
-        # the vLLM side. Moving forward, we should use counters like
-        # counter_prompt_tokens, counter_generation_tokens
-        # Which log raw data and calculate summaries using rate() on the
-        # grafana/prometheus side. See
-        # https://github.com/vllm-project/vllm/pull/2316#discussion_r1464204666
-        self.metrics.gauge_avg_prompt_throughput.labels(
-            **self.labels).set(prompt_throughput)
-        self.metrics.gauge_avg_generation_throughput.labels(
-            **self.labels).set(generation_throughput)
-
     def log(self, stats: Stats):
         """Logs to prometheus and tracked stats every iteration."""
         # Log to prometheus.
@@ -656,20 +635,6 @@ class PrometheusStatLogger(StatLoggerBase):
         # Log locally every local_interval seconds.
         if local_interval_elapsed(stats.now, self.last_local_log,
                                   self.local_interval):
-            # Compute summary metrics for tracked stats (and log them
-            # to promethus if applicable).
-            prompt_throughput = get_throughput(self.num_prompt_tokens,
-                                               now=stats.now,
-                                               last_log=self.last_local_log)
-            generation_throughput = get_throughput(
-                self.num_generation_tokens,
-                now=stats.now,
-                last_log=self.last_local_log)
-
-            self._log_prometheus_interval(
-                prompt_throughput=prompt_throughput,
-                generation_throughput=generation_throughput)
-
             if self.spec_decode_metrics is not None:
                 self._log_gauge(
                     self.metrics.gauge_spec_decode_draft_acceptance_rate,

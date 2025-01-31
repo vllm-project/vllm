@@ -7,8 +7,9 @@ import torch
 from typing_extensions import NotRequired, TypedDict, TypeVar, assert_never
 
 if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
-    from vllm.multimodal.inputs import MultiModalInputsV2
+    from vllm.multimodal import (MultiModalDataDict, MultiModalKwargs,
+                                 MultiModalPlaceholderDict)
+    from vllm.multimodal.inputs import MultiModalInputs
 
 
 class TextPrompt(TypedDict):
@@ -43,13 +44,13 @@ class TokensPrompt(TypedDict):
 
     multi_modal_data: NotRequired["MultiModalDataDict"]
     """
-    DEPRECATED: Optional multi-modal data to pass to the model,
+    Optional multi-modal data to pass to the model,
     if the model supports it.
     """
 
     mm_processor_kwargs: NotRequired[Dict[str, Any]]
     """
-    DEPRECATED: Optional multi-modal processor kwargs to be forwarded to the
+    Optional multi-modal processor kwargs to be forwarded to the
     multimodal input mapper & processor. Note that if multiple modalities
     have registered mappers etc for the model being considered, we attempt
     to pass the mm_processor_kwargs to each of them.
@@ -150,9 +151,20 @@ class TokenInputs(TypedDict):
     if the model supports it.
     """
 
+    multi_modal_inputs: NotRequired["MultiModalKwargs"]
+    """
+    Optional multi-modal inputs to pass to the model,
+    if the model supports it.
+    """
+
     multi_modal_placeholders: NotRequired["MultiModalPlaceholderDict"]
     """
     Placeholder ranges for the multi-modal data.
+    """
+
+    multi_modal_hashes: NotRequired[List[str]]
+    """
+    The hashes of the multi-modal data.
     """
 
     mm_processor_kwargs: NotRequired[Dict[str, Any]]
@@ -169,6 +181,8 @@ def token_inputs(
     token_type_ids: Optional[List[int]] = None,
     prompt: Optional[str] = None,
     multi_modal_data: Optional["MultiModalDataDict"] = None,
+    multi_modal_inputs: Optional["MultiModalKwargs"] = None,
+    multi_modal_hashes: Optional[List[str]] = None,
     multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None,
     mm_processor_kwargs: Optional[Dict[str, Any]] = None,
 ) -> TokenInputs:
@@ -181,6 +195,10 @@ def token_inputs(
         inputs["token_type_ids"] = token_type_ids
     if multi_modal_data is not None:
         inputs["multi_modal_data"] = multi_modal_data
+    if multi_modal_inputs is not None:
+        inputs["multi_modal_inputs"] = multi_modal_inputs
+    if multi_modal_hashes is not None:
+        inputs["multi_modal_hashes"] = multi_modal_hashes
     if multi_modal_placeholders is not None:
         inputs["multi_modal_placeholders"] = multi_modal_placeholders
     if mm_processor_kwargs is not None:
@@ -189,7 +207,7 @@ def token_inputs(
     return inputs
 
 
-DecoderOnlyInputs = Union[TokenInputs, "MultiModalInputsV2"]
+DecoderOnlyInputs = Union[TokenInputs, "MultiModalInputs"]
 """
 The inputs in :class:`~vllm.LLMEngine` before they are
 passed to the model executor.
@@ -204,14 +222,14 @@ class EncoderDecoderInputs(TypedDict):
 
     This specifies the required data for encoder-decoder models.
     """
-    encoder: Union[TokenInputs, "MultiModalInputsV2"]
+    encoder: Union[TokenInputs, "MultiModalInputs"]
     """The inputs for the encoder portion."""
 
-    decoder: Union[TokenInputs, "MultiModalInputsV2"]
+    decoder: Union[TokenInputs, "MultiModalInputs"]
     """The inputs for the decoder portion."""
 
 
-SingletonInputs = Union[TokenInputs, "MultiModalInputsV2"]
+SingletonInputs = Union[TokenInputs, "MultiModalInputs"]
 """
 A processed :class:`SingletonPrompt` which can be passed to
 :class:`vllm.sequence.Sequence`.
@@ -232,7 +250,7 @@ class SingletonInputsAdapter:
         if inputs["type"] == "token" or inputs["type"] == "multimodal":
             return inputs.get("prompt")
 
-        assert_never(inputs)
+        assert_never(inputs)  # type: ignore[arg-type]
 
     @cached_property
     def prompt_token_ids(self) -> List[int]:
@@ -241,7 +259,7 @@ class SingletonInputsAdapter:
         if inputs["type"] == "token" or inputs["type"] == "multimodal":
             return inputs.get("prompt_token_ids", [])
 
-        assert_never(inputs)
+        assert_never(inputs)  # type: ignore[arg-type]
 
     @cached_property
     def token_type_ids(self) -> List[int]:
@@ -250,7 +268,7 @@ class SingletonInputsAdapter:
         if inputs["type"] == "token" or inputs["type"] == "multimodal":
             return inputs.get("token_type_ids", [])
 
-        assert_never(inputs)
+        assert_never(inputs)  # type: ignore[arg-type]
 
     @cached_property
     def prompt_embeds(self) -> Optional[torch.Tensor]:
@@ -259,7 +277,7 @@ class SingletonInputsAdapter:
         if inputs["type"] == "token" or inputs["type"] == "multimodal":
             return None
 
-        assert_never(inputs)
+        assert_never(inputs)  # type: ignore[arg-type]
 
     @cached_property
     def multi_modal_data(self) -> "MultiModalDataDict":
@@ -271,7 +289,32 @@ class SingletonInputsAdapter:
         if inputs["type"] == "multimodal":
             return inputs.get("mm_kwargs", {})
 
-        assert_never(inputs)
+        assert_never(inputs)  # type: ignore[arg-type]
+
+    @cached_property
+    def multi_modal_inputs(self) -> Union[Dict, "MultiModalKwargs"]:
+        inputs = self.inputs
+
+        if inputs["type"] == "token":
+            return inputs.get("multi_modal_inputs", {})
+
+        if inputs["type"] == "multimodal":
+            return inputs.get("mm_kwargs", {})
+
+        assert_never(inputs)  # type: ignore[arg-type]
+
+    @cached_property
+    def multi_modal_hashes(self) -> List[str]:
+        inputs = self.inputs
+
+        if inputs["type"] == "token":
+            return inputs.get("multi_modal_hashes", [])
+
+        if inputs["type"] == "multimodal":
+            # only the case when we use MultiModalInputs
+            return inputs.get("mm_hashes", [])  # type: ignore[return-value]
+
+        assert_never(inputs)  # type: ignore[arg-type]
 
     @cached_property
     def multi_modal_placeholders(self) -> "MultiModalPlaceholderDict":
@@ -283,7 +326,7 @@ class SingletonInputsAdapter:
         if inputs["type"] == "multimodal":
             return inputs.get("mm_placeholders", {})
 
-        assert_never(inputs)
+        assert_never(inputs)  # type: ignore[arg-type]
 
     @cached_property
     def mm_processor_kwargs(self) -> Dict[str, Any]:
@@ -295,7 +338,7 @@ class SingletonInputsAdapter:
         if inputs["type"] == "multimodal":
             return {}
 
-        assert_never(inputs)
+        assert_never(inputs)  # type: ignore[arg-type]
 
 
 ProcessorInputs = Union[DecoderOnlyInputs, EncoderDecoderInputs]
@@ -358,34 +401,3 @@ def to_enc_dec_tuple_list(
     return [(enc_dec_prompt["encoder_prompt"],
              enc_dec_prompt["decoder_prompt"])
             for enc_dec_prompt in enc_dec_prompts]
-
-
-def __getattr__(name: str):
-    import warnings
-
-    if name == "PromptInput":
-        msg = ("PromptInput has been renamed to PromptType. "
-               "The original name will be removed in an upcoming version.")
-
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
-
-        return PromptType
-
-    if name == "LLMInputs":
-        msg = ("LLMInputs has been renamed to DecoderOnlyInputs. "
-               "The original name will be removed in an upcoming version.")
-
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
-
-        return DecoderOnlyInputs
-
-    if name == "EncoderDecoderLLMInputs":
-        msg = (
-            "EncoderDecoderLLMInputs has been renamed to EncoderDecoderInputs. "
-            "The original name will be removed in an upcoming version.")
-
-        warnings.warn(DeprecationWarning(msg), stacklevel=2)
-
-        return EncoderDecoderInputs
-
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

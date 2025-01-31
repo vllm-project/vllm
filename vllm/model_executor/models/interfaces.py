@@ -7,7 +7,7 @@ from typing_extensions import TypeIs, TypeVar
 from vllm.logger import init_logger
 from vllm.utils import supports_kw
 
-from .interfaces_base import is_embedding_model
+from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
@@ -36,6 +36,17 @@ class SupportsMultiModal(Protocol):
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.
+
+        The output embeddings must be one of the following formats:
+    
+        - A list or tuple of 2D tensors, where each tensor corresponds to
+          each input multimodal data item (e.g, image).
+        - A single 3D tensor, with the batch dimension grouping the 2D tensors.
+
+        Note:
+            The returned multimodal embeddings must be in the same order as
+            the appearances of their corresponding multimodal data item in the
+            input prompt.
         """
         ...
 
@@ -50,6 +61,7 @@ class SupportsMultiModal(Protocol):
     ) -> torch.Tensor:
         ...
 
+    @overload
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
@@ -359,6 +371,43 @@ def is_attention_free(
 
 
 @runtime_checkable
+class IsHybrid(Protocol):
+    """The interface required for all models like Jamba that have both
+    attention and mamba blocks, indicates that 
+    hf_config has 'layers_block_type'"""
+
+    is_hybrid: ClassVar[Literal[True]] = True
+    """
+        A flag that indicates this model has both mamba and attention blocks
+        , also indicates that the model's hf_config has 
+        'layers_block_type' """
+
+
+@runtime_checkable
+class _IsHybridType(Protocol):
+    is_hybrid: ClassVar[Literal[True]]
+
+
+@overload
+def is_hybrid(model: object) -> TypeIs[IsHybrid]:
+    ...
+
+
+@overload
+def is_hybrid(model: Type[object]) -> TypeIs[Type[IsHybrid]]:
+    ...
+
+
+def is_hybrid(
+    model: Union[Type[object], object]
+) -> Union[TypeIs[Type[IsHybrid]], TypeIs[IsHybrid]]:
+    if isinstance(model, type):
+        return isinstance(model, _IsHybridType)
+
+    return isinstance(model, IsHybrid)
+
+
+@runtime_checkable
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 
@@ -389,4 +438,4 @@ def _supports_cross_encoding(
 def supports_cross_encoding(
     model: Union[Type[object], object],
 ) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
-    return is_embedding_model(model) and _supports_cross_encoding(model)
+    return is_pooling_model(model) and _supports_cross_encoding(model)

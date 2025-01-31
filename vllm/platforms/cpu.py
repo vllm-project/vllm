@@ -1,4 +1,5 @@
-from typing import TYPE_CHECKING
+import os
+from typing import TYPE_CHECKING, Optional
 
 import psutil
 import torch
@@ -19,6 +20,7 @@ logger = init_logger(__name__)
 
 class CpuPlatform(Platform):
     _enum = PlatformEnum.CPU
+    device_name: str = "cpu"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
 
@@ -27,14 +29,21 @@ class CpuPlatform(Platform):
         return "cpu"
 
     @classmethod
-    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool) -> str:
         if selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
-        return _Backend.TORCH_SDPA
+        logger.info("Using Torch SDPA backend.")
+        return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         return psutil.virtual_memory().total
+
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        return False
 
     @classmethod
     def inference_mode(cls):
@@ -45,7 +54,7 @@ class CpuPlatform(Platform):
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if not model_config.enforce_eager:
             logger.warning(
@@ -54,6 +63,9 @@ class CpuPlatform(Platform):
             model_config.enforce_eager = True
 
         cache_config = vllm_config.cache_config
+
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
 
@@ -93,3 +105,38 @@ class CpuPlatform(Platform):
                     "vllm.worker.cpu_worker.CPUWorker"
             else:
                 parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
+
+        assert vllm_config.device_config.device_type == "cpu"
+
+        #
+        # Environment variables for CPU executor
+        #
+
+        # Disable torch async compiling which won't work with daemonic processes
+        os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+
+        # Intel OpenMP setting
+        ld_prealod_str = os.getenv("LD_PRELOAD", "")
+        if "libiomp5.so" in ld_prealod_str:
+            # The time(milliseconds) that a thread should wait after
+            # completing the execution of a parallel region, before sleeping.
+            os.environ['KMP_BLOCKTIME'] = "1"
+            # Prevents the CPU to run into low performance state
+            os.environ['KMP_TPAUSE'] = "0"
+            # Provides fine granularity parallelism
+            os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
+            os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
+            os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
+
+        # To hint IPEX uses shared memory based AllReduce
+        os.environ["LOCAL_WORLD_SIZE"] = str(
+            vllm_config.parallel_config.tensor_parallel_size)
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        logger.warning("Pin memory is not supported on CPU.")
+        return False
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_cpu.PunicaWrapperCPU"

@@ -8,10 +8,10 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.worker.embedding_model_runner import (
-    ModelInputForGPUWithPoolingMetadata)
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 from vllm.worker.multi_step_model_runner import StatefulModelInput
+from vllm.worker.pooling_model_runner import (
+    ModelInputForGPUWithPoolingMetadata)
 
 
 class MockAttentionBackend(AttentionBackend):
@@ -75,6 +75,7 @@ def test_model_runner_input():
         slot_mapping=torch.zeros(1),
         num_orig_input_tokens_tensor=torch.tensor([10]),
         multi_modal_placeholder_index_maps=None,
+        enable_kv_scales_calculation=True,
     )
     model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.ones(10),
@@ -128,6 +129,7 @@ def test_embedding_model_runner_input():
         slot_mapping=torch.zeros(1),
         num_orig_input_tokens_tensor=torch.tensor([10]),
         multi_modal_placeholder_index_maps=None,
+        enable_kv_scales_calculation=True,
     )
     model_input = ModelInputForGPUWithPoolingMetadata(
         input_tokens=torch.ones(10),
@@ -180,6 +182,7 @@ def test_multi_step_model_runner_input():
         slot_mapping=torch.zeros(1),
         num_orig_input_tokens_tensor=torch.tensor([10]),
         multi_modal_placeholder_index_maps=None,
+        enable_kv_scales_calculation=True,
     )
     frozen_model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.ones(10),

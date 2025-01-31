@@ -19,7 +19,6 @@ from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -109,7 +108,8 @@ class MistralToolParser(ToolParser):
                     function=FunctionCall(
                         name=raw_function_call["name"],
                         # function call args are JSON but as a string
-                        arguments=json.dumps(raw_function_call["arguments"])))
+                        arguments=json.dumps(raw_function_call["arguments"],
+                                             ensure_ascii=False)))
                 for raw_function_call in function_call_arr
             ]
 
@@ -199,7 +199,7 @@ class MistralToolParser(ToolParser):
                     diff: Union[str, None] = current_tool_call.get("arguments")
 
                     if diff:
-                        diff = json.dumps(diff).replace(
+                        diff = json.dumps(diff, ensure_ascii=False).replace(
                             self.streamed_args_for_tool[self.current_tool_id],
                             "")
                         delta = DeltaMessage(tool_calls=[
@@ -232,7 +232,7 @@ class MistralToolParser(ToolParser):
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       type="function",
-                                      id=f"chatcmpl-tool-{random_uuid()}",
+                                      id=MistralToolCall.generate_random_id(),
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
                                               exclude_none=True))
@@ -250,6 +250,8 @@ class MistralToolParser(ToolParser):
                 cur_arguments = current_tool_call.get("arguments")
 
                 new_text = delta_text.replace("\'", "\"")
+                if ('"}' in new_text):
+                    new_text = new_text[:new_text.rindex('"}')]
 
                 if not cur_arguments and not prev_arguments:
 
@@ -260,12 +262,15 @@ class MistralToolParser(ToolParser):
                         "mid-arguments")
                     delta = None
                 elif cur_arguments and not prev_arguments:
-                    cur_arguments_json = json.dumps(cur_arguments)
+                    cur_arguments_json = json.dumps(cur_arguments,
+                                                    ensure_ascii=False)[:-2]
                     logger.debug("finding %s in %s", new_text,
                                  cur_arguments_json)
 
+                    if (new_text not in cur_arguments_json):
+                        return None
                     arguments_delta = cur_arguments_json[:cur_arguments_json.
-                                                         index(new_text) +
+                                                         rindex(new_text) +
                                                          len(new_text)]
                     logger.debug("First tokens in arguments received: %s",
                                  arguments_delta)
@@ -279,8 +284,10 @@ class MistralToolParser(ToolParser):
                         self.current_tool_id] += arguments_delta
 
                 elif cur_arguments and prev_arguments:
-                    cur_args_json = json.dumps(cur_arguments)
-                    prev_args_json = json.dumps(prev_arguments)
+                    cur_args_json = json.dumps(cur_arguments,
+                                               ensure_ascii=False)
+                    prev_args_json = json.dumps(prev_arguments,
+                                                ensure_ascii=False)
                     logger.debug("Searching for diff between \n%s\n%s",
                                  cur_args_json, prev_args_json)
 

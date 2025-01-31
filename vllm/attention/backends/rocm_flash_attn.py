@@ -7,6 +7,7 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
@@ -153,6 +154,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
             multi_modal_placeholder_index_maps=self.
             multi_modal_placeholder_index_maps,
+            enable_kv_scales_calculation=self.enable_kv_scales_calculation,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             num_orig_input_tokens_tensor=self.
@@ -185,6 +187,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
             multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=True,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             num_orig_input_tokens_tensor=self.
@@ -344,6 +347,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
@@ -403,6 +407,12 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 self.attn_func = _sdpa_attention
                 logger.debug("Using naive attention in ROCmBackend")
 
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "ROCmFlashAttentionImpl")
+
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
         """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
         tokens, n_kv_heads, head_dim = x.shape
@@ -413,14 +423,13 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
-        attn_type: str = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -435,14 +444,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "ROCmFlashAttentionImpl")
-
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -463,8 +466,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                k_scale,
-                v_scale,
+                layer._k_scale,
+                layer._v_scale,
             )
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
@@ -572,8 +575,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                     self.sliding_window[0],
-                    k_scale,
-                    v_scale,
+                    layer._k_scale,
+                    layer._v_scale,
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -618,8 +621,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    k_scale,
-                    v_scale,
+                    layer._k_scale,
+                    layer._v_scale,
                 )
             else:
                 output[num_prefill_tokens:] = PagedAttention.forward_decode(
@@ -633,8 +636,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.num_kv_heads,
                     self.scale,
                     self.alibi_slopes,
-                    k_scale,
-                    v_scale,
+                    layer._k_scale,
+                    layer._v_scale,
                 )
 
         # Reshape the output tensor.

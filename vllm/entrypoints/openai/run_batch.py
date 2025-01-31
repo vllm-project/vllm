@@ -16,11 +16,14 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
                                               BatchResponseData,
                                               ChatCompletionResponse,
-                                              EmbeddingResponse, ErrorResponse)
+                                              EmbeddingResponse, ErrorResponse,
+                                              ScoreResponse)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
-from vllm.entrypoints.openai.serving_engine import BaseModelPath
+from vllm.entrypoints.openai.serving_models import (BaseModelPath,
+                                                    OpenAIServingModels)
+from vllm.entrypoints.openai.serving_score import OpenAIServingScores
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
@@ -166,7 +169,8 @@ async def run_request(serving_engine_func: Callable,
                       tracker: BatchProgressTracker) -> BatchRequestOutput:
     response = await serving_engine_func(request.body)
 
-    if isinstance(response, (ChatCompletionResponse, EmbeddingResponse)):
+    if isinstance(response,
+                  (ChatCompletionResponse, EmbeddingResponse, ScoreResponse)):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
@@ -213,26 +217,37 @@ async def main(args):
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
     # Create the openai serving objects.
+    openai_serving_models = OpenAIServingModels(
+        engine_client=engine,
+        model_config=model_config,
+        base_model_paths=base_model_paths,
+        lora_modules=None,
+        prompt_adapters=None,
+    )
     openai_serving_chat = OpenAIServingChat(
         engine,
         model_config,
-        base_model_paths,
+        openai_serving_models,
         args.response_role,
-        lora_modules=None,
-        prompt_adapters=None,
         request_logger=request_logger,
         chat_template=None,
         chat_template_content_format="auto",
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-    ) if model_config.task == "generate" else None
+    ) if model_config.runner_type == "generate" else None
     openai_serving_embedding = OpenAIServingEmbedding(
         engine,
         model_config,
-        base_model_paths,
+        openai_serving_models,
         request_logger=request_logger,
         chat_template=None,
         chat_template_content_format="auto",
-    ) if model_config.task == "embedding" else None
+    ) if model_config.task == "embed" else None
+    openai_serving_scores = (OpenAIServingScores(
+        engine,
+        model_config,
+        openai_serving_models,
+        request_logger=request_logger,
+    ) if model_config.task == "score" else None)
 
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)
@@ -275,12 +290,26 @@ async def main(args):
 
             response_futures.append(run_request(handler_fn, request, tracker))
             tracker.submitted()
+        elif request.url == "/v1/score":
+            handler_fn = (None if openai_serving_scores is None else
+                          openai_serving_scores.create_score)
+            if handler_fn is None:
+                response_futures.append(
+                    make_async_error_request_output(
+                        request,
+                        error_msg="The model does not support Scores API",
+                    ))
+                continue
+
+            response_futures.append(run_request(handler_fn, request, tracker))
+            tracker.submitted()
         else:
             response_futures.append(
                 make_async_error_request_output(
                     request,
-                    error_msg="Only /v1/chat/completions and "
-                    "/v1/embeddings are supported in the batch endpoint.",
+                    error_msg=
+                    "Only /v1/chat/completions, /v1/embeddings, and /v1/score "
+                    "are supported in the batch endpoint.",
                 ))
 
     with tracker.pbar():
