@@ -1,6 +1,5 @@
-import itertools
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -180,7 +179,7 @@ class LogprobsProcessor:
         # [num_tok, num_lps] -> [num_tok * num_lps]
         decoded_tokens = convert_ids_list_to_tokens(
             self.tokenizer,
-            token_ids.tolist()) if need_non_prompt_logprobs else []
+            token_ids[0].squeeze().tolist()) if need_non_prompt_logprobs else []
 
         # Make Logprob for each token.
         num_chunk_tokens, decoded_tokens_stride = prompt_logprobs.shape
@@ -254,33 +253,67 @@ class LogprobsProcessor:
         logprobs: List[float],
         logprob_token_ids: List[int],
         decoded_tokens: List[str],
-        ranks: Iterable[int],
+        num_logprobs: int,
+        special_token_id_logprob: Optional[Tuple[int, Logprob]] = None,
     ) -> Dict[int, Logprob]:
         """Make a Logprob dictionary for a position in the sequence.
         
         Returns a dictionary mapping top token ids to Logprob data
         structures. Each Logprob data structure includes log probability,
-        decoded token, and rank.
+        decoded token, and rank (index+1). The size of the dict returned
+        will be be num_logprobs.
+
+        If the special token (sampled token or prompt token associated
+        with the current sequence position) is not among the top logprobs,
+        then special_token_id_logprob = (special_token_id,logprob) must be
+        provided; an additional dictionary entry mapping special_token_id -> 
+        logprob will be injected with rank equal to num_logprobs + 1 
+        (special_token_id must be lowest-rank if we are having to inject it.)
+        Note that the size of the dict returned will then be num_logprobs + 1.
 
         Args:
           logprobs: list of log probabilities
           logprob_token_ids: list of top token ids
           decoded_tokens: list of decoded top tokens
-          ranks: ranks for each of the tokens
+          num_logprobs: number of top tokens
+          special_token_id_logprob: (optional) tuple of
+                                    (special_token_id,logprob) associated with
+                                    sampled token or prompt token
 
         Returns:
-          Dict[top token id, Logprob]
+          Dict[top token id, Logprob]; num_logprobs or num_logprobs+1
+          keys in total
+        
         """
+        if num_logprobs == 0:
+            # "Zero" logprobs means that we only return
+            # sampled or prompt token logprobs
+            assert special_token_id_logprob is not None
+            logprobs_dict = {}
+        else:
+            # Sampler uses torch.topk() which sorts so the
+            # index in lists is equivalent to rank-1.
+            logprobs_dict = {
+                logprob_token_ids[idx]:
+                Logprob(
+                    logprob=logprobs[idx],
+                    rank=idx + 1,
+                    decoded_token=decoded_tokens[idx],
+                )
+                for idx in range(num_logprobs)
+            }
 
-        return {
-            token_id: Logprob(
-                logprob=logprob,
-                rank=rank,
-                decoded_token=token,
-            )
-            for token_id, logprob, rank, token in zip(
-                logprob_token_ids, logprobs, ranks, decoded_tokens)
-        }
+        # Inject special token Logprob if necessary.
+        # `rank` field must already be set.
+        if special_token_id_logprob:
+            special_token_id = special_token_id_logprob[0]
+            special_logprob_obj = special_token_id_logprob[1]
+            assert special_token_id is not None
+            assert special_logprob_obj is not None
+            assert special_logprob_obj.rank is not None
+            logprobs_dict[special_token_id] = special_logprob_obj
+
+        return logprobs_dict
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
         """
