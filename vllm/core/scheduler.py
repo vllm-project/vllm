@@ -357,17 +357,17 @@ class PartialPrefillMetadata:
         we limit the number of long requests and only accept
         shorter requests from the queue while running them
         concurrently"""
-        return (seq_group.first_seq.get_num_new_tokens() >
-                self.scheduler_config.long_prefill_token_threshold
-                and self.long_prefills >=
-                self.scheduler_config.max_long_partial_prefills
+        return (seq_group.first_seq.get_num_new_tokens()
+                > self.scheduler_config.long_prefill_token_threshold
+                and self.long_prefills
+                >= self.scheduler_config.max_long_partial_prefills
                 and self.scheduler_config.max_num_partial_prefills > 1)
 
     def increment_partial_prefills(self, seq_group: SequenceGroup) -> None:
         # When a new prefill is scheduled, we need to know if it is a
         # long request
-        if (seq_group.first_seq.get_num_new_tokens() >
-                self.scheduler_config.long_prefill_token_threshold):
+        if (seq_group.first_seq.get_num_new_tokens()
+                > self.scheduler_config.long_prefill_token_threshold):
             self.long_prefills += 1
 
     @classmethod
@@ -390,8 +390,8 @@ class PartialPrefillMetadata:
         for sg in running:
             if sg.first_seq.data.stage == SequenceStage.PREFILL:
                 prefills += 1
-                if (sg.first_seq.get_num_new_tokens() >
-                        scheduler_config.long_prefill_token_threshold):
+                if (sg.first_seq.get_num_new_tokens()
+                        > scheduler_config.long_prefill_token_threshold):
                     long_prefills += 1
 
         for sg in waiting:
@@ -403,10 +403,10 @@ class PartialPrefillMetadata:
 
             # Don't count long requests from the waiting queue if we aren't
             # going to schedule them anyway
-            if (sg.first_seq.get_num_new_tokens() >
-                    scheduler_config.long_prefill_token_threshold):
-                if (long_prefills + waiting_long_prefills >=
-                        scheduler_config.max_long_partial_prefills):
+            if (sg.first_seq.get_num_new_tokens()
+                    > scheduler_config.long_prefill_token_threshold):
+                if (long_prefills + waiting_long_prefills
+                        >= scheduler_config.max_long_partial_prefills):
                     continue
                 waiting_long_prefills += 1
             prefills += 1
@@ -714,8 +714,8 @@ class Scheduler:
             # to process the final tokens. The check below avoids this extra
             # decode run when the model max len is reached, in order to avoid
             # a memory overflow.
-            if (self.use_async_output_proc and seq_group.seqs[0].get_len() >
-                    self.scheduler_config.max_model_len):
+            if (self.use_async_output_proc and seq_group.seqs[0].get_len()
+                    > self.scheduler_config.max_model_len):
                 self._async_stopped.append(seq_group)
                 continue
 
@@ -1554,9 +1554,9 @@ class Scheduler:
                     # between engine and worker.
                     # the subsequent comms can still use delta, but
                     # `multi_modal_data` will be None.
-                    multi_modal_data=(seq_group.multi_modal_data if
-                                      scheduler_outputs.num_prefill_groups > 0
-                                      else None),
+                    multi_modal_data=(seq_group.multi_modal_data
+                                      if scheduler_outputs.num_prefill_groups
+                                      > 0 else None),
                     multi_modal_placeholders=(
                         seq_group.multi_modal_placeholders
                         if scheduler_outputs.num_prefill_groups > 0 else None),
