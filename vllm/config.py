@@ -889,7 +889,7 @@ class ModelConfig:
         return self.multimodal_config
 
     def try_get_generation_config(self) -> Dict[str, Any]:
-        if self.generation_config in ("auto", "ignore"):
+        if self.generation_config in ("auto", "vllm"):
             config = try_get_generation_config(
                 self.model,
                 trust_remote_code=self.trust_remote_code,
@@ -910,14 +910,13 @@ class ModelConfig:
         """
         This method returns a dictionary containing the parameters
         that differ from the default sampling parameters. If
-        `generation_config` is `"ignore"`, an empty dictionary is returned.
+        `generation_config` is `"vllm"`, an empty dictionary is returned.
 
         Returns:
             Dict[str, Any]: A dictionary with the differing sampling
-            parameters, if `generation_config` is `"ignore"` an empty
-            dictionary.
+            parameters, if `generation_config` is `"vllm"` an empty dictionary.
         """
-        if self.generation_config == "ignore":
+        if self.generation_config == "vllm":
             config = {}
         else:
             config = self.try_get_generation_config()

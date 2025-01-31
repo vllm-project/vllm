@@ -937,7 +937,7 @@ class EngineArgs:
             default="auto",
             help="The folder path to the generation config. "
             "Defaults to 'auto', the generation config will be loaded from "
-            "model path. If set to 'ignore', no generation config is loaded, "
+            "model path. If set to 'vllm', no generation config is loaded, "
             "vLLM defaults will be used. If set to a folder path, the "
             "generation config will be loaded from the specified folder path. "
             "If `max_new_tokens` is specified in generation config, then "
