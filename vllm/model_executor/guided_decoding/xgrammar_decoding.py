@@ -307,8 +307,8 @@ class XGrammarLogitsProcessor:
         # Note: In this method, if the tensors have different dimensions
         # on CPU device fails, but on GPU it runs without error. Hence the
         # unsqueeze above for scores, to match the token bitmask shape
-        xgr.apply_token_bitmask_inplace(scores,
-                                        self.token_bitmask.to(scores.device))
+        xgr.apply_token_bitmask_inplace(
+            scores, self.token_bitmask.to(scores.device, non_blocking=True))
         if device_type != "cuda":
             scores = scores.to(dtype).to(device_type).squeeze()
 
