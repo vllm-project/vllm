@@ -36,39 +36,38 @@ def get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
     """
     if batch_logprobs_composition == "NONE":
         # No requests with sample or prompt logprobs
-        return [(None, None), (0, None), (None, 0), (0, 0)]
+        return [(None, None)]
     elif batch_logprobs_composition == "SAMPLE":
         # Requests requiring sample logprobs or no logprobs
         return [
             (None, None),
-            (None, 0),
             (0, None),
-            (0, 0),
             (5, None),
-            (3, 0),
+            (3, None),
         ]
     elif batch_logprobs_composition == "PROMPT":
         # Requests requiring prompt logprobs or no logprobs
         return [
+            (None, None),
             (None, 0),
-            (0, None),
-            (0, 0),
             (None, 6),
-            (0, 5),
+            (None, 5),
         ]
     elif batch_logprobs_composition == "SAMPLE_PROMPT":
         # Requests requiring either no logprobs, just
         # sample logprobs, just prompt logprobs, or
         # both sample and prompt logprobs
         return [
-            (None, 0),
+            (None, None),
             (0, None),
-            (0, 0),
             (5, None),
-            (3, 0),
+            (3, None),
+            (0, 3),
+            (6, 0),
             (6, 3),
             (None, 6),
-            (0, 5),
+            (None, 5),
+            (None, 0),
         ]
     else:
         raise ValueError("Invalid logprobs batch configuration for test.")

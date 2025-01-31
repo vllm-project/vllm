@@ -30,6 +30,9 @@ class CachedRequestState:
     num_computed_tokens: int
     output_token_ids: List[int]
 
+    mrope_positions: Optional[torch.Tensor] = None
+    mrope_position_delta: Optional[int] = None
+
     @property
     def num_tokens(self) -> int:
         return len(self.prompt_token_ids) + len(self.output_token_ids)
@@ -165,10 +168,6 @@ class InputBatch:
         # NOTE(rob): num_prompt_logprobs ONLY includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: Dict[str, int] = {}
-        # Dict mapping from partial request ID, to the ID of the token which
-        # immediately follows the last token processed in the current step.
-        # Only necessary for partial requests with prompt logprobs enabled.
-        self.cached_partial_req_peek_token_ids: Dict[str, torch.Tensor] = {}
 
     def add_request(
         self,
@@ -230,9 +229,9 @@ class InputBatch:
         if request.generator is not None:
             self.generators[req_index] = request.generator
 
-        if sampling_params.logprobs:
+        if sampling_params.logprobs is not None:
             self.num_logprobs[req_id] = sampling_params.logprobs
-        if sampling_params.prompt_logprobs:
+        if sampling_params.prompt_logprobs is not None:
             # FIXME(andy): handle prefix caching and preemption.
             # We currently get incorrect results if prompt logprobs
             # are requested and we get a cache hit.
@@ -431,9 +430,9 @@ class InputBatch:
                 and len(self.repetition_penalties_reqs) == 0)
 
     @property
-    def max_num_logprobs(self) -> int:
-        return max(self.num_logprobs.values()) if self.num_logprobs else 0
+    def max_num_logprobs(self) -> Optional[int]:
+        return max(self.num_logprobs.values()) if self.num_logprobs else None
 
     @property
     def no_prompt_logprob(self) -> bool:
-        return len(self.num_prompt_logprobs) == 0
+        return not self.num_prompt_logprobs

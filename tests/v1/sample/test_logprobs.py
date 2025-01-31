@@ -1,4 +1,5 @@
-from typing import List
+import itertools
+from typing import List, Tuple
 
 import pytest
 import torch
@@ -12,6 +13,54 @@ from vllm import SamplingParams
 from ...conftest import VllmRunner
 
 MODELS = ["facebook/opt-125m"]
+
+
+def _repeat_logprob_config(
+    test_prompts,
+    logprob_prompt_logprob_list: List[Tuple],
+) -> List[Tuple]:
+    """Ensure each test prompt has a logprob config.
+    
+    A logprob config specifies the optional (i.e.
+    may-be-`None`) number of sample logprobs and
+    the optional number of prompt logprobs.
+
+    If more test prompts than logprob configs are
+    provided, the provided logprob configs are
+    tiled to match the number of test prompts.
+
+    If fewer test prompts than logprob configs
+    are provided, the list of logprob configs
+    is truncated to match the number of test
+    prompts.
+
+    Otherwise, the list of logprob configs
+    is returned as-is.
+
+    Args:
+      test_prompts: list of prompts under test
+      logprob_prompt_logprob_list: list of
+                            (optional num sample logprob,
+                             optional num prompt logprob)
+                             tuples
+    
+    Returns:
+      List of
+      (optional num sample logprob,optional num prompt logprob)
+      tuples which is either identical to
+      `logprob_prompt_logprob_list`, or else repeats
+      `logprob_prompt_logprob_list` enough times to match the
+      number of `test_prompts`, or else is truncated to match
+      the number of `test_prompts`
+    """
+    num_test_prompts = len(test_prompts)
+    # Make sure there is a logprobs configuration for each test prompt
+    logprob_prompt_logprob_list = list(
+        itertools.islice(itertools.cycle(logprob_prompt_logprob_list),
+                         num_test_prompts))
+    # Now the number of prompts should match the number of sample params combos
+    assert num_test_prompts == len(logprob_prompt_logprob_list)
+    return logprob_prompt_logprob_list
 
 
 def _test_case_get_logprobs_and_prompt_logprobs(
@@ -48,17 +97,9 @@ def _test_case_get_logprobs_and_prompt_logprobs(
     # (different logprobs/prompt logprobs combos)
     logprob_prompt_logprob_list = get_test_batch(batch_logprobs_composition)
 
-    # We rely on there being more prompts than combinations of
-    # logprobs & prompt logprobs which we want to test
-    assert len(test_prompts) >= len(logprob_prompt_logprob_list)
-    # Make sure there is a sample params for each prompt
-    num_extra_params = len(test_prompts) - len(logprob_prompt_logprob_list)
-    if num_extra_params > 0:
-        logprob_prompt_logprob_list = (
-            logprob_prompt_logprob_list +
-            logprob_prompt_logprob_list[-num_extra_params:])
-    # Now the number of prompts should match the number of sample params combos
-    assert len(test_prompts) == len(logprob_prompt_logprob_list)
+    # Ensure that each test prompt has a logprob config for testing
+    logprob_prompt_logprob_list = _repeat_logprob_config(
+        test_prompts, logprob_prompt_logprob_list)
     # Generate SamplingParams
     vllm_sampling_params = [
         SamplingParams(max_tokens=max_tokens,
@@ -96,7 +137,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
                 vllm_result.outputs[0].token_ids == hf_output[0])
 
         # Validate sample logprobs
-        if num_top_logprobs is not None and num_top_logprobs > 0:
+        if num_top_logprobs is not None:
             assert num_top_logprobs is not None
             # Confirm that the structure of the sample logprobs in the result is
             # correct
@@ -161,8 +202,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
             assert vllm_result.outputs[0].logprobs is None
 
         # Validate prompt logprobs
-        if (num_top_prompt_logprobs is not None
-                and num_top_prompt_logprobs > 0):
+        if num_top_prompt_logprobs is not None:
             # Confirm that structure of prompt logprobs in result is correct
             assert vllm_result.prompt_logprobs is not None
             # - The first prompt logprob is always None
@@ -308,3 +348,49 @@ def test_none_logprobs(vllm_runner, model, example_prompts, monkeypatch):
         assert results_logprobs_none[i].outputs[0].cumulative_logprob is None
         # Check prompt logprobs are None
         assert results_logprobs_none[i].prompt_logprobs is None
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_zero_logprobs(vllm_runner, model, example_prompts, monkeypatch):
+    """Engine should return sampled token and prompt token logprobs
+    
+    Args:
+      vllm_runner: vLLM engine runner fixture
+      model: model name
+      example_prompts: list of example prompts (test fixture)
+      monkeypatch: supports editing env vars and rolling back changes
+                   after the test
+    """
+    override_backend_env_variable(monkeypatch, "FLASH_ATTN")
+
+    max_num_seqs = 256
+    max_num_batched_tokens = None
+    max_tokens = 5
+
+    with vllm_runner(
+            model,
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+    ) as vllm_model:
+        sampling_params_logprobs_zero = SamplingParams(max_tokens=max_tokens,
+                                                       logprobs=0,
+                                                       prompt_logprobs=0,
+                                                       temperature=0.0)
+        results_logprobs_zero = vllm_model.model.generate(
+            example_prompts, sampling_params=sampling_params_logprobs_zero)
+
+    for i in range(len(results_logprobs_zero)):
+        # Check that there is one sample logprob dict for each
+        # sample token
+        logprobs = results_logprobs_zero[i].outputs[0].logprobs
+        prompt_logprobs = results_logprobs_zero[i].prompt_logprobs
+        sampled_token_ids = results_logprobs_zero[i].outputs[0].token_ids
+        prompt_token_ids = results_logprobs_zero[i].prompt_token_ids
+        assert logprobs is not None
+        assert len(sampled_token_ids) == len(logprobs)
+        assert results_logprobs_zero[i].outputs[
+            0].cumulative_logprob is not None
+        # Check that there is one prompt logprob dict for each
+        # prompt token
+        assert prompt_logprobs is not None
+        assert len(prompt_token_ids) == len(prompt_logprobs)

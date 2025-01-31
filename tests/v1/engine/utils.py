@@ -1,21 +1,22 @@
 """Engine test utils"""
 import random
 from dataclasses import dataclass
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
-from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.engine import EngineCoreOutput
+
+GeneralTokenizerType = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
 # Number of sample logprobs to request when testing sample logprobs
-NUM_SAMPLE_LOGPROBS = 5
+NUM_SAMPLE_LOGPROBS_UNDER_TEST = 5
 # Number of prompt logprobs to request when testing prompt logprobs
-NUM_PROMPT_LOGPROBS = 7
+NUM_PROMPT_LOGPROBS_UNDER_TEST = 7
 
 TOKENIZER_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
 
@@ -80,11 +81,11 @@ def _create_random_top_logprob_test_matrix(
 
 
 def _create_random_top_token_test_vector(
-    num_logprobs: int,
-    lower: int,
-    upper: int,
-    sampled_token_id: int,
-) -> torch.Tensor:
+        num_logprobs: int,
+        lower: int,
+        upper: int,
+        sampled_token_id: int,
+        adjust_num_logprobs: bool = True) -> Tuple[torch.Tensor, int]:
     """Create a random vector of top logprob token indices
 
     Use to create fake sample logprobs for testing. The sampled token
@@ -109,9 +110,13 @@ def _create_random_top_token_test_vector(
       1D length-x torch Tensor of token ids where x is
       `num_logprobs+1` if `adjust_num_logprobs` and
       `num_logprobs` otherwise
+      sampled_token_rank: the rank of sampled_token_id in the vocab
+                          vector when sorted in descending order by
+                          logprob
     """
+
     # Calculate the final number of logprobs required
-    total_logprobs = num_logprobs + 1
+    total_logprobs = num_logprobs + 1 if adjust_num_logprobs else num_logprobs
 
     # Generate random indices using torch
     choice_tensor = torch.randperm(upper - lower)[:total_logprobs] + lower
@@ -119,7 +124,15 @@ def _create_random_top_token_test_vector(
     # Ensure the sampled token ID is included in the tensor
     choice_tensor[0] = sampled_token_id
 
-    return choice_tensor
+    # Check if the sampled_token_id occurs in choice_tensor[1:]
+    if sampled_token_id in choice_tensor[1:]:
+        sampled_token_rank = (choice_tensor[1:] == sampled_token_id).nonzero(
+            as_tuple=True)[0].item()
+    else:
+        # If not found, assign a random int between num_logprobs and 50700
+        sampled_token_rank = random.randint(num_logprobs, 50700)
+
+    return choice_tensor, sampled_token_rank
 
 
 def _create_random_top_token_test_matrix(
@@ -127,7 +140,7 @@ def _create_random_top_token_test_matrix(
     lower: int,
     upper: int,
     tokens_list: List[int],
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Create a random matrix of top logprob token indices
 
     Use to create fake prompt logprobs for testing.
@@ -142,20 +155,56 @@ def _create_random_top_token_test_matrix(
       upper: upper range of token ids
 
     Returns:
-      2D num_tokens x num_logprobs torch Tensor of token ids
+      Tuple containing:
+      - 2D num_tokens x num_logprobs+1 torch Tensor of token ids
+      - 1D tensor of ranks of prompt tokens in their respective
+        rows, or random values
     """
     num_elements = shape[0] * shape[1]
     choice_tensor = torch.randperm(upper - lower)[:num_elements] + lower
-    return torch.cat((torch.tensor(tokens_list, dtype=torch.int).unsqueeze(-1),
-                      choice_tensor.view(shape)),
-                     dim=1)
+    matrix = torch.cat(
+        (torch.tensor(tokens_list, dtype=torch.int).unsqueeze(-1),
+         choice_tensor.view(shape)),
+        dim=1)
+
+    # Initialize the tensor for storing the ranks
+    prompt_token_ranks = torch.empty(shape[0], dtype=torch.int)
+
+    # Iterate over each row to check presence of
+    # tokens_list[rdx] and determine its index
+    for rdx in range(shape[0]):
+        row = matrix[rdx,
+                     1:]  # Skip the first column as it contains the token list
+        token_index = (row == tokens_list[rdx]).nonzero(as_tuple=True)[0]
+        if token_index.numel() > 0:
+            prompt_token_ranks[rdx] = token_index.item()
+        else:
+            prompt_token_ranks[rdx] = random.randint(shape[1], 50700)
+
+    return matrix, prompt_token_ranks
+
+
+def decode_token(
+    tok_id: int,
+    tokenizer: PreTrainedTokenizer,
+) -> str:
+    """Reproduce the process of detokenizing a token for testing purposes.
+
+    Args:
+      tok_id: token id to detokenize
+      tokenizer: tokenizer to use for detokenization
+
+    Returns:
+      string representation of token
+    """
+    return tokenizer.convert_ids_to_tokens(tok_id)
 
 
 def generate_dummy_sample_logprobs(
     sampled_tokens_list: List,
     num_logprobs: int,
     tokenizer: PreTrainedTokenizer,
-) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+) -> List[Tuple[List[float], List[int], int]]:
     """Generate dummy sample logprobs
 
     Generate a test data structure which imitates the list of sample logprobs
@@ -167,26 +216,42 @@ def generate_dummy_sample_logprobs(
       tokenizer: model tokenizer to use for detokenization
 
     Returns
-      List of (logprobs vector, top token ids vector) torch Tensor tuples; each
-      pair of vectors have the same length which is either `num_logprobs` or
-      `num_logprobs+1`
+      List of (logprobs vector, top token ids vector, sampled token rank)
+      Python lists tuples; in each tuple the logprobs and top token ids
+      vectors have the same length which is either `num_logprobs` or
+      `num_logprobs+1`. Sampled token rank is the rank (index+1) of the
+      sampled token within the vocab vector when sorted by logprob in
+      descending order.
     """
     res = []
     for sampled_token_id in sampled_tokens_list:
+        (
+            token_vector,
+            sampled_token_rank,
+        ) = _create_random_top_token_test_vector(num_logprobs, 0,
+                                                 len(tokenizer.vocab) - 1,
+                                                 sampled_token_id)
+
         res.append(
             (_create_random_top_logprob_test_vector(num_logprobs + 1, -100, 0),
-             _create_random_top_token_test_vector(num_logprobs, 0,
-                                                  len(tokenizer.vocab) - 1,
-                                                  sampled_token_id)))
-    return res
+             token_vector, sampled_token_rank))
+
+    # Convert tensors in the list tuples to Python lists
+    res_list_format = [
+        (log_probs_tensor.tolist(), token_ids_tensor.tolist(),
+         sampled_token_rank)
+        for log_probs_tensor, token_ids_tensor, sampled_token_rank in res
+    ]
+
+    return res_list_format
 
 
-def generate_dummy_prompt_logprobs(
+def generate_dummy_prompt_logprobs_tensors(
     prompt_tokens_list: List,
     num_logprobs: int,
     tokenizer: PreTrainedTokenizer,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Generate dummy prompt logprobs
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Generate dummy prompt logprobs tensors
 
     Generate a test data structure which imitates the torch Tensors of prompt
     logprobs which would be assembled in the engine core during chunked
@@ -211,90 +276,21 @@ def generate_dummy_prompt_logprobs(
     # `prompt_tokens_list[1:]` to the dummy token ids, just as the engine
     # would.
     num_prompt_logprobs = len(prompt_tokens_list) - 1
+    (
+        token_vector,
+        prompt_token_ranks,
+    ) = _create_random_top_token_test_matrix(
+        (num_prompt_logprobs, num_logprobs), 0,
+        len(tokenizer.vocab) - 1, prompt_tokens_list[1:])
     return (_create_random_top_logprob_test_matrix(
-        (num_prompt_logprobs, num_logprobs + 1), -100, 0),
-            _create_random_top_token_test_matrix(
-                (num_prompt_logprobs, num_logprobs), 0,
-                len(tokenizer.vocab) - 1, prompt_tokens_list[1:]))
-
-
-def _decode_token(
-    tok_id: int,
-    tokenizer: PreTrainedTokenizer,
-) -> str:
-    """Reproduce the process of detokenizing a token for testing purposes.
-
-    Args:
-      tok_id: token id to detokenize
-      tokenizer: tokenizer to use for detokenization
-
-    Returns:
-      string representation of token
-    """
-    return tokenizer.batch_decode([tok_id])[0]
-
-
-def validate_requests_logprobs(
-    requests: List[EngineCoreRequest],
-    request_outputs: List[RequestOutput],
-    tokenizer: PreTrainedTokenizer,
-) -> None:
-    """Validate detokenizer logprobs output
-
-    For each sample or prompt logprob, the logprob's
-    `decoded_token` member should match the result of
-    detokenizing the logprob's token id.
-
-    Fails upon mismatch.
-
-    Requires that `requests` and `request_outputs` have
-    the same ordering with respect to requests (i.e.
-    the data structure pertaining to a given request
-    id appears at the same index in both lists and
-    both lists have the same length.)
-
-    Args:
-      requests: list of detokenizer input requests
-      request_outputs: list of detokenizer outputs
-    """
-    for req, req_out in zip(requests, request_outputs):
-        logprobs = req.sampling_params.logprobs
-        prompt_logprobs = req.sampling_params.prompt_logprobs
-        if logprobs is not None and logprobs > 0:
-            # Validate sample logprobs
-            for comp in req_out.outputs:
-                # For each completion
-                for lp_dict in comp.logprobs:
-                    # For each sampled token offset
-                    for tok_id, lp in lp_dict.items():
-                        # For each top logprob,
-                        # compare each `decoded_token` to the result
-                        # of decoding the logprob's token id
-                        assert lp.decoded_token == _decode_token(
-                            tok_id,
-                            tokenizer), "sample logprob decoded token mismatch"
-
-        if prompt_logprobs is not None and prompt_logprobs > 0 and len(
-                req_out.prompt_logprobs) > 0:
-            # Validate prompt logprobs
-            assert req_out.prompt_logprobs[
-                0] is None  # always true for prompt logprobs
-            for plp_dict in req_out.prompt_logprobs[1:]:
-                # For each prompt token offset
-                assert plp_dict is not None
-                for tok_id, plp in plp_dict.items():
-                    # For each top logprob,
-                    # compare each `decoded_token` to the result
-                    # of decoding the logprob's token id
-                    assert plp.decoded_token == _decode_token(
-                        tok_id,
-                        tokenizer), "prompt logprob decoded token mismatch"
+        (num_prompt_logprobs, num_logprobs + 1), -100,
+        0), token_vector, prompt_token_ranks)
 
 
 @dataclass
 class DummyOutputProcessorTestVectors:
     """Dummy test vectors for output processor tests"""
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+    tokenizer: GeneralTokenizerType
     tokenizer_group: BaseTokenizerGroup
     vllm_config: EngineArgs
     full_tokens: List[List[int]]  # Prompt + generated tokens
@@ -302,11 +298,11 @@ class DummyOutputProcessorTestVectors:
     generation_tokens: List[List[int]]
     # Each request is associated with a tuple of (top logprobs,top tokens)
     # prompt logprobs tensors
-    prompt_logprobs: List[Tuple[torch.Tensor, torch.Tensor]]
+    prompt_logprobs: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
     # Each request is associated with a sample logprobs; a request's
     # sample logprobs are a list of (top logprobs,top tokens)
     # sample logprobs tensors at each sequence position
-    generation_logprobs: List[List[Tuple[torch.Tensor, torch.Tensor]]]
+    generation_logprobs: List[List[Tuple[List[float], List[int], int]]]
     prompt_strings: List[str]
     prompt_strings_len: List[int]
     generation_strings: List[str]
@@ -315,23 +311,80 @@ class DummyOutputProcessorTestVectors:
 class MockEngineCore:
     """Mock engine core outputs form premade tokens lists."""
 
-    def __init__(self, tokens_list: List[List[int]]):
+    def __init__(
+        self,
+        tokens_list: List[List[int]],
+        # For each request, for each sampled token offset,
+        # a tuple of
+        # (list of sample logprob vals,list of topk token ids)
+        generated_logprobs_raw: Optional[List[List[Tuple[List[float],
+                                                         List[int],
+                                                         int]]]] = None,
+        # For each request, a tuple of
+        # ( prompt logprob val matrix, prompt logprob tok id matrix );
+        # each matrix has dimensions
+        # (num prompt toks) x (num prompt logprobs+1)
+        prompt_logprobs_raw: Optional[List[Tuple[torch.Tensor, torch.Tensor,
+                                                 torch.Tensor]]] = None,
+    ) -> None:
         self.tokens_list = tokens_list
         self.current_idx = 0
+        self.generated_logprobs_raw = generated_logprobs_raw
+        self.do_logprobs = generated_logprobs_raw is not None
+        self.prompt_logprobs_raw = prompt_logprobs_raw
+        self.do_prompt_logprobs = prompt_logprobs_raw is not None
 
     def get_outputs(self) -> List[EngineCoreOutput]:
+        do_logprobs = self.do_logprobs
+        do_prompt_logprobs = self.do_prompt_logprobs
         token_idx = self.current_idx
-        self.current_idx += 1
 
         outputs = []
         for req_idx, token_ids in enumerate(self.tokens_list):
             if len(token_ids) > token_idx:
-                output = EngineCoreOutput(request_id=f"request-{req_idx}",
-                                          new_token_ids=[token_ids[token_idx]],
-                                          finished=False)
+                if do_logprobs:
+                    assert self.generated_logprobs_raw is not None
+                    (logprobs_, logprobs_token_ids_, sampled_token_ranks_) = (
+                        self.generated_logprobs_raw[req_idx][token_idx])
+                    logprobs = [logprobs_]
+                    logprobs_token_ids = [logprobs_token_ids_]
+                    sampled_token_ranks = [sampled_token_ranks_]
+                else:
+                    logprobs = None
+                    logprobs_token_ids = None
+                    sampled_token_ranks = None
+                if do_prompt_logprobs:
+                    if self.current_idx == 0:
+                        assert self.prompt_logprobs_raw is not None
+                        pos_prompt_logprobs = self.prompt_logprobs_raw[req_idx]
+                        prompt_logprobs = pos_prompt_logprobs[0]
+                        prompt_logprobs_token_ids = pos_prompt_logprobs[1]
+                        prompt_token_ranks = pos_prompt_logprobs[2]
+                    else:
+                        (
+                            prompt_logprobs,
+                            prompt_logprobs_token_ids,
+                            prompt_token_ranks,
+                        ) = (torch.empty(0, 0), torch.empty(0,
+                                                            0), torch.empty(0))
+                else:
+                    (
+                        prompt_logprobs,
+                        prompt_logprobs_token_ids,
+                        prompt_token_ranks,
+                    ) = (None, None, None)
+                output = EngineCoreOutput(
+                    request_id=f"request-{req_idx}",
+                    new_token_ids=[token_ids[token_idx]],
+                    new_logprobs=logprobs,
+                    new_logprobs_token_ids=logprobs_token_ids,
+                    new_sampled_token_ranks=sampled_token_ranks,
+                    new_prompt_logprobs=prompt_logprobs,
+                    new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
+                    new_prompt_token_ranks=prompt_token_ranks)
                 if token_idx == len(token_ids) - 1:
-                    output.finished = True
                     output.finish_reason = "stopped"
                 outputs.append(output)
 
+        self.current_idx += 1
         return outputs
