@@ -19,7 +19,6 @@ class OutputProcessorOutput:
 
     request_outputs: List[RequestOutput]
     reqs_to_abort: List[str]
-    iteration_stats: IterationStats
 
 
 class RequestState:
@@ -45,7 +44,7 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
 
-        self.stats = RequestStateStats(last_token_time=arrival_time)
+        self.stats = RequestStateStats(arrival_time=arrival_time)
 
     @classmethod
     def from_new_request(
@@ -117,6 +116,7 @@ class OutputProcessor:
     def process_outputs(
         self,
         engine_core_outputs: List[EngineCoreOutput],
+        engine_core_timestamp: Optional[float] = None,
         iteration_stats: Optional[IterationStats] = None,
     ) -> OutputProcessorOutput:
         """
@@ -145,8 +145,6 @@ class OutputProcessor:
 
         request_outputs: List[RequestOutput] = []
         reqs_to_abort: List[str] = []
-        if not iteration_stats:
-            iteration_stats = IterationStats(self.log_stats)
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
@@ -155,10 +153,13 @@ class OutputProcessor:
                 continue
 
             # 1) Compute stats for this iteration.
-            iteration_stats.update_from_output(engine_core_output,
-                                               req_state.is_prefilling,
-                                               req_state.prompt_len,
-                                               req_state.stats)
+            if iteration_stats is not None:
+                assert engine_core_timestamp is not None
+                iteration_stats.update_from_output(engine_core_output,
+                                                   engine_core_timestamp,
+                                                   req_state.is_prefilling,
+                                                   req_state.prompt_len,
+                                                   req_state.stats)
 
             new_token_ids = engine_core_output.new_token_ids
             finish_reason = engine_core_output.finish_reason
@@ -205,15 +206,15 @@ class OutputProcessor:
                         # detected stop string, abort needed in EngineCore.
                         reqs_to_abort.append(req_id)
 
-                    # Track per-request stats.
-                    assert finish_reason is not None
-                    iteration_stats.update_from_finished_request(
-                        finish_reason, request_output, req_state.stats)
+                    # Track per-request stats
+                    if iteration_stats is not None:
+                        assert finish_reason is not None
+                        iteration_stats.update_from_finished_request(
+                            finish_reason, request_output, req_state.stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
-            iteration_stats=iteration_stats,
         )
 
     @staticmethod

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import time
 from collections import deque
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
@@ -106,6 +107,8 @@ class Scheduler:
         # Encoder-related.
         scheduled_encoder_inputs: Dict[str, List[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
+
+        scheduled_timestamp = time.monotonic()
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -246,6 +249,7 @@ class Scheduler:
                 self.running.append(request)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
+                    request.scheduled(scheduled_timestamp)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
                 else:
@@ -508,7 +512,8 @@ class Scheduler:
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        stop_reason=request.stop_reason))
+                        stop_reason=request.stop_reason,
+                        events=request.take_events()))
 
             if not stopped:
                 new_running.append(request)
@@ -541,6 +546,7 @@ class Scheduler:
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
         self.requests[request.request_id] = request
+        request.queued()
 
     def finish_requests(
         self,

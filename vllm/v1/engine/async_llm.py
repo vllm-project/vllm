@@ -246,6 +246,8 @@ class AsyncLLM(EngineClient):
                 # 1) Pull EngineCoreOutputs from the EngineCore.
                 outputs = await self.engine_core.get_output_async()
 
+                iteration_stats = IterationStats(self.log_stats)
+
                 # Split outputs into chunks of at most
                 # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                 # event loop for too long.
@@ -257,14 +259,12 @@ class AsyncLLM(EngineClient):
                         outputs.outputs,
                         cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE))
 
-                iteration_stats = None
                 for i, outputs_slice in enumerate(slices):
                     # 2) Process EngineCoreOutputs.
                     processed_outputs = self.output_processor.process_outputs(
-                        outputs_slice, iteration_stats)
+                        outputs_slice, outputs.timestamp, iteration_stats)
                     # NOTE: RequestOutputs are pushed to their queues.
                     assert not processed_outputs.request_outputs
-                    iteration_stats = processed_outputs.iteration_stats
 
                     # Allow other asyncio tasks to run between chunks
                     if i + 1 < len(slices):
