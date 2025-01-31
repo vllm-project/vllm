@@ -28,6 +28,11 @@ void reshape_and_cache_flash(torch::Tensor& key, torch::Tensor& value,
                              const std::string& kv_cache_dtype,
                              torch::Tensor& k_scale, torch::Tensor& v_scale);
 
+void concat_and_cache_mla(torch::Tensor& kv_c, torch::Tensor& k_pe,
+                          torch::Tensor& kv_cache, torch::Tensor& slot_mapping,
+                          const std::string& kv_cache_dtype,
+                          torch::Tensor& scale);
+
 // Just for unittest
 void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
                  const double scale, const std::string& kv_cache_dtype);
