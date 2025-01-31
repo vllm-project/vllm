@@ -1129,6 +1129,7 @@ class QWenLMHeadModel(QWenBaseModel, SupportsMultiModal, SupportsLoRA):
     """
     # Ensure that the LoRA support check passes when the class is not
     # initialized, but set all these attributes to empty.
+    # These will be updated when a model class is selected
     packed_modules_mapping = {}
     supported_lora_modules = []
     embedding_modules = {}
@@ -1140,9 +1141,16 @@ class QWenLMHeadModel(QWenBaseModel, SupportsMultiModal, SupportsLoRA):
         prefix: str = "",
     ) -> QWenBaseModel:
         config = vllm_config.model_config.hf_config
+
         # Initialize VL
-        if hasattr(config, "visual"):
-            return QWenVL(vllm_config=vllm_config, prefix=prefix)
+        if hasattr(config, "visual"):  # noqa: SIM108
+            instance_cls = QWenVL
         # Initialize LLM
         else:
-            return QWenLLM(vllm_config=vllm_config, prefix=prefix)
+            instance_cls = QWenLLM
+
+        cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
+        cls.supported_lora_modules += instance_cls.supported_lora_modules
+        cls.embedding_modules.update(instance_cls.embedding_modules)
+        cls.embedding_padding_modules += instance_cls.embedding_padding_modules
+        return instance_cls(vllm_config=vllm_config, prefix=prefix)

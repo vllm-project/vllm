@@ -110,8 +110,8 @@ def _initialize_model(
     model_config = vllm_config.model_config
     model_class, _ = get_model_architecture(model_config)
 
-    # share reference to packed_modules_mapping with quant_config
-    packed_mapping = hasattr(model_class, "packed_modules_mapping", None)
+    # pass packed_modules_mapping by reference to quant_config
+    packed_mapping = getattr(model_class, "packed_modules_mapping", None)
     if packed_mapping is not None and vllm_config.quant_config is not None:
         vllm_config.quant_config.packed_modules_mapping = packed_mapping
 
