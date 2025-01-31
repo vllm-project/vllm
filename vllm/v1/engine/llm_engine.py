@@ -184,6 +184,9 @@ class LLMEngine:
     def stop_profile(self):
         self.engine_core.profile(False)
 
+    def reset_prefix_cache(self):
+        self.engine_core.reset_prefix_cache()
+
     def get_tokenizer_group(
         self,
         group_type: Type[_G] = BaseTokenizerGroup,

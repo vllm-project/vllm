@@ -37,19 +37,24 @@ class EngineCoreRequest:
 
 class EngineCoreOutput(
         msgspec.Struct,
-        array_like=False,  # type: ignore[call-arg]
+        array_like=True,  # type: ignore[call-arg]
         omit_defaults=True,  # type: ignore[call-arg]
         gc=False):  # type: ignore[call-arg]
 
     request_id: str
     new_token_ids: List[int]
-    finished: bool
-    new_logprobs: List[torch.Tensor] = []
-    new_logprobs_token_ids: List[torch.Tensor] = []
+    new_logprobs: List[List[float]] = []
+    new_logprobs_token_ids: List[List[int]] = []
+    new_sampled_token_ranks: List[int] = []
     new_prompt_logprobs: Optional[torch.Tensor] = None
     new_prompt_logprobs_token_ids: Optional[torch.Tensor] = None
+    new_prompt_token_ranks: Optional[torch.Tensor] = None
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
+
+    @property
+    def finished(self) -> bool:
+        return bool(self.finish_reason)
 
 
 class EngineCoreOutputs(
@@ -71,6 +76,11 @@ class EngineCoreProfile:
     is_start: bool
 
 
+@dataclass
+class EngineCoreResetPrefixCache:
+    pass
+
+
 class EngineCoreRequestType(enum.Enum):
     """
     Request types defined as hex byte strings, so it can be sent over sockets
@@ -79,6 +89,8 @@ class EngineCoreRequestType(enum.Enum):
     ADD = b'\x00'
     ABORT = b'\x01'
     PROFILE = b'\x02'
+    RESET_PREFIX_CACHE = b'\x03'
 
 
-EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile, List[str]]
+EngineCoreRequestUnion = Union[EngineCoreRequest, EngineCoreProfile,
+                               EngineCoreResetPrefixCache, List[str]]

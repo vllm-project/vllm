@@ -1,6 +1,6 @@
 import os
 from contextlib import contextmanager
-from functools import lru_cache
+from functools import cache
 from typing import Generator, Optional, Type
 
 import torch
@@ -14,16 +14,18 @@ from vllm.utils import STR_BACKEND_ENV_VAR, resolve_obj_by_qualname
 logger = init_logger(__name__)
 
 
-def backend_name_to_enum(backend_name: str) -> _Backend:
+def backend_name_to_enum(backend_name: str) -> Optional[_Backend]:
+    """
+    Convert a string backend name to a _Backend enum value.
+
+    Returns:
+    * _Backend: enum value if backend_name is a valid in-tree type
+    * None: otherwise it's an invalid in-tree type or an out-of-tree platform is
+            loaded.
+    """
     assert backend_name is not None
-
-    backend_members = _Backend.__members__
-    if backend_name not in backend_members:
-        raise ValueError(f"Invalid attention backend '{backend_name}'. "
-                         f"Available backends: {', '.join(backend_members)} "
-                         "(case-sensitive).")
-
-    return _Backend[backend_name]
+    return _Backend[backend_name] if backend_name in _Backend.__members__ else \
+          None
 
 
 def get_env_variable_attn_backend() -> Optional[_Backend]:
@@ -81,6 +83,7 @@ def get_attn_backend(
     block_size: int,
     is_attention_free: bool,
     is_blocksparse: bool = False,
+    use_mla: bool = False,
 ) -> Type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
     # Accessing envs.* behind an @lru_cache decorator can cause the wrong
@@ -95,10 +98,11 @@ def get_attn_backend(
         is_attention_free=is_attention_free,
         is_blocksparse=is_blocksparse,
         use_v1=envs.VLLM_USE_V1,
+        use_mla=use_mla,
     )
 
 
-@lru_cache(maxsize=None)
+@cache
 def _cached_get_attn_backend(
     head_size: int,
     dtype: torch.dtype,
@@ -107,6 +111,7 @@ def _cached_get_attn_backend(
     is_attention_free: bool,
     is_blocksparse: bool = False,
     use_v1: bool = False,
+    use_mla: bool = False,
 ) -> Type[AttentionBackend]:
     if is_blocksparse:
         logger.info("Using BlocksparseFlashAttention backend.")
@@ -139,7 +144,8 @@ def _cached_get_attn_backend(
 
     # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(
-        selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1)
+        selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,
+        use_mla)
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}")
