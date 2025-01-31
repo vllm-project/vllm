@@ -17,22 +17,9 @@ DEFAULT_MODELS = [
 ]
 DEFAULT_BATCH_SIZES = [16, 32, 64, 128, 256, 512]
 
-NUM_GROUPS_OPTS = [8]  #[8, 64]
 PER_ACT_TOKEN_OPTS = [False]  #[False, True]
 PER_OUT_CH_OPTS = [False]  #[False, True]
 TOPKS = [2, 6]
-
-
-def run_from_graph(a_q: torch.Tensor, a_scale: torch.Tensor,
-                   w1_q: torch.Tensor, w2_q: torch.Tensor,
-                   w1_scale: torch.Tensor, w2_scale: torch.Tensor,
-                   topk_weights: torch.Tensor, topk_ids: torch.Tensor, m: int,
-                   n: int, k: int, e: int):
-    with set_current_vllm_config(
-            VllmConfig(parallel_config=ParallelConfig(
-                pipeline_parallel_size=1))):
-        return cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
-                           topk_weights, topk_ids, m, n, k, e)
 
 
 def to_fp8(tensor: torch.Tensor):
@@ -87,8 +74,45 @@ def bench_run(results: List[benchmark.Measurement], model: str,
 
     topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
 
-    def replay_graph(graph):
-        graph.replay()
+    def run_triton_moe(a: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor,
+                       topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+                       w1_scale: torch.Tensor, w2_scale: torch.Tensor,
+                       a_scale: torch.Tensor, num_repeats: int):
+        for _ in range(num_repeats):
+            fused_experts(a,
+                          w1,
+                          w2,
+                          topk_weights,
+                          topk_ids,
+                          use_fp8_w8a8=True,
+                          w1_scale=w1_scale,
+                          w2_scale=w2_scale,
+                          a1_scale=a_scale)
+
+    def run_cutlass_moe(a: torch.Tensor, a_scale: torch.Tensor,
+                        w1: torch.Tensor, w2: torch.Tensor,
+                        w1_scale: torch.Tensor, w2_scale: torch.Tensor,
+                        topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+                        m: int, n: int, k: int, num_experts: int,
+                        num_repeats: int):
+        for _ in range(num_repeats):
+            cutlass_moe(a, a_scale, w1, w2, w1_scale, w2_scale, topk_weights,
+                        topk_ids, m, n, k, num_experts)
+
+    def run_from_graph(a_q: torch.Tensor, a_scale: torch.Tensor,
+                       w1_q: torch.Tensor, w2_q: torch.Tensor,
+                       w1_scale: torch.Tensor, w2_scale: torch.Tensor,
+                       topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+                       m: int, n: int, k: int, e: int):
+        with set_current_vllm_config(
+                VllmConfig(parallel_config=ParallelConfig(
+                    pipeline_parallel_size=1))):
+            return cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
+                               topk_weights, topk_ids, m, n, k, e)
+
+    def replay_graph(graph, num_repeats):
+        for _ in range(num_repeats):
+            graph.replay()
         torch.cuda.synchronize()
 
     stream = torch.cuda.Stream()
@@ -97,6 +121,9 @@ def bench_run(results: List[benchmark.Measurement], model: str,
         run_from_graph(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
                        topk_weights, topk_ids, m, n, k, num_experts)
     torch.cuda.synchronize()
+
+    min_run_time = 5
+    num_warmup = 5
 
     globals = {
         # Baseline params
@@ -124,30 +151,19 @@ def bench_run(results: List[benchmark.Measurement], model: str,
         "topk_weights": topk_weights,
         "topk_ids": topk_ids,
         # Kernels
-        "fused_experts": fused_experts,
-        "cutlass_moe": cutlass_moe,
+        "run_triton_moe": run_triton_moe,
+        "run_cutlass_moe": run_cutlass_moe,
         "replay_graph": replay_graph,
     }
 
-    min_run_time = 1
-    num_warmup = 5
-
     # Warmup
-    for _ in range(num_warmup):
-        fused_experts(a,
-                      w1_q_notransp,
-                      w2_q_notransp,
-                      topk_weights,
-                      topk_ids,
-                      use_fp8_w8a8=True,
-                      w1_scale=w1_scale,
-                      w2_scale=w2_scale,
-                      a1_scale=a_scale)
+    run_triton_moe(a, w1_q_notransp, w2_q_notransp, topk_weights, topk_ids,
+                   w1_scale, w2_scale, a_scale, num_warmup)
 
     results.append(
         benchmark.Timer(
             stmt=
-            "fused_experts(a, w1_q_notransp, w2_q_notransp, topk_weights, topk_ids, use_fp8_w8a8=True, w1_scale=w1_scale, w2_scale=w2_scale, a1_scale=a_scale)",  # noqa: E501
+            "run_triton_moe(a, w1_q_notransp, w2_q_notransp, topk_weights, topk_ids, w1_scale, w2_scale, a_scale, 1)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
@@ -155,14 +171,13 @@ def bench_run(results: List[benchmark.Measurement], model: str,
         ).blocked_autorange(min_run_time=min_run_time))
 
     # Warmup
-    for _ in range(num_warmup):
-        cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights,
-                    topk_ids, m, n, k, num_experts)
+    run_cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights,
+                    topk_ids, m, n, k, num_experts, num_warmup)
 
     results.append(
         benchmark.Timer(
             stmt=
-            "cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights, topk_ids, m, n, k, num_experts)",  # noqa: E501
+            "run_cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights, topk_ids, m, n, k, num_experts, 1)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
@@ -170,12 +185,11 @@ def bench_run(results: List[benchmark.Measurement], model: str,
         ).blocked_autorange(min_run_time=min_run_time))
 
     # Warmup
-    for _ in range(num_warmup):
-        replay_graph(graph)
+    replay_graph(graph, num_warmup)
 
     results.append(
         benchmark.Timer(
-            stmt="replay_graph(graph)",
+            stmt="replay_graph(graph, 1)",
             globals=globals,
             label=label,
             sub_label=sub_label,
