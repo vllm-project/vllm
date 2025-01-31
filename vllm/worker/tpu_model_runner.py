@@ -44,7 +44,6 @@ _ENABLE_TOP_P = False
 # FIXME(woosuk): A temporary hack to support `n > 1`.
 # This can significantly affect the performance if too large.
 _MAX_NUM_SAMPLES = 128
-LORA_WARMUP_RANK = 8 # KRAI: TODO: Should this not be max rank - so we have better startup times?
 
 class ExecutionMode(enum.Enum):
     PREFILL = enum.auto()
@@ -192,7 +191,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
     def get_model(self) -> nn.Module:
         return self.model.model
 
-    def _dummy_run( # KRAI-TODO: Add lora config here
+    def _dummy_run(
         self,
         batch_size: int,
         seq_len: int,
@@ -294,7 +293,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                         lora_path="/not/a/real/path",
                     )
                     self.lora_manager.add_dummy_lora(dummy_lora_request,
-                                                     rank=LORA_WARMUP_RANK)
+                                                     rank=self.lora_config.max_lora_rank)
                     dummy_lora_requests.add(dummy_lora_request)
                 dummy_lora_mapping = LoRAMapping(
                     [lora_id] * batch_size * seq_len, [lora_id] * batch_size, is_prefill=exec_mode.is_prefill()
