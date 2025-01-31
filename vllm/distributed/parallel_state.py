@@ -893,6 +893,7 @@ _PP: Optional[GroupCoordinator] = None
 
 _EP_SIZE: Optional[int] = None
 
+
 def get_pp_group() -> GroupCoordinator:
     assert _PP is not None, (
         "pipeline model parallel group is not initialized")
@@ -1024,7 +1025,7 @@ def initialize_model_parallel(
             f"world_size ({world_size}) is not equal to "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
             f"pipeline_model_parallel_size ({pipeline_model_parallel_size})")
-    
+
     if tensor_model_parallel_size % expert_model_parallel_size != 0:
         raise RuntimeError(
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) is not "
@@ -1049,7 +1050,7 @@ def initialize_model_parallel(
                                     backend,
                                     use_message_queue_broadcaster=True,
                                     group_name="tp")
-    
+
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size //
                                                pipeline_model_parallel_size)
@@ -1069,6 +1070,7 @@ def initialize_model_parallel(
 
     global _EP_SIZE
     _EP_SIZE = expert_model_parallel_size
+
 
 def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
     """
@@ -1104,9 +1106,8 @@ def ensure_model_parallel_initialized(
         get_world_group().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size, 
-                                  expert_model_parallel_size,
-                                  backend)
+                                  pipeline_model_parallel_size,
+                                  expert_model_parallel_size, backend)
         return
 
     assert (

@@ -4,9 +4,9 @@ from typing import Callable, List, Optional, Tuple
 
 import torch
 
-from vllm.distributed import (get_tensor_model_parallel_rank,
+from vllm.distributed import (get_expert_model_parallel_size,
+                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              get_expert_model_parallel_size,
                               tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -101,7 +101,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 )
             else:
                 raise NotImplementedError("CPU MOE only supports x86 arch.")
-            
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -116,7 +116,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        e_score_correction_bias: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         return self.forward(x=x,
                             layer=layer,
                             router_logits=router_logits,
@@ -145,7 +146,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        e_score_correction_bias: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -279,14 +281,7 @@ class FusedMoE(torch.nn.Module):
                         get_tensor_model_parallel_world_size())
         self.ep_size = (ep_size if ep_size is not None else
                         get_expert_model_parallel_size())
-        if num_experts % self.ep_size != 0:
-            raise ValueError(
-                f"Number of routed experts {num_experts} must be "
-                f"divisible by the expert parallel size {self.ep_size}.")
-        if self.tp_size % self.ep_size != 0:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} must be divisible by "
-                f"the expert parallel size {self.ep_size}.")
+        assert self.tp_size % self.ep_size == 0
         self.tp_size = self.tp_size // self.ep_size
         self.top_k = top_k
         self.global_num_experts = num_experts
@@ -302,16 +297,22 @@ class FusedMoE(torch.nn.Module):
         self.custom_routing_function = custom_routing_function
         self.scoring_func = scoring_func
         self.e_score_correction_bias = e_score_correction_bias
-        
+
         ep_rank = get_tensor_model_parallel_rank() // self.tp_size
-        tp_rank = get_tensor_model_parallel_rank() % self.tp_size
         # Create a tensor of size num_experts filled with -1
-        self.expert_map = torch.full((num_experts,), -1, dtype=torch.int32)
-        # Create a list of expert ids for this layer
-        expert_per_partition = num_experts // self.ep_size
-        self.expert_map[ep_rank * expert_per_partition:
-                        (ep_rank + 1) * expert_per_partition] = (
-            torch.arange(0, expert_per_partition,dtype=torch.int32))
+        self.expert_map = torch.full((num_experts, ), -1, dtype=torch.int32)
+        # Create a expert map for the local experts
+        local_num_experts = num_experts // self.ep_size
+        if ep_rank < (self.ep_size - 1):
+            # Each rank gets local_num_experts experts, except the last rank.
+            self.expert_map[ep_rank * local_num_experts:
+                            (ep_rank + 1) * local_num_experts] = \
+                torch.arange(0, local_num_experts,dtype=torch.int32)
+        else:
+            # All remaining experts are assigned to the last rank.
+            local_num_experts = num_experts - ep_rank * local_num_experts
+            self.expert_map[-local_num_experts:] = \
+                torch.arange(0, local_num_experts,dtype=torch.int32)
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -453,7 +454,7 @@ class FusedMoE(torch.nn.Module):
         else:
             assert shard_id in ("w1", "w3")
             expert_data.copy_(loaded_weight)
-            
+
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
         return self.expert_map[expert_id].item()
 
@@ -576,20 +577,21 @@ class FusedMoE(torch.nn.Module):
             return
 
     @staticmethod
-    def select_experts(hidden_states: torch.Tensor,
-                       router_logits: torch.Tensor,
-                       top_k: int,
-                       use_grouped_topk: bool,
-                       renormalize: bool,
-                       topk_group: Optional[int] = None,
-                       num_expert_group: Optional[int] = None,
-                       custom_routing_function: Optional[Callable] = None,
-                       scoring_func: str = "softmax",
-                       e_score_correction_bias: Optional[torch.Tensor] = None
-                    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def select_experts(
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        use_grouped_topk: bool,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_topk, grouped_topk)
-                
+
         # DeekSeekv2 uses grouped_top_k
         if use_grouped_topk:
             assert topk_group is not None

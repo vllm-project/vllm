@@ -695,20 +695,19 @@ class ModelConfig:
                 f"Total number of attention heads ({total_num_attention_heads})"
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
-            
+
         expert_parallel_size = parallel_config.expert_parallel_size
         if expert_parallel_size > 1:
             num_experts = getattr(self.hf_text_config, "n_routed_experts", 0)
             if num_experts < 1:
-                print (f"hf config: {self.hf_text_config}")
                 raise ValueError(
-                    "Number of experts must be greater than 0 when using "
-                    "expert parallelism.")
-            if num_experts % expert_parallel_size != 0:
-                print (f"hf config: {self.hf_text_config}")
+                    "Number of experts in the model must be greater than 0 "
+                    "when using expert parallelism.")
+            if tensor_parallel_size % expert_parallel_size != 0:
                 raise ValueError(
-                    f"Number of experts ({num_experts}) must be divisible by "
-                    f"expert parallel size ({expert_parallel_size}).")
+                    f"Tensor parallel group size ({tensor_parallel_size}) "
+                    f"is not divisible by expert parallelism size "
+                    f"({expert_parallel_size})")
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1:
@@ -831,11 +830,12 @@ class ModelConfig:
                                 parallel_config: "ParallelConfig") -> int:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
-    
+
     def get_num_routed_experts(self, parallel_config: "ParallelConfig") -> int:
-        num_routed_experts = getattr(self.hf_text_config, "n_routed_experts", 0)
+        num_routed_experts = getattr(self.hf_text_config, "n_routed_experts",
+                                     0)
         return num_routed_experts // parallel_config.expert_parallel_size
-        
+
     def get_layers_start_end_indices(
             self, parallel_config: "ParallelConfig") -> Tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
@@ -1314,8 +1314,14 @@ class ParallelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
+        # MoE layers will use the specified number of EPs, with TP
+        # of tensor_parallel_size. Non-MoE layers will use TP of size
+        # tensor_parallel_size * expert_parallel_size. As such, the size
+        # of the tensor parallel group is set to the product of the
+        # user-specified tensor parallel and expert parallel sizes,
+        # prioritizing the non-MoE layer's TP size.
         self.tensor_parallel_size *= self.expert_parallel_size
-        
+
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
@@ -3313,8 +3319,8 @@ class VllmConfig:
             f" download_dir={self.load_config.download_dir!r}, "
             f"load_format={self.load_config.load_format}, "
             f"tensor_parallel_size={self.parallel_config.tensor_parallel_size},"
-            f" expert_parallel_size={self.parallel_config.expert_parallel_size},"
             f" pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
+            f" expert_parallel_size={self.parallel_config.expert_parallel_size},"  # noqa
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
