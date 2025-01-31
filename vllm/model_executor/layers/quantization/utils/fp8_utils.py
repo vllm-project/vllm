@@ -8,6 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -21,20 +22,34 @@ def apply_w8a8_block_fp8_linear(
     weight_scale: torch.Tensor,
     input_scale: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
+    cutlass_block_fp8_supported: bool = True,
 ) -> torch.Tensor:
     assert input_scale is None
     # View input as 2D matrix for fp8 methods
     input_2d = input.view(-1, input.shape[-1])
     output_shape = [*input.shape[:-1], weight.shape[0]]
 
-    q_input, x_scale = per_token_group_quant_fp8(input_2d, block_size[1])
-    output = w8a8_block_fp8_matmul(q_input,
-                                   weight,
-                                   x_scale,
-                                   weight_scale,
-                                   block_size,
-                                   output_dtype=input.dtype)
-
+    shape_supported_by_cutlass = (weight.shape[0] % 128 == 0
+                                  and weight.shape[1] % 128 == 0)
+    if cutlass_block_fp8_supported and shape_supported_by_cutlass:
+        q_input, x_scale = per_token_group_quant_fp8(input_2d,
+                                                     block_size[1],
+                                                     column_major_scales=True)
+        output = ops.cutlass_scaled_mm(q_input,
+                                       weight.T,
+                                       out_dtype=input.dtype,
+                                       scale_a=x_scale,
+                                       scale_b=weight_scale.T)
+    else:
+        q_input, x_scale = per_token_group_quant_fp8(input_2d,
+                                                     block_size[1],
+                                                     column_major_scales=False)
+        output = w8a8_block_fp8_matmul(q_input,
+                                       weight,
+                                       x_scale,
+                                       weight_scale,
+                                       block_size,
+                                       output_dtype=input.dtype)
     if bias is not None:
         output = output + bias
     return output.to(dtype=input.dtype).view(*output_shape)
@@ -98,10 +113,7 @@ def _per_token_group_quant_fp8(
     y_ptr,
     y_q_ptr,
     y_s_ptr,
-    # Stride of input
-    y_stride,
-    # Columns of input
-    N,
+    group_size,
     # Avoid to divide zero
     eps,
     # Information for float8
@@ -116,12 +128,60 @@ def _per_token_group_quant_fp8(
     """
     # Map the program id to the row of X and Y it should compute.
     g_id = tl.program_id(0)
-    y_ptr += g_id * y_stride
-    y_q_ptr += g_id * y_stride
+    y_ptr += g_id * group_size
+    y_q_ptr += g_id * group_size
     y_s_ptr += g_id
 
     cols = tl.arange(0, BLOCK)  # N <= BLOCK
-    mask = cols < N
+    mask = cols < group_size
+
+    y = tl.load(y_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    # Quant
+    _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
+    y_s = _absmax / fp8_max
+    y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+
+    tl.store(y_q_ptr + cols, y_q, mask=mask)
+    tl.store(y_s_ptr, y_s)
+
+
+@triton.jit
+def _per_token_group_quant_fp8_colmajor(
+    # Pointers to inputs and output
+    y_ptr,
+    y_q_ptr,
+    y_s_ptr,
+    group_size,
+    # Num columns of y
+    y_num_columns,
+    # Stride from one column to the next of y_s
+    y_s_col_stride,
+    # Avoid to divide zero
+    eps,
+    # Information for float8
+    fp8_min,
+    fp8_max,
+    # Meta-parameters
+    BLOCK: tl.constexpr,
+):
+    """A Triton-accelerated function to perform per-token-group
+    quantization on a tensor.
+    This function converts the tensor values into float8 values.
+    """
+    # Map the program id to the row of X and Y it should compute.
+    g_id = tl.program_id(0)
+    y_ptr += g_id * group_size
+    y_q_ptr += g_id * group_size
+
+    # Convert g_id the flattened block coordinate to 2D so we can index
+    # into the output y_scales matrix
+    blocks_per_row = y_num_columns // group_size
+    scale_col = g_id % blocks_per_row
+    scale_row = g_id // blocks_per_row
+    y_s_ptr += scale_col * y_s_col_stride + scale_row
+
+    cols = tl.arange(0, BLOCK)  # group_size <= BLOCK
+    mask = cols < group_size
 
     y = tl.load(y_ptr + cols, mask=mask, other=0.0).to(tl.float32)
     # Quant
@@ -138,12 +198,13 @@ def per_token_group_quant_fp8(
     group_size: int,
     eps: float = 1e-10,
     dtype: Optional[torch.dtype] = None,
+    column_major_scales: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
     It converts the tensor values into signed float8 values and returns the
     quantized tensor along with the scaling factor used for quantization.
     Args:
-        x: The input tenosr with ndim >= 2.
+        x: The input tensor with ndim >= 2.
         group_size: The group size used for quantization.
         eps: The minimum to avoid dividing zero.
         dtype: The dype of output tensor. Note that only `torch.float8_e4m3fn`
@@ -167,29 +228,46 @@ def per_token_group_quant_fp8(
     x_q = torch.empty_like(x, device=x.device, dtype=dtype)
     M = x.numel() // group_size
     N = group_size
-    x_s = torch.empty(
-        x.shape[:-1] + (x.shape[-1] // group_size, ),
-        device=x.device,
-        dtype=torch.float32,
-    )
+    if column_major_scales:
+        shape = (x.shape[-1] // group_size, ) + x.shape[:-1]
+        x_s = torch.empty(shape, device=x.device,
+                          dtype=torch.float32).permute(-1, -2)
+    else:
+        shape = x.shape[:-1] + (x.shape[-1] // group_size, )
+        x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
     BLOCK = triton.next_power_of_2(N)
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
-    _per_token_group_quant_fp8[(M, )](
-        x,
-        x_q,
-        x_s,
-        group_size,
-        N,
-        eps,
-        fp8_min=fp8_min,
-        fp8_max=fp8_max,
-        BLOCK=BLOCK,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
+    if column_major_scales:
+        _per_token_group_quant_fp8_colmajor[(M, )](
+            x,
+            x_q,
+            x_s,
+            group_size,
+            x.shape[1],
+            x_s.stride(1),
+            eps,
+            fp8_min=fp8_min,
+            fp8_max=fp8_max,
+            BLOCK=BLOCK,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+    else:
+        _per_token_group_quant_fp8[(M, )](
+            x,
+            x_q,
+            x_s,
+            group_size,
+            eps,
+            fp8_min=fp8_min,
+            fp8_max=fp8_max,
+            BLOCK=BLOCK,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
 
     return x_q, x_s
 

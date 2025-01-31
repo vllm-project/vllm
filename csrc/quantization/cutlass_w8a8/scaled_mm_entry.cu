@@ -81,6 +81,19 @@ bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability) {
   return false;
 }
 
+bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability) {
+  // CUTLASS block-quantized FP8 kernels need at least CUDA 12.0
+  // and at least SM90 (Hopper)
+
+#if defined CUDA_VERSION
+  if (cuda_device_capability >= 90) {
+    return CUDA_VERSION >= 12000;
+  }
+#endif
+
+  return false;
+}
+
 void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
                        torch::Tensor const& b_scales,

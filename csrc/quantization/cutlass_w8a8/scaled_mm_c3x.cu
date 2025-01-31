@@ -58,7 +58,13 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
 
     vllm::cutlass_scaled_mm_blockwise_sm90_fp8(c, a, b, a_scales, b_scales);
   } else {
-    TORCH_CHECK(false, "Unsupported scale group shapes for CUTLASS 3.x GEMM");
+    TORCH_CHECK(false,
+                "Unsupported scale group shapes for CUTLASS 3.x GEMM.\n "
+                "a_scale_group_shape must be [1, 128], got: [",
+                a_scale_group_shape[0], ", ", a_scale_group_shape[1],
+                "]\n"
+                "b_scale_group_shape must be [128, 128], got: [",
+                b_scale_group_shape[0], ", ", b_scale_group_shape[1], "]");
   }
 }
 
