@@ -21,7 +21,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Fp8)
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    apply_fp8_linear_generic, fp8_quantize, is_fp8, scaled_dequant)
+    apply_fp8_linear_generic, current_platform_fp8_dtype, is_fp8)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    scaled_dequantize, scaled_quantize)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.vllm_flash_attn import flash_attn_varlen_func
 
@@ -274,7 +276,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                     get_scale_group_shapes_for_fp8(layer)
                 scales = get_scales(layer)
 
-                return scaled_dequant(weight, scales, weight_scale_group_shape)
+                return scaled_dequantize(weight, scales,
+                                         weight_scale_group_shape)
             else:
                 return layer.weight
 
@@ -353,8 +356,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 .flatten(start_dim=1).contiguous()
 
             if is_fp8(weight_dtype) and requantization_enabled:
-                W_Q_UK, W_Q_UK_scales = fp8_quantize(
-                    W_Q_UK, self.reqaunt_weight_group_shape)
+                W_Q_UK, W_Q_UK_scales = scaled_quantize(
+                    W_Q_UK,
+                    self.reqaunt_weight_group_shape,
+                    dtype=current_platform_fp8_dtype)
                 # For FP8 save the transpose so we can use
                 # `apply_w8a8_block_fp8_linear` directly
                 self.W_Q_UK = W_Q_UK.T.contiguous()
@@ -368,8 +373,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 .flatten(start_dim=0, end_dim=1).contiguous()
 
             if is_fp8(weight_dtype) and requantization_enabled:
-                W_UV_O, W_UV_O_scales = fp8_quantize(
-                    W_UV_O, self.reqaunt_weight_group_shape)
+                W_UV_O, W_UV_O_scales = scaled_quantize(
+                    W_UV_O,
+                    self.reqaunt_weight_group_shape,
+                    dtype=current_platform_fp8_dtype)
                 # For FP8 save the transpose so we can use
                 # `apply_w8a8_block_fp8_linear` directly
                 self.W_UV_O = W_UV_O.T.contiguous()
