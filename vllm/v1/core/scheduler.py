@@ -478,19 +478,16 @@ class Scheduler:
             scheduler_stats=self.make_stats(),
         )
 
-    def _crop_request(self, request: Request, num_total_token: int) -> None:
-        """Truncate the request to the num_total_token.
-            We do not need to update the input batch because
-            it will be updated in the next execute_model call's
-            _update_states method, where the request data is aligned
-            with the data in the persistent batch.
-        """
-        request.crop(num_total_token)
-
     def _check_stop(self, request: Request) -> bool:
         """Check if the request should be stopped.
         The function should handle both single token generation or
         multiple token generation (e.g., spec decode) per step.
+        
+        This function will crop requests to the given number of tokens.
+        When cropping, we do not need to update the input batch because
+        it will be updated in the next execute_model call's
+        _update_states method, where the request data is aligned
+        with the data in the persistent batch.
         """
         if (request.num_tokens >= self.max_model_len
                 or request.num_output_tokens >= request.max_tokens):
@@ -499,30 +496,30 @@ class Scheduler:
                 self.max_model_len, request.num_tokens,
                 request.max_tokens + request.num_prompt_tokens,
                 request.num_output_tokens + request.num_prompt_tokens)
-            self._crop_request(request, num_total_token)
+            request.crop(num_total_token)
             self._free_request(request)
             return True
 
         sampling_params = request.sampling_params
-        if (not sampling_params.ignore_eos
-                and request.eos_token_id in request.output_token_ids):
+        if not sampling_params.ignore_eos:
             assert request.eos_token_id is not None
-            request.status = RequestStatus.FINISHED_STOPPED
-            num_total_token = request.num_prompt_tokens + \
-                    request.output_token_ids.index(request.eos_token_id) + 1
-            self._crop_request(request, num_total_token)
-            self._free_request(request)
-            return True
+            if request.eos_token_id in request.output_token_ids:
+                assert request.eos_token_id is not None
+                request.status = RequestStatus.FINISHED_STOPPED
+                num_total_token = request.num_prompt_tokens + \
+                        request.output_token_ids.index(request.eos_token_id) + 1
+                request.crop(num_total_token)
+                self._free_request(request)
+                return True
 
-        stop_token_ids = set(sampling_params.stop_token_ids or set([]))
         output_token_ids = set(request.output_token_ids)
-        for stop_token_id in stop_token_ids:
+        for stop_token_id in sampling_params.stop_token_ids:
             if stop_token_id in output_token_ids:
                 request.status = RequestStatus.FINISHED_STOPPED
                 request.stop_reason = stop_token_id
                 num_total_token = request.num_prompt_tokens + \
                         request.output_token_ids.index(stop_token_id) + 1
-                self._crop_request(request, num_total_token)
+                request.crop(num_total_token)
                 self._free_request(request)
                 return True
         return False

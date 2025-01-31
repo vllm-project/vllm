@@ -63,8 +63,6 @@ class EngineCore:
             lora_config=vllm_config.lora_config,
             speculative_config=vllm_config.speculative_config)
 
-        self._last_logging_time = time.time()
-
         self.mm_input_mapper_server = MMInputMapperServer(
             vllm_config.model_config)
 
