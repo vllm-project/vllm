@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Generic, List, Optional
 
 import torch
+import triton
+import triton.language as tl
 
 from vllm import _custom_ops as ops
 from vllm import envs
@@ -21,6 +23,67 @@ class MLACommonMetadata(AttentionMetadata):
     # Input positions for rotrary embeddings since for MLA the rotary
     # position embeddings are applied inside the attention backend
     input_positions: torch.Tensor
+
+
+@triton.jit
+def weight_dequant_kernel(x_ptr, s_ptr, y_ptr, M, N, BLOCK_SIZE: tl.constexpr):
+    """
+    Code from deepseek https://github.com/deepseek-ai/DeepSeek-V3/blob/b5d872ead062c94b852d75ce41ae0b10fcfa1c86/inference/kernel.py#L56
+    Dequantizes weights using the provided scaling factors and stores the result.
+
+    Args:
+        x_ptr (tl.pointer): Pointer to the quantized weights.
+        s_ptr (tl.pointer): Pointer to the scaling factors.
+        y_ptr (tl.pointer): Pointer to the output buffer for dequantized weights.
+        M (int): Number of rows in the weight matrix.
+        N (int): Number of columns in the weight matrix.
+        BLOCK_SIZE (tl.constexpr): Size of the block for tiling.
+
+    Returns:
+        None
+    """
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+    n = tl.cdiv(N, BLOCK_SIZE)
+    offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    offs_n = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    offs = offs_m[:, None] * N + offs_n[None, :]
+    mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    x = tl.load(x_ptr + offs, mask=mask).to(tl.float32)
+    s = tl.load(s_ptr + pid_m * n + pid_n)
+    y = x * s
+    tl.store(y_ptr + offs, y, mask=mask)
+
+
+def weight_dequant(x: torch.Tensor, s: torch.Tensor, block_size: int = 128) -> torch.Tensor:
+    """
+    Code from deepseek https://github.com/deepseek-ai/DeepSeek-V3/blob/b5d872ead062c94b852d75ce41ae0b10fcfa1c86/inference/kernel.py#L56
+    Dequantizes the given weight tensor using the provided scale tensor.
+
+    Args:
+        x (torch.Tensor): The quantized weight tensor of shape (M, N).
+        s (torch.Tensor): The scale tensor of shape (M, N).
+        block_size (int, optional): The block size to use for dequantization. Defaults to 128.
+
+    Returns:
+        torch.Tensor: The dequantized weight tensor of the same shape as `x`.
+
+    Raises:
+        AssertionError: If `x` or `s` are not contiguous or if their dimensions are not 2.
+    """
+    assert x.is_contiguous() and s.is_contiguous()
+    assert x.dim() == 2 and s.dim() == 2
+    M, N = x.size()
+    y = torch.empty_like(x, dtype=torch.get_default_dtype())
+    grid = lambda meta: (triton.cdiv(M, meta['BLOCK_SIZE']), triton.cdiv(N, meta['BLOCK_SIZE']))
+    weight_dequant_kernel[grid](x, s, y, M, N, BLOCK_SIZE=block_size)
+    return y
+
+
+def dequantize_fp8(fp8_layer) -> torch.Tensor:
+    if not hasattr(fp8_layer, "weight_scale_inv") or fp8_layer.weight_scale_inv is None:
+        return fp8_layer.weight
+    return weight_dequant(fp8_layer.weight, fp8_layer.weight_scale_inv)
 
 
 class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
@@ -180,7 +243,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 .view(-1, self.num_heads, self.kv_lora_rank)
 
     def process_weights_after_loading(self):
-        kv_b_proj_weight = self.kv_b_proj.weight.T
+        kv_b_proj_weight = dequantize_fp8(self.kv_b_proj).T
+
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)), (
@@ -198,13 +262,14 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         W_UK, W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        q_proj = self.q_proj.weight.T\
+        q_proj = dequantize_fp8(self.q_proj).T\
                 .view(-1, self.num_heads, self.qk_head_dim)
 
         # can be W_Q or W_UQ depending q_lora_rank, the former if
         # q_lora_rank is None, the latter otherwise. From the Attention backend
         # perspective though we call these both W_Q and rely on the layer
         # to pass in the correct matrix
+
         W_Q = q_proj[..., :self.qk_nope_head_dim]
         self.W_QR = q_proj[..., self.qk_nope_head_dim:]\
             .flatten(start_dim=1).contiguous()
@@ -226,7 +291,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             self.W_Q_UK = torch.einsum("qnd,lnd -> qnl", W_Q, W_UK)\
                 .flatten(start_dim=1).contiguous()
 
-            W_O = self.o_proj.weight\
+            W_O = dequantize_fp8(self.o_proj)\
                 .view(-1, self.num_heads, self.v_head_dim)
             self.W_UV_O = torch.einsum("lnd,hnd -> nlh", W_UV, W_O)\
                 .flatten(start_dim=0, end_dim=1).contiguous()

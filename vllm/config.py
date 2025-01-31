@@ -741,7 +741,7 @@ class ModelConfig:
         # TODO add deepseek_v3
         return hasattr(self.hf_text_config,
                        "model_type") and (self.hf_text_config.model_type
-                                          in ('deepseek_v2'))
+                                          in ('deepseek_v2', 'deepseek_v3'))
 
     def get_head_size(self) -> int:
         # TODO remove hard code
