@@ -135,7 +135,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
                 vllm_result.outputs[0].token_ids == hf_output[0])
 
         # Validate sample logprobs
-        if num_top_logprobs is not None and num_top_logprobs > 0:
+        if num_top_logprobs is not None:
             assert num_top_logprobs is not None
             # Confirm that the structure of the sample logprobs in the result is
             # correct
@@ -200,8 +200,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
             assert vllm_result.outputs[0].logprobs is None
 
         # Validate prompt logprobs
-        if (num_top_prompt_logprobs is not None
-                and num_top_prompt_logprobs > 0):
+        if num_top_prompt_logprobs is not None:
             # Confirm that structure of prompt logprobs in result is correct
             assert vllm_result.prompt_logprobs is not None
             # - The first prompt logprob is always None
@@ -376,8 +375,14 @@ def test_zero_logprobs(vllm_runner, model, example_prompts, monkeypatch):
 
     for i in range(len(results_logprobs_none)):
         # Check sample logprobs are None
-        assert results_logprobs_none[i].outputs[0].logprobs is not None
+        logprobs = results_logprobs_none[i].outputs[0].logprobs
+        prompt_logprobs = results_logprobs_none[i].prompt_logprobs
+        sampled_token_ids = results_logprobs_none[i].outputs[0].token_ids
+        prompt_token_ids = results_logprobs_none[i].prompt_token_ids
+        assert logprobs is not None
+        assert len(sampled_token_ids) == len(logprobs)
         assert results_logprobs_none[i].outputs[
             0].cumulative_logprob is not None
         # Check prompt logprobs are None
         assert results_logprobs_none[i].prompt_logprobs is not None
+        assert len(prompt_token_ids) == len(prompt_logprobs)

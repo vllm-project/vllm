@@ -41,6 +41,7 @@ def get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
         # Requests requiring sample logprobs or no logprobs
         return [
             (None, None),
+            (0, None),
             (5, None),
             (3, None),
         ]
@@ -48,6 +49,7 @@ def get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
         # Requests requiring prompt logprobs or no logprobs
         return [
             (None, None),
+            (None, 0),
             (None, 6),
             (None, 5),
         ]
@@ -57,11 +59,15 @@ def get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
         # both sample and prompt logprobs
         return [
             (None, None),
+            (0, None),
             (5, None),
             (3, None),
+            (0, 3),
+            (6, 0),
             (6, 3),
             (None, 6),
             (None, 5),
+            (None, 0),
         ]
     else:
         raise ValueError("Invalid logprobs batch configuration for test.")

@@ -465,7 +465,7 @@ class Scheduler:
                     self._free_request(request)
 
                 # Extract sample logprobs if needed.
-                if request.sampling_params.logprobs:
+                if request.sampling_params.logprobs is not None:
                     assert logprobs_token_ids_cpu is not None
                     assert logprobs_cpu is not None
                     assert sampled_token_ranks_cpu is not None
