@@ -10,7 +10,6 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
-steps:
   - label: "Build wheel - CUDA 12.1"
     agents:
       queue: cpu_queue_postmerge
