@@ -30,8 +30,7 @@ def _ref_convert_id_to_token(
       String representation of input token id
     """
     tok_str_lst = tokenizer.convert_ids_to_tokens([token_id])
-    replace_none_with_empty(tok_str_lst)
-    return tok_str_lst[0]
+    return replace_none_with_empty(tok_str_lst)[0]
 
 
 @pytest.mark.parametrize(
