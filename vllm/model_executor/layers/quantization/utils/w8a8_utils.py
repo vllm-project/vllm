@@ -30,6 +30,16 @@ def cutlass_fp8_supported() -> bool:
     return ops.cutlass_scaled_mm_supports_fp8(capability)
 
 
+def cutlass_block_fp8_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+
+    return ops.cutlass_scaled_mm_supports_block_fp8(capability)
+
+
 def per_tensor_dequantize(
         tensor: torch.Tensor, inv_scale: Union[float,
                                                torch.Tensor]) -> torch.Tensor:
