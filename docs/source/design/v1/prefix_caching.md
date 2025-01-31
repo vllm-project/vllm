@@ -12,15 +12,11 @@ Block 2: |<------- prefix ------>| |<--- block tokens --->|
 Block 3: |<------------------ prefix -------------------->| |<--- block tokens ---->|
 ```
 
-In the example above, the KV cache in the first block can be uniquely identified with the token “A gentle breeze stirred”. The third block can be uniquely identified with the tokens in the block “laughed in the distance”, along with the prefix tokens “A gentle breeze stirred the leaves as children”. Therefore, we can build the following block hash:
+In the example above, the KV cache in the first block can be uniquely identified with the token “A gentle breeze stirred”. The third block can be uniquely identified with the tokens in the block “laughed in the distance”, along with the prefix tokens “A gentle breeze stirred the leaves as children”. Therefore, we can build the block hash of `hash(tuple[components])`, where components are:
 
-```text
-hash(prefix tokens + block tokens), tuple(block_tokens), extra hashes
-```
-
-* `hash(prefix tokens + block tokens):` The integer hash value of all tokens.  
-* `tuple(block_tokens)`: A tuple of tokens in this block. The reason to include the exact tokens is to reduce potential hash value collision.  
-* `extra hashes`: Other values required to make this block unique, such as LoRA IDs and multi-modality input hashes (see the example below).
+* Parent hash value: The hash value of the parent hash block.
+* Block tokens: A tuple of tokens in this block. The reason to include the exact tokens is to reduce potential hash value collision.  
+* Extra hashes: Other values required to make this block unique, such as LoRA IDs and multi-modality input hashes (see the example below).
 
 Note 1: We only cache full blocks.
 
