@@ -439,6 +439,11 @@ class DummyModelLoader(BaseModelLoader):
                     with device_loading_context(
                             module, torch.device(device_config.device)):
                         quant_method.process_weights_after_loading(module)
+                if isinstance(module, Attention) and \
+                    hasattr(module, "process_weights_after_loading"):
+                    # When attention modules need to process weights after
+                    # currently only used by MLA
+                    module.process_weights_after_loading()
         return model.eval()
 
 
@@ -633,6 +638,11 @@ class ShardedStateLoader(BaseModelLoader):
                     quant_method = getattr(module, "quant_method", None)
                     if quant_method is not None:
                         quant_method.process_weights_after_loading(module)
+                    if isinstance(module, Attention) and \
+                        hasattr(module, "process_weights_after_loading"):
+                        # When attention modules need to process weights after
+                        # currently only used by MLA
+                        module.process_weights_after_loading()
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(
                 local_model_path,
@@ -1369,6 +1379,11 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 if quant_method is not None:
                     with device_loading_context(module, target_device):
                         quant_method.process_weights_after_loading(module)
+                if isinstance(module, Attention) and \
+                    hasattr(module, "process_weights_after_loading"):
+                    # When attention modules need to process weights after
+                    # currently only used by MLA
+                    module.process_weights_after_loading()
         return model.eval()
 
 
