@@ -185,7 +185,9 @@ def _match_fused_layer(layer_name: str,
         is_matching_type = any(type_suffix in target
                                for type_suffix in possible_layer_types)
 
-        if is_same_parent and is_matching_type:
+        if is_same_parent and is_matching_type and all(
+                '.'.join([parent_path, type_suffix])
+                for type_suffix in possible_layer_types):
             return target
 
     return None
