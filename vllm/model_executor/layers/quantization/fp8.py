@@ -7,6 +7,7 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
+import os
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -423,6 +424,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
+        self.moe_n_slice = int(os.environ.get("VLLM_MOE_N_SLICE", 8))
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
@@ -782,17 +784,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
-        # final_hidden_states = layer.hpu_fused_moe.MoeOp(
-        #     hidden_states=x,
-        #     expert_routing_table=topk_ids,
-        #     router_weights=topk_weights,
-        #     permuted_weights=True,
-        #     activation="silu",
-        # )
         final_hidden_states = torch.zeros_like(x)
         num_experts = layer.w13_weight.shape[0]
-        n_expert_slice = layer.w13_weight.shape[0] // 8
-        assert n_expert_slice * 8 == num_experts
+        n_expert_slice = layer.w13_weight.shape[0] // self.moe_n_slice
+        assert n_expert_slice * self.moe_n_slice == num_experts
 
         # w13_list = layer.hpu_fused_moe.MoeOp.w13_list
         # w2_list = layer.hpu_fused_moe.MoeOp.w2_list
@@ -814,14 +809,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                     dtype=x.dtype,
                                                     original_M=orig_M_w2,
                                                     original_N=orig_N_w2)
-        for i in range(8):
+        for i in range(self.moe_n_slice):
             min_expert = i * n_expert_slice
             max_expert = (i + 1) * n_expert_slice
 
             w13_list_slice = [w13_weight[j] for j in range(min_expert, max_expert)]
             w2_list_slice = [w2_weight[j] for j in range(min_expert, max_expert)]
 
-            final_hidden_states += torch.ops.hpu.mixture_of_experts(hidden_states=x,
+            final_hidden_states += torch.ops.hpu.mixture_of_experts(
+                                         hidden_states=x,
                                          expert_routing_table=topk_ids.to(torch.int64),
                                          router_weights=topk_weights.to(x.dtype),
                                          w12=w13_list_slice,

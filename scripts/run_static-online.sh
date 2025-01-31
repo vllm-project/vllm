@@ -8,20 +8,21 @@ total_len=$((in_len + out_len))
 VLLM_DECODE_BLOCK_BUCKET_MIN=$((in_len * bs / 128))
 VLLM_DECODE_BLOCK_BUCKET_MAX=$((total_len * bs / 128 + 128))
 
-#model="/data/models/DeepSeek-R1/"
-#tokenizer="/data/models/DeepSeek-R1/"
+# model="/data/models/DeepSeek-R1/"
+# tokenizer="/data/models/DeepSeek-R1/"
 model="/software/data/DeepSeek-R1/"
 tokenizer="/software/data/DeepSeek-R1/"
 model_name="DeepSeek-R1"
 
 HABANA_VISIBLE_DEVICES="ALL" \
+VLLM_MOE_N_SLICE=8 \
 PT_HPU_ENABLE_LAZY_COLLECTIVES="true" \
 VLLM_RAY_DISABLE_LOG_TO_DRIVER="1" \
 RAY_IGNORE_UNHANDLED_ERRORS="1" \
 VLLM_PROMPT_BS_BUCKET_MIN=1 \
 VLLM_PROMPT_BS_BUCKET_MAX=${bs} \
 VLLM_PROMPT_SEQ_BUCKET_MIN=${in_len} \
-VLLM_PROMPT_SEQ_BUCKET_MAX=${out_len} \
+VLLM_PROMPT_SEQ_BUCKET_MAX=${total_len} \
 VLLM_DECODE_BS_BUCKET_MIN=${bs} \
 VLLM_DECODE_BS_BUCKET_MAX=${bs} \
 VLLM_DECODE_BLOCK_BUCKET_MIN=${VLLM_DECODE_BLOCK_BUCKET_MIN} \
