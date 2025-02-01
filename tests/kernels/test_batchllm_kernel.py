@@ -19,7 +19,6 @@ def create_seq_params(shared_request_count, request_count, shared_degree,
     # Construct the sequence parameters for Batchllm prefill scenarios.
 
     mega_seq_params = []
-    cur_q_total_len = 0
     i = 0
     # prefix_sharing_group_count = shared_request_count // shared_degree
     while i < shared_request_count:
@@ -28,10 +27,10 @@ def create_seq_params(shared_request_count, request_count, shared_degree,
         # Thus, real_q_length = inflight_qkv_length
         # real_kv_length = shared_prefix_length + non_shared_context_length
         # + inflight_qkv_length
-
-        prefix_sharing_group = [[query_len_of_each_request, 
-                                 shared_prefix_length, 
-                                 non_shared_context_length]] * shared_degree
+        prefix_sharing_group = [[
+            query_len_of_each_request, shared_prefix_length,
+            non_shared_context_length
+        ]] * shared_degree
 
         mega_seq_params.append(prefix_sharing_group)
         i += shared_degree
@@ -154,16 +153,17 @@ def test_batchllm_scenarios(
                                                           dtype=torch.int32)
     max_num_blocks_per_seq = (max(kv_lens) + paged_block_size -
                               1) // paged_block_size
-    block_table = torch.randint(0, NUM_PAGE_BLOCKS, 
-                                (len(query_lens), max_num_blocks_per_seq), 
-                                 dtype=torch.int32)
+    block_table = torch.randint(0,
+                                NUM_PAGE_BLOCKS,
+                                (len(query_lens), max_num_blocks_per_seq),
+                                dtype=torch.int32)
 
     # rectify block_table
     cur_r = 0
     for prefix_sharing_group in mega_seq_params:
         num_elements = len(prefix_sharing_group)
         if num_elements > 1:
-            # replace the block_table of the prefix-sharing group with the 
+            # replace the block_table of the prefix-sharing group with the
             # first one, aka the common prefix
             common_prefix_len = prefix_sharing_group[0][1]
             assert common_prefix_len > 0
@@ -207,7 +207,7 @@ def test_batchllm_scenarios(
             shared_q_start_loc.append(cur_q_start_loc)
         else:
             non_shared_q_lens.append(prefix_sharing_group[0][0])
-            non_shared_kv_lens.append(prefix_sharing_group[0][0] + 
+            non_shared_kv_lens.append(prefix_sharing_group[0][0] +
                                       prefix_sharing_group[0][1] +
                                       prefix_sharing_group[0][2])
             non_shared_block_tables.append(block_table[cur_r].tolist())

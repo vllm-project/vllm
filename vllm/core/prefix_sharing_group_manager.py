@@ -1,5 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 
+
 class PrefixSharingGroupManager:
     """
     To manage the prefix sharing group.

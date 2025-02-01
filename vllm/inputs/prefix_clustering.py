@@ -1,10 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 import numpy as np
 
 SINGLE_REQUEST = -100
+
 
 def prefix_cluster_preprocess(cluster, prompt_token_ids):
     for ind, prompt in enumerate(prompt_token_ids):
@@ -54,11 +55,11 @@ class PromptPrefixCluster:
             self.parent = parent
             self.prompt_id = prompt_id  # The prompt id if it is a leaf node.
             self.children: Dict[int, Any] = {}  # {node_id: TokensNode}
-            
+
         def match_prefix(self, input_ids: List[int]) -> int:
             # Return the matched length of the input_ids.
             length = 0
-            if input_ids is not []:
+            if input_ids != []:
                 for i, id in enumerate(input_ids):
                     if i >= len(self.input_ids) or id != self.input_ids[i]:
                         break
@@ -140,7 +141,7 @@ class PromptPrefixCluster:
         children = list(node.children.values())
         depth = len(node.input_ids)
         for fork in children:
-            if fork.input_ids is []:  # Leaf node.
+            if fork.input_ids == []:  # Leaf node.
                 continue
             fork_width = len(fork.children)
             if fork_width == 1:
@@ -191,7 +192,7 @@ class PromptPrefixCluster:
             return
         children = list(node.children.values())
         for child in children:
-            if child.input_ids is []:  # Leaf node.
+            if child.input_ids == []:  # Leaf node.
                 continue
             self._enlarge_1st_prefix_tokens(child)
             # Now the tree of `child` has the first prefix maximized, note this
@@ -202,7 +203,7 @@ class PromptPrefixCluster:
             # shared prefix.
             child_depth = len(child.input_ids)
             for gchild in grandchildren:
-                if gchild.input_ids is []:  # Leaf node.
+                if gchild.input_ids == []:  # Leaf node.
                     continue
                 gchild_width = self._get_num_leaves(gchild)
                 gchild_depth = len(gchild.input_ids)
@@ -319,20 +320,19 @@ class PromptPrefixCluster:
             distinct_lengths), logical_tokens, physical_tokens
 
     def _print_pretty(self, node: TokensNode, token_num: int, width: int = 4):
-        if node.input_ids is not []:
+        if node.input_ids != []:
             for input_id in node.input_ids:
                 print(f'{input_id:<{width}}', end='')
         else:
             print(f"<prompt{node.prompt_id}>")
             return
-        if node.input_ids is []:
+        if node.input_ids == []:
             local_intent_num = 0
         else:
             local_intent_num = 2 + len(node.input_ids)
             if len(node.input_ids) > 0:
                 local_intent_num += len(node.input_ids) - 1
-        node_token_num = len(
-            node.input_ids) if node.input_ids is not [] else 0
+        node_token_num = len(node.input_ids) if node.input_ids != [] else 0
         new_token_num = token_num + node_token_num
         for id, child in enumerate(node.children.values()):
             if id != 0:
