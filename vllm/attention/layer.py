@@ -200,9 +200,9 @@ class Attention(nn.Module):
         s += f", backend={self.impl.__class__.__name__}"
         return s
 
-    def process_weights_after_loading(self):
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
         if hasattr(self.impl, "process_weights_after_loading"):
-            self.impl.process_weights_after_loading()
+            self.impl.process_weights_after_loading(act_dtype)
 
 
 class MultiHeadAttention(nn.Module):

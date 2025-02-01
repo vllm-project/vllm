@@ -57,14 +57,12 @@ class TritonMLABackend(AttentionBackend):
 
     @staticmethod
     def get_kv_cache_shape(
-            num_blocks: int,
-            block_size: int,
-            num_kv_heads: int,  # assumed to be 1 for MLA
-            kv_lora_rank: int,  # passed via head_size
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,  # assumed to be 1 for MLA
+        head_size: int,
     ) -> Tuple[int, ...]:
-        # TODO(lucas): remove hardcoding k_pe size as 1/8th of kv_lora_rank
-        k_pe_size = kv_lora_rank // 8
-        return (num_blocks, block_size, kv_lora_rank + k_pe_size)
+        return (num_blocks, block_size, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -83,7 +81,7 @@ class TritonMLABackend(AttentionBackend):
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
-        return [512]
+        return [576]
 
 
 class TritonMLAState(AttentionState):
@@ -624,8 +622,6 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             self.multimodal_placeholder_maps.items()
         }
 
-        num_kv_splits = 8
-
         return TritonMLAMetadata(
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
@@ -645,7 +641,7 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
-            num_kv_splits=num_kv_splits,
+            num_kv_splits=4,  # TODO(lucas) add heuristic
             head_dim=self.runner.model_config.get_head_size(),
         )
 

@@ -110,7 +110,9 @@ class CacheEngine:
             parallel_config, LayerBlockType.attention)
 
         key_cache_block = cache_config.block_size * num_heads * head_size
-        value_cache_block = key_cache_block
+        # For MLA there is no value cache, since the latent vector
+        # is joint keys and values.
+        value_cache_block = key_cache_block if not model_config.use_mla else 0
         total = num_attention_layers * (key_cache_block + value_cache_block)
         if cache_config.cache_dtype == "auto":
             dtype = model_config.dtype
