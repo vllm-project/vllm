@@ -10,7 +10,6 @@ from tests.v1.engine.utils import (NUM_PROMPT_LOGPROBS_UNDER_TEST,
                                    MockEngineCore)
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import PromptLogprobs, SampleLogprobs
-from vllm.transformers_utils.detokenizer_utils import replace_none_with_empty
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -29,8 +28,7 @@ def _ref_convert_id_to_token(
     Returns:
       String representation of input token id
     """
-    tok_str_lst = tokenizer.convert_ids_to_tokens([token_id])
-    return replace_none_with_empty(tok_str_lst)[0]
+    return tokenizer.convert_ids_to_tokens(token_id) or ""
 
 
 @pytest.mark.parametrize(

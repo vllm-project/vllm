@@ -1,15 +1,16 @@
 from typing import List, Optional, Tuple
 
-import torch
-
 from .tokenizer import AnyTokenizer
 
 
-def replace_none_with_empty(tokens: List[Optional[str]]):
+def replace_none_with_empty(tokens: List[Optional[str]]) -> None:
+    """Replace occurrences of None with empty string.
+    In-place operation
+    """
+
     for i, token in enumerate(tokens):
         if token is None:
             tokens[i] = ""
-    return tokens
 
 
 def _convert_tokens_to_string_with_added_encoders(
@@ -90,29 +91,8 @@ def convert_ids_list_to_tokens(
     
     """
     token_str_lst = tokenizer.convert_ids_to_tokens(token_ids)
-    return replace_none_with_empty(token_str_lst)  # type: ignore
-
-
-def convert_ids_tensor_to_tokens(
-    tokenizer: AnyTokenizer,
-    token_ids: torch.Tensor,
-) -> List[str]:
-    """Detokenize the input ids individually.
-
-    Args:
-      tokenizer: tokenizer used by model under test
-      token_ids: convert these tokens
-
-    Returns:
-      Python list of token string representations
-    
-    """
-    # Flatten input to shape [N, 1]. Tokenizers then
-    # treats it as decoding batch N seq_len 1, such
-    # that they all happen independently.
-    flat_token_ids = token_ids.reshape(-1,
-                                       1).squeeze().to(torch.int32).tolist()
-    return convert_ids_list_to_tokens(tokenizer, flat_token_ids)
+    replace_none_with_empty(token_str_lst)  # type: ignore
+    return token_str_lst
 
 
 # Based on
