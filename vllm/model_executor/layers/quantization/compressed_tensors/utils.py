@@ -12,7 +12,7 @@ def is_activation_quantization_format(format: str) -> bool:
     _ACTIVATION_QUANTIZATION_FORMATS = [
         CompressionFormat.naive_quantized.value,
         CompressionFormat.int_quantized.value,
-        CompressionFormat.float_quantized.value
+        CompressionFormat.float_quantized.value,
     ]
     return format in _ACTIVATION_QUANTIZATION_FORMATS
 
@@ -68,7 +68,7 @@ def should_ignore_layer(layer_name: Optional[str],
 def check_equal_or_regex_match(layer_name: str,
                                targets: Iterable[str]) -> bool:
     """
-    Checks whether a layer_name is exactly equal or a regex match for 
+    Checks whether a layer_name is exactly equal or a regex match for
     if target starts with 're:' to any target in list.
     """
     for target in targets:
@@ -77,17 +77,64 @@ def check_equal_or_regex_match(layer_name: str,
     return False
 
 
+def _handle_fused_layers(func):
+    """
+    Decorator to handle fused layers by mapping vllm fused layer names
+    to their corresponding unfused layer names for quantization/pruning schemes.
+    """
+    # fused_layer_name -> unfused_layer_name
+    fused_layer_map = {
+        "qkv_proj": "q_proj",
+        "gate_up_proj": "up_proj",
+    }
+
+    def fused_layer_handler(layer_name: Optional[str], module: Module,
+                            targets: Iterable[str]) -> Optional[str]:
+        """
+        Wrapper function specifically designed to support the
+        find_matched_target function.
+
+        It handles cases where the provided layer name corresponds to a
+        fused layer in vllm, mapping it to its equivalent unfused layer name
+        based on the predefined fused_layer_map. If the original layer name
+        raises a ValueError in the wrapped function, this handler
+        will attempt to resolve the issue by substituting with unfused
+        layer name.
+
+        :param layer_name: Name of the layer, which may be fused.
+        :param module: An instance of torch.nn.Module.
+        :param targets: A list of target names or patterns to match.
+        :return: The result of the wrapped find_matched_target function with
+            the resolved layer name.
+        :raises ValueError: If the layer name cannot be resolved to a 
+            valid target.
+        """
+        try:
+            return func(layer_name, module, targets)
+        except ValueError:
+            if layer_name is None:
+                layer_name = ""
+            parent_name, fused_proj_name = layer_name.rsplit(".", 1)
+            unfused_proj_name = fused_layer_map.get(fused_proj_name,
+                                                    fused_proj_name)
+            new_layer_name = f"{parent_name}.{unfused_proj_name}"
+            return func(new_layer_name, module, targets)
+
+    return fused_layer_handler
+
+
+@_handle_fused_layers
 def find_matched_target(layer_name: Optional[str], module: Module,
                         targets: Iterable[str]) -> str:
     """
     Helper function to look up which "target" in the compressed-tensors
     config that a layer corresponds to.
 
-    Recall that a compressed-tensors configs has a concept of 
+    Recall that a compressed-tensors configs has a concept of
     config_groups, where each layer can be quantized with with a different
     scheme.
 
-    targets in each config_group will be a list of either layer names 
+    targets in each config_group will be a list of either layer names
     (or regexes corresponding to layer names) or names of torch Modules.
 
     First, we try to match the layer_name with a target
@@ -107,8 +154,9 @@ def find_matched_target(layer_name: Optional[str], module: Module,
                       or _match_fused_layer(layer_name, targets))
 
     if matched_target is None:
-        raise ValueError(f"Unable to find matching target for {module} in the "
-                         "compressed-tensors config.")
+        raise ValueError(
+            f"Unable to find matching target for {layer_name} in the "
+            "compressed-tensors config.")
 
     return matched_target
 
