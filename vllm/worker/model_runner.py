@@ -14,7 +14,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 from tqdm import tqdm
-
+from math import floor
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
@@ -1083,6 +1083,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
+        self.model_num_params: int
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
         self.prompt_adapter_manager: LRUCacheWorkerPromptAdapterManager = None
@@ -1161,6 +1162,37 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.model,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                 backend=backend)
+
+
+    def get_powv(
+        self,
+        input_tokens,
+        response_tokens,
+    ) -> int:
+        """
+        Calculates probability of weights value that can be used to verify the outputs
+        of a model were made with the model claimed.
+        """
+        powv = 0
+        input_sum = sum(input_tokens)
+        output_sum = sum(response_tokens)
+        token_sum = input_sum + output_sum
+        param_index = token_sum % self.model_num_params
+        for k, param in enumerate(self.model.parameters()):
+            if k != param_index:
+                continue
+            if param.dim() == 1:
+                weights = param.tolist()
+            else:
+                tensor_index = output_sum % param.size()[0]
+                weights = param[tensor_index].tolist()
+            if len(weights) == 0:
+                param_index += 1
+                continue
+            weight_index = input_sum % len(weights)
+            powv = floor(weights[weight_index] * token_sum)
+            break
+        return powv
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -1705,6 +1737,22 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_inner_state else {}
+
+
+        if(model_input.input_positions is not None and model_input.sampling_metadata is not None):
+            for i, o in enumerate(output.outputs):
+                seq_id = model_input.sampling_metadata.seq_groups[i].seq_ids[0]
+                input_tokens = (
+                    model_input.sampling_metadata.seq_groups[i]
+                    .seq_data[seq_id]
+                    .get_prompt_token_ids()
+                )
+                output_tokens = (
+                    model_input.sampling_metadata.seq_groups[i]
+                    .seq_data[seq_id]
+                    .get_output_token_ids()
+                )
+                o.powv = self.get_powv(input_tokens, output_tokens)
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_start = torch.cuda.Event(enable_timing=True)

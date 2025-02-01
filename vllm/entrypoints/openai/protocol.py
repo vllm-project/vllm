@@ -1085,6 +1085,8 @@ class CompletionResponseChoice(OpenAIBaseModel):
             "to stop, None if the completion finished for some other reason "
             "including encountering the EOS token"),
     )
+    powv: Optional[int] = None
+    token_ids: Optional[List[int]] = None
     prompt_logprobs: Optional[List[Optional[Dict[int, Logprob]]]] = None
 
 
@@ -1109,6 +1111,8 @@ class CompletionResponseStreamChoice(OpenAIBaseModel):
             "to stop, None if the completion finished for some other reason "
             "including encountering the EOS token"),
     )
+    powv: Optional[int] = None
+    token_ids: Optional[List[int]] = None
 
 
 class CompletionStreamResponse(OpenAIBaseModel):

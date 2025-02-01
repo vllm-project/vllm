@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, Generic, List, MutableSequence, Optional
+from typing import Dict, Generic, List, MutableSequence, Optional, Tuple
 from typing import Sequence as GenericSequence
 from typing import Union
 
@@ -41,6 +41,7 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+    powv: Optional[int] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -116,6 +117,7 @@ class RequestOutput:
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[List[int]] = None,
         num_cached_tokens: Optional[int] = None,
+        powv: Optional[int] = None,
         *,
         multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
     ) -> None:
@@ -131,6 +133,7 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
+        self.powv: Optional[int] = powv
 
     @classmethod
     def new(
@@ -283,6 +286,7 @@ class RequestOutput:
                 output.finish_reason = SequenceStatus.get_finished_reason(
                     seq.status)
                 output.stop_reason = seq.stop_reason
+                output.powv = seq_group.powv
 
             else:
                 output = CompletionOutput(
@@ -291,7 +295,7 @@ class RequestOutput:
                     seq.get_cumulative_logprob() if include_logprobs else None,
                     output_logprobs,
                     SequenceStatus.get_finished_reason(seq.status),
-                    seq.stop_reason)
+                    seq.stop_reason, powv=seq_group.powv)
 
             outputs.append(output)
 
@@ -364,11 +368,12 @@ class PoolingRequestOutput(Generic[_O]):
     """
 
     def __init__(self, request_id: str, outputs: _O,
-                 prompt_token_ids: List[int], finished: bool):
+                 prompt_token_ids: List[int], finished: bool, powv: Optional[int]=None):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.finished = finished
         self.outputs = outputs
+        self.powv = powv
 
     @staticmethod
     def from_seq_group(seq_group: SequenceGroup) -> "PoolingRequestOutput":
@@ -381,7 +386,7 @@ class PoolingRequestOutput(Generic[_O]):
         finished = seq_group.is_finished()
 
         return PoolingRequestOutput(seq_group.request_id, output,
-                                    prompt_token_ids, finished)
+                                    prompt_token_ids, finished, seq_group.powv)
 
     def __repr__(self):
         """
@@ -447,6 +452,7 @@ class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
             outputs=EmbeddingOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
             finished=request_output.finished,
+            
         )
 
 

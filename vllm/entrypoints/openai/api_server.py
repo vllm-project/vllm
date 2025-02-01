@@ -83,7 +83,7 @@ from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
-
+POWV_VERIFY_VERSION = "2"
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)

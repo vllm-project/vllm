@@ -653,6 +653,7 @@ class SequenceGroup:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        powv: Optional[int]=None
     ) -> None:
         self.request_id = request_id
         self.seqs = seqs
@@ -660,6 +661,7 @@ class SequenceGroup:
         self.arrival_time = arrival_time
         self.is_single_seq = len(seqs) == 1
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
+        self.powv = powv
 
         self.sampling_params = sampling_params
         self.metrics = RequestMetrics(arrival_time=arrival_time,
@@ -1078,6 +1080,7 @@ class CompletionSequenceGroupOutput(
     samples: List[SequenceOutput]
     # Prompt logprob for each prompt query token.
     prompt_logprobs: Optional[PromptLogprobs]
+    powv: Optional[int]=None
 
     def __repr__(self) -> str:
         return (f"CompletionSequenceGroupOutput(samples={self.samples}, "
