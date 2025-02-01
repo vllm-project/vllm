@@ -417,7 +417,7 @@ def get_rocm_version():
 
         if (get_rocm_core_version(ctypes.byref(major), ctypes.byref(minor),
                                   ctypes.byref(patch)) == 0):
-            return "%d.%d.%d" % (major.value, minor.value, patch.value)
+            return f"{major.value}.{minor.value}.{patch.value}"
         return None
     except Exception:
         return None
@@ -608,7 +608,11 @@ if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
 package_data = {
-    "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
+    "vllm": [
+        "py.typed",
+        "model_executor/layers/fused_moe/configs/*.json",
+        "model_executor/layers/quantization/utils/configs/*.json",
+    ]
 }
 
 if _no_device():

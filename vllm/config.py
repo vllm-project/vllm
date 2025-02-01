@@ -67,7 +67,8 @@ _RUNNER_TASKS: Dict[RunnerType, List[_ResolvedTask]] = {
 
 _TASK_RUNNER: Dict[_ResolvedTask, RunnerType] = {
     task: runner
-    for runner, tasks in _RUNNER_TASKS.items() for task in tasks
+    for runner, tasks in _RUNNER_TASKS.items()
+    for task in tasks
 }
 
 HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
@@ -164,6 +165,8 @@ class ModelConfig:
             `logits_processors` extra completion argument. Defaults to None,
             which allows no processors.
         generation_config: Configuration parameter file for generation.
+        override_generation_config: Override the generation config with the
+            given config.
     """
 
     def compute_hash(self) -> str:
@@ -224,6 +227,7 @@ class ModelConfig:
         logits_processor_pattern: Optional[str] = None,
         generation_config: Optional[str] = None,
         enable_sleep_mode: bool = False,
+        override_generation_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -310,14 +314,15 @@ class ModelConfig:
             (self.hf_text_config.model_type in ["gemma2", "cohere2"]))
 
         if (not self.disable_sliding_window and has_interleaved_attention):
-            if envs.VLLM_ATTENTION_BACKEND == "XFORMERS":
+            if (backend :=
+                    envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER"):
                 sliding_window_len_min = get_min_sliding_window(
                     self.hf_text_config.sliding_window)
 
                 logger.warning_once(
                     f"{self.hf_text_config.model_type} has interleaved "
                     "attention, which is currently not supported by the "
-                    "XFORMERS backend. Disabling sliding window and capping "
+                    f"{backend} backend. Disabling sliding window and capping "
                     "the max length to the sliding window size "
                     f"({sliding_window_len_min}).")
                 self.disable_sliding_window = True
@@ -366,6 +371,7 @@ class ModelConfig:
         self.logits_processor_pattern = logits_processor_pattern
 
         self.generation_config = generation_config
+        self.override_generation_config = override_generation_config or {}
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -730,17 +736,25 @@ class ModelConfig:
     def get_hidden_size(self) -> int:
         return self.hf_text_config.hidden_size
 
+    @property
+    def is_deepseek_mla(self) -> bool:
+        # TODO add deepseek_v3
+        return hasattr(self.hf_text_config,
+                       "model_type") and (self.hf_text_config.model_type
+                                          in ('deepseek_v2'))
+
     def get_head_size(self) -> int:
         # TODO remove hard code
-        if hasattr(self.hf_text_config,
-                   "model_type") and (self.hf_text_config.model_type
-                                      in ('deepseek_v2', 'deepseek_v3')):
-            qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim",
-                                       0)
-            qk_nope_head_dim = getattr(self.hf_text_config, "qk_nope_head_dim",
-                                       0)
-            if qk_rope_head_dim and qk_nope_head_dim:
-                return qk_rope_head_dim + qk_nope_head_dim
+        if self.is_deepseek_mla:
+            if self.use_mla:
+                return self.hf_text_config.kv_lora_rank
+            else:
+                qk_rope_head_dim = getattr(self.hf_text_config,
+                                           "qk_rope_head_dim", 0)
+                qk_nope_head_dim = getattr(self.hf_text_config,
+                                           "qk_nope_head_dim", 0)
+                if qk_rope_head_dim and qk_nope_head_dim:
+                    return qk_rope_head_dim + qk_nope_head_dim
 
         if self.is_attention_free:
             return 0
@@ -799,6 +813,10 @@ class ModelConfig:
 
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU."""
+        if self.use_mla:
+            # When using MLA during decode it becomes MQA
+            return 1
+
         total_num_kv_heads = self.get_total_num_kv_heads()
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
@@ -902,20 +920,31 @@ class ModelConfig:
         """
         if self.generation_config is None:
             # When generation_config is not set
-            return {}
-        config = self.try_get_generation_config()
+            config = {}
+        else:
+            config = self.try_get_generation_config()
+
+        # Overriding with given generation config
+        config.update(self.override_generation_config)
+
         available_params = [
             "repetition_penalty",
             "temperature",
             "top_k",
             "top_p",
             "min_p",
+            "max_new_tokens",
         ]
         if any(p in config for p in available_params):
             diff_sampling_param = {
                 p: config.get(p)
                 for p in available_params if config.get(p) is not None
             }
+            # Huggingface definition of max_new_tokens is equivalent
+            # to vLLM's max_tokens
+            if "max_new_tokens" in diff_sampling_param:
+                diff_sampling_param["max_tokens"] = diff_sampling_param.pop(
+                    "max_new_tokens")
         else:
             diff_sampling_param = {}
         return diff_sampling_param
@@ -937,6 +966,11 @@ class ModelConfig:
     def is_cross_encoder(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_cross_encoder_model(architectures)
+
+    @property
+    def use_mla(self) -> bool:
+        use_mla = (self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE)
+        return use_mla
 
     @property
     def supported_runner_types(self) -> Set[RunnerType]:
@@ -1678,7 +1712,8 @@ class SpeculativeConfig:
             raise ValueError("Expect the batch size threshold of disabling "
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
-
+        if (enable_chunked_prefill and speculative_model == "eagle"):
+            raise ValueError("Chunked prefill and EAGLE are not compatible.")
         # TODO: The user should be able to specify revision/max model len
         # for the draft model. It is not currently supported.
         draft_revision = None
@@ -1744,12 +1779,6 @@ class SpeculativeConfig:
                         "This speculative model supports a maximum of "
                         f"num_speculative_tokens={n_predict}, but "
                         f"{num_speculative_tokens=} was provided.")
-
-            if enable_chunked_prefill and draft_hf_config.model_type in (
-                    "medusa", "mlp_speculator", "eagle"):
-                raise ValueError(
-                    "Chunked prefill and hidden-state based draft models are "
-                    "not compatible.")
 
             speculative_draft_tensor_parallel_size = \
                 SpeculativeConfig._verify_and_get_draft_model_tensor_parallel_size(
@@ -1974,8 +2003,8 @@ class SpeculativeConfig:
                              "typical_acceptance_sampler.")
 
         if (self.draft_token_acceptance_method != 'rejection_sampler'
-                and self.draft_token_acceptance_method !=
-                'typical_acceptance_sampler'):
+                and self.draft_token_acceptance_method
+                != 'typical_acceptance_sampler'):
             raise ValueError(
                 "Expected draft_token_acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "
@@ -3304,7 +3333,7 @@ _current_vllm_config: Optional[VllmConfig] = None
 
 
 @contextmanager
-def set_current_vllm_config(vllm_config: VllmConfig):
+def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     """
     Temporarily set the current VLLM config.
     Used during model initialization.
@@ -3324,7 +3353,8 @@ def set_current_vllm_config(vllm_config: VllmConfig):
                      vllm_config.compilation_config.enabled_custom_ops)
         logger.debug("disabled custom ops: %s",
                      vllm_config.compilation_config.disabled_custom_ops)
-        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
+        if check_compile and \
+            vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
             and compilation_counter.num_models_seen == num_models_seen:
             # If the model supports compilation,
             # compilation_counter.num_models_seen should be increased
