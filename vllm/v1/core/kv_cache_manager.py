@@ -143,13 +143,6 @@ class KVCacheManager:
             raise ValueError(f"num_tokens must be greater than 0")
 
         new_computed_blocks = new_computed_blocks or []
-        # Touch the computed blocks to make sure they won't be evicted.
-        if self.enable_caching:
-            self._touch(new_computed_blocks)
-        else:
-            assert not new_computed_blocks, (
-                "Computed blocks should be empty when "
-                "prefix caching is disabled")
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
@@ -160,10 +153,24 @@ class KVCacheManager:
         req_blocks = self.req_to_blocks[request.request_id]
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(new_computed_blocks))
-        if num_new_blocks > self.free_block_queue.num_free_blocks:
+
+        # If a computed block of a request is an eviction candidate (in the
+        # free queue and ref_cnt == 0), it cannot be counted as a free block
+        # when allocating this request.
+        num_evictable_computed_blocks = sum(1 for blk in new_computed_blocks
+                                            if blk.ref_cnt == 0)
+        if (num_new_blocks > self.free_block_queue.num_free_blocks -
+                num_evictable_computed_blocks):
             # Cannot allocate new blocks
-            self._untouch(new_computed_blocks)
             return None
+
+        # Touch the computed blocks to make sure they won't be evicted.
+        if self.enable_caching:
+            self._touch(new_computed_blocks)
+        else:
+            assert not new_computed_blocks, (
+                "Computed blocks should be empty when "
+                "prefix caching is disabled")
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
@@ -421,21 +428,6 @@ class KVCacheManager:
             if block.ref_cnt == 0:
                 self.free_block_queue.remove(block)
             block.incr_ref()
-
-    def _untouch(self, blocks: List[KVCacheBlock]) -> None:
-        """Untouch a block decreases its reference count by 1, and may add
-        the block to the free queue. This is used to reverse touched blocks
-        that are hit by another request with the same prefix.
-
-        Args:
-            blocks: A list of blocks to touch.
-        """
-        for block in blocks:
-            block.decr_ref()
-            # ref_cnt=0 means this block can be added in the free list
-            # (i.e. eviction candidate).
-            if block.ref_cnt == 0:
-                self.free_block_queue.append(block)
 
     def _cache_full_blocks(
         self,
