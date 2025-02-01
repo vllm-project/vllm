@@ -206,6 +206,11 @@ class Processor:
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
 
+        if len(prompt_ids) >= self.model_config.max_model_len:
+            raise ValueError(
+                f"Prompt length of {len(prompt_ids)} is longer than the "
+                f"maximum model length of {self.model_config.max_model_len}.")
+
         if self.model_config.is_multimodal_model:
             max_prompt_len = self.model_config.max_model_len
 
