@@ -971,7 +971,28 @@ class ModelConfig:
     def use_mla(self) -> bool:
         if self.quantization is not None and self.quantization not in [\
             "fp8", "compressed-tensors"]:
+            logger.warning(
+                "MLA is not supported with %s quantization. "
+                "Disabling MLA.", self.quantization)
             return False
+
+        # If using a "compressed-tensors" checkpoint, check that all groups
+        # have fp8 for both weights and activations.
+        if self.quantization == "compressed-tensors":
+            quant_config = self._parse_quant_hf_config()
+            for group_name, group_cfg in quant_config.get("config_groups",
+                                                          {}).items():
+                input_act_type = group_cfg.get("input_activations", {})\
+                    .get("type", "unknown").lower()
+                weights_type = group_cfg.get("weights", {})\
+                    .get("type", "unknown").lower()
+                if input_act_type != "fp8" or weights_type != "fp8":
+                    logger.warning(
+                        "compressed-tensors MLA support requires fp8 "
+                        "activations and weights in group '%s', but got "
+                        "activations type '%s' and weights type '%s'.",
+                        group_name, input_act_type, weights_type)
+                    return False
 
         use_mla = (self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE)
         return use_mla
