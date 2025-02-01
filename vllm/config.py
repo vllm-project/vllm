@@ -2040,6 +2040,11 @@ class SpeculativeConfig:
         return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
 
 
+class LoraPolicy(enum.Enum):
+    ROUND_ROBIN = "round_robin"
+    NAIVE = "naive"
+
+
 @dataclass
 class LoRAConfig:
     max_lora_rank: int
@@ -2048,6 +2053,9 @@ class LoRAConfig:
     max_cpu_loras: Optional[int] = None
     lora_dtype: Optional[Union[torch.dtype, str]] = None
     lora_extra_vocab_size: int = 256
+    num_iters_before_reschedule: int = 32
+    lora_policy: LoraPolicy = LoraPolicy.NAIVE
+
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None

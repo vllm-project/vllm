@@ -3,7 +3,7 @@ import os
 
 import torch
 
-from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
+from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs, LoraPolicy
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.llm import LLM
