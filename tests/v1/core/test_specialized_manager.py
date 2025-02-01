@@ -3,10 +3,10 @@ from typing import Deque
 
 import torch
 
-from vllm.v1.core.hybrid_cache_manager.specialized_manager import (
-    BlockPoolOperations, SlidingWindowManager)
-from vllm.v1.core.hybrid_cache_manager.utils import PrefixLengthRange
-from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
+from vllm.v1.core.specialized_manager import (BlockPoolOperations,
+                                              SlidingWindowManager)
+from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
+                                         PrefixLengthRange)
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
 

@@ -4,15 +4,14 @@ from typing import Dict, List, Optional, Tuple
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
-from vllm.v1.core.hybrid_cache_manager.specialized_manager import (
-    BlockPoolOperations, get_managers)
-from vllm.v1.core.hybrid_cache_manager.utils import (PrefixLength,
-                                                     intersect_ranges)
+from vllm.v1.core.specialized_manager import (BlockPoolOperations,
+                                              get_managers)
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock, ReqKVCacheBlocks,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
-                                         hash_request_tokens)
+                                         hash_request_tokens, PrefixLength,
+                                         intersect_ranges)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 

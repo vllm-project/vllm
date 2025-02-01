@@ -4,9 +4,8 @@ from itertools import chain
 from typing import Callable, Dict, List, Optional, Tuple, Type
 
 from vllm.utils import cdiv
-from vllm.v1.core.hybrid_cache_manager.utils import (PrefixLength,
-                                                     PrefixLengthRange)
-from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
+                                         PrefixLength, PrefixLengthRange)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, SlidingWindowSpec)
 from vllm.v1.utils import ConstantList
