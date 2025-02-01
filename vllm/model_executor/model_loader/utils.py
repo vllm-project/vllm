@@ -30,11 +30,12 @@ def set_default_torch_dtype(dtype: torch.dtype):
 def is_transformers_impl_compatible(
         arch: str,
         module: Optional[transformers.PreTrainedModel] = None) -> bool:
-    mod = module if module is not None else getattr(transformers, arch)
-    if hasattr(mod, "supports_backend"):
+    mod = module if module is not None else getattr(transformers, arch, None)
+    if mod is not None and hasattr(mod, "supports_backend"):
         return mod.is_backend_compatible()
-    else:
+    elif mod is not None:
         return mod._supports_flex_attn
+    return False
 
 
 def resolve_transformers_fallback(model_config: ModelConfig,
@@ -48,6 +49,8 @@ def resolve_transformers_fallback(model_config: ModelConfig,
             custom_module = get_class_from_dynamic_module(
                 model_config.hf_config.auto_map["AutoModel"],
                 model_config.model)
+        # TODO(Isotr0py): Further clean up these raises.
+        # perhaps handled them in _ModelRegistry._raise_for_unsupported?
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
             if not is_transformers_impl_compatible(arch, custom_module):
                 raise ValueError(
