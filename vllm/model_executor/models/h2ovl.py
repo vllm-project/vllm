@@ -399,13 +399,16 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
             dynamic_image_size=dynamic_image_size,
         )
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        max_tokens_no_msac = self.get_max_image_tokens(use_msac=False)
-        if seq_len // max_tokens_no_msac < 2:
-            # Dummy data will have one image; in that case msac may be applied
-            max_tokens_per_image = self.get_max_image_tokens(use_msac=None)
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        max_tokens_one_image = self.get_max_image_tokens(use_msac=None)
+        if mm_counts.get("image", 0) <= 1:
+            max_tokens_per_image = max_tokens_one_image
         else:
-            max_tokens_per_image = max_tokens_no_msac
+            max_tokens_per_image = self.get_max_image_tokens(use_msac=False)
 
         return {"image": max_tokens_per_image}
 
