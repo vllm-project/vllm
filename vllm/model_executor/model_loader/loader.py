@@ -1386,8 +1386,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                     hasattr(module, "process_weights_after_loading"):
                     # When attention modules need to process weights after
                     # currently only used by MLA
-                    module.process_weights_after_loading(
-                            model_config.dtype)
+                    module.process_weights_after_loading(model_config.dtype)
         return model.eval()
 
 
