@@ -3,7 +3,7 @@
 import re
 import time
 from argparse import Namespace
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -42,15 +42,31 @@ class OpenAIBaseModel(BaseModel):
     # OpenAI API does allow extra fields
     model_config = ConfigDict(extra="allow")
 
+    # Cache class field names
+    field_names: ClassVar[Optional[Set[str]]] = None
+
     @model_validator(mode="before")
     @classmethod
     def __log_extra_fields__(cls, data):
-        if isinstance(data, dict):
-            extra_fields = data.keys() - cls.model_fields.keys()
-            if extra_fields:
-                logger.warning(
-                    "The following fields were present in the request "
-                    "but ignored: %s", extra_fields)
+
+        field_names = cls.field_names
+        if field_names is None:
+            if not isinstance(data, dict):
+                return data
+            # Get all class field names and their potential aliases
+            field_names = set()
+            for field_name, field in cls.model_fields.items():
+                field_names.add(field_name)
+                if alias := getattr(field, 'alias', None):
+                    field_names.add(alias)
+            cls.field_names = field_names
+
+        # Compare against both field names and aliases
+        if any(k not in field_names for k in data):
+            logger.warning(
+                "The following fields were present in the request "
+                "but ignored: %s",
+                data.keys() - field_names)
         return data
 
 
@@ -211,8 +227,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
-    temperature: Optional[float] = 0.7
-    top_p: Optional[float] = 1.0
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
     tools: Optional[List[ChatCompletionToolsParam]] = None
     tool_choice: Optional[Union[Literal["none"], Literal["auto"],
                                 ChatCompletionNamedToolChoiceParam]] = "none"
@@ -224,9 +240,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # doc: begin-chat-completion-sampling-params
     best_of: Optional[int] = None
     use_beam_search: bool = False
-    top_k: int = -1
-    min_p: float = 0.0
-    repetition_penalty: float = 1.0
+    top_k: Optional[int] = None
+    min_p: Optional[float] = None
+    repetition_penalty: Optional[float] = None
     length_penalty: float = 1.0
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
@@ -348,15 +364,36 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # doc: end-chat-completion-extra-params
 
-    def to_beam_search_params(self,
-                              default_max_tokens: int) -> BeamSearchParams:
+    # Default sampling parameters for chat completion requests
+    _DEFAULT_SAMPLING_PARAMS: dict = {
+        "repetition_penalty": 1.0,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "min_p": 0.0,
+    }
+
+    def to_beam_search_params(
+            self,
+            default_max_tokens: int,
+            default_sampling_params: Optional[dict] = None
+    ) -> BeamSearchParams:
         # TODO(#9845): remove max_tokens when field is removed from OpenAI API
         max_tokens = self.max_completion_tokens or self.max_tokens
-        if max_tokens is None:
-            max_tokens = default_max_tokens
 
+        if default_sampling_params is None:
+            default_sampling_params = {}
         n = self.n if self.n is not None else 1
-        temperature = self.temperature if self.temperature is not None else 0.0
+
+        # Use minimum of context window, user request & server limit.
+        max_tokens = min(
+            val for val in (default_max_tokens, max_tokens,
+                            default_sampling_params.get("max_tokens", None))
+            if val is not None)
+
+        if (temperature := self.temperature) is None:
+            temperature = default_sampling_params.get(
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
 
         return BeamSearchParams(
             beam_width=n,
@@ -367,12 +404,40 @@ class ChatCompletionRequest(OpenAIBaseModel):
             include_stop_str_in_output=self.include_stop_str_in_output)
 
     def to_sampling_params(
-            self, default_max_tokens: int,
-            logits_processor_pattern: Optional[str]) -> SamplingParams:
+            self,
+            default_max_tokens: int,
+            logits_processor_pattern: Optional[str],
+            default_sampling_params: Optional[dict] = None) -> SamplingParams:
         # TODO(#9845): remove max_tokens when field is removed from OpenAI API
         max_tokens = self.max_completion_tokens or self.max_tokens
-        if max_tokens is None:
-            max_tokens = default_max_tokens
+
+        if default_sampling_params is None:
+            default_sampling_params = {}
+
+        # Use minimum of context window, user request & server limit.
+        max_tokens = min(
+            val for val in (default_max_tokens, max_tokens,
+                            default_sampling_params.get("max_tokens", None))
+            if val is not None)
+
+        # Default parameters
+        if (repetition_penalty := self.repetition_penalty) is None:
+            repetition_penalty = default_sampling_params.get(
+                "repetition_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
+            )
+        if (temperature := self.temperature) is None:
+            temperature = default_sampling_params.get(
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
+        if (top_p := self.top_p) is None:
+            top_p = default_sampling_params.get(
+                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
+        if (top_k := self.top_k) is None:
+            top_k = default_sampling_params.get(
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"])
+        if (min_p := self.min_p) is None:
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
 
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
@@ -387,7 +452,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 assert json_schema is not None
                 self.guided_json = json_schema.json_schema
                 if self.guided_decoding_backend is None:
-                    self.guided_decoding_backend = "lm-format-enforcer"
+                    self.guided_decoding_backend = "xgrammar"
 
         guided_decoding = GuidedDecodingParams.from_optional(
             json=self._get_guided_json_from_tool() or self.guided_json,
@@ -403,11 +468,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
-            repetition_penalty=self.repetition_penalty,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            top_k=self.top_k,
-            min_p=self.min_p,
+            repetition_penalty=repetition_penalty,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
@@ -584,15 +649,15 @@ class CompletionRequest(OpenAIBaseModel):
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
     suffix: Optional[str] = None
-    temperature: Optional[float] = 1.0
-    top_p: Optional[float] = 1.0
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
     user: Optional[str] = None
 
     # doc: begin-completion-sampling-params
     use_beam_search: bool = False
-    top_k: int = -1
-    min_p: float = 0.0
-    repetition_penalty: float = 1.0
+    top_k: Optional[int] = None
+    min_p: Optional[float] = None
+    repetition_penalty: Optional[float] = None
     length_penalty: float = 1.0
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
@@ -669,14 +734,34 @@ class CompletionRequest(OpenAIBaseModel):
 
     # doc: end-completion-extra-params
 
-    def to_beam_search_params(self,
-                              default_max_tokens: int) -> BeamSearchParams:
-        max_tokens = self.max_tokens
-        if max_tokens is None:
-            max_tokens = default_max_tokens
+    # Default sampling parameters for completion requests
+    _DEFAULT_SAMPLING_PARAMS: dict = {
+        "repetition_penalty": 1.0,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "min_p": 0.0,
+    }
 
+    def to_beam_search_params(
+            self,
+            default_max_tokens: int,
+            default_sampling_params: Optional[dict] = None
+    ) -> BeamSearchParams:
+        max_tokens = self.max_tokens
+
+        if default_sampling_params is None:
+            default_sampling_params = {}
         n = self.n if self.n is not None else 1
-        temperature = self.temperature if self.temperature is not None else 0.0
+
+        # Use minimum of context window, user request & server limit.
+        max_tokens = min(
+            val for val in (default_max_tokens, max_tokens,
+                            default_sampling_params.get("max_tokens", None))
+            if val is not None)
+
+        if (temperature := self.temperature) is None:
+            temperature = default_sampling_params.get("temperature", 1.0)
 
         return BeamSearchParams(
             beam_width=n,
@@ -687,11 +772,39 @@ class CompletionRequest(OpenAIBaseModel):
             include_stop_str_in_output=self.include_stop_str_in_output)
 
     def to_sampling_params(
-            self, default_max_tokens: int,
-            logits_processor_pattern: Optional[str]) -> SamplingParams:
+            self,
+            default_max_tokens: int,
+            logits_processor_pattern: Optional[str],
+            default_sampling_params: Optional[dict] = None) -> SamplingParams:
         max_tokens = self.max_tokens
-        if max_tokens is None:
-            max_tokens = default_max_tokens
+
+        if default_sampling_params is None:
+            default_sampling_params = {}
+
+        # Use minimum of context window, user request & server limit.
+        max_tokens = min(
+            val for val in (default_max_tokens, max_tokens,
+                            default_sampling_params.get("max_tokens", None))
+            if val is not None)
+
+        # Default parameters
+        if (repetition_penalty := self.repetition_penalty) is None:
+            repetition_penalty = default_sampling_params.get(
+                "repetition_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
+            )
+        if (temperature := self.temperature) is None:
+            temperature = default_sampling_params.get(
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
+        if (top_p := self.top_p) is None:
+            top_p = default_sampling_params.get(
+                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
+        if (top_k := self.top_k) is None:
+            top_k = default_sampling_params.get(
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"])
+        if (min_p := self.min_p) is None:
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
 
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
@@ -718,11 +831,11 @@ class CompletionRequest(OpenAIBaseModel):
             best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
-            repetition_penalty=self.repetition_penalty,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            top_k=self.top_k,
-            min_p=self.min_p,
+            repetition_penalty=repetition_penalty,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
@@ -876,6 +989,10 @@ class EmbeddingChatRequest(OpenAIBaseModel):
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
 
+PoolingCompletionRequest = EmbeddingCompletionRequest
+PoolingChatRequest = EmbeddingChatRequest
+PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest]
+
 
 class ScoreRequest(OpenAIBaseModel):
     model: str
@@ -968,6 +1085,21 @@ class EmbeddingResponse(OpenAIBaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     data: List[EmbeddingResponseData]
+    usage: UsageInfo
+
+
+class PoolingResponseData(OpenAIBaseModel):
+    index: int
+    object: str = "pooling"
+    data: Union[List[List[float]], List[float], str]
+
+
+class PoolingResponse(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"pool-{random_uuid()}")
+    object: str = "list"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    data: List[PoolingResponseData]
     usage: UsageInfo
 
 

@@ -5,9 +5,12 @@ from torch import nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.attention.backends.placeholder_attn import (
+    PlaceholderAttentionMetadata)
 from vllm.attention.backends.xformers import XFormersMetadata
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -31,15 +34,20 @@ from vllm.model_executor.utils import set_weight_attrs
 @CustomOp.register("mixer2_gated_rms_norm")
 class Mixer2RMSNormGated(CustomOp):
 
-    def __init__(self, hidden_size, eps=1e-6):
+    def __init__(self, full_hidden_size, full_n_groups, eps=1e-6):
         super().__init__()
-        self.hidden_size = hidden_size
-        self.variance_epsilon = eps
-        self.weight = nn.Parameter(torch.ones(hidden_size))
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.full_hidden_size = full_hidden_size
+        self.group_size = full_hidden_size // full_n_groups
+        self.per_rank_hidden_size = full_hidden_size // self.tp_size
+        self.n_groups = full_hidden_size // self.group_size
+
+        self.variance_epsilon = eps
+        self.weight = nn.Parameter(torch.ones(self.per_rank_hidden_size))
         set_weight_attrs(self.weight,
                          {"weight_loader": sharded_weight_loader(0)})
-        assert self.hidden_size % self.tp_size== 0,\
+        assert self.full_hidden_size % self.tp_size== 0,\
             "Tensor parallel world size must divide hidden size."
 
     def forward_native(
@@ -47,21 +55,49 @@ class Mixer2RMSNormGated(CustomOp):
         x: torch.Tensor,
         gate: torch.Tensor,
     ):
+        # Three tensor-parallel cases:
+        #   1. n_groups is 1
+        #      In this case we parallelize along the reduction dim.
+        #      Each rank computes a local sum of squares followed by AllReduce
+        #   2. tp_size divides n_groups
+        #      Each rank only reduces within its local group(s).
+        #      No collective ops necessary.
+        #   3. The general case can be pretty complicated so we AllGather
+        #      the input and then redundantly compute the RMSNorm.
         input_dtype = x.dtype
         x = x * nn.functional.silu(gate.to(torch.float32))
 
-        if self.tp_size > 1:
-            # Compute local sum and then reduce to obtain global sum
-            local_sums = x.pow(2).sum(dim=-1, keepdim=True)
-            global_sums = tensor_model_parallel_all_reduce(local_sums)
-            # Calculate the variance
-            count = self.tp_size * x.shape[-1]
-            variance = (global_sums / count)
+        if self.n_groups == 1:
+            if self.tp_size > 1:
+                # Compute local sum and then reduce to obtain global sum
+                local_sums = x.pow(2).sum(dim=-1, keepdim=True)
+                global_sums = tensor_model_parallel_all_reduce(local_sums)
+                # Calculate the variance
+                count = self.tp_size * x.shape[-1]
+                variance = (global_sums / count)
 
+            else:
+                variance = x.pow(2).mean(-1, keepdim=True)
+            x = x * torch.rsqrt(variance + self.variance_epsilon)
         else:
-            variance = x.pow(2).mean(-1, keepdim=True)
+            redundant_tp: bool = self.n_groups % self.tp_size != 0
+            if redundant_tp:
+                # To handle the general case, redundantly apply the variance
+                x = tensor_model_parallel_all_gather(x, -1)
 
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
+            *prefix_dims, hidden_dim = x.shape
+            group_count = hidden_dim // self.group_size
+            x_grouped = x.view(*prefix_dims, group_count, self.group_size)
+            variance = x_grouped.pow(2).mean(-1, keepdim=True)
+            x_grouped = x_grouped * torch.rsqrt(variance +
+                                                self.variance_epsilon)
+            x = x_grouped.view(*prefix_dims, hidden_dim)
+
+            if redundant_tp:
+                start = self.per_rank_hidden_size * self.tp_rank
+                end = start + self.per_rank_hidden_size
+                x = x[..., start:end]
+
         return self.weight * x.to(input_dtype)
 
     def forward_cuda(
@@ -70,7 +106,7 @@ class Mixer2RMSNormGated(CustomOp):
         gate: torch.Tensor,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
 
-        if self.tp_size > 1:
+        if self.tp_size > 1 or self.n_groups != 1:
             return self.forward_native(x, gate)
 
         from vllm import _custom_ops as ops
@@ -322,7 +358,8 @@ class MambaMixer2(CustomOp):
                                           input_is_parallel=True,
                                           quant_config=quant_config)
 
-        self.norm = Mixer2RMSNormGated(intermediate_size // self.tp_size,
+        self.norm = Mixer2RMSNormGated(intermediate_size,
+                                       n_groups,
                                        eps=rms_norm_eps)
 
     def forward_native(self, hidden_states: torch.Tensor,
@@ -348,7 +385,8 @@ class MambaMixer2(CustomOp):
         # - currently we really only support the FlashAttention backend
         has_initial_states = None
         if (isinstance(attn_metadata,
-                       (FlashAttentionMetadata, XFormersMetadata))
+                       (FlashAttentionMetadata, XFormersMetadata,
+                        PlaceholderAttentionMetadata))
                 and attn_metadata.context_lens_tensor is not None):
             has_initial_states = attn_metadata.context_lens_tensor > 0
 
@@ -388,6 +426,9 @@ class MambaMixer2(CustomOp):
                 cache_indices=mamba_cache_params.state_indices_tensor,
                 query_start_loc=attn_metadata.query_start_loc).transpose(
                     0, 1)[:seq_len]
+
+            # TODO: Why is this needed?
+            hidden_states_B_C = hidden_states_B_C.contiguous()
         else:
             hidden_states_B_C = causal_conv1d_update(
                 hidden_states_B_C,
@@ -460,7 +501,7 @@ class MambaMixer2(CustomOp):
                 -1, self.num_heads // self.tp_size, self.head_dim)
 
             # - the hidden is reshaped into number of current batches
-            # - in this case there is no more prefil, so the batches gen
+            # - in this case there is no more prefill, so the batches gen
             #   1 token at a time
             # - thus hidden will be (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected

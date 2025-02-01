@@ -24,12 +24,8 @@ def init_tokenizer_from_configs(model_config: ModelConfig,
                        max_input_length=None,
                        tokenizer_mode=model_config.tokenizer_mode,
                        trust_remote_code=model_config.trust_remote_code,
-                       revision=model_config.tokenizer_revision)
-
-    if (model_config.encoder_config is not None
-            and "do_lower_case" in model_config.encoder_config):
-        init_kwargs["do_lower_case"] = model_config.encoder_config[
-            "do_lower_case"]
+                       revision=model_config.tokenizer_revision,
+                       truncation_side=model_config.truncation_side)
 
     return get_tokenizer_group(parallel_config.tokenizer_pool_config,
                                **init_kwargs)

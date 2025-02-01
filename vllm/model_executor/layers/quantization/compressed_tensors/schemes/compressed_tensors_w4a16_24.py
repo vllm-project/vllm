@@ -61,6 +61,10 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
 
+        assert params_dtype == torch.float16, (
+            "float16 is required for marlin24 compressed models. Set dtype=torch.float16"  # noqa: E501
+        )
+
         pack_factor = 32 // self.quant_type.size_bits
         output_size_per_partition = sum(output_partition_sizes)
 

@@ -30,7 +30,7 @@ def should_ignore_layer(layer_name: Optional[str],
     # in the safetensors checkpoint. So, we convert the name
     # from the fused version to unfused + check to make sure that
     # each shard of the fused layer has the same scheme.
-    if proj_name in FUSED_LAYER_NAME_MAPPING:
+    if proj_name in FUSED_LAYER_NAME_MAPPING and layer_name not in ignore:
         shard_proj_names = FUSED_LAYER_NAME_MAPPING[proj_name]
 
         # Convert fused_name --> [shard_names]
@@ -130,23 +130,6 @@ def _find_first_match(value: str,
                                     target,
                                     check_contains=check_contains):
             return target
-    return None
-
-
-def get_compressed_tensors_cache_scale(name: str) -> Optional[str]:
-    """
-    Check whether the param name matches the format for k/v cache scales
-    in compressed-tensors. If this is the case, return its equivalent
-    param name expected by vLLM
-
-    :param name: param name
-    :return: matching param name for KV cache scale in vLLM
-    """
-    if name.endswith(".output_scale") and ".k_proj" in name:
-        return name.replace(".k_proj.output_scale", ".attn.k_scale")
-    if name.endswith(".output_scale") and ".v_proj" in name:
-        return name.replace(".v_proj.output_scale", ".attn.v_scale")
-    # If no matches, return None
     return None
 
 
