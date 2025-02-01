@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+from transformers import PretrainedConfig
 
 from vllm.model_executor.custom_op import CustomOp
 
@@ -829,13 +830,11 @@ class MRotaryEmbedding(RotaryEmbedding):
     @staticmethod
     def get_input_positions(
         input_tokens: List[int],
+        hf_config: PretrainedConfig,
         image_grid_thw: Union[List[List[int]], torch.Tensor],
         video_grid_thw: Union[List[List[int]], torch.Tensor],
-        image_token_id: int,
-        video_token_id: int,
-        vision_start_token_id: int,
-        vision_end_token_id: int,
-        spatial_merge_size: int,
+        second_per_grid_ts: Optional[Union[List[List[int]],
+                                           torch.Tensor]] = None,
         context_len: int = 0,
         seq_len: Optional[int] = None,
     ) -> Tuple[List[List[int]], int]:
@@ -843,16 +842,13 @@ class MRotaryEmbedding(RotaryEmbedding):
 
         llm_positions, mrope_position_delta = \
             MRotaryEmbedding.get_input_positions_tensor(
-                input_tokens,
-                image_grid_thw,
-                video_grid_thw,
-                image_token_id,
-                video_token_id,
-                vision_start_token_id,
-                vision_end_token_id,
-                spatial_merge_size,
-                context_len,
-                seq_len,
+                input_tokens=input_tokens,
+                hf_config=hf_config,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
+                context_len=context_len,
+                seq_len=seq_len,
             )
 
         return llm_positions.tolist(), mrope_position_delta
@@ -860,17 +856,22 @@ class MRotaryEmbedding(RotaryEmbedding):
     @staticmethod
     def get_input_positions_tensor(
         input_tokens: List[int],
+        hf_config: PretrainedConfig,
         image_grid_thw: Union[List[List[int]], torch.Tensor],
         video_grid_thw: Union[List[List[int]], torch.Tensor],
-        image_token_id: int,
-        video_token_id: int,
-        vision_start_token_id: int,
-        vision_end_token_id: int,
-        spatial_merge_size: int,
+        second_per_grid_ts: Optional[Union[List[List[int]],
+                                           torch.Tensor]] = None,
         context_len: int = 0,
         seq_len: Optional[int] = None,
     ) -> Tuple[torch.Tensor, int]:
         """Get mrope input positions and delta value."""
+
+        image_token_id = hf_config.image_token_id
+        video_token_id = hf_config.video_token_id
+        vision_start_token_id = hf_config.vision_start_token_id
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+        tokens_per_second = getattr(hf_config.vision_config,
+                                    "tokens_per_second", None)
 
         if isinstance(image_grid_thw, torch.Tensor):
             image_grid_thw = image_grid_thw.tolist()
@@ -904,6 +905,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                     image_grid_thw[image_index][1],
                     image_grid_thw[image_index][2],
                 )
+                second_per_grid_t = 0
                 image_index += 1
                 remain_images -= 1
                 ed = ed_image
@@ -913,9 +915,14 @@ class MRotaryEmbedding(RotaryEmbedding):
                     video_grid_thw[video_index][1],
                     video_grid_thw[video_index][2],
                 )
+                if second_per_grid_ts:
+                    second_per_grid_t = second_per_grid_ts[video_index]
+                else:
+                    second_per_grid_t = 1.0
                 video_index += 1
                 remain_videos -= 1
                 ed = ed_video
+
             llm_grid_t, llm_grid_h, llm_grid_w = \
                 t, h // spatial_merge_size, w // spatial_merge_size
             text_len = ed - st
@@ -925,8 +932,18 @@ class MRotaryEmbedding(RotaryEmbedding):
             llm_pos_ids_list.append(
                 torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
-            t_index = torch.arange(llm_grid_t).view(-1, 1).expand(
-                -1, llm_grid_h * llm_grid_w).flatten()
+            if tokens_per_second is not None:
+                range_tensor = torch.arange(llm_grid_t).view(-1, 1)
+                expanded_range = range_tensor.expand(-1,
+                                                     llm_grid_h * llm_grid_w)
+                time_tensor = expanded_range * second_per_grid_t * \
+                    tokens_per_second
+                time_tensor_long = time_tensor.long()
+                t_index = time_tensor_long.flatten()
+            else:
+                t_index = torch.arange(llm_grid_t).view(-1, 1).expand(
+                    -1, llm_grid_h * llm_grid_w).flatten()
+
             h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(
                 llm_grid_t, -1, llm_grid_w).flatten()
             w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(

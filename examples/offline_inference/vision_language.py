@@ -530,7 +530,7 @@ def run_qwen2_vl(question: str, modality: str):
     return llm, prompt, stop_token_ids
 
 
-# Qwen2-VL
+# Qwen2.5-VL
 def run_qwen2_5_vl(question: str, modality: str):
 
     model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
@@ -541,12 +541,12 @@ def run_qwen2_5_vl(question: str, modality: str):
         max_num_seqs=5,
         mm_processor_kwargs={
             "min_pixels": 28 * 28,
-            "max_pixels": 256 * 28 * 28,
+            "max_pixels": 64 * 28 * 28,
         },
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
         limit_mm_per_prompt={
             "image": 1,
-            "video": 0
+            "video": 1,
         },
     )
 
