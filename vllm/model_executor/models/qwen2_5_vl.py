@@ -35,8 +35,6 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 from transformers.models.qwen2_5_vl.image_processing_qwen2_5_vl import (
     smart_resize)
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-    Qwen2_5_VisionTransformerPretrainedModel)
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -144,21 +142,14 @@ class Qwen2_5_VLMLP(nn.Module):
             prefix=f"{prefix}.down_proj"
         )
 
-        # self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
-        # self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias)
-        # self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias)
-
         self.act = act_layer()
 
-    def forward(self, hidden_state):
-        gate_out, _ = self.gate_proj(hidden_state)
-        up_out, _ = self.up_proj(hidden_state)
+    def forward(self, x):
+        gate_out, _ = self.gate_proj(x)
+        up_out, _ = self.up_proj(x)
         gated = self.act(gate_out) * up_out
         out, _ = self.down_proj(gated)
         return out
-
-        # return self.down_proj(self.act(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
-
 
 def rotate_half(x: torch.Tensor, interleaved: bool = False) -> torch.Tensor:
     if not interleaved:
@@ -494,9 +485,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
         spatial_merge_size = vision_config.spatial_merge_size
         in_channels = vision_config.in_channels
         hidden_size = vision_config.hidden_size
-        out_hidden_size = vision_config.out_hidden_size # New for merger
+        out_hidden_size = vision_config.out_hidden_size
         intermediate_size = vision_config.intermediate_size
-        embed_dim = vision_config.hidden_size # Same as hidden size now
+        embed_dim = vision_config.hidden_size # Same for 2.5
         depth = vision_config.depth
         num_heads = vision_config.num_heads
 
@@ -613,32 +604,27 @@ class Qwen2_5_VisionTransformer(nn.Module):
         return window_index, cu_window_seqlens
 
 
-    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            hidden_states (`torch.Tensor` of shape `(batch_size, seq_len, hidden_size)`):
-                The final hidden states of the model.
-            grid_thw (`torch.Tensor` of shape `(num_images_or_videos, 3)`):
-                The temporal, height and width of feature shape of each image in LLM.
-        Returns:
-            `torch.Tensor`: hidden_states.
-        """
-        hidden_states = hidden_states.to(device=self.device, dtype=self.dtype)
-        hidden_states = self.patch_embed(hidden_states)
-        hidden_states = hidden_states.unsqueeze(1)
+    def forward(
+        self,
+        x: torch.Tensor,
+        grid_thw: torch.Tensor,
+    ) -> torch.Tensor:
+        x = x.to(device=self.device, dtype=self.dtype)
+        x = self.patch_embed(x)
+        x = x.unsqueeze(1)
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
         window_index, cu_window_seqlens = self.get_window_index(grid_thw)
         cu_window_seqlens = torch.tensor(
             cu_window_seqlens,
-            device=hidden_states.device,
+            device=x.device,
             dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
         )
         cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
-        print(hidden_states.size())
-        seq_len, _, _ = hidden_states.size()
-        hidden_states = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        hidden_states = hidden_states[window_index, :, :]
-        hidden_states = hidden_states.reshape(seq_len, -1)
+
+        seq_len, _, _ = x.size()
+        x = x.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+        x = x[window_index, :, :]
+        x = x.reshape(seq_len, -1)
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         rotary_pos_emb = rotary_pos_emb[window_index, :, :]
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
@@ -652,51 +638,23 @@ class Qwen2_5_VisionTransformer(nn.Module):
             dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
-        hidden_states = hidden_states.unsqueeze(1)
+        x = x.unsqueeze(1)
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
             else:
                 cu_seqlens_now = cu_window_seqlens
-            hidden_states = blk(
-                hidden_states,
+            x = blk(
+                x,
                 cu_seqlens=cu_seqlens_now,
                 rotary_pos_emb=rotary_pos_emb,
             )
 
-        hidden_states = self.merger(hidden_states)
+        x = self.merger(x)
         reverse_indices = torch.argsort(window_index)
-        hidden_states = hidden_states[reverse_indices, :]
+        x = x[reverse_indices, :]
 
-        return hidden_states
-
-    # def forward(
-    #     self,
-    #     x: torch.Tensor,
-    #     grid_thw: torch.Tensor,
-    # ) -> torch.Tensor:
-    #     # patchify
-    #     x = x.to(device=self.device, dtype=self.dtype)
-    #     x = self.patch_embed(x)
-
-    #     # compute position embedding
-    #     rotary_pos_emb = self.rot_pos_emb(grid_thw)
-
-    #     # compute cu_seqlens
-    #     cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
-    #                                          grid_thw[:, 0]).cumsum(
-    #                                              dim=0, dtype=torch.int32)
-    #     cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
-
-    #     # transformers
-    #     x = x.unsqueeze(1)
-    #     for blk in self.blocks:
-    #         x = blk(x, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
-
-    #     # adapter
-    #     x = self.merger(x)
-
-    #     return x
+        return x
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
@@ -724,7 +682,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                # print("NAMEIS", name)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
