@@ -10,7 +10,7 @@ from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -203,7 +203,6 @@ class Scheduler:
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
                 if num_new_tokens == 0:
-                    raise NotImplementedError
                     # The happens when prompt length is divisible by the block
                     # size and all blocks are cached. Now we force to recompute
                     # the last block. Note that we have to re-compute an entire
@@ -211,9 +210,21 @@ class Scheduler:
                     # is always a multiple of the block size. This limitation
                     # can potentially be removed in the future to slightly
                     # improve the performance.
-                    num_computed_tokens -= self.block_size
-                    num_new_tokens = self.block_size
-                    computed_blocks.pop()
+                    kv_groups = self.kv_cache_manager.kv_cache_config.groups
+                    if len(kv_groups) > 1 or \
+                        not isinstance(kv_groups[0].kv_cache_spec,
+                                       FullAttentionSpec):
+                        # It is difficult to handle the last block problem
+                        # for hybrid models. Ignore all computed tokens as
+                        # a temporary solution.
+                        num_computed_tokens = 0
+                        num_new_tokens = request.num_tokens
+                        computed_blocks = [[] for _ in kv_groups]
+                    else:
+                        block_size = kv_groups[0].kv_cache_spec.block_size
+                        num_computed_tokens -= block_size
+                        num_new_tokens = block_size
+                        computed_blocks[0].pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 
@@ -227,7 +238,8 @@ class Scheduler:
                     break
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens, computed_blocks)
+                    request, num_new_tokens, computed_blocks,
+                    num_computed_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break

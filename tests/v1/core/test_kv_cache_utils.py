@@ -49,7 +49,9 @@ def test_kv_cache_block():
     assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
-    block_hash = BlockHashType(hash_value=123, token_ids=(1, 2, 3))
+    block_hash = BlockHashType(hash_value=123,
+                               kv_cache_group_id=0,
+                               token_ids=(1, 2, 3))
     block.block_hash = block_hash
     assert block.block_hash == block_hash
 
@@ -190,11 +192,11 @@ def test_hash_block_tokens():
     curr_block_token_ids = (1, 2, 3)
     extra_keys = ("key1", "key2")
 
-    block_hash = hash_block_tokens(parent_block_hash, curr_block_token_ids,
+    block_hash = hash_block_tokens(parent_block_hash, curr_block_token_ids, 0,
                                    extra_keys)
     assert isinstance(block_hash, BlockHashType)
     assert block_hash.hash_value == hash(
-        (parent_block_hash, *curr_block_token_ids))
+        (parent_block_hash, 0, *curr_block_token_ids))
     assert block_hash.token_ids == curr_block_token_ids
     assert block_hash.extra_keys == extra_keys
 
@@ -214,7 +216,7 @@ def test_hash_request_tokens():
     )
 
     block_size = 3
-    block_hashes = hash_request_tokens(block_size, request)
+    block_hashes = hash_request_tokens(block_size, request, 0)
 
     assert len(block_hashes) == 2
     assert isinstance(block_hashes[0], BlockHashType)
@@ -238,7 +240,7 @@ def test_hash_request_tokens_no_mm_inputs():
     )
 
     block_size = 3
-    block_hashes = hash_request_tokens(block_size, request)
+    block_hashes = hash_request_tokens(block_size, request, 0)
 
     assert len(block_hashes) == 2
     assert block_hashes[0].token_ids == (0, 1, 2)
@@ -267,3 +269,6 @@ def test_prefix_length_range_intersection():
         PrefixLengthRange(10, 11),
         PrefixLengthRange(16, 17)
     ]
+
+
+# TODO: add tests for hash of kv_cache_group_id

@@ -260,6 +260,7 @@ class KVCacheManager:
         request: Request,
         num_tokens: int,
         computed_blocks: ReqKVCacheBlocks,
+        num_computed_tokens: int,
     ) -> Optional[ReqKVCacheBlocks]:
         """Allocate slots for a new request.
 
@@ -268,6 +269,7 @@ class KVCacheManager:
             num_tokens: The number of tokens to allocate. Note that this does
                 not include the tokens that have already been computed.
             computed_blocks: The computed blocks.
+            num_computed_tokens: The number of computed tokens.
 
         Returns:
            The new blocks if new blocks are allocated, or None if new blocks
@@ -285,7 +287,7 @@ class KVCacheManager:
                                             if blk.ref_cnt == 0)
 
         num_new_blocks = [
-            manager.get_num_new_blocks(request.num_computed_tokens, num_tokens,
+            manager.get_num_new_blocks(num_computed_tokens, num_tokens,
                                        len(computed_blocks_of_group))
             for manager, computed_blocks_of_group in zip(
                 self.managers, computed_blocks)
