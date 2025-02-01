@@ -40,6 +40,11 @@ class CPUCacheEngine:
         self.model_config = model_config
         self.parallel_config = parallel_config
 
+        if device_config.device_type == "metal":
+            self.device = torch.device("mps")
+        else:
+            self.device = torch.device("cpu")
+
         self.head_size = model_config.get_head_size()
         self.num_layers = model_config.get_num_layers(parallel_config)
         self.num_heads = model_config.get_num_kv_heads(parallel_config)
@@ -77,7 +82,7 @@ class CPUCacheEngine:
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_layers):
             kv_cache.append(
-                torch.empty(kv_cache_shape, dtype=self.dtype, device="cpu"))
+                torch.empty(kv_cache_shape, dtype=self.dtype, device=self.device))
         return kv_cache
 
     def swap_in(self, src_to_dst: Dict[int, int]) -> None:
@@ -135,6 +140,13 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
+
+        if self.device_config.device_type == "cpu":
+            self.device = torch.device("cpu")
+        elif self.device_config.device_type == "metal":
+            self.device = torch.device("mps")
+        else:
+            raise ValueError(f"Invalid device type: {self.device_config.device_type}")
 
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
@@ -212,7 +224,6 @@ class CPUWorker(LocalOrDistributedWorkerBase):
             ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
-        self.device = torch.device("cpu")
         self.init_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)
@@ -350,7 +361,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         virtual_engine: int = execute_model_req.virtual_engine
         num_seq_groups: int = len(execute_model_req.seq_group_metadata_list)
         blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
-                                      device="cpu",
+                                      device=self.device,
                                       dtype=torch.int64).view(-1, 2)
         assert len(execute_model_req.blocks_to_swap_in) == 0
         assert len(execute_model_req.blocks_to_swap_out) == 0

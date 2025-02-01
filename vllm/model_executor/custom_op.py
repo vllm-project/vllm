@@ -88,6 +88,8 @@ class CustomOp(nn.Module):
             return self.forward_xpu
         elif current_platform.is_out_of_tree():
             return self.forward_oot
+        elif current_platform.is_metal():
+            return self.forward_native
         else:
             return self.forward_cuda
 

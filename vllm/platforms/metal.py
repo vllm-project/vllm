@@ -74,14 +74,6 @@ class MetalPlatform(Platform):
                 "Invalid environment variable VLLM_CPU_KVCACHE_SPACE"
                 f" {kv_cache_space}, expect a positive integer value.")
 
-        scheduler_config = vllm_config.scheduler_config
-        if ((scheduler_config.chunked_prefill_enabled
-             or cache_config.enable_prefix_caching)
-                and model_config.dtype == torch.half):
-            logger.warning("Chunked-prefill on the CPU backend only does not"
-                           " support fp16 for now, cast to bf16.")
-            model_config.dtype = torch.bfloat16 # TODO supported?
-        
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
@@ -90,7 +82,6 @@ class MetalPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
-        logger.warning("Pin memory is not supported on Metal.")
         return False
 
     @classmethod

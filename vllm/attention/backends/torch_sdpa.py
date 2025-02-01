@@ -500,6 +500,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 PagedAttention.write_to_paged_cache(
                     key, value, key_cache, value_cache, updated_slot_mapping,
                     self.kv_cache_dtype, layer._k_scale, layer._v_scale)
+                torch.mps.synchronize()
 
         if attn_type != AttentionType.ENCODER:
             # Decoder self-attention supports chunked prefill.
@@ -576,7 +577,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 layer._k_scale,
                 layer._v_scale,
             )
-
+        torch.mps.synchronize()
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
 
