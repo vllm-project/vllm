@@ -980,18 +980,18 @@ class ModelConfig:
         # have fp8 for both weights and activations.
         if self.quantization == "compressed-tensors":
             quant_config = self._parse_quant_hf_config()
-        if self.quantization == "compressed-tensors":
-            quant_config = self._parse_quant_hf_config()
             for group_name, cfg in quant_config.get("config_groups",
-                                                    {}).items():
-                act_type = cfg.get("input_activations", {}).get("type", "")
-                weight_type = cfg.get("weights", {}).get("type", "")
-                if act_type != "fp8" or weight_type != "fp8":
+                                                    ("", {})).items():
+                act_cfg = cfg.get("input_activations", {})
+                act_type = None if act_cfg is None else act_cfg.get("type", "")
+                w_cfg = cfg.get("weights", {})
+                w_type = None if w_cfg is None else w_cfg.get("type", "")
+                if act_type != "fp8" or w_type != "fp8":
                     logger.warning(
                         "compressed-tensors MLA support requires fp8 "
                         "activations and weights in group '%s', but got "
                         "activations type '%s' and weights type '%s'.\n "
-                        "Full config: %s", group_name, act_type, weight_type,
+                        "Full config: %s", group_name, act_type, w_type,
                         quant_config)
                     return False
 
