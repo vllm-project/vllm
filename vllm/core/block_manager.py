@@ -249,8 +249,17 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         new_cows = self.block_allocator.clear_copy_on_writes()
         return new_cows
 
-    def free(self, seq: Sequence) -> None:
-        seq_id = seq.seq_id
+    def free(
+        self,
+        seq: Optional[Sequence] = None,
+        i_seq_id: Optional[int] = None,
+    ) -> None:
+        if seq is not None:
+            seq_id = seq.seq_id
+        elif i_seq_id is not None:
+            seq_id = i_seq_id
+        else:
+            raise ValueError("both seq & i_seq_id are None!")
 
         if seq_id not in self.block_tables:
             # Already freed or haven't been scheduled yet.
@@ -258,7 +267,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         # Update seq block ids with the latest access time
         self._last_access_blocks_tracker.update_seq_blocks_last_access(
-            seq_id, self.block_tables[seq.seq_id].physical_block_ids)
+            seq_id, self.block_tables[seq_id].physical_block_ids)
 
         # Untrack seq
         self._last_access_blocks_tracker.remove_seq(seq_id)
@@ -276,8 +285,18 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self.cross_block_tables[request_id].free()
         del self.cross_block_tables[request_id]
 
-    def get_block_table(self, seq: Sequence) -> List[int]:
-        block_ids = self.block_tables[seq.seq_id].physical_block_ids
+    def get_block_table(
+        self,
+        seq: Optional[Sequence] = None,
+        i_seq_id: Optional[int] = None,
+    ) -> List[int]:
+        if seq is not None:
+            seq_id = seq.seq_id
+        elif i_seq_id is not None:
+            seq_id = i_seq_id
+        else:
+            raise ValueError("seq & i_seq_id are None!")
+        block_ids = self.block_tables[seq_id].physical_block_ids
         return block_ids  # type: ignore
 
     def get_cross_block_table(self, seq_group: SequenceGroup) -> List[int]:

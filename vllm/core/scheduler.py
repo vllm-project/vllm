@@ -10,6 +10,7 @@ from typing import Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
+from vllm.core.prefix_sharing_group_manager import PrefixSharingGroupManager
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -419,6 +420,56 @@ class Scheduler:
         # for processing and deallocation by the free_finished_seq_groups()
         self._async_stopped: List[SequenceGroup] = []
 
+        # For BatchLLM scenarios, we need to manage some meta-info
+        # of prefix-sharing groups, like the their ids.
+        # Here we introduce a separate manager
+        self.prefix_sharing_manager = PrefixSharingGroupManager(
+            self, self.block_manager)
+
+        # Considering there're 3 requests
+        # `A`: [x, y1], `B`: [x, y2], `C`:[c],
+        # and A, B share the same prefix `x`, while C is a single request.
+        # In this case, Batchllm build a prefix-sharing group for A and B,
+        # and extract the shared prefix `x` as a separate request.
+        # In this case, there're 4 requests in total:
+        # shared prefix request: [x]
+        # non-shared context request : [y1], [y2]
+        # single request : [c]
+
+        # For the requests of prefix sharing group, it's important
+        # to keep the output order of the requests aligned with the
+        # input order. Before the inference of BatchLLM starts,
+        # only the shared prefix request and single request could be
+        # put into `self.waiting` queue of the scheduler. All non-shared
+        # context requests would be put into `self.non_shared_waiting` queue.
+
+        # when inference for one shared prefix request is done at one step,
+        # non-shared context requests for **this** prefix-caching group
+        # would be put into `self.non_shared_ready` queue of the scheduler.
+        # Then all requests in `self.non_shared_ready` at this step would cut in
+        # front of all requests in `self.waiting` queue.
+
+        # At one step, here's one possible status of some queues
+        # in the scheduler:
+
+        # waiting:           [ [x], [c] ] -> [ [c]       ] -> [ [y1], [y2], [c]]
+        #                                                      |
+        #                                                      |
+        # non_shared_ready:  [          ] -> [ [y1], [y2]] -> []
+        #                                     |
+        #                                     |
+        # non_shared_waiting:[[y1], [y2]] -> [           ] -> []
+
+        # Sequence groups with their prefix sharing have been handled.
+        # All requests here will be put into the left of the `self.waiting`
+        # queue at the end of this step.
+        self.non_shared_ready: Deque[SequenceGroup] = deque()
+        # Sequence groups of non-shared context requests.
+        # When inference for one shared prefix request is done,
+        # its non-shared context requests in this queue would be
+        # put into `self.non_shared_ready` queue.
+        self.non_shared_waiting: Deque[SequenceGroup] = deque()
+
     @property
     def next_cache_id(self):
         return (self.cache_id + 1) % self.num_cache_iters
@@ -432,9 +483,25 @@ class Scheduler:
         """The number of new tokens."""
         return 1
 
-    def add_seq_group(self, seq_group: SequenceGroup) -> None:
+    def add_seq_group(self,
+                      seq_group: SequenceGroup,
+                      csgroup_common: Optional[bool] = None) -> None:
         # Add sequence groups to the waiting queue.
-        self.waiting.append(seq_group)
+        if csgroup_common is not None:  # shared/non-shared requests
+            if csgroup_common:
+                self.waiting.append(seq_group)
+                self.prefix_sharing_manager.add_shared_prefix_request(
+                    seq_group)
+            else:
+                self.non_shared_waiting.append(seq_group)
+                self.prefix_sharing_manager.add_non_shared_request(seq_group)
+                shared_prefix_request_id = \
+                    self.prefix_sharing_manager.get_shared_prefix_request_id(
+                    seq_group)
+                seq_group.update_shared_prefix_request_id(
+                    shared_prefix_request_id)
+        else:  # single request
+            self.waiting.append(seq_group)
 
     def _add_seq_group_to_running(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the running queue.
@@ -499,7 +566,7 @@ class Scheduler:
 
     def has_unfinished_seqs(self) -> bool:
         return len(self.waiting) != 0 or len(self.running) != 0 or len(
-            self.swapped) != 0
+            self.swapped) != 0 or len(self.non_shared_waiting) != 0
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_manager.get_prefix_cache_hit_rate(device)
@@ -508,7 +575,9 @@ class Scheduler:
         return self.block_manager.reset_prefix_cache()
 
     def get_num_unfinished_seq_groups(self) -> int:
-        return len(self.waiting) + len(self.running) + len(self.swapped)
+        return (len(self.waiting) + len(self.running) + len(self.swapped) +
+                len(self.non_shared_waiting) -
+                len(self.prefix_sharing_manager.group_dict))
 
     def get_and_reset_finished_requests_ids(self) -> List[str]:
         """Flushes the list of request ids of previously finished seq_groups."""
@@ -1317,6 +1386,9 @@ class Scheduler:
             seq_data: Dict[int, SequenceData] = {}
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
+            shared_prefix_request_id, shared_prefix_block_tables, \
+                shared_prefix_length = \
+                self.prefix_sharing_manager.get_common_request(seq_group)
 
             if seq_group.is_encoder_decoder():
                 # Encoder associated with SequenceGroup
@@ -1334,7 +1406,17 @@ class Scheduler:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
-                block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                # NOTE(batchllm): Since batchllm's kernels performs
+                # not as good as the vllm's original kernels in some
+                # scenarios(like when the shared-degree is not big
+                # enough) here we keep the `full` block tables of
+                # one request in a shared-prefix group for better
+                # utilizing vllm's kernels.
+                block_tables[seq_id] = (
+                    shared_prefix_block_tables +
+                    self.block_manager.get_block_table(seq) if self.
+                    prefix_sharing_manager.is_psgroup_non_shared(seq_group)
+                    else self.block_manager.get_block_table(seq))
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
             if self.cache_config.enable_prefix_caching:
@@ -1367,6 +1449,9 @@ class Scheduler:
             if is_first_prefill or not self.scheduler_config.send_delta_data:
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
+                    shared_prefix_request_id=shared_prefix_request_id,
+                    shared_prefix_block_tables=shared_prefix_block_tables,
+                    shared_prefix_length=shared_prefix_length,
                     is_prompt=is_prompt,
                     seq_data=seq_data,
                     sampling_params=seq_group.sampling_params,
@@ -1463,9 +1548,14 @@ class Scheduler:
             # This list will be used to update the Mamba cache in the
             # next step.
             self._finished_requests_ids.append(seq_group.request_id)
+            # NOTE(batchllm) Here we only need to release the seq_group
+            # of `common` part when all `distinct` parts in one `shared-prefix`
+            # group are processed.
+            self.prefix_sharing_manager.remove_finished_request(seq_group)
 
-        # Free finished seqs
-        self._free_finished_seqs(seq_group)
+        # Free finished seqs, except the seq_group of "common" part.
+        if not self.prefix_sharing_manager.is_psgroup_shared(seq_group):
+            self._free_finished_seqs(seq_group)
 
     def free_finished_seq_groups(self) -> None:
         remaining: Deque[SequenceGroup] = deque()
@@ -1473,11 +1563,15 @@ class Scheduler:
             self._free_finished_seq_group(seq_group)
             if not seq_group.is_finished():
                 remaining.append(seq_group)
+        if self.non_shared_ready:
+            self.waiting.extendleft(self.non_shared_ready)
+            self.non_shared_ready = deque()
 
         self.running = remaining
 
         # Handle async stopped sequence groups
         # (ones that reached max model len)
+        # TODO(batchllm): not support yet
         if self._async_stopped:
             for seq_group in self._async_stopped:
                 self._free_seq_group_cross_attn_blocks(seq_group)

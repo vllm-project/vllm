@@ -254,6 +254,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             reinit: bool = False,
             reinit_use_defaults: bool = False,
             encoder_seq_len: int = 0,
+
+            # For batchllm, the request_id of common part
+            batchllm_this_group_hit: bool = False,
+            shared_prefix_request_id: Optional[str] = None,
+            shared_prefix_length: int = 0,
+            shared_prefix_block_tables: Optional[List[int]] = None,
         ):
             if reinit:
                 assert len(self.seq_ids) == len(seq_ids)  # type: ignore
@@ -268,6 +274,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.computed_block_nums = computed_block_nums
             self.n_seqs = n_seqs
             self.encoder_seq_len = encoder_seq_len
+            self.batchllm_this_group_hit = batchllm_this_group_hit
+            self.shared_prefix_request_id = shared_prefix_request_id
+            self.shared_prefix_length = shared_prefix_length
+            self.shared_prefix_block_tables = shared_prefix_block_tables
 
             if reinit:
                 if len(self.seq_ids) == 1 and reinit_use_defaults:
@@ -437,6 +447,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self._compute_for_prefix_cache_hit,
             self._compute_for_sliding_window,
             self._compute_lora_input,
+            self._compute_for_batchllm,
         ]
         # Compute functions for each sequence group.
         # WARNING: The order of the functions matters!
@@ -486,6 +497,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             ModelInputForGPUBuilder.InterDataForSeqGroup] = []
 
         self.attn_metadata_builder.prepare()
+        # For the batchllm enabled
+        self.batchllm_enabled = (
+            self.scheduler_config is not None
+            and self.scheduler_config.enable_ahead_of_prefix_clustering)
+        assert not (self.batchllm_enabled and self.sliding_window is not None)
 
     def _compute_lens(self, inter_data: InterDataForSeqGroup, seq_idx: int,
                       seq_group_metadata: SequenceGroupMetadata):
@@ -727,6 +743,33 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 inter_data.mrope_input_positions[
                     seq_idx] = mrope_input_positions
 
+    def _compute_for_batchllm(self, inter_data: InterDataForSeqGroup,
+                              seq_idx: int,
+                              seq_group_metadata: SequenceGroupMetadata):
+        """Fix seq_len/context_len/input_position when batch
+        """
+
+        batchllm_this_group_hit = \
+            inter_data.shared_prefix_request_id is not None \
+            and inter_data.shared_prefix_request_id != inter_data.request_id
+        inter_data.batchllm_this_group_hit = batchllm_this_group_hit
+
+        if batchllm_this_group_hit:
+            assert self.sliding_window is None
+            cur_common_kv_len = inter_data.shared_prefix_length
+            # TODO(BatchLLM): maybe it's not necessary to
+            # add `cur_common_kv_len` for orig_seq_lens
+            inter_data.orig_seq_lens[seq_idx] += cur_common_kv_len
+            inter_data.seq_lens[seq_idx] += cur_common_kv_len
+            inter_data.context_lens[seq_idx] += cur_common_kv_len
+            replace_range = inter_data.seq_lens[seq_idx] - \
+                    inter_data.context_lens[seq_idx]
+            inter_data.input_positions[seq_idx] = \
+                inter_data.input_positions[seq_idx][:-replace_range]
+            inter_data.input_positions[seq_idx].extend(
+                range(inter_data.context_lens[seq_idx],
+                      inter_data.seq_lens[seq_idx]))
+
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         """Add a sequence group to the builder."""
         seq_ids = seq_group_metadata.seq_data.keys()
@@ -750,7 +793,15 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             computed_block_nums=seq_group_metadata.computed_block_nums,
             reinit=True,
             reinit_use_defaults=True,
-            encoder_seq_len=encoder_seq_len)
+            encoder_seq_len=encoder_seq_len,
+            shared_prefix_request_id=seq_group_metadata.
+            shared_prefix_request_id,
+            shared_prefix_length=0 \
+            if seq_group_metadata.shared_prefix_length is None else \
+            seq_group_metadata.shared_prefix_length,
+            shared_prefix_block_tables=seq_group_metadata.
+            shared_prefix_block_tables,
+        )
 
         self.inter_data_list.append(inter_data)
 
@@ -1049,6 +1100,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.graph_block_tables = np.zeros(
             (self.max_batchsize_to_capture, self.get_max_block_per_batch()),
             dtype=np.int32)
+        # same with common/distinct cached block
+
+        # TODO(batchllm): not support cuda graph yet
 
         # Attention-free but stateful models like Mamba need a placeholder attn
         # backend, as the attention metadata is needed to manage internal state.

@@ -163,7 +163,7 @@ class EngineArgs:
 
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: Optional[bool] = None
-
+    enable_ahead_of_prefix_clustering: bool = False
     guided_decoding_backend: str = 'xgrammar'
     logits_processor_pattern: Optional[str] = None
     # Speculative decoding configuration.
@@ -700,6 +700,10 @@ class EngineArgs:
             const="True",
             help='If set, the prefill requests can be chunked based on the '
             'max_num_batched_tokens.')
+        parser.add_argument(
+            '--enable-ahead-of-prefix-clustering',
+            action='store_true',
+            help='Enables prefix_clustering as the preprocessing.')
 
         parser.add_argument(
             '--speculative-model',
@@ -1064,7 +1068,29 @@ class EngineArgs:
                            "supported for multimodal models in v0 and "
                            "has been disabled.")
             self.enable_prefix_caching = False
-
+            if self.enable_ahead_of_prefix_clustering:
+                logger.warning(
+                    "--enable-ahead-of-prefix-clustering is currently not "
+                    "supported for multimodal models and has been disabled.")
+            self.enable_ahead_of_prefix_clustering = False
+        if self.enable_ahead_of_prefix_clustering:
+            if not self.enforce_eager:
+                logger.warning("--enable-prefix-caching is currently not "
+                               "supported CUDA Graph, and CUDA Graph"
+                               " will be disabled.")
+                self.enforce_eager = True
+            if self.enable_prefix_caching:
+                logger.warning(
+                    "--enable-prefix-caching is currently not "
+                    "supported when `ahead_of_prefix_clustering` is True. "
+                    "`prefix-caching` will be disabled.")
+                self.enable_prefix_caching = False
+            use_sliding_window = (model_config.get_sliding_window()
+                                  is not None)
+            if use_sliding_window:
+                logger.error(
+                    "--enable-ahead-of-prefix-clustering is currently "
+                    "not supported when using sliding-window.")
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1179,6 +1205,9 @@ class EngineArgs:
                                "currently not supported for CPUs and has been "
                                "disabled.")
                 self.num_scheduler_steps = 1
+            if self.enable_ahead_of_prefix_clustering:
+                raise ValueError(
+                    "Batchllm cannot support num_scheduler_steps > 1")
 
         # make sure num_lookahead_slots is set the higher value depending on
         # if we are using speculative decoding or multi-step
@@ -1212,7 +1241,10 @@ class EngineArgs:
             multi_step_stream_outputs=self.multi_step_stream_outputs,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
-            policy=self.scheduling_policy)
+            policy=self.scheduling_policy,
+            enable_ahead_of_prefix_clustering=self.
+            enable_ahead_of_prefix_clustering,
+        )
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,

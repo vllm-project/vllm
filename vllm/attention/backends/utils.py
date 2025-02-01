@@ -53,32 +53,53 @@ def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,
 
 
 def _compute_slot_mapping_python(slot_mapping: List[int],
-                                 block_table: List[int], range_start: int,
-                                 range_end: int, block_size: int):
+                                 block_table: List[int],
+                                 range_start: int,
+                                 range_end: int,
+                                 block_size: int,
+                                 batchllm_block_offs: int = 0,
+                                 batchllm_index_offs: int = 0):
     for i in range(range_start, range_end):
-        block_number = block_table[i // block_size]
-        block_offset = i % block_size
+        block_number = block_table[batchllm_block_offs +
+                                   (i - batchllm_index_offs) // block_size]
+        block_offset = (i - batchllm_index_offs) % block_size
         slot = block_number * block_size + block_offset
         slot_mapping.append(slot)
 
 
-def _compute_slot_mapping_numpy(slot_mapping: List[int],
-                                block_table: List[int], range_start: int,
-                                range_end: int, block_size: int):
+def _compute_slot_mapping_numpy(
+    slot_mapping: List[int],
+    block_table: List[int],
+    range_start: int,
+    range_end: int,
+    block_size: int,
+    batchllm_block_offs: int = 0,
+    batchllm_index_offs: int = 0,
+):
     block_table_array = np.array(block_table)
     idx = np.arange(range_start, range_end)
-    block_offset = idx % block_size
-    idx //= block_size
+    block_offset = (idx - batchllm_index_offs) % block_size
+    idx = batchllm_block_offs + (idx - batchllm_index_offs) // block_size
     seq_slot_mapping_array = block_table_array[idx]
     seq_slot_mapping_array *= block_size
     seq_slot_mapping_array += block_offset
     slot_mapping.extend(seq_slot_mapping_array)
 
 
-def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
-                         seq_id: int, seq_len: int, context_len: int,
-                         start_idx: int, block_size: int,
-                         block_tables: Dict[int, List[int]]):
+def compute_slot_mapping(
+    is_profile_run: bool,
+    slot_mapping: List[int],
+    seq_id: int,
+    seq_len: int,
+    context_len: int,
+    start_idx: int,
+    block_size: int,
+    block_tables: Dict[int, List[int]],
+    batchllm_meta_collect: bool = False,
+    batchllm_this_group_hit: bool = False,
+    batchllm_common_kv_len: int = 0,
+    batchllm_common_kv_block_count: int = 0,
+):
     """
     Compute slot mapping.
     """
@@ -104,14 +125,203 @@ def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
     numel = range_end - range_start
     block_table = block_tables[seq_id]
 
+    # Since one request is split as common and distinct part in
+    # batchllm, slot_mapping  needs to be fix here.
+    batchllm_block_offs = 0
+    batchllm_index_offs = 0
+    if batchllm_meta_collect and batchllm_this_group_hit:
+        batchllm_block_offs = batchllm_common_kv_block_count
+        batchllm_index_offs = batchllm_common_kv_len
+
     # numpy implementation will be faster than python if we have
     # many elements, otherwise it will be slower.
     if numel < _COMPUTE_SLOT_MAPPING_NUMPY_NUMEL:
         _compute_slot_mapping_python(slot_mapping, block_table, range_start,
-                                     range_end, block_size)
+                                     range_end, block_size,
+                                     batchllm_block_offs, batchllm_index_offs)
     else:
         _compute_slot_mapping_numpy(slot_mapping, block_table, range_start,
-                                    range_end, block_size)
+                                    range_end, block_size, batchllm_block_offs,
+                                    batchllm_index_offs)
+
+
+def identify_group(arr: list) -> list:
+    """
+    Given a list, if any element appears repeatedly in consecutive
+    positions, mark those positions as True; otherwise False. The returned
+    mask has the same length as the input list.
+
+    For example:
+      Input:  [3, 2, 4, 4, 0, 1, 2, None, 4]
+      Output: [False, False, True, True, False, False, False, False, False]
+    """
+    mask = [False] * len(arr)
+    for i in range(len(arr) - 1):
+        if arr[i] == arr[i + 1] and arr[i] is not None:
+            mask[i] = True
+            mask[i + 1] = True
+    return mask
+
+
+def shared_meta_reorg(shared_q_lens, masked_shared_q_lens):
+    """
+    Reorganize the shared meta-info. Remove the requests
+    without shared part.
+    """
+    new_shared_q_lens, new_shared_q_start_loc = [], []
+    q_start = 0
+    for i in range(len(shared_q_lens)):
+
+        if masked_shared_q_lens[i] == 0:
+            q_start += shared_q_lens[i]
+            continue
+        new_shared_q_lens.append(shared_q_lens[i])
+        new_shared_q_start_loc.append(q_start)
+        q_start += shared_q_lens[i]
+    return new_shared_q_lens, new_shared_q_start_loc
+
+
+def compute_for_batchllm(
+        is_profile_run, is_prompt, this_group_activated, cur_shared_kv_len,
+        cur_shared_block_table, cur_request_id, cur_shared_prefix_request_id,
+        last_prefill_shared_prefix_request_id,
+        last_decode_shared_prefix_request_id, query_len, seq_len,
+        prefill_shared_q_lens, prefill_shared_kv_lens,
+        prefill_shared_block_tables, prefill_non_shared_q_lens,
+        prefill_non_shared_kv_lens, prefill_non_shared_block_tables,
+        decode_shared_q_lens, decode_shared_kv_lens,
+        decode_shared_block_tables, decode_non_shared_q_lens,
+        decode_non_shared_kv_lens, decode_non_shared_block_tables, block_table,
+        shared_prefix_valid):
+    """
+    Collect meta-info for batchllm.
+    Args:
+        is_profile_run: Whether it's a profile run.
+        is_prompt: Whether it's a prompt.
+        this_group_activated: Whether this request is in a 
+            prefix-sharing group.
+        cur_shared_kv_len: The shared-prefix kv length of 
+            this request.
+        cur_shared_block_table: The shared-prefix kv block table
+            of this request.
+        cur_request_id: The current request id.
+        cur_shared_prefix_request_id: The shared-prefix 
+            request id of the current request.
+        last_prefill_shared_prefix_request_id: The last 
+            shared-prefix request id of the prefill stage.
+        last_decode_shared_prefix_request_id: The last 
+            shared-prefix request id of the decode stage.
+        query_len: The query length.
+        seq_len: The sequence length.
+
+        # the following lists are used to store the meta-info
+
+        prefill_shared_q_lens: Query lengths of requests 
+            within the same prefix-sharing group in prefill stage.
+            Requests without shared part are also included.
+        prefill_shared_kv_lens: KV lengths of requests within
+            the same prefix-sharing group in prefill stage. The 
+            kv-length of requests without shared part should 
+            be 0.
+        prefill_shared_block_tables: KV block tables of requests
+            within the same prefix-sharing group in prefill stage.
+        prefill_non_shared_q_lens: Query lengths of non-shared 
+            context requests in prefill stage.
+        prefill_non_shared_kv_lens: KV lengths of non-shared
+            context requests in prefill stage.
+        prefill_non_shared_block_tables: KV block tables of 
+            non-shared context requests in prefill stage.
+
+
+        decode_shared_q_lens: Query lengths of requests within
+            the same prefix-sharing group in decode stage.
+        decode_shared_kv_lens: KV lengths of requests within the
+            same prefix-sharing group in decode stage. The kv-length       
+            of requests without shared part should be 0.
+        decode_shared_block_tables: KV block tables of requests 
+            within the same prefix-sharing group in decode stage.
+        decode_non_shared_q_lens: Query lengths of non-shared
+            context requests in decode stage.
+        decode_non_shared_kv_lens: KV lengths of non-shared context
+            requests in decode stage.
+        decode_non_shared_block_tables: KV block tables of 
+            non-shared context requests in decode stage.
+        block_table: The block table.
+        shared_prefix_valid: if False, take this request as a single 
+            request.
+
+    """
+    # There're some corner cases where there're only one non-shared request
+    # in the batch. In this case we should regard these requests as the ones
+    # without shared part.
+
+    prefill_shared_prefix_request_id = last_prefill_shared_prefix_request_id
+    decode_shared_prefix_request_id = last_decode_shared_prefix_request_id
+
+    if not is_profile_run:
+
+        if is_prompt:
+            prefill_non_shared_q_lens.append(query_len)  # q length
+            prefill_non_shared_kv_lens.append(seq_len - cur_shared_kv_len)
+            prefill_non_shared_block_tables.append(
+                block_table[int(shared_prefix_valid) *
+                            len(cur_shared_block_table):])
+            if this_group_activated and shared_prefix_valid:
+                assert len(cur_shared_block_table
+                           ) > 0, "batchllm's common part is none "
+                if cur_shared_prefix_request_id != \
+                        prefill_shared_prefix_request_id:
+                    # a new prefix-sharing group
+                    prefill_shared_prefix_request_id = \
+                        cur_shared_prefix_request_id
+                    prefill_shared_q_lens.append(query_len)
+                    prefill_shared_kv_lens.append(cur_shared_kv_len)
+                    prefill_shared_block_tables.append(cur_shared_block_table)
+                else:
+                    # extend the prefix-sharing group
+                    prefill_shared_q_lens[-1] += query_len
+            else:
+                if len(prefill_shared_kv_lens
+                       ) > 0 and prefill_shared_kv_lens[-1] == 0:
+                    prefill_shared_q_lens[-1] += query_len
+                else:
+                    prefill_shared_q_lens.append(query_len)
+                    prefill_shared_kv_lens.append(0)
+                    prefill_shared_block_tables.append([])
+                prefill_shared_prefix_request_id = cur_request_id
+
+        else:
+            assert query_len == 1, \
+            "batchllm cannot support the decoding scenarios with query_len > 1"
+            decode_non_shared_q_lens.append(query_len)  # q length
+            decode_non_shared_kv_lens.append(seq_len -
+                                             cur_shared_kv_len)  # kv length
+            decode_non_shared_block_tables.append(
+                block_table[int(shared_prefix_valid) *
+                            len(cur_shared_block_table):])
+
+            if this_group_activated and shared_prefix_valid:
+                if cur_shared_prefix_request_id != \
+                        decode_shared_prefix_request_id:
+                    decode_shared_prefix_request_id = \
+                        cur_shared_prefix_request_id
+                    decode_shared_q_lens.append(query_len)
+                    decode_shared_kv_lens.append(cur_shared_kv_len)
+                    decode_shared_block_tables.append(cur_shared_block_table)
+                else:
+                    decode_shared_q_lens[-1] += query_len
+
+            else:
+                if len(decode_shared_kv_lens
+                       ) > 0 and decode_shared_kv_lens[-1] == 0:
+                    decode_shared_q_lens[-1] += query_len
+                else:
+                    decode_shared_q_lens.append(query_len)
+                    decode_shared_kv_lens.append(0)
+                    decode_shared_block_tables.append([])
+                decode_shared_prefix_request_id = cur_request_id
+
+    return prefill_shared_prefix_request_id, decode_shared_prefix_request_id
 
 
 TAttentionMetadata = TypeVar("TAttentionMetadata", bound='AttentionMetadata')

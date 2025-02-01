@@ -25,6 +25,10 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          resolve_chat_template_content_format)
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import is_token_prompt, parse_and_batch_prompt
+from vllm.inputs.prefix_clustering import (SINGLE_REQUEST, PromptPrefixCluster,
+                                           prefix_cluster_postprocess,
+                                           prefix_cluster_preprocess,
+                                           print_batchllm_info)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding.guided_fields import (
@@ -241,6 +245,9 @@ class LLM:
             engine_args, usage_context=UsageContext.LLM_CLASS)
 
         self.request_counter = Counter()
+        self.prefix_cluster = None
+        if self.llm_engine.scheduler_config.enable_ahead_of_prefix_clustering:
+            self.prefix_cluster = PromptPrefixCluster()
 
     @staticmethod
     def get_engine_class() -> Type[LLMEngine]:
@@ -435,6 +442,37 @@ class LLM:
 
             raise ValueError(" ".join(messages))
 
+        # NOTE(batchllm): when `enable_ahead_of_prefix_clustering`,
+        # `batchllm` first tries to cluster all the samples.
+        num_samples = 0
+        if prompts is not None:
+            num_samples = len(prompts)
+        elif prompt_token_ids is not None:
+            num_samples = len(prompt_token_ids)
+        else:
+            raise ValueError("both prompts and prompt_token_ids are None")
+        group_ids = [SINGLE_REQUEST] * num_samples
+
+        map_list = []
+        assert prompt_token_ids is not None, \
+            "in batchllm scenarios we need prompt token ids"
+        from time import perf_counter
+        if self.llm_engine.scheduler_config.enable_ahead_of_prefix_clustering:
+            assert prompt_token_ids is not None , \
+            ("when `enable_ahead_of_prefix_clustering`, "
+            "all samples have to be tokenized first. ")
+            assert self.prefix_cluster is not None
+            start = perf_counter()
+            self.prefix_cluster.reset()
+            map_list, prompt_token_ids = prefix_cluster_preprocess(
+                self.prefix_cluster, prompt_token_ids)
+            end = perf_counter()
+            print(f"prefix_cluster_preprocess time: {end - start}")
+            print_batchllm_info(self.prefix_cluster)
+            prompts, prompt_token_ids, group_ids = \
+                self._conv_PrefixSharingGroup2Sequences(
+                prompts, prompt_token_ids)
+
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, List[str]]], prompts),
@@ -461,11 +499,17 @@ class LLM:
             params=sampling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            group_ids=group_ids,
             guided_options=guided_options_request,
             priority=priority)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        return self.engine_class.validate_outputs(outputs, RequestOutput)
+        results = self.engine_class.validate_outputs(outputs, RequestOutput)
+        if self.llm_engine.scheduler_config.enable_ahead_of_prefix_clustering:
+            results = prefix_cluster_postprocess(map_list, results)
+            if self.prefix_cluster is not None:
+                self.prefix_cluster.reset()
+        return results
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
@@ -1285,6 +1329,7 @@ class LLM:
                       Sequence[PoolingParams]],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
+        group_ids: Optional[List[int]] = None,
         guided_options: Optional[GuidedDecodingRequest] = None,
         priority: Optional[List[int]] = None,
     ) -> None:
@@ -1318,6 +1363,12 @@ class LLM:
 
         # Add requests to the engine.
         for i, prompt in enumerate(prompts):
+            if group_ids is None or group_ids[i] == SINGLE_REQUEST:
+                is_shared_prefix = None
+            else:
+                is_shared_prefix = True if i == 0 else group_ids[
+                    i] != group_ids[i - 1]
+
             self._add_request(
                 prompt,
                 params[i] if isinstance(params, Sequence) else params,
@@ -1325,7 +1376,7 @@ class LLM:
                     lora_request, Sequence) else lora_request,
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority[i] if priority else 0,
-            )
+                is_shared_prefix=is_shared_prefix)
 
     def _add_request(
         self,
@@ -1333,6 +1384,7 @@ class LLM:
         params: Union[SamplingParams, PoolingParams],
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        is_shared_prefix: Optional[bool] = None,
         priority: int = 0,
     ) -> None:
         request_id = str(next(self.request_counter))
@@ -1343,7 +1395,7 @@ class LLM:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             priority=priority,
-        )
+            is_shared_prefix=is_shared_prefix)
 
     def _add_guided_params(
             self,
@@ -1410,3 +1462,46 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
+
+    def _is_corner_prefix_sharing_group(self, shared_prefix, non_shared_parts):
+        # when share degree == 1 or shared_prefix_len < block_size,
+        # it's a corner case
+        return (len(non_shared_parts) <= 1) or \
+            (len(shared_prefix) < self.llm_engine.cache_config.block_size)
+
+    def _conv_PrefixSharingGroup2Sequences(self, prompts, prompt_token_ids):
+        # inputs = prompts if prompt_token_ids is None else prompt_token_ids
+        inputs = prompt_token_ids
+        seqs = []
+        group_ids = []
+        block_size = self.llm_engine.cache_config.block_size
+        for group_id, group in enumerate(inputs):
+            if len(group) == 2 and isinstance(group[1], list):
+                # prefix-sharing group inputs
+                shared_prefix = group[0]
+                non_shared_parts = group[1]
+                if self._is_corner_prefix_sharing_group(
+                        shared_prefix, non_shared_parts):
+                    for non_shared_i in non_shared_parts:
+                        seqs.append(shared_prefix + non_shared_i)
+                        group_ids.append(SINGLE_REQUEST)
+                else:
+                    min_non_shared_len = min(
+                        [len(x) for x in non_shared_parts])
+                    offset_token = []
+                    if min_non_shared_len == 0:
+                        offset_token = [shared_prefix[-1]]
+                        shared_prefix = shared_prefix[:-1]
+                    shared_prefix_tail_start = (len(shared_prefix) //
+                                                block_size) * block_size
+                    seqs.append(shared_prefix[:shared_prefix_tail_start])
+                    group_ids.append(group_id)
+                    for non_shared in non_shared_parts:
+                        seqs.append(shared_prefix[shared_prefix_tail_start:] +
+                                    offset_token + non_shared)
+                        group_ids.append(group_id)
+            else:
+                seqs.append(group)
+                group_ids.append(SINGLE_REQUEST)
+
+        return prompts, seqs, group_ids

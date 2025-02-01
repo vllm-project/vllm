@@ -29,6 +29,40 @@ class AttentionType:
     ENCODER_DECODER = "encoder_decoder"
 
 
+@dataclass
+class BatchLLMMeta:
+    # Metadata for BatchLLM
+
+    # Number of shared_prefix in this batch
+    shared_prefix_num: int = 0
+    # Number of non_shared context in this batch
+    non_shared_context_num: int = 0
+
+    # For the attention calculation of shared prefix part
+    # The tensors related to `shared_q_lens` means that all
+    # requests of one prefix-sharing group are regarded as if
+    # they are from one request.
+    cu_shared_q_lens_tensor: Optional[torch.Tensor] = None
+    cu_shared_kv_lens_tensor: Optional[torch.Tensor] = None
+    shared_block_tables_tensor: Optional[torch.Tensor] = None
+
+    # The following tensors are used for the merge_state kernel.
+    shared_q_lens_tensor: Optional[torch.Tensor] = None
+    shared_q_start_loc_tensor: Optional[torch.Tensor] = None
+
+    # For the attention calculation of non-shared context part
+    cu_non_shared_q_lens_tensor: Optional[torch.Tensor] = None
+    cu_non_shared_kv_lens_tensor: Optional[torch.Tensor] = None
+    non_shared_kv_lens_tensor: Optional[torch.Tensor] = None
+    non_shared_block_tables_tensor: Optional[torch.Tensor] = None
+
+    # max([sum_of_query_tokens_in_group for prefix-sharing-group in batch ])
+    max_shared_q_len: int = 0
+    max_shared_kv_len: int = 0
+    max_non_shared_q_len: int = 0
+    max_non_shared_kv_len: int = 0
+
+
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
     # For some attention backends, we allocate an output tensor before

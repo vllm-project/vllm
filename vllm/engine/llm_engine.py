@@ -541,19 +541,19 @@ class LLMEngine:
                 self.model_config)
 
     def _add_processed_request(
-        self,
-        request_id: str,
-        processed_inputs: ProcessorInputs,
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: float,
-        lora_request: Optional[LoRARequest],
-        prompt_adapter_request: Optional[PromptAdapterRequest],
-        trace_headers: Optional[Mapping[str, str]] = None,
-        priority: int = 0,
-    ) -> Optional[SequenceGroup]:
+            self,
+            request_id: str,
+            processed_inputs: ProcessorInputs,
+            params: Union[SamplingParams, PoolingParams],
+            arrival_time: float,
+            lora_request: Optional[LoRARequest],
+            prompt_adapter_request: Optional[PromptAdapterRequest],
+            trace_headers: Optional[Mapping[str, str]] = None,
+            priority: int = 0,
+            is_shared_prefix: Optional[bool] = None) -> None:
         """Add a processed request to the engine's request pool.
-        return the created sequence group.
-        """
+                return the created sequence group.
+                """
         if isinstance(params, SamplingParams) and params.n > 1:
             ParallelSampleSequenceGroup.add_request(
                 request_id,
@@ -565,7 +565,7 @@ class LLMEngine:
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
-            )
+                is_shared_prefix=is_shared_prefix)
             return None
 
         self._validate_model_inputs(processed_inputs, lora_request)
@@ -620,7 +620,7 @@ class LLMEngine:
             for scheduler in self.scheduler
         ]
         min_cost_scheduler = self.scheduler[costs.index(min(costs))]
-        min_cost_scheduler.add_seq_group(seq_group)
+        min_cost_scheduler.add_seq_group(seq_group, is_shared_prefix)
 
         return seq_group
 
@@ -638,6 +638,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        is_shared_prefix: Optional[bool] = None,
     ) -> None:
         ...
 
@@ -654,6 +655,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        is_shared_prefix: Optional[bool] = None,
     ) -> None:
         ...
 
@@ -671,6 +673,7 @@ class LLMEngine:
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
             priority: int = 0,
+            is_shared_prefix: Optional[bool] = None,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
@@ -763,6 +766,7 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
             priority=priority,
+            is_shared_prefix=is_shared_prefix,
         )
 
     def _validate_token_prompt(self, prompt: PromptType,
@@ -1101,7 +1105,12 @@ class LLMEngine:
                 self._process_sequence_group_outputs(seq_group, output)
             else:
                 self.output_processor.process_prompt_logprob(seq_group, output)
-                if seq_group_meta.do_sample:
+                if self.scheduler[0].prefix_sharing_manager.is_psgroup_shared(
+                        seq_group) and seq_group.get_num_uncomputed_tokens(
+                        ) == 0:
+                    for seq in seq_group.get_seqs():
+                        seq.status = SequenceStatus.FINISHED_COMMON
+                elif seq_group_meta.do_sample:
                     self.output_processor.process_outputs(
                         seq_group, output, is_async)
 
@@ -1113,15 +1122,19 @@ class LLMEngine:
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
 
             seq_group = scheduled_seq_group.seq_group
-            seq_group.maybe_set_first_token_time(now)
-            if not seq_group.is_prefill():
-                seq_group.set_last_token_time(now)
-            request_output = RequestOutputFactory.create(
-                seq_group,
-                self.seq_id_to_seq_group,
-                use_cache=self.use_cached_outputs)
-            if request_output:
-                ctx.request_outputs.append(request_output)
+            # NOTE(batchllm): all requests of "common" parts in `batchllm`
+            # should not be taken as a request with output tokens.
+            if not self.scheduler[0].prefix_sharing_manager.is_psgroup_shared(
+                    seq_group):
+                seq_group.maybe_set_first_token_time(now)
+                if not seq_group.is_prefill():
+                    seq_group.set_last_token_time(now)
+                request_output = RequestOutputFactory.create(
+                    seq_group,
+                    self.seq_id_to_seq_group,
+                    use_cache=self.use_cached_outputs)
+                if request_output:
+                    ctx.request_outputs.append(request_output)
 
         # When we process a single request, we skip it for the next time,
         # and invoke the request output callback (if there was final output)
@@ -1157,15 +1170,17 @@ class LLMEngine:
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
 
             seq_group = scheduled_seq_group.seq_group
-            seq_group.maybe_set_first_token_time(now)
-            if not seq_group.is_prefill():
-                seq_group.set_last_token_time(now)
-            request_output = RequestOutputFactory.create(
-                seq_group,
-                self.seq_id_to_seq_group,
-                use_cache=self.use_cached_outputs)
-            if request_output:
-                ctx.request_outputs.append(request_output)
+            if not self.scheduler[0].prefix_sharing_manager.is_psgroup_shared(
+                    seq_group):
+                seq_group.maybe_set_first_token_time(now)
+                if not seq_group.is_prefill():
+                    seq_group.set_last_token_time(now)
+                request_output = RequestOutputFactory.create(
+                    seq_group,
+                    self.seq_id_to_seq_group,
+                    use_cache=self.use_cached_outputs)
+                if request_output:
+                    ctx.request_outputs.append(request_output)
 
         # For multi-step with streaming, create outputs each iteration
         if not is_last_step and ctx.multi_step_stream_outputs:

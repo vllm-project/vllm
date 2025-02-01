@@ -11,12 +11,14 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
-                                              AttentionType)
+                                              AttentionType, BatchLLMMeta)
 from vllm.attention.backends.utils import (
-    PAD_SLOT_ID, CommonAttentionState, compute_slot_mapping,
-    compute_slot_mapping_start_idx, get_num_prefill_decode_query_kv_tokens,
-    get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
-    is_all_encoder_attn_metadata_set, is_block_tables_empty)
+    PAD_SLOT_ID, CommonAttentionState, compute_for_batchllm,
+    compute_slot_mapping, compute_slot_mapping_start_idx,
+    get_num_prefill_decode_query_kv_tokens, get_seq_len_block_table_args,
+    identify_group, is_all_cross_attn_metadata_set,
+    is_all_encoder_attn_metadata_set, is_block_tables_empty, shared_meta_reorg)
+from vllm.attention.ops.batchllm import BatchLLM_merge_attn_states
 from vllm.envs import VLLM_FLASH_ATTN_VERSION
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
@@ -162,6 +164,15 @@ class FlashAttentionMetadata(AttentionMetadata):
     _cached_prefill_metadata: Optional["FlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional["FlashAttentionMetadata"] = None
 
+    # For batchllm
+    # Whether we use batch_llm kernels
+    prefill_batchllm_activated: Optional[bool] = False
+    decode_batchllm_activated: Optional[bool] = False
+    # meta-data for prefill-stage
+    prefill_batchllm_meta: Optional[BatchLLMMeta] = None
+    # meta-data for decoding-stage
+    decode_batchllm_meta: Optional[BatchLLMMeta] = None
+
     # Begin encoder attn & enc/dec cross-attn fields...
 
     # Encoder sequence lengths representation
@@ -251,7 +262,10 @@ class FlashAttentionMetadata(AttentionMetadata):
             encoder_seq_start_loc=self.encoder_seq_start_loc,
             max_encoder_seq_len=self.max_encoder_seq_len,
             cross_slot_mapping=self.cross_slot_mapping,
-            cross_block_tables=self.cross_block_tables)
+            cross_block_tables=self.cross_block_tables,
+            prefill_batchllm_activated=self.prefill_batchllm_activated,
+            prefill_batchllm_meta=self.prefill_batchllm_meta,
+        )
         return self._cached_prefill_metadata
 
     @property
@@ -302,7 +316,12 @@ class FlashAttentionMetadata(AttentionMetadata):
             encoder_seq_start_loc=self.encoder_seq_start_loc,
             max_encoder_seq_len=self.max_encoder_seq_len,
             cross_slot_mapping=self.cross_slot_mapping,
-            cross_block_tables=self.cross_block_tables)
+            cross_block_tables=self.cross_block_tables,
+            # Batchllm
+            decode_batchllm_activated=self.decode_batchllm_activated,
+            decode_batchllm_meta=self.decode_batchllm_meta,
+        )
+
         return self._cached_decode_metadata
 
     def advance_step(self,
@@ -397,21 +416,64 @@ class FlashAttentionMetadataBuilder(
         self.multimodal_placeholder_maps: Dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
+
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
         self.has_prefix_cache_hit = False
 
+        # For batchllm
+        self.last_prefill_shared_prefix_request_id = "p"
+        self.last_decode_shared_prefix_request_id = "d"
+        self.batchllm_group_hit = False
+
+        self.prefill_shared_q_lens: List[int] = []
+        self.prefill_shared_kv_lens: List[int] = []
+        self.prefill_shared_block_tables: List[List[int]] = []
+
+        self.prefill_non_shared_q_lens: List[int] = []
+        self.prefill_non_shared_kv_lens: List[int] = []
+        self.prefill_non_shared_block_tables: List[List[int]] = []
+
+        self.decode_shared_q_lens: List[int] = []
+        self.decode_shared_kv_lens: List[int] = []
+        self.decode_shared_block_tables: List[List[int]] = []
+
+        self.decode_non_shared_q_lens: List[int] = []
+        self.decode_non_shared_kv_lens: List[int] = []
+        self.decode_non_shared_block_tables: List[List[int]] = []
+
     def _add_seq_group(
-            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool, prefix_cache_hit: bool):
+        self,
+        inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
+        chunked_prefill_enabled: bool,
+        prefix_cache_hit: bool,
+        batchllm_meta_collect: bool = False,
+        shared_prefix_valid: bool = False,
+    ):
         """Add a sequence group to the metadata. Specifically update/append
         1. context length.
         2. block table.
         3. slot mapping.
+        4. batchllm's metainfo.
         """
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
+        batchllm_this_group_hit = False
+        cur_shared_kv_len = 0
+        cur_shared_block_table = []
+        if batchllm_meta_collect:
+            # If `batchllm` is enabled, collect the related metadata.
+            # For the current request, whether we should collect the
+            # `batchllm` metadata. If the request is the non-shared
+            #  part, we start to collect.
+            batchllm_this_group_hit = inter_data.batchllm_this_group_hit
+            # the length of shared part.
+            cur_shared_kv_len = inter_data.shared_prefix_length
+            # the kv_block of shared part.
+            cur_shared_block_table = [] \
+                if inter_data.shared_prefix_block_tables is None \
+                else inter_data.shared_prefix_block_tables
 
         for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
              curr_sliding_window_block) in zip(
@@ -444,8 +506,8 @@ class FlashAttentionMetadataBuilder(
                 # NOTE(woosuk): For flash-attn, the block table should
                 # include the entries for the incoming prefill tokens.
                 block_table = block_tables[seq_id]
-            elif ((chunked_prefill_enabled or not is_prompt)
-                  and block_tables is not None):
+            elif ((chunked_prefill_enabled or not is_prompt
+                   or batchllm_meta_collect) and block_tables is not None):
                 if curr_sliding_window_block == 0:
                     block_table = block_tables[seq_id]
                 else:
@@ -458,9 +520,57 @@ class FlashAttentionMetadataBuilder(
             start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
                                                        context_len,
                                                        self.sliding_window)
-            compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
-                                 seq_len, context_len, start_idx,
-                                 self.block_size, inter_data.block_tables)
+            compute_slot_mapping(
+                is_profile_run,
+                self.slot_mapping,
+                seq_id,
+                seq_len,
+                context_len,
+                start_idx,
+                self.block_size,
+                inter_data.block_tables,
+                batchllm_meta_collect,
+                batchllm_this_group_hit,
+                cur_shared_kv_len,
+                len(cur_shared_block_table),
+            )
+            if batchllm_meta_collect:
+                self.last_prefill_shared_prefix_request_id, \
+                    self.last_decode_shared_prefix_request_id = \
+                        compute_for_batchllm(
+                            is_profile_run,
+                            is_prompt,
+                            batchllm_this_group_hit,
+                            cur_shared_kv_len,
+                            cur_shared_block_table,
+
+                            inter_data.request_id,
+                            inter_data.shared_prefix_request_id,
+                            self.last_prefill_shared_prefix_request_id,
+                            self.last_decode_shared_prefix_request_id,
+
+                            query_len,
+                            curr_seq_len,
+
+                            self.prefill_shared_q_lens,
+                            self.prefill_shared_kv_lens,
+                            self.prefill_shared_block_tables,
+
+                            self.prefill_non_shared_q_lens,
+                            self.prefill_non_shared_kv_lens,
+                            self.prefill_non_shared_block_tables,
+
+                            self.decode_shared_q_lens,
+                            self.decode_shared_kv_lens,
+                            self.decode_shared_block_tables,
+
+                            self.decode_non_shared_q_lens,
+                            self.decode_non_shared_kv_lens,
+                            self.decode_non_shared_block_tables,
+
+                            block_table,
+                            shared_prefix_valid,
+                        )
 
     def _get_graph_runner_block_tables(
             self, num_seqs: int,
@@ -497,14 +607,30 @@ class FlashAttentionMetadataBuilder(
                                  -1 if cuda graph is not used.
             batch_size: The maybe padded batch size.
         """
+        batchllm_meta_collect = False
+        identified_group = [False] * len(self.input_builder.inter_data_list)
+        if self.input_builder.batchllm_enabled:
+            batchllm_total_group_hit = any([
+                inter_data.batchllm_this_group_hit for inter_data \
+                in self.input_builder.inter_data_list
+            ])
+            shared_prefix_id = [inter_data.shared_prefix_request_id \
+                        for inter_data in self.input_builder.inter_data_list]
+            identified_group = identify_group(shared_prefix_id)
+            # Whether to collect the metadata for batchllm.
+            batchllm_meta_collect = (self.input_builder.chunked_prefill_enabled
+                                     or batchllm_total_group_hit)
+
         prefix_cache_hit = any([
             inter_data.prefix_cache_hit
             for inter_data in self.input_builder.inter_data_list
         ])
-        for inter_data in self.input_builder.inter_data_list:
+
+        for idx, inter_data in enumerate(self.input_builder.inter_data_list):
             self._add_seq_group(inter_data,
                                 self.input_builder.chunked_prefill_enabled,
-                                prefix_cache_hit)
+                                prefix_cache_hit, batchllm_meta_collect,
+                                identified_group[idx])
 
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
@@ -519,6 +645,8 @@ class FlashAttentionMetadataBuilder(
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
         query_start_loc = list(accumulate(query_lens, initial=0))
+        # TODO(batchllm): fix the seq_start_loc
+
         seq_start_loc = list(accumulate(seq_lens, initial=0))
 
         num_seqs = len(seq_lens)
@@ -538,6 +666,7 @@ class FlashAttentionMetadataBuilder(
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
         assert device is not None
+
         context_lens_tensor = async_tensor_h2d(self.context_lens, torch.int,
                                                device, self.runner.pin_memory)
         seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
@@ -547,6 +676,9 @@ class FlashAttentionMetadataBuilder(
         query_start_loc_tensor = async_tensor_h2d(query_start_loc, torch.int32,
                                                   device,
                                                   self.runner.pin_memory)
+        # NOTE(batchllm): when batchllm is enabled,
+        # this meta "seq_start_loc" may have some issues
+        # since all `seq_len = original_seq_len + common_kv_len`.
         seq_start_loc_tensor = async_tensor_h2d(seq_start_loc, torch.int32,
                                                 device, self.runner.pin_memory)
         placeholder_index_maps = {
@@ -554,6 +686,194 @@ class FlashAttentionMetadataBuilder(
             for modality, placeholder_map in
             self.multimodal_placeholder_maps.items()
         }
+
+        prefill_batchllm_meta = None
+        decode_batchllm_meta = None
+        prefill_batchllm_activated = False
+        decode_batchllm_activated = False
+
+        if batchllm_meta_collect:
+
+            prefill_shared_prefix_mask = [
+                bool(x) for x in self.prefill_shared_kv_lens
+            ]
+            prefill_shared_prefix_num = sum(prefill_shared_prefix_mask)
+            prefill_non_shared_context_num = len(
+                self.prefill_non_shared_q_lens)
+            decode_shared_prefix_mask = [
+                bool(x) for x in self.decode_shared_kv_lens
+            ]
+            decode_shared_prefix_num = sum(decode_shared_prefix_mask)
+            decode_non_shared_context_num = len(self.decode_non_shared_q_lens)
+
+            masked_prefill_shared_q_lens = [
+                x * y for (x, y) in zip(self.prefill_shared_q_lens,
+                                        prefill_shared_prefix_mask)
+            ]
+            masked_decode_shared_q_lens = [
+                x * y for (x, y) in zip(self.decode_shared_q_lens,
+                                        decode_shared_prefix_mask)
+            ]
+
+            max_prefill_shared_q_len = max(masked_prefill_shared_q_lens,
+                                           default=0)
+            max_decode_shared_q_len = max(masked_decode_shared_q_lens,
+                                          default=0)
+
+            if prefill_shared_prefix_num > 0 and \
+                prefill_shared_prefix_num < prefill_non_shared_context_num :
+                # collect meta-data for `flash-attn` of prefill-stage
+                # For shared prefix
+                cu_shared_q_lens = list(
+                    accumulate(self.prefill_shared_q_lens, initial=0))
+                cu_shared_kv_lens = list(
+                    accumulate(self.prefill_shared_kv_lens, initial=0))
+                max_prefill_shared_kv_len = max(self.prefill_shared_kv_lens,
+                                                default=0)
+
+                # For non-shared context
+                cu_non_shared_q_lens = list(
+                    accumulate(self.prefill_non_shared_q_lens, initial=0))
+                cu_non_shared_kv_lens = list(
+                    accumulate(self.prefill_non_shared_kv_lens, initial=0))
+                max_prefill_non_shared_q_len = max(
+                    self.prefill_non_shared_q_lens, default=0)
+                max_prefill_non_shared_kv_len = max(
+                    self.prefill_non_shared_kv_lens, default=0)
+
+                # To tensor
+                cu_shared_q_lens_tensor = async_tensor_h2d(
+                    cu_shared_q_lens, torch.int32, device,
+                    self.runner.pin_memory)
+                cu_shared_kv_lens_tensor = async_tensor_h2d(
+                    cu_shared_kv_lens, torch.int32, device,
+                    self.runner.pin_memory)
+                shared_q_lens_for_merge, shared_q_start_loc_for_merge = \
+                    shared_meta_reorg(self.prefill_shared_q_lens, \
+                        masked_prefill_shared_q_lens)
+                shared_q_lens_for_merge_tensor = async_tensor_h2d(
+                    shared_q_lens_for_merge, torch.int, device,
+                    self.runner.pin_memory)
+                shared_q_start_loc_for_merge_tensor = async_tensor_h2d(
+                    shared_q_start_loc_for_merge, torch.int32, device,
+                    self.runner.pin_memory)
+                shared_block_tables_tensor = make_tensor_with_pad(
+                    self.prefill_shared_block_tables,
+                    pad=0,
+                    dtype=torch.int,
+                    device=self.runner.device,
+                )
+                cu_non_shared_q_lens_tensor = async_tensor_h2d(
+                    cu_non_shared_q_lens, torch.int32, device,
+                    self.runner.pin_memory)
+                cu_non_shared_kv_lens_tensor = async_tensor_h2d(
+                    cu_non_shared_kv_lens, torch.int32, device,
+                    self.runner.pin_memory)
+                non_shared_block_tables_tensor = make_tensor_with_pad(
+                    self.prefill_non_shared_block_tables,
+                    pad=0,
+                    dtype=torch.int,
+                    device=self.runner.device,
+                )
+
+                prefill_batchllm_meta = BatchLLMMeta(
+                    shared_prefix_num=prefill_shared_prefix_num,
+                    non_shared_context_num=prefill_non_shared_context_num,
+                    cu_shared_q_lens_tensor=cu_shared_q_lens_tensor,
+                    cu_shared_kv_lens_tensor=cu_shared_kv_lens_tensor,
+                    shared_block_tables_tensor=shared_block_tables_tensor,
+                    shared_q_lens_tensor=shared_q_lens_for_merge_tensor,
+                    shared_q_start_loc_tensor=
+                    shared_q_start_loc_for_merge_tensor,
+                    cu_non_shared_q_lens_tensor=cu_non_shared_q_lens_tensor,
+                    cu_non_shared_kv_lens_tensor=cu_non_shared_kv_lens_tensor,
+                    non_shared_block_tables_tensor=
+                    non_shared_block_tables_tensor,
+                    max_shared_q_len=max_prefill_shared_q_len,
+                    max_shared_kv_len=max_prefill_shared_kv_len,
+                    max_non_shared_q_len=max_prefill_non_shared_q_len,
+                    max_non_shared_kv_len=max_prefill_non_shared_kv_len,
+                )
+
+                prefill_batchllm_activated = True
+
+            # NOTE(batchllm): heuristic method
+            if decode_shared_prefix_num > 0 and \
+                decode_shared_prefix_num < decode_non_shared_context_num and \
+                max_decode_shared_q_len >= 16:
+
+                # TODO(batchllm): not support CUDA GRAPH yet
+                # For shared-prefix
+                cu_shared_q_lens = list(
+                    accumulate(self.decode_shared_q_lens, initial=0))
+                cu_shared_kv_lens = list(
+                    accumulate(self.decode_shared_kv_lens, initial=0))
+                max_decode_shared_kv_len = max(self.decode_shared_kv_lens,
+                                               default=0)
+
+                # For non-shared context
+                cu_non_shared_q_lens = list(
+                    accumulate(self.decode_non_shared_q_lens, initial=0))
+                max_decode_non_shared_q_len = max(
+                    self.decode_non_shared_q_lens, default=0)
+                max_decode_non_shared_kv_len = max(
+                    self.decode_non_shared_kv_lens, default=0)
+
+                # To tensor
+                cu_shared_q_lens_tensor = async_tensor_h2d(
+                    cu_shared_q_lens, torch.int32, device,
+                    self.runner.pin_memory)
+                cu_shared_kv_lens_tensor = async_tensor_h2d(
+                    cu_shared_kv_lens, torch.int32, device,
+                    self.runner.pin_memory)
+                shared_q_lens_for_merge, shared_q_start_loc_for_merge = \
+                    shared_meta_reorg(self.decode_shared_q_lens, \
+                        masked_decode_shared_q_lens)
+                shared_q_lens_for_merge_tensor = async_tensor_h2d(
+                    shared_q_lens_for_merge, torch.int, device,
+                    self.runner.pin_memory)
+                shared_q_start_loc_for_merge_tensor = async_tensor_h2d(
+                    shared_q_start_loc_for_merge, torch.int32, device,
+                    self.runner.pin_memory)
+                shared_block_tables_tensor = make_tensor_with_pad(
+                    self.decode_shared_block_tables,
+                    pad=0,
+                    dtype=torch.int,
+                    device=self.runner.device,
+                )
+                cu_non_shared_q_lens_tensor = async_tensor_h2d(
+                    cu_non_shared_q_lens, torch.int32, device,
+                    self.runner.pin_memory)
+                non_shared_kv_lens_tensor = async_tensor_h2d(
+                    self.decode_non_shared_kv_lens, torch.int32, device,
+                    self.runner.pin_memory)
+                non_shared_block_tables_tensor = make_tensor_with_pad(
+                    self.decode_non_shared_block_tables,
+                    pad=0,
+                    dtype=torch.int,
+                    device=self.runner.device,
+                )
+
+                decode_batchllm_meta = BatchLLMMeta(
+                    shared_prefix_num=decode_shared_prefix_num,
+                    non_shared_context_num=decode_non_shared_context_num,
+                    cu_shared_q_lens_tensor=cu_shared_q_lens_tensor,
+                    cu_shared_kv_lens_tensor=cu_shared_kv_lens_tensor,
+                    shared_block_tables_tensor=shared_block_tables_tensor,
+                    shared_q_lens_tensor=shared_q_lens_for_merge_tensor,
+                    shared_q_start_loc_tensor=
+                    shared_q_start_loc_for_merge_tensor,
+                    cu_non_shared_q_lens_tensor=cu_non_shared_q_lens_tensor,
+                    non_shared_kv_lens_tensor=non_shared_kv_lens_tensor,
+                    non_shared_block_tables_tensor=
+                    non_shared_block_tables_tensor,
+                    max_shared_q_len=max_decode_shared_q_len,
+                    max_shared_kv_len=max_decode_shared_kv_len,
+                    max_non_shared_q_len=max_decode_non_shared_q_len,
+                    max_non_shared_kv_len=max_decode_non_shared_kv_len,
+                )
+
+                decode_batchllm_activated = True
 
         return FlashAttentionMetadata(
             num_prefills=self.num_prefills,
@@ -573,6 +893,11 @@ class FlashAttentionMetadataBuilder(
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
+            # for batchllm
+            prefill_batchllm_meta=prefill_batchllm_meta,
+            decode_batchllm_meta=decode_batchllm_meta,
+            prefill_batchllm_activated=prefill_batchllm_activated,
+            decode_batchllm_activated=decode_batchllm_activated,
         )
 
 
@@ -788,23 +1113,63 @@ class FlashAttentionImpl(AttentionImpl):
                     "Only decoder-only models support prefix caching")
                 assert prefill_meta.seq_lens is not None
                 max_seq_len = max(prefill_meta.seq_lens)
-                flash_attn_varlen_func(  # noqa
-                    q=query,
-                    k=key_cache,
-                    v=value_cache,
-                    cu_seqlens_q=prefill_meta.query_start_loc,
-                    max_seqlen_q=prefill_meta.max_query_len,
-                    seqused_k=prefill_meta.seq_lens_tensor,
-                    max_seqlen_k=max_seq_len,
-                    softmax_scale=softmax_scale,
-                    causal=True,
-                    window_size=window_size,
-                    alibi_slopes=alibi_slopes,
-                    block_table=prefill_meta.block_tables,
-                    softcap=logits_soft_cap,
-                    out=prefill_output,
-                    fa_version=self.fa_version,
-                )
+                if not prefill_meta.prefill_batchllm_activated:
+                    flash_attn_varlen_func(  # noqa
+                        q=query,
+                        k=key_cache,
+                        v=value_cache,
+                        cu_seqlens_q=prefill_meta.query_start_loc,
+                        max_seqlen_q=prefill_meta.max_query_len,
+                        cu_seqlens_k=prefill_meta.seq_start_loc,
+                        max_seqlen_k=max_seq_len,
+                        softmax_scale=softmax_scale,
+                        causal=True,
+                        window_size=window_size,
+                        alibi_slopes=alibi_slopes,
+                        block_table=prefill_meta.block_tables,
+                        softcap=logits_soft_cap,
+                        out=prefill_output,
+                        fa_version=self.fa_version,
+                    )
+                else:
+                    assert prefill_meta.prefill_batchllm_meta is not None
+                    BatchLLM_attention(
+                        output=prefill_output,
+                        query=query,
+                        key_cache=key_cache,
+                        value_cache=value_cache,
+                        cu_shared_q_lens=prefill_meta.prefill_batchllm_meta.
+                        cu_shared_q_lens_tensor,
+                        cu_shared_kv_lens=prefill_meta.prefill_batchllm_meta.
+                        cu_shared_kv_lens_tensor,
+                        shared_block_tables=prefill_meta.prefill_batchllm_meta.
+                        shared_block_tables_tensor,
+                        shared_q_lens=prefill_meta.prefill_batchllm_meta.
+                        shared_q_lens_tensor,
+                        shared_q_start_loc=prefill_meta.prefill_batchllm_meta.
+                        shared_q_start_loc_tensor,
+                        cu_non_shared_q_lens=prefill_meta.
+                        prefill_batchllm_meta.cu_non_shared_q_lens_tensor,
+                        cu_non_shared_kv_lens=prefill_meta.
+                        prefill_batchllm_meta.cu_non_shared_kv_lens_tensor,
+                        non_shared_kv_lens=None,
+                        non_shared_block_tables=prefill_meta.
+                        prefill_batchllm_meta.non_shared_block_tables_tensor,
+                        max_shared_q_len=prefill_meta.prefill_batchllm_meta.
+                        max_shared_q_len,
+                        max_shared_kv_len=prefill_meta.prefill_batchllm_meta.
+                        max_shared_kv_len,
+                        max_non_shared_q_len=prefill_meta.
+                        prefill_batchllm_meta.max_non_shared_q_len,
+                        max_non_shared_kv_len=prefill_meta.
+                        prefill_batchllm_meta.max_non_shared_kv_len,
+                        softmax_scale=softmax_scale,
+                        alibi_slopes=alibi_slopes,
+                        sliding_window=window_size,
+                        logits_soft_cap=logits_soft_cap,
+                        is_prefill=True,
+                        fa_version=self.fa_version,
+                    )
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
@@ -835,26 +1200,70 @@ class FlashAttentionImpl(AttentionImpl):
                     fa_version=self.fa_version,
                 )
             else:
-                # Use flash_attn_with_kvcache for normal decoding.
-                (
-                    seq_lens_arg,
-                    _,
-                    block_tables_arg,
-                ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
-                flash_attn_with_kvcache(
-                    q=decode_query.unsqueeze(1),
-                    k_cache=key_cache,
-                    v_cache=value_cache,
-                    block_table=block_tables_arg,
-                    cache_seqlens=seq_lens_arg,
-                    softmax_scale=softmax_scale,
-                    causal=True,
-                    window_size=window_size,
-                    alibi_slopes=alibi_slopes,
-                    softcap=logits_soft_cap,
-                    out=decode_output.unsqueeze(1),
-                    fa_version=self.fa_version,
-                )
+                if not decode_meta.decode_batchllm_activated:
+                    # Use flash_attn_with_kvcache for normal decoding.
+                    (
+                        seq_lens_arg,
+                        _,
+                        block_tables_arg,
+                    ) = get_seq_len_block_table_args(decode_meta, False,
+                                                     attn_type)
+                    flash_attn_with_kvcache(
+                        q=decode_query.unsqueeze(1),
+                        k_cache=key_cache,
+                        v_cache=value_cache,
+                        block_table=block_tables_arg,
+                        cache_seqlens=seq_lens_arg,
+                        softmax_scale=softmax_scale,
+                        causal=True,
+                        window_size=window_size,
+                        alibi_slopes=alibi_slopes,
+                        softcap=logits_soft_cap,
+                        out=decode_output.unsqueeze(1),
+                        fa_version=self.fa_version,
+                    )
+                else:
+                    assert attn_type == AttentionType.DECODER, \
+                        "BatchLLM only supports decoder-only models."
+                    assert decode_meta.decode_batchllm_meta is not None
+                    BatchLLM_attention(
+                        output=decode_output,
+                        query=decode_query,
+                        key_cache=key_cache,
+                        value_cache=value_cache,
+                        cu_shared_q_lens=decode_meta.decode_batchllm_meta.
+                        cu_shared_q_lens_tensor,
+                        cu_shared_kv_lens=decode_meta.decode_batchllm_meta.
+                        cu_shared_kv_lens_tensor,
+                        shared_block_tables=decode_meta.decode_batchllm_meta.
+                        shared_block_tables_tensor,
+                        shared_q_lens=decode_meta.decode_batchllm_meta.
+                        shared_q_lens_tensor,
+                        shared_q_start_loc=decode_meta.decode_batchllm_meta.
+                        shared_q_start_loc_tensor,
+                        cu_non_shared_q_lens=decode_meta.decode_batchllm_meta.
+                        cu_non_shared_q_lens_tensor,
+                        cu_non_shared_kv_lens=None,
+                        non_shared_kv_lens=decode_meta.decode_batchllm_meta.
+                        non_shared_kv_lens_tensor,
+                        non_shared_block_tables=decode_meta.
+                        decode_batchllm_meta.non_shared_block_tables_tensor,
+                        max_shared_q_len=decode_meta.decode_batchllm_meta.
+                        max_shared_q_len,
+                        max_shared_kv_len=decode_meta.decode_batchllm_meta.
+                        max_shared_kv_len,
+                        max_non_shared_q_len=decode_meta.decode_batchllm_meta.
+                        max_non_shared_q_len,
+                        max_non_shared_kv_len=decode_meta.decode_batchllm_meta.
+                        max_non_shared_kv_len,
+                        softmax_scale=softmax_scale,
+                        alibi_slopes=alibi_slopes,
+                        sliding_window=window_size,
+                        logits_soft_cap=logits_soft_cap,
+                        is_prefill=False,
+                        fa_version=self.fa_version,
+                    )
+
         return output
 
 
@@ -939,3 +1348,173 @@ def _get_causal_option(attn_type: str) -> bool:
     return not (attn_type == AttentionType.ENCODER
                 or attn_type == AttentionType.ENCODER_ONLY
                 or attn_type == AttentionType.ENCODER_DECODER)
+
+
+def BatchLLM_attention(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    # for shared prefix
+    cu_shared_q_lens: torch.Tensor,
+    cu_shared_kv_lens: torch.Tensor,
+    shared_block_tables: torch.Tensor,
+    shared_q_lens: torch.Tensor,
+    shared_q_start_loc: torch.Tensor,
+    # for non-shared context
+    cu_non_shared_q_lens: torch.Tensor,
+    cu_non_shared_kv_lens: torch.Tensor,
+    non_shared_kv_lens: torch.Tensor,
+    non_shared_block_tables: torch.Tensor,
+    # Others
+    max_shared_q_len: int,
+    max_shared_kv_len: int,
+    max_non_shared_q_len: int,
+    max_non_shared_kv_len: int,
+    softmax_scale: float,
+    alibi_slopes: Optional[torch.Tensor],
+    sliding_window: Tuple[int, int],
+    logits_soft_cap: Optional[float] = None,
+    is_prefill: bool = True,
+    fa_version: Optional[int] = None,
+):
+    """
+    BatchLLM Attention calculation, for shared prefix and
+    non-shared context. Use `psg` as the abbreviation of
+    `prefix-sharing group`.
+
+    Arguments:
+        output (torch.Tensor):
+          (total_q, nheads, headdim). Buffer for final attention
+          outputs.
+        query (torch.Tensor):
+          (total_q, nheads, headdim), where total_q = total number
+          of query tokens in the batch.
+        key_cache (torch.Tensor):
+          (num_blocks, block_size, nheads_k, headdim). Key cache
+          tensor.
+        value_cache (torch.Tensor):
+          (num_blocks, block_size, nheads_k, headdim). Value cache
+          tensor.
+
+        cu_shared_q_lens (torch.Tensor):
+          (#num_of_psg + 1,), dtype torch.int32. The cumulative
+          sequence lengths of the prefix-sharing groups, indexing
+          into the sum of query lengths.
+        cu_shared_kv_lens (torch.Tensor):
+          (#num_of_psg + 1,), dtype torch.int32. The cumulative
+          sequence lengths for shared-prefix KV.
+        shared_block_tables (torch.Tensor):
+          (num_blocks, block_size), dtype torch.int32. Block table
+          for the shared-prefix.
+        shared_q_lens (torch.Tensor):
+          (#num_of_psg_x,), dtype torch.int32. Length of shared
+          prefix for each group with non-zero shared-prefix length.
+        shared_q_start_loc (torch.Tensor):
+          (#num_of_psg_x,), dtype torch.int32. Starting location of
+          the shared-prefix for groups with non-zero shared-prefix.
+
+        cu_non_shared_q_lens (torch.Tensor):
+          (batch_size + 1,), dtype torch.int32. Cumulative query
+          lengths for non-shared context.
+        cu_non_shared_kv_lens (torch.Tensor):
+          (batch_size + 1,), dtype torch.int32. Cumulative KV
+          lengths for non-shared context.
+        non_shared_kv_lens (torch.Tensor):
+          (batch_size,). KV lengths for non-shared context. 
+        non_shared_block_tables (torch.Tensor):
+          (num_blocks, block_size), dtype torch.int32. Block table
+          for non-shared context.
+
+        max_shared_q_len (int):
+          Maximum group-level query length of all prefix-sharing groups.
+        max_shared_kv_len (int):
+          Maximum KV length for the shared prefix.
+        max_non_shared_q_len (int):
+          Maximum query length in the batch for non-shared context.
+        max_non_shared_kv_len (int):
+          Maximum KV length for the non-shared context.
+
+        softmax_scale (float):
+          Scale factor for softmax computation.
+        alibi_slopes (Optional[torch.Tensor]):
+          ALiBi slopes (not supported here).
+        sliding_window (Tuple[int, int]):
+          Sliding window size (not supported here).
+        logits_soft_cap (float):
+          Soft cap to apply to logits.
+        is_prefill (bool):
+          Indicates whether this is the prefill stage or the
+          decode stage.
+    
+    """
+    assert alibi_slopes is None, ("Batchllm does not support ALiBi.")
+    # TODO: Support sliding window.
+    assert sliding_window == (-1, -1), (
+        "Batchllm does not support sliding window.")
+    assert fa_version is not None
+    # For non-shared context
+    if is_prefill:
+        _, non_shared_lse = flash_attn_varlen_func(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            cu_seqlens_q=cu_non_shared_q_lens,
+            cu_seqlens_k=cu_non_shared_kv_lens,
+            max_seqlen_q=max_non_shared_q_len,
+            max_seqlen_k=max_non_shared_kv_len,
+            softmax_scale=softmax_scale,
+            causal=True,
+            window_size=sliding_window,
+            block_table=non_shared_block_tables,
+            softcap=logits_soft_cap,
+            return_softmax_lse=True,
+            out=output,
+            fa_version=fa_version,
+        )
+    else:
+        _, non_shared_lse = flash_attn_with_kvcache(
+            q=query.unsqueeze(1),
+            k_cache=key_cache,
+            v_cache=value_cache,
+            block_table=non_shared_block_tables,
+            cache_seqlens=non_shared_kv_lens,
+            softmax_scale=softmax_scale,
+            causal=True,
+            window_size=sliding_window,
+            alibi_slopes=alibi_slopes,
+            softcap=logits_soft_cap,
+            return_softmax_lse=True,
+            out=output.unsqueeze(1),
+            fa_version=fa_version,
+        )
+        # non_shared_output = non_shared_output.squeeze(1)
+        non_shared_lse = non_shared_lse.squeeze(-1)
+    # For shared-prefix
+    # NOTE(batchllm): here not all requests have the prefix,
+    # here we use another method to alleviate: all requests without
+    # shared-prefix have the kv_length == 0.
+    shared_output, shared_lse = flash_attn_varlen_func(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        cu_seqlens_q=cu_shared_q_lens,
+        cu_seqlens_k=cu_shared_kv_lens,
+        # TODO(BatchLLM): check if it's ok to set max_seqlen_q
+        # as the maximum of "valid" shared-prefix length.
+        max_seqlen_q=max_shared_q_len,
+        max_seqlen_k=max_shared_kv_len,
+        softmax_scale=softmax_scale,
+        causal=False,
+        window_size=sliding_window,
+        block_table=shared_block_tables,
+        softcap=logits_soft_cap,
+        return_softmax_lse=True,
+        fa_version=fa_version,
+    )
+
+    # Merge prefix and suffix outputs, and store the result in output.
+    BatchLLM_merge_attn_states(output, shared_output, shared_lse, output,
+                               non_shared_lse, shared_q_lens,
+                               shared_q_start_loc, max_shared_q_len,
+                               is_prefill)
