@@ -162,7 +162,7 @@ def apply_fp8_linear(
             # For now validated on ROCm platform
             # fp8 rowwise scaling in torch._scaled_mm is introduced in
             # https://github.com/pytorch/pytorch/pull/144432 using
-            # hipBLASLt
+            # hipBLASLt and ROCm 6.3, which only exists in torch 2.7 and above.
             # For CUDA platform please validate if the
             # torch._scaled_mm support rowwise scaled GEMM
             # Fused GEMM_DQ Rowwise GEMM
@@ -172,10 +172,7 @@ def apply_fp8_linear(
                                       scale_a=x_scale,
                                       scale_b=weight_scale.t(),
                                       bias=bias)
-            # A fix for discrepancy in scaled_mm which returns tuple
-            # for torch < 2.5 and a single value in torch >= 2.5
-            if type(output) is tuple and len(output) == 2:
-                output = output[0]
+
             output = torch.narrow(output, 0, 0, input_2d.shape[0])
             output = output.view(*output_shape)
             return output
