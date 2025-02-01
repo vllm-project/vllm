@@ -120,13 +120,18 @@ class CudaPlatformBase(Platform):
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
                 if envs.VLLM_USE_V1:
-                    raise NotImplementedError
+                    raise NotImplementedError(
+                        "Multi-step scheduling is not supported (and not "
+                        "needed) on VLLM V1. Please launch without "
+                        "--num-scheduler-steps.")
                 else:
                     parallel_config.worker_cls = \
                         "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
                 if envs.VLLM_USE_V1:
-                    raise NotImplementedError
+                    raise NotImplementedError(
+                        "Speculative decoding is not yet supported on VLLM V1."
+                    )
                 else:
                     parallel_config.worker_cls = \
                         "vllm.spec_decode.spec_decode_worker.create_spec_worker"
@@ -152,10 +157,14 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1) -> str:
+                             kv_cache_dtype, block_size, use_v1,
+                             use_mla) -> str:
         if use_v1:
             logger.info("Using Flash Attention backend on V1 engine.")
             return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+        if use_mla:
+            logger.info("Using Triton MLA backend.")
+            return "vllm.attention.backends.triton_mla.TritonMLABackend"
         if selected_backend == _Backend.FLASHINFER:
             logger.info("Using FlashInfer backend.")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"
@@ -166,7 +175,8 @@ class CudaPlatformBase(Platform):
             pass
         elif selected_backend:
             raise ValueError(
-                f"Invalid attention backend for {cls.device_name}")
+                f"Invalid attention backend for {cls.device_name}, "
+                f"with use_v1: {use_v1} use_mla: {use_mla}")
 
         target_backend = _Backend.FLASH_ATTN
         if not cls.has_device_capability(80):

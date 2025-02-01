@@ -289,7 +289,9 @@ class CommonAttentionState(AttentionState):
 
     @contextmanager
     def graph_capture(self, max_batch_size: int):
+
         self._is_graph_capturing = True
+
         self._graph_slot_mapping = torch.full((max_batch_size, ),
                                               PAD_SLOT_ID,
                                               dtype=torch.long,
@@ -299,7 +301,9 @@ class CommonAttentionState(AttentionState):
                                           device=self.runner.device)
         self._graph_block_tables = torch.from_numpy(
             self.runner.graph_block_tables).to(device=self.runner.device)
+
         yield
+
         self._is_graph_capturing = False
         del self._graph_slot_mapping
         del self._graph_seq_lens

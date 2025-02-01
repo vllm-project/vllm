@@ -6,7 +6,8 @@ from argparse import Namespace
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Union
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
+                      ValidationInfo, field_validator, model_validator)
 from typing_extensions import Annotated
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
@@ -45,14 +46,14 @@ class OpenAIBaseModel(BaseModel):
     # Cache class field names
     field_names: ClassVar[Optional[Set[str]]] = None
 
-    @model_validator(mode="before")
+    @model_validator(mode="wrap")
     @classmethod
-    def __log_extra_fields__(cls, data):
-
+    def __log_extra_fields__(cls, data, handler):
+        result = handler(data)
+        if not isinstance(data, dict):
+            return result
         field_names = cls.field_names
         if field_names is None:
-            if not isinstance(data, dict):
-                return data
             # Get all class field names and their potential aliases
             field_names = set()
             for field_name, field in cls.model_fields.items():
@@ -67,7 +68,7 @@ class OpenAIBaseModel(BaseModel):
                 "The following fields were present in the request "
                 "but ignored: %s",
                 data.keys() - field_names)
-        return data
+        return result
 
 
 class ErrorResponse(OpenAIBaseModel):
@@ -1018,6 +1019,52 @@ class ScoreRequest(OpenAIBaseModel):
         return PoolingParams(additional_data=self.additional_data)
 
 
+class RerankRequest(OpenAIBaseModel):
+    model: str
+    query: str
+    documents: List[str]
+    top_n: int = Field(default_factory=lambda: 0)
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+
+    # doc: begin-rerank-pooling-params
+    additional_data: Optional[Any] = None
+    # doc: end-rerank-pooling-params
+
+    # doc: begin-rerank-extra-params
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."))
+
+    # doc: end-rerank-extra-params
+
+    def to_pooling_params(self):
+        return PoolingParams(additional_data=self.additional_data)
+
+
+class RerankDocument(BaseModel):
+    text: str
+
+
+class RerankResult(BaseModel):
+    index: int
+    document: RerankDocument
+    relevance_score: float
+
+
+class RerankUsage(BaseModel):
+    total_tokens: int
+
+
+class RerankResponse(OpenAIBaseModel):
+    id: str
+    model: str
+    usage: RerankUsage
+    results: List[RerankResult]
+
+
 class CompletionLogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
@@ -1156,6 +1203,7 @@ class ExtractedToolCallInformation(BaseModel):
 
 class ChatMessage(OpenAIBaseModel):
     role: str
+    reasoning_content: Optional[str] = None
     content: Optional[str] = None
     tool_calls: List[ToolCall] = Field(default_factory=list)
 
@@ -1197,6 +1245,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
 class DeltaMessage(OpenAIBaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    reasoning_content: Optional[str] = None
     tool_calls: List[DeltaToolCall] = Field(default_factory=list)
 
 
@@ -1237,7 +1286,21 @@ class BatchRequestInput(OpenAIBaseModel):
     url: str
 
     # The parameters of the request.
-    body: Union[ChatCompletionRequest, EmbeddingRequest]
+    body: Union[ChatCompletionRequest, EmbeddingRequest, ScoreRequest]
+
+    @field_validator('body', mode='plain')
+    @classmethod
+    def check_type_for_url(cls, value: Any, info: ValidationInfo):
+        # Use url to disambiguate models
+        url = info.data['url']
+        if url == "/v1/chat/completions":
+            return ChatCompletionRequest.model_validate(value)
+        if url == "/v1/embeddings":
+            return TypeAdapter(EmbeddingRequest).validate_python(value)
+        if url == "/v1/score":
+            return ScoreRequest.model_validate(value)
+        return TypeAdapter(Union[ChatCompletionRequest, EmbeddingRequest,
+                                 ScoreRequest]).validate_python(value)
 
 
 class BatchResponseData(OpenAIBaseModel):
@@ -1248,7 +1311,8 @@ class BatchResponseData(OpenAIBaseModel):
     request_id: str
 
     # The body of the response.
-    body: Optional[Union[ChatCompletionResponse, EmbeddingResponse]] = None
+    body: Optional[Union[ChatCompletionResponse, EmbeddingResponse,
+                         ScoreResponse]] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
