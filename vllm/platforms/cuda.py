@@ -278,7 +278,10 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @with_nvml_context
     def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)
-        return cls._get_physical_device_name(physical_device_id)
+        device_name = cls._get_physical_device_name(physical_device_id)
+        if isinstance(device_name, bytes):
+            device_name = device_name.decode("utf-8")
+        return device_name
 
     @classmethod
     @lru_cache(maxsize=8)
