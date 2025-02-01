@@ -113,7 +113,7 @@ class KVCacheManager:
 
     def allocate_slots(
         self, request: Request, num_tokens: int,
-        new_computed_blocks: List[KVCacheBlock]
+        new_computed_blocks: Optional[List[KVCacheBlock]] = None
     ) -> Optional[List[KVCacheBlock]]:
         """Add slots for a new prefill or a new decode request.
 
@@ -140,9 +140,9 @@ class KVCacheManager:
             A list of new allocated blocks.
         """
         if num_tokens == 0:
-            raise ValueError(
-                f"num_tokens must be greater than 0, got {num_tokens}")
+            raise ValueError(f"num_tokens must be greater than 0")
 
+        new_computed_blocks = new_computed_blocks or []
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
             self._touch(new_computed_blocks)
@@ -152,7 +152,7 @@ class KVCacheManager:
                 "prefix caching is disabled")
 
         # The number of computed tokens is the number of computed tokens plus
-        # the new prefix cacheing hits
+        # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
                                len(new_computed_blocks) * self.block_size)
         num_required_blocks = cdiv(num_computed_tokens + num_tokens,
