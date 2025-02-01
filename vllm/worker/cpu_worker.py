@@ -35,7 +35,7 @@ class CPUCacheEngine:
     def __init__(self, cache_config: CacheConfig, model_config: ModelConfig,
                  parallel_config: ParallelConfig,
                  device_config: DeviceConfig) -> None:
-        assert device_config.device_type == "cpu"
+        assert device_config.device_type == "cpu" or device_config.device_type == "metal"
         self.cache_config = cache_config
         self.model_config = model_config
         self.parallel_config = parallel_config

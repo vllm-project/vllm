@@ -34,11 +34,7 @@ envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
-if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
-    logger.warning(
-        "VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
-    VLLM_TARGET_DEVICE = "cpu"
-elif not (sys.platform.startswith("linux")
+if not (sys.platform.startswith("linux")
           or sys.platform.startswith("darwin")):
     logger.warning(
         "vLLM only supports Linux platform (including WSL) and MacOS."
@@ -390,10 +386,11 @@ def _is_openvino() -> bool:
 def _is_xpu() -> bool:
     return VLLM_TARGET_DEVICE == "xpu"
 
+def _is_metal() -> bool:
+    return VLLM_TARGET_DEVICE == "metal"
 
 def _build_custom_ops() -> bool:
-    return _is_cuda() or _is_hip() or _is_cpu()
-
+    return _is_cuda() or _is_hip() or _is_cpu() or _is_metal()
 
 def get_rocm_version():
     # Get the Rocm version from the ROCM_HOME/bin/librocm-core.so
@@ -521,6 +518,8 @@ def get_vllm_version() -> str:
         version += f"{sep}cpu"
     elif _is_xpu():
         version += f"{sep}xpu"
+    elif _is_metal():
+        version += f"{sep}metal"
     else:
         raise RuntimeError("Unknown runtime environment")
 
@@ -581,6 +580,8 @@ def get_requirements() -> List[str]:
         requirements = _read_requirements("requirements-cpu.txt")
     elif _is_xpu():
         requirements = _read_requirements("requirements-xpu.txt")
+    elif _is_metal():
+        requirements = _read_requirements("requirements-metal.txt")
     else:
         raise ValueError(
             "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "

@@ -179,16 +179,16 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         input_data = self.input_data
         input_tokens = torch.tensor(input_data.input_tokens,
                                     dtype=torch.long,
-                                    device="cpu")
+                                    device=self.device)
         input_positions = torch.tensor(
             input_data.input_positions
             if not any(input_data.input_mrope_positions) else
             input_data.input_mrope_positions,
             dtype=torch.long,
-            device="cpu")
+            device=self.device)
         token_type_ids = torch.tensor(input_data.token_type_ids,
                                     dtype=torch.long,
-                                    device="cpu") \
+                                    device=self.device) \
                                     if input_data.token_type_ids else None
 
         # For multi-modal models

@@ -515,6 +515,12 @@ def is_xnnpack_available():
     else:
         return "N/A"
 
+def is_mps_available():
+    if TORCH_AVAILABLE:
+        return str(torch.backends.mps.is_available())
+    else:
+        return "N/A"
+
 def get_env_vars():
     env_vars = ''
     secret_terms=('secret', 'token', 'api', 'access', 'password')

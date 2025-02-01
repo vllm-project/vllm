@@ -85,7 +85,7 @@ find_package(Torch REQUIRED)
 #
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
     NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
-    if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+    if (VLLM_TARGET_DEVICE STREQUAL "cpu" OR VLLM_TARGET_DEVICE STREQUAL "metal")
         include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
     else()
         return()

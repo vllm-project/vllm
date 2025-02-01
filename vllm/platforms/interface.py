@@ -28,6 +28,7 @@ class _Backend(enum.Enum):
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
+    TORCH_SDPA_2 = enum.auto()
     OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
     HPU_ATTN = enum.auto()
@@ -44,6 +45,7 @@ class PlatformEnum(enum.Enum):
     HPU = enum.auto()
     XPU = enum.auto()
     CPU = enum.auto()
+    METAL = enum.auto()
     NEURON = enum.auto()
     OPENVINO = enum.auto()
     OOT = enum.auto()
@@ -122,6 +124,9 @@ class Platform:
 
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
+
+    def is_metal(self) -> bool:
+        return self._enum == PlatformEnum.METAL
 
     def is_neuron(self) -> bool:
         return self._enum == PlatformEnum.NEURON

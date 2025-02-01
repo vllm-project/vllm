@@ -96,15 +96,22 @@ def xpu_platform_plugin() -> Optional[str]:
     return "vllm.platforms.xpu.XPUPlatform" if is_xpu else None
 
 
+def metal_platform_plugin() -> Optional[str]:
+    is_metal = False
+    try:
+        from importlib.metadata import version
+        import torch
+        is_metal = torch.backends.mps.is_available() and "metal" in version("vllm")
+    except Exception:
+        pass
+    return "vllm.platforms.metal.MetalPlatform" if is_metal else None
+
+
 def cpu_platform_plugin() -> Optional[str]:
     is_cpu = False
     try:
         from importlib.metadata import version
         is_cpu = "cpu" in version("vllm")
-        if not is_cpu:
-            import platform
-            is_cpu = platform.machine().lower().startswith("arm")
-
     except Exception:
         pass
 
@@ -142,6 +149,7 @@ builtin_platform_plugins = {
     'cpu': cpu_platform_plugin,
     'neuron': neuron_platform_plugin,
     'openvino': openvino_platform_plugin,
+    'metal': metal_platform_plugin,
 }
 
 
