@@ -216,7 +216,17 @@ class Idefics3MultimodalProcessor(
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
-            return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+            patches_per_image = [
+                math.prod(self.info._get_image_feature_grid_size(
+                    image_width=img.width,
+                    image_height=img.height,
+                )) + 1
+                for img in mm_data["images"]
+            ]
+            processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+            processed_outputs["pixel_values"] = processed_outputs["pixel_values"].flatten(0, 1).split(patches_per_image)
+            processed_outputs["pixel_attention_mask"] = processed_outputs["pixel_attention_mask"].flatten(0, 1).split(patches_per_image)
+            processed_outputs["patches_per_image"] = patches_per_image
         else:
             tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
@@ -229,9 +239,12 @@ class Idefics3MultimodalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        num_patches = hf_inputs.pop("patches_per_image", [])
+        slices_idxs = [0] + [sum(num_patches[:i]) for i in range(1, len(num_patches)+1)]
+        slices = [slice(slices_idxs[i], slices_idxs[i + 1]) for i in range(len(num_patches))]
         return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-            pixel_attention_mask=MultiModalFieldConfig.batched("image"),
+            pixel_values=MultiModalFieldConfig.flat("image", slices=slices),
+            pixel_attention_mask=MultiModalFieldConfig.flat("image", slices=slices),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
