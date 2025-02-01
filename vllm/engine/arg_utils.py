@@ -1289,7 +1289,7 @@ class EngineArgs:
         # context.
         # Use different default values for different hardware.
         from vllm.platforms import current_platform
-        device_name = current_platform.get_device_name().lower()
+        device_name = str(current_platform.get_device_name().lower())
         if "h100" in device_name or "h200" in device_name:
             # For H100 and H200, we use larger default values.
             default_max_num_batched_tokens = {
