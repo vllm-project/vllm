@@ -441,15 +441,15 @@ def _chunk_scan_fwd_kernel(
 
 def _seq_idx_to_chunk_indices_offsets(seq_idx, chunk_size: int):
 
-    # convert seq_idx to chunk indicies and offsets
+    # convert seq_idx to chunk indices and offsets
     # - derive the cu_seqlens
     _, cu_seqlens = torch.where(seq_idx.diff())
     cu_seqlens += 1
 
     # outputs will have length expansion of chunks that do not divide
     # chunk_size
-    N = math.ceil(
-        seq_idx.shape[-1] / chunk_size) + (cu_seqlens % chunk_size > 0).sum()
+    N = math.ceil(seq_idx.shape[-1] / chunk_size) + (cu_seqlens % chunk_size
+                                                     > 0).sum()
     chunk_indices = torch.arange(N, dtype=torch.int, device=seq_idx.device)
     chunk_offsets = torch.zeros((N, ), dtype=torch.int, device=seq_idx.device)
 
