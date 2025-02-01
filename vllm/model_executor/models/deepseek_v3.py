@@ -27,6 +27,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
@@ -566,8 +567,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-# TODO(simon): check whether we support torch compile for Deepseek V3
-# @support_torch_compile
+@support_torch_compile
 class DeepseekV3Model(nn.Module):
 
     fall_back_to_pt_during_load = False
