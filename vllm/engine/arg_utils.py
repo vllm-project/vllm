@@ -195,6 +195,7 @@ class EngineArgs:
     kv_transfer_config: Optional[KVTransferConfig] = None
 
     generation_config: Optional[str] = None
+    override_generation_config: Optional[Dict[str, Any]] = None
     enable_sleep_mode: bool = False
 
     calculate_kv_scales: Optional[bool] = None
@@ -930,18 +931,28 @@ class EngineArgs:
             type=str,
             default="auto",
             help='The worker class to use for distributed execution.')
-
         parser.add_argument(
             "--generation-config",
             type=nullable_str,
             default=None,
             help="The folder path to the generation config. "
-            "Defaults to None, will use the default generation config in vLLM. "
-            "If set to 'auto', the generation config will be automatically "
-            "loaded from model. If set to a folder path, the generation config "
-            "will be loaded from the specified folder path. If "
-            "`max_new_tokens` is specified, then it sets a server-wide limit "
-            "on the number of output tokens for all requests.")
+            "Defaults to None, no generation config is loaded, vLLM defaults "
+            "will be used. If set to 'auto', the generation config will be "
+            "loaded from model path. If set to a folder path, the generation "
+            "config will be loaded from the specified folder path. If "
+            "`max_new_tokens` is specified in generation config, then "
+            "it sets a server-wide limit on the number of output tokens "
+            "for all requests.")
+
+        parser.add_argument(
+            "--override-generation-config",
+            type=json.loads,
+            default=None,
+            help="Overrides or sets generation config in JSON format. "
+            "e.g. ``{\"temperature\": 0.5}``. If used with "
+            "--generation-config=auto, the override parameters will be merged "
+            "with the default config from the model. If generation-config is "
+            "None, only the override parameters are used.")
 
         parser.add_argument("--enable-sleep-mode",
                             action="store_true",
@@ -1002,6 +1013,7 @@ class EngineArgs:
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,
+            override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
         )
 

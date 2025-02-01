@@ -69,11 +69,13 @@ class LoggingStatLogger(StatLoggerBase):
         logger.info(
             "Avg prompt throughput: %.1f tokens/s, "
             "Avg generation throughput: %.1f tokens/s, "
-            "Running: %d reqs, Waiting: %d reqs ",
+            "Running: %d reqs, Waiting: %d reqs "
+            "GPU KV cache usage: %.1f%%.",
             prompt_throughput,
             generation_throughput,
             scheduler_stats.num_running_reqs,
             scheduler_stats.num_waiting_reqs,
+            scheduler_stats.gpu_cache_usage * 100,
         )
 
 
@@ -95,6 +97,11 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_scheduler_waiting = prometheus_client.Gauge(
             name="vllm:num_requests_waiting",
             documentation="Number of requests waiting to be processed.",
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.gauge_gpu_cache_usage = prometheus_client.Gauge(
+            name="vllm:gpu_cache_usage_perc",
+            documentation="GPU KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames).labels(*labelvalues)
 
         self.counter_prompt_tokens = prometheus_client.Counter(
@@ -121,11 +128,33 @@ class PrometheusStatLogger(StatLoggerBase):
                 buckets=build_1_2_5_buckets(max_model_len),
                 labelnames=labelnames).labels(*labelvalues)
 
+        self.histogram_time_to_first_token = \
+            prometheus_client.Histogram(
+                name="vllm:time_to_first_token_seconds",
+                documentation="Histogram of time to first token in seconds.",
+                buckets=[
+                    0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5,
+                    0.75, 1.0, 2.5, 5.0, 7.5, 10.0
+                ],
+                labelnames=labelnames).labels(*labelvalues)
+
+        self.histogram_time_per_output_token = \
+            prometheus_client.Histogram(
+                name="vllm:time_per_output_token_seconds",
+                documentation="Histogram of time per output token in seconds.",
+                buckets=[
+                    0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5,
+                    0.75, 1.0, 2.5
+                ],
+                labelnames=labelnames).labels(*labelvalues)
+
     def log(self, scheduler_stats: SchedulerStats,
             iteration_stats: IterationStats):
         """Log to prometheus."""
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
+
+        self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
 
         self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)
         self.counter_generation_tokens.inc(
@@ -136,6 +165,11 @@ class PrometheusStatLogger(StatLoggerBase):
                 finished_request.num_prompt_tokens)
             self.histogram_num_generation_tokens_request.observe(
                 finished_request.num_generation_tokens)
+
+        for ttft in iteration_stats.time_to_first_tokens_iter:
+            self.histogram_time_to_first_token.observe(ttft)
+        for tpot in iteration_stats.time_per_output_tokens_iter:
+            self.histogram_time_per_output_token.observe(tpot)
 
     @staticmethod
     def _unregister_vllm_metrics():
