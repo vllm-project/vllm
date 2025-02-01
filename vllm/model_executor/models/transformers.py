@@ -221,6 +221,7 @@ class TransformersModel(nn.Module):
         kv_caches: List[torch.Tensor],  # argument not used
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(
             input_ids[None, ...],
