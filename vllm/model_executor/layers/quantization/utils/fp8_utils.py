@@ -1,11 +1,32 @@
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
-from typing import List, Optional, Tuple
+import functools
+import json
+import os
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import triton
 import triton.language as tl
 
+from vllm import _custom_ops as ops
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    _normalize_quant_group_shape, scaled_dequantize)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    apply_fp8_linear)
 from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
+
+current_platform_fp8_dtype = (torch.float8_e4m3fnuz
+                              if current_platform.is_rocm() else
+                              torch.float8_e4m3fn)
+
+
+def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
+    if isinstance(x, torch.Tensor):
+        x = x.dtype
+    return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
 
 
 def apply_w8a8_block_fp8_linear(
@@ -124,6 +145,42 @@ def apply_block_fp8_linear_hpu(
     return output.to(dtype=input.dtype).view(*output_shape)
 
 
+# Unify the interface between `apply_w8a8_block_fp8_linear` and
+# `apply_fp8_linear`
+# NOTE(lucas): this is quite messy, we should think through this more formally
+def apply_fp8_linear_generic(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        input_group_shape: Tuple[int, int],
+        weight_group_shape: Tuple[int, int],
+        input_scale: Optional[torch.Tensor] = None,  # static scale if one
+) -> torch.Tensor:
+    # View input as 2D matrix for fp8 methods
+    input = input.view(-1, input.shape[-1])
+
+    weight_group_shape = _normalize_quant_group_shape(\
+        weight, weight_group_shape)
+    input_group_shape = _normalize_quant_group_shape(input, input_group_shape)
+
+    def is_dim_blocked(dim, shape, group_shape):
+        return group_shape < shape[dim] and group_shape > 1
+
+    if is_dim_blocked(0, weight.shape, weight_group_shape[0])\
+     and is_dim_blocked(1, weight.shape, weight_group_shape[1]) and\
+     input_group_shape == (1, weight_group_shape[1]):
+        return apply_w8a8_block_fp8_linear(input, weight,
+                                           list(weight_group_shape),
+                                           weight_scale)
+    else:
+        # Despite having linear in the it doesn't conform to
+        # `torch.nn.functional.linear` which is defined as `input @ weight.T`
+        # so we explicitly transpose the weight matrix here
+        return apply_fp8_linear(input, weight.T, weight_scale.T,
+                         use_per_token_if_dynamic=\
+                             (input_group_shape == (1, input.shape[1])))
+
+
 def input_to_float8(
         x: torch.Tensor,
         dtype: Optional[torch.dtype] = None
@@ -144,7 +201,6 @@ def input_to_float8(
 def block_quant_to_tensor_quant(
     x_q_block: torch.Tensor,
     x_s: torch.Tensor,
-    block_size: List[int],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """This function converts block-wise quantization to tensor-wise
     quantization. The inputs are block-wise quantization tensor `x_q_block`,
@@ -152,26 +208,7 @@ def block_quant_to_tensor_quant(
     The outputs are tensor-wise quantization tensor and tensor-wise
     quantization scale. Note only float8 is supported for now.
     """
-    block_n, block_k = block_size[0], block_size[1]
-    n, k = x_q_block.shape
-    n_tiles = (n + block_n - 1) // block_n
-    k_tiles = (k + block_k - 1) // block_k
-    assert n_tiles == x_s.shape[0]
-    assert k_tiles == x_s.shape[1]
-
-    x_dq_block = x_q_block.to(torch.float32)
-
-    x_dq_block_tiles = [[
-        x_dq_block[
-            j * block_n:min((j + 1) * block_n, n),
-            i * block_k:min((i + 1) * block_k, k),
-        ] for i in range(k_tiles)
-    ] for j in range(n_tiles)]
-
-    for i in range(k_tiles):
-        for j in range(n_tiles):
-            x_dq_block_tiles[j][i][:, :] = x_dq_block_tiles[j][i] * x_s[j][i]
-
+    x_dq_block = scaled_dequantize(x_q_block, x_s)
     x_q_tensor, scale = input_to_float8(x_dq_block, dtype=x_q_block.dtype)
     return x_q_tensor, scale
 
