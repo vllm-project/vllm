@@ -112,10 +112,12 @@ class KVCacheManager:
         return computed_blocks, num_computed_tokens
 
     def allocate_slots(
-        self, request: Request, num_tokens: int,
+        self,
+        request: Request,
+        num_tokens: int,
         new_computed_blocks: Optional[List[KVCacheBlock]] = None
     ) -> Optional[List[KVCacheBlock]]:
-        """Add slots for a new prefill or a new decode request.
+        """Add slots for a request with new tokens to append.
 
         Args:
             request: The request to allocate slots.
@@ -140,7 +142,7 @@ class KVCacheManager:
             A list of new allocated blocks.
         """
         if num_tokens == 0:
-            raise ValueError(f"num_tokens must be greater than 0")
+            raise ValueError("num_tokens must be greater than 0")
 
         new_computed_blocks = new_computed_blocks or []
 
@@ -178,12 +180,12 @@ class KVCacheManager:
 
         # Start to handle new blocks
 
-        # Determine the number of new blocks to allocate considering
-        # preallocated blocks.
         if num_new_blocks <= 0:
             # No new block is needed.
             new_blocks = []
         else:
+            # Get new blocks from the free block pool considering
+            # preallocated blocks.
             num_new_blocks = min(
                 num_new_blocks + self.num_preallocate_blocks,
                 self.free_block_queue.num_free_blocks,
