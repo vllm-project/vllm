@@ -185,7 +185,7 @@ def image_to_pixel_values_h2ovl(
     # when MSAC is turned on, we need to process the image twice
     if use_msac:
         # first pass
-        pixel_values, target_aspect_ratio = _preprocess_image(
+        pixel_values1, aspect_ratio1 = _preprocess_image(
             image,
             input_size=input_size,
             min_num=min_num,
@@ -200,11 +200,11 @@ def image_to_pixel_values_h2ovl(
             min_num=min_num,
             max_num=max_num,
             use_thumbnail=True,
-            prior_aspect_ratio=target_aspect_ratio,
+            prior_aspect_ratio=aspect_ratio1,
         )
         # combine pixel values
         pixel_values = torch.cat(
-            [pixel_values2[:-1], pixel_values[:-1], pixel_values2[-1:]], 0)
+            [pixel_values2[:-1], pixel_values1[:-1], pixel_values2[-1:]], 0)
 
     else:
         pixel_values, _ = _preprocess_image(
@@ -287,6 +287,26 @@ class H2OVLProcessor(BaseInternVLProcessor):
             use_msac=use_msac,
         )
 
+    def resolve_target_ratios(
+        self,
+        *,
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
+        use_thumbnail: Optional[bool] = None,
+        prior_aspect_ratio: Optional[tuple[int, int]] = None,
+    ) -> list[tuple[int, int]]:
+        min_num, max_num = self.resolve_min_max_num(
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+            use_thumbnail=use_thumbnail,
+        )
+
+        return get_h2ovl_target_ratios(
+            min_num,
+            max_num,
+            prior_aspect_ratio=prior_aspect_ratio,
+        )
+
     def get_num_image_tokens(
         self,
         *,
@@ -296,21 +316,44 @@ class H2OVLProcessor(BaseInternVLProcessor):
     ) -> int:
         use_msac = (self.use_msac if use_msac is None else use_msac)
 
-        target_ratios = self.resolve_target_ratios(
-            use_thumbnail=False,  # Applied in calculate_targets
-        )
-
         use_thumbnail = self.use_thumbnail
-        num_patches, _, _, _ = calculate_h2ovl_targets(
-            orig_width=image_width,
-            orig_height=image_height,
-            image_size=self.image_size,
-            target_ratios=target_ratios,
-            use_thumbnail=use_thumbnail,
-        )
 
         if use_msac:
-            num_patches = (num_patches - use_thumbnail) * 2 + use_thumbnail
+            target_ratios_1 = self.resolve_target_ratios(
+                use_thumbnail=False,  # Applied in calculate_targets
+            )
+            num_patches_1, _, _, aspect_ratio_1 = calculate_h2ovl_targets(
+                orig_width=image_width,
+                orig_height=image_height,
+                image_size=self.image_size,
+                target_ratios=target_ratios_1,
+                use_thumbnail=True,
+            )
+
+            target_ratios_2 = self.resolve_target_ratios(
+                use_thumbnail=False,  # Applied in calculate_targets
+                prior_aspect_ratio=aspect_ratio_1,
+            )
+            num_patches_2, _, _, _ = calculate_h2ovl_targets(
+                orig_width=image_width,
+                orig_height=image_height,
+                image_size=self.image_size,
+                target_ratios=target_ratios_2,
+                use_thumbnail=True,
+            )
+
+            num_patches = num_patches_1 + num_patches_2 - 1
+        else:
+            target_ratios = self.resolve_target_ratios(
+                use_thumbnail=False,  # Applied in calculate_targets
+            )
+            num_patches, _, _, _ = calculate_h2ovl_targets(
+                orig_width=image_width,
+                orig_height=image_height,
+                image_size=self.image_size,
+                target_ratios=target_ratios,
+                use_thumbnail=use_thumbnail,
+            )
 
         return num_patches * self.num_image_token
 
