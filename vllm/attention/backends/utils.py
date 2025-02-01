@@ -374,7 +374,7 @@ class CommonAttentionState(AttentionState):
             "block_tables":
             attn_metadata.decode_metadata.block_tables,
             "num_orig_input_tokens_tensor":
-            attn_metadata.num_orig_input_tokens_tensor,
+            attn_metadata.decode_metadata.num_orig_input_tokens_tensor,
         }
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers and
@@ -397,8 +397,6 @@ class CommonAttentionState(AttentionState):
             attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
         input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
-        input_buffers["num_orig_input_tokens_tensor"].copy_(
-            attn_metadata.num_orig_input_tokens_tensor, non_blocking=True)
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers and
             # Flash Attention backend. Assert the same.
