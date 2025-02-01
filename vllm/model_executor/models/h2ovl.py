@@ -34,12 +34,8 @@ def resolve_h2ovl_min_max_num(
     max_dynamic_patch: int,
     dynamic_image_size: bool,
     use_thumbnail: bool,
-    use_msac: bool,
 ) -> tuple[int, int]:
     max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
-
-    if use_msac:
-        max_dynamic_patch *= 2
 
     if use_thumbnail and max_dynamic_patch != 1:
         max_dynamic_patch += 1
@@ -268,7 +264,6 @@ class H2OVLProcessor(BaseInternVLProcessor):
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
         use_thumbnail: Optional[bool] = None,
-        use_msac: Optional[bool] = None,
     ) -> tuple[int, int]:
         min_dynamic_patch = self.min_dynamic_patch
         max_dynamic_patch = (self.max_dynamic_patch if max_dynamic_patch
@@ -277,14 +272,12 @@ class H2OVLProcessor(BaseInternVLProcessor):
                               is None else dynamic_image_size)
         use_thumbnail = (self.use_thumbnail
                          if use_thumbnail is None else use_thumbnail)
-        use_msac = (self.use_msac if use_msac is None else use_msac)
 
         return resolve_h2ovl_min_max_num(
             min_dynamic_patch=min_dynamic_patch,
             max_dynamic_patch=max_dynamic_patch,
             dynamic_image_size=dynamic_image_size,
             use_thumbnail=use_thumbnail,
-            use_msac=use_msac,
         )
 
     def resolve_target_ratios(
@@ -369,7 +362,6 @@ class H2OVLProcessor(BaseInternVLProcessor):
             max_dynamic_patch=max_dynamic_patch,
             dynamic_image_size=dynamic_image_size,
             use_thumbnail=False,  # Applied in image_to_pixel_values
-            use_msac=use_msac,
         )
 
         return [

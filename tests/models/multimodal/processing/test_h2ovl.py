@@ -76,7 +76,7 @@ def test_processor_override(
             width, height = image.size
 
             # Calculate the expected number of blocks
-            if use_msac:
+            if num_imgs == 1 and use_msac:
                 # First pass
                 blocks1, _, _, aspect_ratio = calculate_h2ovl_targets(
                     orig_width=width,
