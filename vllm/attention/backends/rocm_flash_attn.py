@@ -552,7 +552,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         attn_metadata: ROCmFlashAttentionMetadata,
         fp8_out_scale: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
-        fp8_comp_scales: Optional[Tuple[torch.Tensor, ...]] = None,
+        attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -802,20 +802,12 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     device=output.device,
                 )
                 max_logits = torch.empty_like(exp_sums)
-                cpa_fp8_out = False
                 if num_prefill_tokens > 0:
                     out = output[num_prefill_tokens:]
                 else:
-                    if fp8_out_scale is not None:
-                        out = torch.empty_like(output,
-                                               dtype=torch.float8_e4m3fnuz)
-                        cpa_fp8_out = True
-                    else:
-                        out = output
-                block_tables = decode_meta.block_tables if self.attn_type != AttentionType.ENCODER_DECODER else decode_meta.cross_block_tables
-                seq_lens = decode_meta.seq_lens_tensor if self.attn_type != AttentionType.ENCODER_DECODER else decode_meta.encoder_seq_lens_tensor
+                    out = output
                 ops.paged_attention_rocm(
-                    out,
+                    output[num_prefill_tokens:],
                     exp_sums,
                     max_logits,
                     tmp_output,
@@ -835,8 +827,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     fp8_out_scale if cpa_fp8_out else None,
                     _PARTITION_SIZE_ROCM,
                 )
-                if cpa_fp8_out:
-                    return out.view(num_seqs, num_heads * head_size)
             else:
                 output[num_prefill_tokens:] = PagedAttention.forward_decode(
                     decode_query,
@@ -907,5 +897,4 @@ def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
             and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
-            and (gqa_ratio >= 1 and gqa_ratio <= 16)
-            and max_seq_len <= 128 * 1024)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768)

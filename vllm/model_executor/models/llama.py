@@ -26,7 +26,6 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
@@ -195,12 +194,6 @@ class LlamaAttention(nn.Module):
         else:
             sliding_window = None
 
-        # For CUDA devices and Navi4x, attn_fp8 will be set to false.
-        self.attn_fp8_out = envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT \
-                        and current_platform.is_rocm() \
-                        and not is_navi() \
-                        and isinstance(quant_config, Fp8Config)
-
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -222,9 +215,7 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(
-            q, k, v, kv_cache, attn_metadata,
-            self.o_proj.input_scale if self.attn_fp8_out else None)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
