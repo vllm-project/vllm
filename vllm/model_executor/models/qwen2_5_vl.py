@@ -1,7 +1,7 @@
 # Adapted from
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py
 # Copyright 2025 The vLLM team.
-# Copyright 2025 The Qwen Team and The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 The Qwen Team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
 # and OPT implementations in this library. It has been modified from its
@@ -42,7 +42,6 @@ from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -54,11 +53,8 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (ImageItem, ModalityData,
-                                    MultiModalFieldConfig, MultiModalKwargs,
-                                    VideoItem)
-from vllm.multimodal.parse import (ImageSize, ModalityDataItems,
-                                   MultiModalDataItems, MultiModalDataParser)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
@@ -495,7 +491,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.patch_size = vision_config.patch_size
         self.fullatt_block_indexes = vision_config.fullatt_block_indexes
         self.window_size = vision_config.window_size
-        self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
+        self.spatial_merge_unit = spatial_merge_size * spatial_merge_size
 
         self.patch_embed = Qwen2_5_VisionPatchEmbed(
             patch_size=patch_size,
@@ -563,7 +559,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         window_index: list = []
         cu_window_seqlens: list = [0]
         window_index_id = 0
-        vit_merger_window_size = self.window_size // self.spatial_merge_size // self.patch_size
+        vit_merger_window_size = self.window_size // \
+            self.spatial_merge_size // self.patch_size
 
         for grid_t, grid_h, grid_w in grid_thw:
             llm_grid_h, llm_grid_w = (
@@ -635,8 +632,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
             dim=0,
             # Select dtype based on the following factors:
             #  - FA2 requires that cu_seqlens_q must have dtype int32
-            #  - torch.onnx.export requires that cu_seqlens_q must have same dtype as grid_thw
-            # See https://github.com/huggingface/transformers/pull/34852 for more information
+            #  - torch.onnx.export requires that cu_seqlens_q must have same
+            #   dtype as grid_thw
+            # See https://github.com/huggingface/transformers/pull/34852
             dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
@@ -971,9 +969,6 @@ class Qwen2_5_VLMultiModalProcessor(
             slice(video_slice_idxs[i], video_slice_idxs[i + 1])
             for i in range(len(video_grid_thw))
         ]
-
-        second_per_grid_ts = hf_inputs.get("second_per_grid_ts",
-                                           torch.empty(0))
 
         return dict(
             pixel_values=MultiModalFieldConfig.flat("image", image_slices),
