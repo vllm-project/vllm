@@ -74,9 +74,6 @@ class Processor:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
 
-    # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
-    # This ideally should releases the GIL, so we should not block the
-    # asyncio loop while this is running.
     def process_inputs(
         self,
         request_id: str,

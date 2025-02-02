@@ -779,67 +779,21 @@ class GPUModelRunner:
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
-        # Sample the next token and get logprobs if needed.
+        # Sample the next token and get sample logprobs if needed.
         sampling_metadata = self._prepare_sampling(scheduler_output)
         sampler_output = self.model.sample(
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
 
-        # Compute prompt logprobs if needed.
-        # NOTE(rob): for simplicity, compute prompt logprobs for each
-        # prompt separately. Prompt logprobs are rare (used for eval),
-        # and few prefills per batch, so prioritize simple over optimal.
+        # Compute logprobs for each active prompt that needs prompt lps.
+        # Since prompt lps are rare, prioritizes simple over optimal.
         prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor,
                                               torch.Tensor]] = {}
-        if self.input_batch.num_prompt_logprobs:
-            # Prompt token ids are required for computing prompt logprobs
-            assert input_ids is not None
-        for (request_id, num_prompt_logprobs
-             ) in self.input_batch.num_prompt_logprobs.items():
-
-            request = self.requests[request_id]
-            req_idx = self.input_batch.req_id_to_index[request_id]
-            prompt_token_ids = torch.tensor(request.prompt_token_ids)
-            is_partial_req = request_id == scheduler_output.partial_req_id
-
-            # Get number of prompt logits generated.
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
-                request_id]
-            num_prompt_logits = (num_scheduled_tokens if is_partial_req else
-                                 num_scheduled_tokens - 1)
-
-            # Get start and end indices of the hidden states
-            # corresponding to prompt logits
-            start_idx_in_hidden_states = self.query_start_loc_np[req_idx].item(
-            )
-            end_idx_in_hidden_states = (start_idx_in_hidden_states +
-                                        num_prompt_logits)
-
-            # Compute prompt logits from prompt hidden states
-            prompt_hidden_states = (hidden_states[
-                start_idx_in_hidden_states:end_idx_in_hidden_states])
-            logits = self.model.compute_logits(prompt_hidden_states, None)
-
-            # Get start and end indices of the prompt token ids
-            # corresponding to the prompt logits
-            start_idx_in_tokens = request.num_computed_tokens + 1
-            end_idx_in_tokens = start_idx_in_tokens + num_prompt_logits
-
-            # Compute prompt logprobs.
-            req_plp: Tuple[torch.Tensor, torch.Tensor,
-                           torch.Tensor] = self.model.sampler.get_logprobs(
-                               logits,
-                               num_prompt_logprobs,
-                               token_ids=prompt_token_ids[
-                                   start_idx_in_tokens:end_idx_in_tokens].to(
-                                       self.device)  # copy to gpu
-                           )
-
-            # GPU -> CPU
-            prompt_logprobs_dict[request_id] = (req_plp[0].cpu(),
-                                                req_plp[1].cpu(),
-                                                req_plp[2].cpu())
+        for req_id in self.input_batch.num_prompt_logprobs:
+            # GPU<>CPU sync happens here.
+            prompt_logprobs_dict[req_id] = self.get_prompt_logprobs(
+                req_id, hidden_states, scheduler_output)
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -909,6 +863,47 @@ class GPUModelRunner:
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
+
+    def get_prompt_logprobs(
+        self,
+        req_id: str,
+        hidden_states: torch.Tensor,
+        scheduler_output: "SchedulerOutput",
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        # Get metadata for this request.
+        num_prompt_logprobs = self.input_batch.num_prompt_logprobs[req_id]
+        request = self.requests[req_id]
+        prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
+            self.device, non_blocking=True)
+        req_idx = self.input_batch.req_id_to_index[req_id]
+
+        # Get the logits corresponding to this req's prompt tokens.
+        # If this is a partial request (i.e. chunked prefill),
+        # then there is prompt logprob generated for each index.
+        is_partial_req = req_id == scheduler_output.partial_req_id
+        num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+        num_logits = num_tokens if is_partial_req else num_tokens - 1
+        start_idx = self.query_start_loc_np[req_idx].item()
+        end_idx = start_idx + num_logits
+        prompt_hidden_states = hidden_states[start_idx:end_idx]
+        logits = self.model.compute_logits(prompt_hidden_states, None)
+
+        # Get the "sampled" tokens for each index. For prompt at index i,
+        # the token at prompt index i+1 is the "sampled" token we want
+        # to gather the logprob for.
+        start_idx_in_tokens = request.num_computed_tokens + 1
+        end_idx_in_tokens = start_idx_in_tokens + num_logits
+        sampled_token_ids = prompt_token_ids[
+            start_idx_in_tokens:end_idx_in_tokens]
+
+        # Compute prompt logprobs.
+        logprobs = self.model.sampler.compute_logprobs(logits)
+        indices, logprobs, ranks = self.model.sampler.gather_logprobs(
+            logits, num_prompt_logprobs, sampled_token_ids)
+
+        # GPU<>CPU sync happens here.
+        return (indices.cpu(), logprobs.cpu(), ranks.cpu())
 
     @torch.inference_mode()
     def _dummy_run(

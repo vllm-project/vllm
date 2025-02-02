@@ -32,7 +32,6 @@ class Sampler(nn.Module):
         # TODO(rob): provide option for logprobs post sampling.
         # See https://vllm-dev.slack.com/archives/C07UUL8E61Z/p1735907856007919 # noqa: E501
         if sampling_metadata.max_num_logprobs is not None:
-            # This happens in fp32.
             raw_logprobs = self.compute_logprobs(logits)
 
         # Use float32 for the logits.
@@ -143,13 +142,15 @@ class Sampler(nn.Module):
         # Get with the logprob of the prompt or sampled token.
         token_ids = token_ids.unsqueeze(-1)
         token_logprobs = logprobs.gather(-1, token_ids.to(torch.int64))
-        topk_indices = torch.cat((token_ids, topk_indices), dim=1)
-        topk_logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
+
+        # Concatenate together with the topk.
+        indices = torch.cat((token_ids, topk_indices), dim=1)
+        logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
 
         # Compute the ranks of the actual token.
-        token_ranks = (logprobs >= token_logprobs).sum(-1)
+        token_ranks = (topk_logprobs >= token_logprobs).sum(-1)
 
-        return topk_indices, topk_logprobs, token_ranks
+        return indices, logprobs, token_ranks
 
     def apply_penalties(
         self,
