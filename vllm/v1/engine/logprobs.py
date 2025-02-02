@@ -1,6 +1,6 @@
 import itertools
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, List, Optional
 
 import torch
 
@@ -79,14 +79,15 @@ class LogprobsProcessor:
             sampled_token_logprob = logprobs[0]
             self.cumulative_logprob += sampled_token_logprob
 
-            # We do not need a special case for the sampled token
-            # being in the topk, since we insert the same data into
-            # a dictionary twice.
-            topk_ranks = range(1, self.num_logprobs + 1)
-            ranks = itertools.chain((rank, ), topk_ranks)
-            logprobs_dict = self._make_logprob_dict(logprobs, token_ids,
-                                                    decoded_tokens, ranks)
-            self.logprobs.append(logprobs_dict)
+            # Update with the Logprob dictionary for this pos.
+            self.logprobs.append(
+                self._make_logprob_dict(
+                    logprobs,
+                    token_ids,
+                    decoded_tokens,
+                    rank,
+                    self.num_logprobs,
+                ))
 
     def _update_prompt_logprobs(
         self,
@@ -147,23 +148,17 @@ class LogprobsProcessor:
 
         # Make Logprob for each position.
         for pos in range(num_prompt_tokens):
-            # Index into the flattened list.
+            # Handle flattening.
             offset = pos * num_logprobs
             offset_end = offset + num_logprobs
             decoded_tokens_for_pos = decoded_tokens[offset:offset_end]
 
-            # We do not need a special case for the sampled token
-            # being in the topk, since we inserting the same data into
-            # a dictionary twice is the same as doing it once.
-            topk_ranks = range(1, num_prompt_logprobs + 1)
-            ranks = itertools.chain((prompt_token_ranks[pos], ), topk_ranks)
+            # Update with the Logprob dictionary for this pos.
             self.prompt_logprobs.append(
-                self._make_logprob_dict(
-                    prompt_logprobs[pos],
-                    token_ids[pos],
-                    decoded_tokens_for_pos,
-                    ranks,
-                ))
+                self._make_logprob_dict(prompt_logprobs[pos], token_ids[pos],
+                                        decoded_tokens_for_pos,
+                                        prompt_token_ranks[pos],
+                                        num_prompt_logprobs))
 
     def pop_prompt_logprobs(self) -> Optional[PromptLogprobs]:
         """Pop and return all request prompt logprobs
@@ -189,7 +184,8 @@ class LogprobsProcessor:
         logprobs: List[float],
         logprob_token_ids: List[int],
         decoded_tokens: List[str],
-        ranks: Iterable[int],
+        rank: int,
+        num_logprobs: int,
     ) -> Dict[int, Logprob]:
         """Make a Logprob dictionary for a position.
 
@@ -197,11 +193,19 @@ class LogprobsProcessor:
           logprobs: list of log probabilities
           logprob_token_ids: list of top token ids
           decoded_tokens: list of decoded top tokens
-          ranks: ranks for each of the tokens
+          rank: rank of the sampled token
+          num_logprobs: number of logprobs requested
+            by the user (in addition to sampled logprob)
 
         Returns:
-          Dict[top token id, Logprob]
+          Dict[token id, Logprob]
         """
+
+        # We do not need a special case for the sampled token
+        # being in the topk, since inserting duplicated data
+        # into a dictionary twice is the same as doing it once.
+        topk_ranks = range(1, num_logprobs + 1)
+        ranks = itertools.chain((rank, ), topk_ranks)
 
         return {
             token_id: Logprob(
