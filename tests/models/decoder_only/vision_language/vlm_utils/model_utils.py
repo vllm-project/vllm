@@ -333,7 +333,6 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         def __init__(self, hf_runner: HfRunner):
             self.num_image_token = hf_runner.model.num_image_token
             self.tokenizer = hf_runner.tokenizer
-            self.dtype = hf_runner.model.dtype
 
             self.config = AutoConfig.from_pretrained(hf_runner.model_name,
                                                      trust_remote_code=True)
@@ -360,7 +359,7 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                     max_num=self.max_num,
                     use_thumbnail=self.use_thumbnail,
                     use_msac=self.use_msac,
-                ).to(self.dtype) for image in images
+                ) for image in images
             ]
             num_patches_list = [
                 pixel_value.shape[0] for pixel_value in pixel_values
@@ -395,7 +394,6 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         def __init__(self, hf_runner: HfRunner):
             self.num_image_token = hf_runner.model.num_image_token
             self.tokenizer = hf_runner.tokenizer
-            self.dtype = hf_runner.model.dtype
 
             self.config = AutoConfig.from_pretrained(hf_runner.model_name,
                                                      trust_remote_code=True)
@@ -418,7 +416,7 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                     min_num=self.min_num,
                     max_num=self.max_num,
                     use_thumbnail=self.use_thumbnail,
-                ).to(self.dtype) for image in images
+                ) for image in images
             ]
             num_patches_list = [
                 pixel_value.shape[0] for pixel_value in pixel_values
@@ -453,7 +451,8 @@ def _internvl_generate(
 ) -> torch.LongTensor:
     """Generate method for InternVL2 model without fixed use_cache."""
     assert self.img_context_token_id is not None
-    vit_embeds = self.extract_feature(pixel_values)
+    target_dtype = next(self.parameters()).dtype
+    vit_embeds = self.extract_feature(pixel_values.to(target_dtype))
     input_embeds = self.language_model.get_input_embeddings()(input_ids)
     B, N, C = input_embeds.shape
     input_embeds = input_embeds.reshape(B * N, C)
