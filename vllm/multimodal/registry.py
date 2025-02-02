@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import functools
 from collections import UserDict
 from dataclasses import dataclass

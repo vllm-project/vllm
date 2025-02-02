@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import contextlib
 import importlib
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
@@ -433,6 +435,11 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
 # cutlass
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
+
+
+def cutlass_scaled_mm_supports_block_fp8(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_scaled_mm_supports_block_fp8(
+        cuda_device_capability)
 
 
 def cutlass_scaled_mm(a: torch.Tensor,

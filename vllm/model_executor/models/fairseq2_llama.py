@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2024 The vLLM team.
 # Copyright 2024 Meta Platforms, Inc. and affiliates. All rights reserved.
 #

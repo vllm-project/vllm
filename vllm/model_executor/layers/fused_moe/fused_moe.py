@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Fused MoE kernel."""
 import functools
 import json
@@ -660,36 +661,17 @@ def get_default_config(
     is_marlin: bool,
     block_shape: Optional[List[int]] = None,
 ) -> Dict[str, int]:
-    if dtype == "fp8_w8a8":
-        if block_shape is None:
-            config = {
-                "BLOCK_SIZE_M": 128,
-                "BLOCK_SIZE_N": 256,
-                "BLOCK_SIZE_K": 128,
-                "GROUP_SIZE_M": 32,
-                "num_warps": 8,
-                "num_stages": 4,
-            }
-            if M <= E:
-                config = {
-                    "BLOCK_SIZE_M": 64,
-                    "BLOCK_SIZE_N": 128,
-                    "BLOCK_SIZE_K": 128,
-                    "GROUP_SIZE_M": 1,
-                    "num_warps": 4,
-                    "num_stages": 4,
-                }
-        else:
-            # Block-wise quant: BLOCK_SIZE_N must be divisible by block_shape[0]
-            # BLOCK_SIZE_K must be divisible by block_shape[1]
-            config = {
-                "BLOCK_SIZE_M": 64,
-                "BLOCK_SIZE_N": block_shape[0],
-                "BLOCK_SIZE_K": block_shape[1],
-                "GROUP_SIZE_M": 32,
-                "num_warps": 4,
-                "num_stages": 3,
-            }
+    if dtype == "fp8_w8a8" and block_shape is not None:
+        # Block-wise quant: BLOCK_SIZE_N must be divisible by block_shape[0]
+        # BLOCK_SIZE_K must be divisible by block_shape[1]
+        config = {
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": block_shape[0],
+            "BLOCK_SIZE_K": block_shape[1],
+            "GROUP_SIZE_M": 32,
+            "num_warps": 4,
+            "num_stages": 3,
+        }
     else:
         config = {
             "BLOCK_SIZE_M": 64,
@@ -778,6 +760,7 @@ def fused_topk(
 
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def grouped_topk(hidden_states: torch.Tensor,
                  gating_output: torch.Tensor,
                  topk: int,

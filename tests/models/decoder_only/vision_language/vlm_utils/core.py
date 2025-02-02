@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Core test implementation to be shared across modalities."""
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
