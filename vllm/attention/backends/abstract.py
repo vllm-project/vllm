@@ -276,3 +276,19 @@ class AttentionImpl(ABC, Generic[T]):
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
+
+
+class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
+
+    @abstractmethod
+    def forward(
+        self,
+        layer: AttentionLayer,
+        hidden_states_or_cq: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: T,
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError
