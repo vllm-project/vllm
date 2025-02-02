@@ -29,8 +29,8 @@ class Sampler(nn.Module):
         # temperature scaling) for the top-k logprobs.
         # This is different from the V0 sampler, which uses the logits that
         # is used for sampling (after penalties and temperature scaling).
-        # TODO: provide option for logprobs post sampling.
-        # See https://vllm-dev.slack.com/archives/C07UUL8E61Z/p1735907856007919 for more discussion # noqa: E501
+        # TODO(rob): provide option for logprobs post sampling.
+        # See https://vllm-dev.slack.com/archives/C07UUL8E61Z/p1735907856007919 # noqa: E501
         if sampling_metadata.max_num_logprobs is not None:
             # This happens in fp32.
             raw_logprobs = self.compute_logprobs(logits)
