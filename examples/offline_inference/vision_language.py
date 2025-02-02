@@ -542,6 +542,7 @@ def run_qwen2_5_vl(question: str, modality: str):
         mm_processor_kwargs={
             "min_pixels": 28 * 28,
             "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
         },
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
         limit_mm_per_prompt={
