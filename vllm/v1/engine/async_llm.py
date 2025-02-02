@@ -4,7 +4,7 @@ from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
 
 import numpy as np
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
@@ -23,6 +23,7 @@ from vllm.utils import cdiv, kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.processor import Processor
+from vllm.v1.engine.utils import STR_ASYNC_LLM_PROMPT_LP_APC_UNSUPPORTED
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
                                      StatLoggerBase)
@@ -48,6 +49,7 @@ class AsyncLLM(EngineClient):
         assert start_engine_loop
 
         self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
 
         self.log_requests = log_requests
         self.log_stats = log_stats
@@ -160,6 +162,22 @@ class AsyncLLM(EngineClient):
 
         return queue
 
+    async def _assert_valid_request(
+        self,
+        params: SamplingParams,
+    ) -> None:
+        """Validate AsyncLLM request attributes. Fail if invalid.
+        
+        Args:
+          params: request parameters
+        """
+        # Prompt logprobs and APC are incompatible
+        if isinstance(params, SamplingParams):
+            plp = params.prompt_logprobs
+            if (await self.get_cache_config()
+                ).enable_prefix_caching and plp is not None and plp > 0:
+                raise ValueError(STR_ASYNC_LLM_PROMPT_LP_APC_UNSUPPORTED)
+
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
     # requests we don't need to send multiple messages to core proc,
@@ -189,6 +207,7 @@ class AsyncLLM(EngineClient):
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
         """
+        await self._assert_valid_request(sampling_params)
 
         try:
             # We start the output_handler on the first call to generate() so
@@ -320,6 +339,9 @@ class AsyncLLM(EngineClient):
 
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
+
+    async def get_cache_config(self) -> CacheConfig:
+        return self.cache_config
 
     async def get_decoding_config(self):
         raise ValueError("Not Supported on V1 yet.")
