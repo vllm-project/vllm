@@ -272,7 +272,7 @@ class Scheduler:
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = 0
+        num_common_prefix_blocks = [0]
         if self.running:
             any_request = self.running[0]
             num_common_prefix_blocks = (
