@@ -2,12 +2,12 @@ import lm_eval
 
 from ...utils import RemoteOpenAIServer
 
-# windogrande uses prompt_logprobs=1
-TASK = "winogrande"
-FILTER = "acc,none"
+# arc-easy uses prompt_logprobs=1, logprobs=1
+TASK = "arc-easy"
+FILTER = "acc_norm,none"
 RTOL = 0.03
 # Measured on V0.
-EXPECTED_VALUE = 0.61
+EXPECTED_VALUE = 0.62
 
 # FIXME(rob): enable prefix caching once supported.
 MODEL = "meta-llama/Llama-3.2-1B"
