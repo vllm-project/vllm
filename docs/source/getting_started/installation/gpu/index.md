@@ -5,7 +5,8 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} CUDA
+::::{tab-item} NVIDIA CUDA
+:selected:
 :sync: cuda
 
 :::{include} cuda.inc.md
@@ -15,7 +16,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 ::::
 
-::::{tab-item} ROCm
+::::{tab-item} AMD ROCm
 :sync: rocm
 
 :::{include} rocm.inc.md
@@ -25,7 +26,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 ::::
 
-::::{tab-item} XPU
+::::{tab-item} Intel XPU
 :sync: xpu
 
 :::{include} xpu.inc.md
@@ -45,7 +46,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} CUDA
+::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
 :::{include} cuda.inc.md
@@ -55,7 +56,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 ::::
 
-::::{tab-item} ROCm
+::::{tab-item} AMD ROCm
 :sync: rocm
 
 :::{include} rocm.inc.md
@@ -65,7 +66,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 ::::
 
-::::{tab-item} XPU
+::::{tab-item} Intel XPU
 :sync: xpu
 
 :::{include} xpu.inc.md
@@ -87,7 +88,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} CUDA
+::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
 :::{include} cuda.inc.md
@@ -97,14 +98,14 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 ::::
 
-::::{tab-item} ROCm
+::::{tab-item} AMD ROCm
 :sync: rocm
 
 There is no extra information on creating a new Python environment for this device.
 
 ::::
 
-::::{tab-item} XPU
+::::{tab-item} Intel XPU
 :sync: xpu
 
 There is no extra information on creating a new Python environment for this device.
@@ -118,7 +119,7 @@ There is no extra information on creating a new Python environment for this devi
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} CUDA
+::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
 :::{include} cuda.inc.md
@@ -128,7 +129,7 @@ There is no extra information on creating a new Python environment for this devi
 
 ::::
 
-::::{tab-item} ROCm
+::::{tab-item} AMD ROCm
 :sync: rocm
 
 :::{include} rocm.inc.md
@@ -138,7 +139,7 @@ There is no extra information on creating a new Python environment for this devi
 
 ::::
 
-::::{tab-item} XPU
+::::{tab-item} Intel XPU
 :sync: xpu
 
 :::{include} xpu.inc.md
@@ -157,7 +158,7 @@ There is no extra information on creating a new Python environment for this devi
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} CUDA
+::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
 :::{include} cuda.inc.md
@@ -167,7 +168,7 @@ There is no extra information on creating a new Python environment for this devi
 
 ::::
 
-::::{tab-item} ROCm
+::::{tab-item} AMD ROCm
 :sync: rocm
 
 :::{include} rocm.inc.md
@@ -177,7 +178,7 @@ There is no extra information on creating a new Python environment for this devi
 
 ::::
 
-::::{tab-item} XPU
+::::{tab-item} Intel XPU
 :sync: xpu
 
 :::{include} xpu.inc.md
@@ -196,7 +197,7 @@ There is no extra information on creating a new Python environment for this devi
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} CUDA
+::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
 :::{include} cuda.inc.md
@@ -206,7 +207,7 @@ There is no extra information on creating a new Python environment for this devi
 
 ::::
 
-::::{tab-item} ROCm
+::::{tab-item} AMD ROCm
 :sync: rocm
 
 :::{include} rocm.inc.md
@@ -216,7 +217,7 @@ There is no extra information on creating a new Python environment for this devi
 
 ::::
 
-::::{tab-item} XPU
+::::{tab-item} Intel XPU
 :sync: xpu
 
 :::{include} xpu.inc.md
@@ -233,7 +234,7 @@ There is no extra information on creating a new Python environment for this devi
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} CUDA
+::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
 :::{include} cuda.inc.md
@@ -243,7 +244,7 @@ There is no extra information on creating a new Python environment for this devi
 
 ::::
 
-::::{tab-item} ROCm
+::::{tab-item} AMD ROCm
 :sync: rocm
 
 :::{include} rocm.inc.md
@@ -253,7 +254,7 @@ There is no extra information on creating a new Python environment for this devi
 
 ::::
 
-::::{tab-item} XPU
+::::{tab-item} Intel XPU
 :sync: xpu
 
 :::{include} xpu.inc.md
@@ -270,7 +271,7 @@ There is no extra information on creating a new Python environment for this devi
 :::::{tab-set}
 :sync-group: device
 
-::::{tab-item} CUDA
+::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
 :::{include} cuda.inc.md
@@ -279,7 +280,7 @@ There is no extra information on creating a new Python environment for this devi
 
 ::::
 
-::::{tab-item} ROCm
+::::{tab-item} AMD ROCm
 :sync: rocm
 
 :::{include} rocm.inc.md
@@ -288,7 +289,7 @@ There is no extra information on creating a new Python environment for this devi
 
 ::::
 
-::::{tab-item} XPU
+::::{tab-item} Intel XPU
 :sync: xpu
 
 :::{include} xpu.inc.md
