@@ -905,7 +905,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                     image_grid_thw[image_index][1],
                     image_grid_thw[image_index][2],
                 )
-                second_per_grid_t = 0
+                second_per_grid_t = 0.0
                 image_index += 1
                 remain_images -= 1
                 ed = ed_image
