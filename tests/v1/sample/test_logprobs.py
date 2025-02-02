@@ -243,7 +243,6 @@ def _test_case_get_logprobs_and_prompt_logprobs(
             # Compare prompt logprobs to HF
             # The first prompt logprob is always None, so we compare it from
             # 1:.
-            print(vllm_result.prompt_logprobs)
             vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
             for i, vllm_prompt_logprob_dict in enumerate(vllm_prompt_logprobs):
                 for token_id, logprob in vllm_prompt_logprob_dict.items():

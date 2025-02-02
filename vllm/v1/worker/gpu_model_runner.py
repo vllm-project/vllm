@@ -779,7 +779,7 @@ class GPUModelRunner:
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
-        # Sample the next token and get sample logprobs if needed.
+        # Sample the next token and get logprobs if needed.
         sampling_metadata = self._prepare_sampling(scheduler_output)
         sampler_output = self.model.sample(
             logits=logits,
