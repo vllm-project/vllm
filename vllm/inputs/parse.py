@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Literal, Sequence, TypedDict, Union, cast, overload
 
 from typing_extensions import TypeIs
