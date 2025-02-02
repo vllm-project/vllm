@@ -30,7 +30,7 @@ def set_default_torch_dtype(dtype: torch.dtype):
 def is_transformers_impl_compatible(
         arch: str,
         module: Optional[transformers.PreTrainedModel] = None) -> bool:
-    mod = module if module is not None else getattr(transformers, arch, None)
+    mod = module or getattr(transformers, arch, None)
     if mod is not None and hasattr(mod, "supports_backend"):
         return mod.is_backend_compatible()
     elif mod is not None:
