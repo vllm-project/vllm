@@ -786,15 +786,6 @@ class GPUModelRunner:
             sampling_metadata=sampling_metadata,
         )
 
-        # Compute logprobs for each active prompt that needs prompt lps.
-        # Since prompt lps are rare, prioritizes simple over optimal.
-        prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor,
-                                              torch.Tensor]] = {}
-        for req_id in self.input_batch.num_prompt_logprobs:
-            # GPU<>CPU sync happens here.
-            prompt_logprobs_dict[req_id] = self.get_prompt_logprobs(
-                req_id, hidden_states, scheduler_output)
-
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
@@ -835,6 +826,16 @@ class GPUModelRunner:
             ranks = sampler_output.sampled_token_ranks.tolist()
         else:
             logprob_token_ids, logprobs, ranks = None, None, None
+
+        # Compute prompt logprobs if needed.
+        prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor,
+                                              torch.Tensor]] = {}
+        # Since prompt logprobs are a rare feature, prioritize simple,
+        # maintainable loop over optimal performance.
+        for req_id in self.input_batch.num_prompt_logprobs:
+            # GPU<>CPU sync happens here.
+            prompt_logprobs_dict[req_id] = self.get_prompt_logprobs(
+                req_id, hidden_states, scheduler_output)
 
         # Update with the actual token ids
         for i, req_state, seq_len in request_seq_lens:
