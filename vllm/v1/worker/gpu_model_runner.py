@@ -287,7 +287,7 @@ class GPUModelRunner:
                             mm_input["video_grid_thw"].tolist())
                     if mm_input.get("second_per_grid_ts") is not None:
                         second_per_grid_ts.extend(
-                            mm_input["second_per_grid_ts"].tolist())
+                            mm_input["second_per_grid_ts"])
 
                 hf_config = self.model_config.hf_config
 

@@ -833,8 +833,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         hf_config: PretrainedConfig,
         image_grid_thw: Union[List[List[int]], torch.Tensor],
         video_grid_thw: Union[List[List[int]], torch.Tensor],
-        second_per_grid_ts: Optional[Union[List[List[int]],
-                                           torch.Tensor]] = None,
+        second_per_grid_ts: Optional[List[int]] = None,
         context_len: int = 0,
         seq_len: Optional[int] = None,
     ) -> Tuple[List[List[int]], int]:
@@ -859,8 +858,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         hf_config: PretrainedConfig,
         image_grid_thw: Union[List[List[int]], torch.Tensor],
         video_grid_thw: Union[List[List[int]], torch.Tensor],
-        second_per_grid_ts: Optional[Union[List[List[int]],
-                                           torch.Tensor]] = None,
+        second_per_grid_ts: Optional[List[int]] = None,
         context_len: int = 0,
         seq_len: Optional[int] = None,
     ) -> Tuple[torch.Tensor, int]:
