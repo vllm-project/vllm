@@ -113,7 +113,7 @@ class Qwen2_5_VLMLP(nn.Module):
         hidden_size,
         intermediate_size,
         bias = True,
-        act_layer: Type[nn.Module] = QuickGELU,
+        act_layer: Type[nn.Module] = F.silu,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
@@ -143,7 +143,7 @@ class Qwen2_5_VLMLP(nn.Module):
             prefix=f"{prefix}.down_proj"
         )
 
-        self.act = act_layer()
+        self.act = act_layer
 
     def forward(self, x):
         gate_out, _ = self.gate_proj(x)
@@ -276,11 +276,10 @@ class Qwen2_5_VisionAttention(nn.Module):
         if rotary_pos_emb is not None:
             q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
             k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
-
         if self.attn_backend == _Backend.FLASH_ATTN:
-            # from vllm_flash_attn.flash_attn_interface import (
-            #   flash_attn_varlen_func)
-            from flash_attn import flash_attn_varlen_func
+            from vllm_flash_attn.flash_attn_interface import (
+              flash_attn_varlen_func)
+            # from flash_attn import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
@@ -338,7 +337,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         num_heads: int,
         hidden_size: int,
         intermediate_size: int,
-        act_layer: Type[nn.Module] = QuickGELU,
+        act_layer: Type[nn.Module] = F.silu,
         norm_layer: Optional[Callable[[int], nn.Module]] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -421,7 +420,7 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
                                  bias=True,
                                  quant_config=quant_config,
                                  prefix=f"{prefix}.mlp.0"),
-            nn.GELU(),
+            nn.SiLU(),
             RowParallelLinear(self.hidden_size,
                               d_model,
                               bias=True,
@@ -1096,7 +1095,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image pixel values. "
                                  f"Got type: {type(pixel_values)}")
-
             return Qwen2_5_VLImagePixelInputs(type="pixel_values",
                                               pixel_values=pixel_values,
                                               image_grid_thw=image_grid_thw)
