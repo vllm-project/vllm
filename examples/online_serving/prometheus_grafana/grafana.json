@@ -1,4 +1,41 @@
 {
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "prometheus",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__elements": {},
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "11.2.0"
+    },
+    {
+      "type": "panel",
+      "id": "heatmap",
+      "name": "Heatmap",
+      "version": ""
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    }
+  ],
   "annotations": {
     "list": [
       {
@@ -25,7 +62,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 1,
+  "id": null,
   "links": [],
   "liveNow": false,
   "panels": [
@@ -1260,7 +1297,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "edx8memhpd9tsa"
+            "uid": "${DS_PROMETHEUS}"
           },
           "disableTextWrap": false,
           "editorMode": "code",
@@ -1360,7 +1397,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "edx8memhpd9tsa"
+            "uid": "${DS_PROMETHEUS}"
           },
           "disableTextWrap": false,
           "editorMode": "code",
@@ -1392,7 +1429,6 @@
     },
     {
       "datasource": {
-        "default": false,
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
@@ -1473,7 +1509,7 @@
         {
           "datasource": {
             "type": "prometheus",
-            "uid": "edx8memhpd9tsa"
+            "uid": "${DS_PROMETHEUS}"
           },
           "disableTextWrap": false,
           "editorMode": "code",
@@ -1497,11 +1533,7 @@
   "templating": {
     "list": [
       {
-        "current": {
-          "selected": false,
-          "text": "prometheus",
-          "value": "edx8memhpd9tsa"
-        },
+        "current": {},
         "hide": 0,
         "includeAll": false,
         "label": "datasource",
@@ -1516,14 +1548,10 @@
         "type": "datasource"
       },
       {
-        "current": {
-          "selected": false,
-          "text": "/share/datasets/public_models/Meta-Llama-3-8B-Instruct",
-          "value": "/share/datasets/public_models/Meta-Llama-3-8B-Instruct"
-        },
+        "current": {},
         "datasource": {
           "type": "prometheus",
-          "uid": "edx8memhpd9tsa"
+          "uid": "${DS_PROMETHEUS}"
         },
         "definition": "label_values(model_name)",
         "hide": 0,
