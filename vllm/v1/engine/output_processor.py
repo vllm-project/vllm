@@ -117,9 +117,10 @@ class OutputProcessor:
             # outputs associated with non-partial completions.
             # Currently this is handled by having `is_prefilling`
             # check for new decoded tokens, indicating that
-            # the completion is not partial. A better solution
-            # would be to aggregate prompt logprobs in the
-            # engine core.
+            # the completion is not partial.
+            #
+            # Follow up will aggregate partial prompt logprobs
+            # in the EngineCore.
             req_state.is_prefilling = not new_token_ids
 
             # 2) Detokenize the token ids into text and check for stop
