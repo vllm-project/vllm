@@ -895,7 +895,7 @@ class GPUModelRunner:
         # Compute prompt logprobs.
         logprobs = self.model.sampler.compute_logprobs(logits)
         token_ids, logprobs, ranks = self.model.sampler.gather_logprobs(
-            logits, num_prompt_logprobs, tgt_token_ids)
+            logprobs, num_prompt_logprobs, tgt_token_ids)
 
         # GPU<>CPU sync happens here.
         return (token_ids.cpu(), logprobs.cpu(), ranks.cpu())

@@ -261,9 +261,8 @@ def _test_case_get_logprobs_and_prompt_logprobs(
                          ["half"])  # needed for comparing logprobs with HF
 # Include a very small max_num_batched_tokens to ensure we test chunking
 @pytest.mark.parametrize("max_num_batched_tokens", [16, 256])
-# @pytest.mark.parametrize("batch_logprobs_composition",
-#                          ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
-@pytest.mark.parametrize("batch_logprobs_composition", ["PROMPT"])
+@pytest.mark.parametrize("batch_logprobs_composition",
+                         ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
 @pytest.mark.parametrize("temperature", [0.0, 2.0])
 def test_get_logprobs_and_prompt_logprobs(
     hf_runner,

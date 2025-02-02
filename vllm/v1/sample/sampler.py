@@ -135,6 +135,7 @@ class Sampler(nn.Module):
         topk_logprobs, topk_indices = torch.topk(logprobs,
                                                  num_logprobs,
                                                  dim=-1)
+
         # Use int32 to reduce the tensor size.
         topk_indices = topk_indices.to(torch.int32)
 
