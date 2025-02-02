@@ -31,6 +31,7 @@ class Processor:
     ):
 
         self.model_config = model_config
+        self.cache_config = cache_config
         self.lora_config = lora_config
         self.tokenizer = tokenizer
 
@@ -69,14 +70,17 @@ class Processor:
                 f"Requested prompt logprobs of {params.prompt_logprobs}, "
                 f"which is greater than max allowed: {max_logprobs}")
 
+        # TODO(andy): enable this in follow up by recomputing.
+        if (params.prompt_logprobs is not None
+                and self.cache_config.enable_prefix_caching):
+            raise ValueError("Prefix caching with prompt logprobs not yet "
+                             "supported on VLLM V1.")
+
     def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
 
-    # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
-    # This ideally should releases the GIL, so we should not block the
-    # asyncio loop while this is running.
     def process_inputs(
         self,
         request_id: str,
