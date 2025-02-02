@@ -613,11 +613,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                          loaded_weight: torch.Tensor,
                          loaded_shard_id: Optional[int] = None):
         if loaded_shard_id is None:
-            if isinstance(param, PerTensorScaleParameter):
+            if isinstance(param.vllm_parameter, PerTensorScaleParameter):
                 param.load_merged_column_weight(loaded_weight=loaded_weight,
                                                 shard_id=0)
                 return
-            elif type(param) in (RowvLLMParameter, BasevLLMParameter):
+            elif type(param.vllm_parameter) in (RowvLLMParameter,
+                                                BasevLLMParameter):
                 param.load_merged_column_weight(loaded_weight=loaded_weight)
                 return
             # TODO: @dsikka - move to parameter.py
@@ -628,7 +629,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         tp_size = get_tensor_model_parallel_world_size()
 
-        if isinstance(param, BlockQuantScaleParameter):
+        if isinstance(param.vllm_parameter, BlockQuantScaleParameter):
             from vllm.model_executor.layers.quantization.fp8 import (
                 Fp8LinearMethod, Fp8MoEMethod)
             assert self.quant_method is not None
@@ -780,10 +781,11 @@ class QKVParallelLinear(ColumnParallelLinear):
                          loaded_weight: torch.Tensor,
                          loaded_shard_id: Optional[str] = None):
         if loaded_shard_id is None:  # special case for certain models
-            if isinstance(param, PerTensorScaleParameter):
+            if isinstance(param.vllm_parameter, PerTensorScaleParameter):
                 param.load_qkv_weight(loaded_weight=loaded_weight, shard_id=0)
                 return
-            elif type(param) in (RowvLLMParameter, BasevLLMParameter):
+            elif type(param.vllm_parameter) in (RowvLLMParameter,
+                                                BasevLLMParameter):
                 param.load_qkv_weight(loaded_weight=loaded_weight)
                 return
             # TODO: @dsikka - move to parameter.py
