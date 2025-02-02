@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """KV-Cache Utilities."""
 from collections.abc import Sequence
 from dataclasses import dataclass

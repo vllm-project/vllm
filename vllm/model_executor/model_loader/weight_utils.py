@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Utilities for downloading and initializing model weights."""
 import fnmatch
 import glob

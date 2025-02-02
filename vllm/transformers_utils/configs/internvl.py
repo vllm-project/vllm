@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://huggingface.co/OpenGVLab/InternVL2-1B/blob/main/configuration_internvl_chat.py
 # --------------------------------------------------------
