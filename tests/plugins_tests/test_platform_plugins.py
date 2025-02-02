@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 
 from tests.kernels.utils import override_backend_env_variable

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import tempfile
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional

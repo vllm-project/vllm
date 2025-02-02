@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from pathlib import Path

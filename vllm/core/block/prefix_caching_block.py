@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Token blocks."""
 import sys
 from bisect import bisect_left
