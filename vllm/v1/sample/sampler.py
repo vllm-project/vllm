@@ -46,13 +46,12 @@ class Sampler(nn.Module):
         sampled = sampled.to(torch.int32)
 
         # Gather the logprobs of the topk and sampled token.
+        logprob_token_ids, logprobs, ranks = None, None, None
         if sampling_metadata.max_num_logprobs is not None:
-            logprobs, logprob_token_ids, ranks = self.gather_logprobs(
+            logprob_token_ids, logprobs, ranks = self.gather_logprobs(
                 raw_logprobs,
                 sampling_metadata.max_num_logprobs,
                 token_ids=sampled)
-        else:
-            logprobs, logprob_token_ids, ranks = None, None, None
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(
@@ -143,12 +142,12 @@ class Sampler(nn.Module):
         token_ids = token_ids.unsqueeze(-1)
         token_logprobs = logprobs.gather(-1, token_ids.to(torch.int64))
 
+        # Compute the ranks of the actual token.
+        token_ranks = (logprobs >= token_logprobs).sum(-1)
+
         # Concatenate together with the topk.
         indices = torch.cat((token_ids, topk_indices), dim=1)
         logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
-
-        # Compute the ranks of the actual token.
-        token_ranks = (topk_logprobs >= token_logprobs).sum(-1)
 
         return indices, logprobs, token_ranks
 

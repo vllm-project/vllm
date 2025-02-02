@@ -829,15 +829,12 @@ class GPUModelRunner:
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
         sampled_token_ids = sampler_output.sampled_token_ids.tolist()
-        do_sample_logprobs = sampler_output.logprob_token_ids is not None
-        logprob_token_ids: List[List[int]] = (
-            sampler_output.logprob_token_ids.tolist()
-            if do_sample_logprobs else None)
-        logprobs: List[List[float]] = (sampler_output.logprobs.tolist()
-                                       if do_sample_logprobs else None)
-        sampled_token_ranks: List[int] = (
-            sampler_output.sampled_token_ranks.tolist()
-            if do_sample_logprobs else None)
+        if sampler_output.logprob_token_ids is not None:
+            logprob_token_ids = sampler_output.logprob_token_ids.tolist()
+            logprobs = sampler_output.logprobs.tolist()
+            ranks = sampler_output.sampled_token_ranks.tolist()
+        else:
+            logprob_token_ids, logprobs, ranks = None, None, None
 
         # Update with the actual token ids
         for i, req_state, seq_len in request_seq_lens:
@@ -849,9 +846,9 @@ class GPUModelRunner:
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
-            logprob_token_ids_cpu=logprob_token_ids,
-            logprobs_cpu=logprobs,
-            sampled_token_ranks_cpu=sampled_token_ranks,
+            logprob_token_ids=logprob_token_ids,
+            logprobs=logprobs,
+            sampled_token_ranks=ranks,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
@@ -885,26 +882,23 @@ class GPUModelRunner:
         is_partial_req = req_id == scheduler_output.partial_req_id
         num_tokens = scheduler_output.num_scheduled_tokens[req_id]
         num_logits = num_tokens if is_partial_req else num_tokens - 1
-        start_idx = self.query_start_loc_np[req_idx].item()
-        end_idx = start_idx + num_logits
-        prompt_hidden_states = hidden_states[start_idx:end_idx]
+        offset = self.query_start_loc_np[req_idx].item()
+        prompt_hidden_states = hidden_states[offset:offset + num_logits]
         logits = self.model.compute_logits(prompt_hidden_states, None)
 
-        # Get the "sampled" tokens for each index. For prompt at index i,
+        # Get the "target" tokens for each index. For prompt at index i,
         # the token at prompt index i+1 is the "sampled" token we want
         # to gather the logprob for.
-        start_idx_in_tokens = request.num_computed_tokens + 1
-        end_idx_in_tokens = start_idx_in_tokens + num_logits
-        sampled_token_ids = prompt_token_ids[
-            start_idx_in_tokens:end_idx_in_tokens]
+        offset = request.num_computed_tokens + 1
+        tgt_token_ids = prompt_token_ids[offset:offset + num_logits]
 
         # Compute prompt logprobs.
         logprobs = self.model.sampler.compute_logprobs(logits)
-        indices, logprobs, ranks = self.model.sampler.gather_logprobs(
-            logits, num_prompt_logprobs, sampled_token_ids)
+        token_ids, logprobs, ranks = self.model.sampler.gather_logprobs(
+            logits, num_prompt_logprobs, tgt_token_ids)
 
         # GPU<>CPU sync happens here.
-        return (indices.cpu(), logprobs.cpu(), ranks.cpu())
+        return (token_ids.cpu(), logprobs.cpu(), ranks.cpu())
 
     @torch.inference_mode()
     def _dummy_run(

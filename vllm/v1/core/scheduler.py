@@ -413,9 +413,9 @@ class Scheduler:
     ) -> EngineCoreOutputs:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
-        logprobs_token_ids_cpu = model_runner_output.logprob_token_ids_cpu
-        logprobs_cpu = model_runner_output.logprobs_cpu
-        sampled_token_ranks_cpu = model_runner_output.sampled_token_ranks_cpu
+        logprobs_token_ids = model_runner_output.logprob_token_ids
+        logprobs = model_runner_output.logprobs
+        sampled_token_ranks = model_runner_output.sampled_token_ranks
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
@@ -446,7 +446,7 @@ class Scheduler:
                             request, input_id)
 
             # Get prompt logprobs for this request.
-            prompt_logprobs, prompt_logprobs_token_ids, prompt_token_ranks = (
+            prompt_logprobs_token_ids, prompt_logprobs, prompt_token_ranks = (
                 prompt_logprobs_dict.get(req_id, (None, None, None)))
 
             if request.num_computed_tokens == request.num_tokens:
@@ -466,25 +466,25 @@ class Scheduler:
 
                 # Extract sample logprobs if needed.
                 if request.sampling_params.logprobs is not None:
-                    assert logprobs_token_ids_cpu is not None
-                    assert logprobs_cpu is not None
-                    assert sampled_token_ranks_cpu is not None
+                    assert logprobs_token_ids is not None
+                    assert logprobs is not None
+                    assert sampled_token_ranks is not None
                     # NOTE: once we support N tokens per step (spec decode),
                     # the outer lists can be of length > 1.
-                    logprobs_token_ids = [logprobs_token_ids_cpu[req_index]]
-                    logprobs = [logprobs_cpu[req_index]]
-                    ranks = [sampled_token_ranks_cpu[req_index]]
+                    new_logprobs_token_ids = [logprobs_token_ids[req_index]]
+                    new_logprobs = [logprobs[req_index]]
+                    new_ranks = [sampled_token_ranks[req_index]]
                 else:
-                    logprobs_token_ids, logprobs, ranks = [], [], []
+                    new_logprobs_token_ids, new_logprobs, new_ranks = [], [], []
 
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
                     request_id=req_id,
                     new_token_ids=request.output_token_ids[-num_new_tokens:],
                     finish_reason=request.get_finished_reason(),
-                    new_logprobs_token_ids=logprobs_token_ids,
-                    new_logprobs=logprobs,
-                    new_sampled_token_ranks=ranks,
+                    new_logprobs_token_ids=new_logprobs_token_ids,
+                    new_logprobs=new_logprobs,
+                    new_sampled_token_ranks=new_ranks,
                     new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
                     new_prompt_logprobs=prompt_logprobs,
                     new_prompt_token_ranks=prompt_token_ranks,

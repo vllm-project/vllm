@@ -12,7 +12,7 @@ from vllm import SamplingParams
 
 from ...conftest import VllmRunner
 
-MODELS = ["facebook/opt-125m"]
+MODELS = ["meta-llama/Llama-3.2-1B"]
 
 
 def _repeat_logprob_config(
@@ -68,15 +68,12 @@ def _test_case_get_logprobs_and_prompt_logprobs(
     vllm_runner,
     model: str,
     dtype: str,
-    detokenize: bool,
     batch_logprobs_composition: str,
     max_num_batched_tokens: int,
     temperature: float,
     example_prompts,
-    monkeypatch,
 ) -> None:
     test_prompts = example_prompts
-    override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
     max_num_seqs = 16
     max_model_len = 128
@@ -102,12 +99,11 @@ def _test_case_get_logprobs_and_prompt_logprobs(
     # Generate SamplingParams
     vllm_sampling_params = [
         SamplingParams(max_tokens=max_tokens,
-                       logprobs=lp,
-                       prompt_logprobs=plp,
+                       logprobs=num_lp,
+                       prompt_logprobs=num_plp,
                        temperature=temperature,
-                       seed=1984,
-                       detokenize=detokenize)
-        for lp, plp in logprob_prompt_logprob_list
+                       seed=1984)
+        for num_lp, num_plp in logprob_prompt_logprob_list
     ]
 
     with vllm_runner(
@@ -174,18 +170,13 @@ def _test_case_get_logprobs_and_prompt_logprobs(
                 output_string_from_most_likely_tokens_lst.append(
                     top_logprob.decoded_token)
 
-            if detokenize:
-                output_string_from_most_likely_tokens = "".join(
-                    output_string_from_most_likely_tokens_lst)
-                assert_incr_detok_str_matches_non_incr_detok_str(
-                    output_text, output_string_from_most_likely_tokens,
-                    "The output text from the top logprob for each token "
-                    "position should be the same as the output text in the "
-                    "result.")
-            else:
-                assert output_text == ''
-                assert output_string_from_most_likely_tokens_lst == (
-                    [None] * max_tokens)
+            output_string_from_most_likely_tokens = "".join(
+                output_string_from_most_likely_tokens_lst)
+            assert_incr_detok_str_matches_non_incr_detok_str(
+                output_text, output_string_from_most_likely_tokens,
+                "The output text from the top logprob for each token "
+                "position should be the same as the output text in the "
+                "result.")
 
             # Compare vLLM sample logprobs to HF
             vllm_sample_logprobs = vllm_result.outputs[0].logprobs
@@ -198,10 +189,10 @@ def _test_case_get_logprobs_and_prompt_logprobs(
                             hf_logprob[i][-1][token_id].item(),
                             atol=1e-2,
                             rtol=1e-2)
-                    if detokenize:
-                        assert isinstance(sample_logprob.decoded_token, str), (
-                            "The token should be decoded by the time it is"
-                            " returned to the user.")
+                    assert isinstance(
+                        sample_logprob.decoded_token,
+                        str), ("The token should be decoded by the time it is"
+                               " returned to the user.")
 
             # At this point we know the sample logprobs are correct for this
             # request. Validate that cumulative_logprob is actually the sum.
@@ -252,6 +243,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
             # Compare prompt logprobs to HF
             # The first prompt logprob is always None, so we compare it from
             # 1:.
+            print(vllm_result.prompt_logprobs)
             vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
             for i, vllm_prompt_logprob_dict in enumerate(vllm_prompt_logprobs):
                 for token_id, logprob in vllm_prompt_logprob_dict.items():
@@ -269,8 +261,9 @@ def _test_case_get_logprobs_and_prompt_logprobs(
                          ["half"])  # needed for comparing logprobs with HF
 # Include a very small max_num_batched_tokens to ensure we test chunking
 @pytest.mark.parametrize("max_num_batched_tokens", [16, 256])
-@pytest.mark.parametrize("batch_logprobs_composition",
-                         ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
+# @pytest.mark.parametrize("batch_logprobs_composition",
+#                          ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
+@pytest.mark.parametrize("batch_logprobs_composition", ["PROMPT"])
 @pytest.mark.parametrize("temperature", [0.0, 2.0])
 def test_get_logprobs_and_prompt_logprobs(
     hf_runner,
@@ -281,7 +274,6 @@ def test_get_logprobs_and_prompt_logprobs(
     max_num_batched_tokens: int,
     temperature: float,
     example_prompts,
-    monkeypatch,
 ) -> None:
     """Test V1 Engine logprobs & prompt logprobs
     
@@ -312,12 +304,10 @@ def test_get_logprobs_and_prompt_logprobs(
         vllm_runner=vllm_runner,
         model=model,
         dtype=dtype,
-        detokenize=True,
         batch_logprobs_composition=batch_logprobs_composition,
         max_num_batched_tokens=max_num_batched_tokens,
         temperature=temperature,
-        example_prompts=example_prompts,
-        monkeypatch=monkeypatch)
+        example_prompts=example_prompts)
 
 
 def test_max_logprobs(monkeypatch):

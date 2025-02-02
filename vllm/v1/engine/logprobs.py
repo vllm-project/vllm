@@ -92,8 +92,8 @@ class LogprobsProcessor:
     def _update_prompt_logprobs(
         self,
         token_ids: Optional[torch.Tensor],
-        prompt_logprobs: Optional[torch.Tensor],
-        prompt_token_ranks: Optional[torch.Tensor],
+        logprobs: Optional[torch.Tensor],
+        ranks: Optional[torch.Tensor],
     ) -> None:
         """Update with prompt logprobs from EngineCore.
 
@@ -107,8 +107,8 @@ class LogprobsProcessor:
         Args:
           token_ids: (num prompt tokens-1) x (topk + 1) token ids tensor
                      `None` if prompt logprobs are disabled in this req
-          prompt_logprobs: (num prompt tokens-1) x (topk + 1) logprobs tensor
-          prompt_token_ranks: (num prompt_tokens-1) prompt token rank tensor
+          logprobs: (num prompt tokens-1) x (topk + 1) logprobs tensor
+          ranks: (num prompt_tokens-1) prompt token rank tensor
 
         Return:
           Prompt logprobs, if required for this request
@@ -119,16 +119,16 @@ class LogprobsProcessor:
             return
 
         # Prompt logprobs are enabled.
-        assert prompt_logprobs is not None
+        assert logprobs is not None
         assert token_ids is not None
-        assert prompt_token_ranks is not None
+        assert ranks is not None
         assert self.prompt_logprobs is not None
 
         # TODO(rob): can we avoid this case with a better
         # invariant from EngineCore?
         # Prompt logprobs are enabled but prefill is finished
         # so no more logprobs are streamed from EngineCore.
-        if prompt_logprobs.numel() == 0:
+        if logprobs.numel() == 0:
             return
 
         # Detokenize non-incrementally.
@@ -138,12 +138,12 @@ class LogprobsProcessor:
             token_ids.flatten().tolist())
 
         # Recover shapes.
-        num_prompt_tokens, num_logprobs = prompt_logprobs.shape
+        num_prompt_tokens, num_logprobs = logprobs.shape
 
         # Pythonize the torch tensors.
         # TODO(rob): experiment with doing this in EngineCore?
-        prompt_token_ranks = prompt_token_ranks.tolist()
-        prompt_logprobs = prompt_logprobs.tolist()
+        prompt_token_ranks = ranks.tolist()
+        prompt_logprobs = logprobs.tolist()
         token_ids = token_ids.tolist()
 
         # Make Logprob for each position.
