@@ -191,6 +191,9 @@ class OutputProcessor:
             token_ids=new_token_ids if delta else detokenizer.output_token_ids,
             logprobs=logprobs,
             # Side effect: logprobs processor forgets prompt logprobs
+            # FIXME(rob): this does not handle output_kind.CUMULATIVE.
+            # In follow up, we will switch to invariant where EngineCore
+            # does not stream partial prefills.
             prompt_logprobs=logprobs_processor.pop_prompt_logprobs(),
             cumulative_logprob=logprobs_processor.cumulative_logprob,
             finished=finished,
