@@ -3,16 +3,17 @@ import lm_eval
 from ...utils import RemoteOpenAIServer
 
 # arc-easy uses prompt_logprobs=1, logprobs=1
-TASK = "arc-easy"
+TASK = "arc_easy"
 FILTER = "acc_norm,none"
 RTOL = 0.03
-# Measured on V0.
 EXPECTED_VALUE = 0.62
 
 # FIXME(rob): enable prefix caching once supported.
 MODEL = "meta-llama/Llama-3.2-1B"
 MODEL_ARGS = f"pretrained={MODEL},enforce_eager=True,enable_prefix_caching=False"  # noqa: E501
-SERVER_ARGS = ["--enforce_eager", "--no_enable_prefix_caching"]
+SERVER_ARGS = [
+    "--enforce_eager", "--no_enable_prefix_caching", "--disable-log-requests"
+]
 NUM_CONCURRENT = 100
 
 
