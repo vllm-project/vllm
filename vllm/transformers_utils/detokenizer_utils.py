@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 from .tokenizer import AnyTokenizer
 
 
-def replace_none_with_empty(tokens: List[Optional[str]]) -> None:
+def _replace_none_with_empty(tokens: List[Optional[str]]) -> None:
     """Replace occurrences of None with empty string.
     In-place operation
     """
@@ -72,7 +72,7 @@ def convert_prompt_ids_to_tokens(
     prefix_offset = max(
         read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
     # This is required to guard against out-of-vocab prompt token ids
-    replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
+    _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
     return new_tokens, prefix_offset, read_offset
 
 
@@ -91,7 +91,7 @@ def convert_ids_list_to_tokens(
     
     """
     token_str_lst = tokenizer.convert_ids_to_tokens(token_ids)
-    replace_none_with_empty(token_str_lst)  # type: ignore
+    _replace_none_with_empty(token_str_lst)  # type: ignore
     return token_str_lst
 
 
