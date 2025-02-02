@@ -54,10 +54,9 @@ class QuarkConfig(QuantizationConfig):
 
         # Check if the layer is skipped for quantization.
         exclude_layers = cast(List[str], self.quant_config.get("exclude"))
-        if should_ignore_layer(
-                prefix,
-                ignore=exclude_layers,
-                packed_modules_mapping=self.packed_modules_mapping):
+        if should_ignore_layer(prefix,
+                               ignore=exclude_layers,
+                               mapping=self.packed_modules_mapping):
             return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)

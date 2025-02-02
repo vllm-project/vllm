@@ -81,10 +81,9 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Check if the layer is skipped for quantization.
         # TODO (@robertgshaw2): support module names
-        if should_ignore_layer(
-                prefix,
-                ignore=self.ignore,
-                packed_modules_mapping=self.packed_modules_mapping):
+        if should_ignore_layer(prefix,
+                               ignore=self.ignore,
+                               mapping=self.packed_modules_mapping):
             return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
@@ -395,11 +394,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self.sparsity_scheme_map:
             is_ignored = False
             with suppress(ValueError):
-                is_ignored = find_matched_target(
-                    layer_name=layer_name,
-                    module=layer,
-                    targets=self.sparsity_ignore_list,
-                    mapping=self.packed_modules_mapping)
+                find_matched_target(layer_name=layer_name,
+                                    module=layer,
+                                    targets=self.sparsity_ignore_list,
+                                    mapping=self.packed_modules_mapping)
+                is_ignored = True
 
             # if the layer is in the sparsity ignore list,
             # we should not apply any sparsity scheme

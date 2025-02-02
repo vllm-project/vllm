@@ -89,7 +89,7 @@ def configure_quant_config(quant_config: QuantizationConfig,
     Note that model attributes are passed by reference to quant_config,
     enabling them to be updated by model_class.__new__ (ex. chatglm, qwen)
     """
-    packed_mapping = hasattr(model_class, "packed_modules_mapping", None)
+    packed_mapping = getattr(model_class, "packed_modules_mapping", None)
     if packed_mapping is not None:
         # pass packed_modules_mapping by reference to quant_config
         quant_config.packed_modules_mapping = packed_mapping
