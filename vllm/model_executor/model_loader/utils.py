@@ -7,10 +7,15 @@ import torch
 from torch import nn
 
 from vllm.config import ModelConfig
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.adapters import (as_classification_model,
                                                  as_embedding_model,
                                                  as_reward_model)
+
+logger = init_logger(__name__)
 
 
 @contextlib.contextmanager
@@ -73,3 +78,23 @@ class ParamMapping:
                     packed_name,
                     index,
                 )
+
+
+def configure_quant_config(quant_config: QuantizationConfig,
+                           model_class: Type[nn.Module]):
+    """
+    Pass packed_modules_mapping by reference to quant_config so that
+    quant_config can properly match fused modules
+
+    Note that model attributes are passed by reference to quant_config,
+    enabling them to be updated by model_class.__new__ (ex. chatglm, qwen)
+    """
+    packed_mapping = hasattr(model_class, "packed_modules_mapping", None)
+    if packed_mapping is not None:
+        # pass packed_modules_mapping by reference to quant_config
+        quant_config.packed_modules_mapping = packed_mapping
+    else:
+        logger.warning(
+            "The model class %s has not defined `packed_modules_mapping`, "
+            "this may lead to incorrect mapping of quantized or ignored "
+            "modules", model_class.__name__)
