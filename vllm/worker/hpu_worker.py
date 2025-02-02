@@ -566,16 +566,27 @@ class HPUCacheEngine(CacheEngine):
         """Allocates KV cache on the specified device."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
+
+        use_mla = False
+        if len(kv_cache_shape) == 2 and kv_cache_shape[1]:
+            use_mla = True
+            kv_cache_shape = kv_cache_shape[0]
+
         kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
         dtype = self.dtype
         if device != 'hpu' and not is_fake_hpu() \
           and self.dtype == torch.float8_e4m3fn:
             dtype = torch.uint8
         for _ in range(self.num_attention_layers):
-            key_cache = torch.zeros(kv_cache_shape, dtype=dtype, device=device)
-            value_cache = torch.zeros(kv_cache_shape,
-                                      dtype=dtype,
-                                      device=device)
-            kv_layer = (key_cache, value_cache)
+            if use_mla:
+                kv_layer = torch.zeros(kv_cache_shape,
+                                           dtype=dtype,
+                                           device=device)
+            else:
+                key_cache = torch.zeros(kv_cache_shape, dtype=dtype, device=device)
+                value_cache = torch.zeros(kv_cache_shape,
+                                          dtype=dtype,
+                                          device=device)
+                kv_layer = (key_cache, value_cache)
             kv_cache.append(kv_layer)
         return kv_cache

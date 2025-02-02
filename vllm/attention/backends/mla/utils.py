@@ -13,7 +13,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm.vllm_flash_attn import flash_attn_varlen_func
+# from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 
 @dataclass
