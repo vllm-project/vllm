@@ -162,7 +162,9 @@ class MPClient(EngineCoreClient):
 
         # Serialization setup.
         self.encoder = PickleEncoder()
-        self.decoder = MsgpackDecoder(EngineCoreOutputs)
+        # self.decoder = MsgpackDecoder(EngineCoreOutputs)
+        import msgspec
+        self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
         # ZMQ setup.
         self.ctx = (

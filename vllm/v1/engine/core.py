@@ -291,7 +291,9 @@ class EngineCoreProc(EngineCore):
         """Output socket IO thread."""
 
         # Msgpack serialization encoding.
-        encoder = MsgpackEncoder()
+        # encoder = MsgpackEncoder()
+        import msgspec
+        encoder = msgspec.msgpack.Encoder()
         # Reuse send buffer.
         buffer = bytearray()
 

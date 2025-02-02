@@ -50,7 +50,6 @@ class AsyncLLM(EngineClient):
         assert start_engine_loop
 
         self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config
 
         self.log_requests = log_requests
         self.log_stats = log_stats
