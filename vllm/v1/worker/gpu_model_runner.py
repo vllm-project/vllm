@@ -1015,7 +1015,17 @@ class GPUModelRunner:
 
     def _initialize_kv_cache_buffer(
             self, kv_cache_config: KVCacheConfig) -> Dict[str, torch.Tensor]:
-        # TODO: add docstring
+        """
+        Initializes the KV cache buffer with the correct size. The buffer needs
+        to be reshaped to the desired shape before being used by the models.
+
+        Args:
+            kv_cache_config: The KV cache config 
+
+        Returns:
+            Dict[str, torch.Tensor]: A map between layer names to their 
+            corresponding memory buffer for KV cache.
+        """
         kv_cache_raw_tensors: Dict[str, torch.Tensor] = {}
         for layer_name, tensor_config in kv_cache_config.tensors.items():
             if isinstance(tensor_config, KVCacheNewTensor):
@@ -1024,7 +1034,7 @@ class GPUModelRunner:
                     tensor_config.size, dtype=torch.int8, device=self.device)
         for layer_name, tensor_config in kv_cache_config.tensors.items():
             if isinstance(tensor_config, KVCacheReuseTensor):
-                # Reuse the tensor from `kv_cache_raw_tensors`
+                # Reuse a tensor from `kv_cache_raw_tensors`
                 kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[
                     tensor_config.reused_layer_name]
         assert len(kv_cache_raw_tensors) == len(
@@ -1036,7 +1046,18 @@ class GPUModelRunner:
         kv_cache_config: KVCacheConfig,
         kv_cache_raw_tensors: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
-        # TODO: add docstring
+        """
+        Reshape the KV cache tensors to the desired shape.
+
+        Args:
+            kv_cache_config: The KV cache config 
+            kv_cache_raw_tensors: The KV cache buffer of each layer, with 
+            correct size but uninitialized shape.
+
+        Returns:
+            Dict[str, torch.Tensor]: A map between layer names to their 
+            corresponding memory buffer for KV cache.
+        """
         kv_caches: Dict[str, torch.Tensor] = {}
         for kv_cache_group in kv_cache_config.groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec

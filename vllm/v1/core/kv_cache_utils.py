@@ -580,7 +580,7 @@ def get_kv_cache_config(vllm_config: VllmConfig,
 @dataclass
 class PrefixLengthRange:
     """
-    [start, end]
+    A closed interval [start, end] representing a range of valid prefix lengths.
     """
     start: int
     end: int
