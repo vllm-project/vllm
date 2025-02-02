@@ -770,6 +770,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `Qwen2_5_VLForConditionalGeneration`
+  * Qwen2.5-VL
+  * T + I<sup>+</sup> + V<sup>+</sup>
+  * `Qwen/Qwen2.5-VL-3B-Instruct`, `Qwen/Qwen2.5-VL-72B-Instruct`, etc.
+  *
+  * ✅︎
+  * ✅︎
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
