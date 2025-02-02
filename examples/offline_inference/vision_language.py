@@ -545,10 +545,6 @@ def run_qwen2_5_vl(question: str, modality: str):
             "fps": 1,
         },
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
-        limit_mm_per_prompt={
-            "image": 1,
-            "video": 1,
-        },
     )
 
     if modality == "image":
