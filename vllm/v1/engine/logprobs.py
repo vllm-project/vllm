@@ -50,68 +50,53 @@ class LogprobsProcessor:
     def _update_sample_logprobs(
         self,
         token_ids_lst: List[List[int]],
-        sample_logprobs_lst: List[List[float]],
-        sampled_token_ranks_lst: List[int],
+        logprobs_lst: List[List[float]],
+        ranks_lst: List[int],
     ) -> None:
-        """Incorporate sample logprobs from this step, if they exist.
+        """Update with sample logprobs from EngineCore.
 
-        Lists are only of length >1 if EngineCore made
+        Outer lists are only of len > 1 if EngineCore made
         >1 tokens in prior step (e.g. in spec decoding).
 
-        Token rank = (index in logprob-sorted vocab vector) + 1
-
         Args:
-          token_ids_lst: list of (topk + 1) token ids tensors at each pos;
-                          `None` if sample logprobs are disabled in this req
-          sample_logprobs_lst: list of (topk + 1) logprobs tensors at
-                          each pos; `None` if sample logprobs are
-                          disabled in this req
-          sampled_token_ranks_lst: list of individual sampled token ranks
-                                   for each sampled token
-        Return:
-          Sample logprobs, if required for this request
+          token_ids_lst: list of (topk + 1) token ids tensors at each pos
+          logprobs_lst: list of (topk + 1) logprobs tensors at each pos
+          ranks_lst: list of rank of each samples token
+
+        Lists are empty if logprobs are not enabled for this req.
         """
         if self.num_logprobs is None:
             # Sample logprobs disabled for this request.
             return
         assert self.logprobs is not None
 
-        for sampled_token_rank, logprobs, token_ids in zip(
-                sampled_token_ranks_lst, sample_logprobs_lst, token_ids_lst):
+        for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst,
+                                             token_ids_lst):
 
-            sampled_token_id = token_ids[0]
-            sampled_token_logprob = logprobs[0]
-            ranks: Iterable[int]
+            assert len(logprobs) > 0, (
+                "Always generate at least 1 logprobs if enabled.")
 
-            if self.num_logprobs:
-                ranks = range(1, self.num_logprobs + 1)
-                topk_token_ids = token_ids[1:]
-                if sampled_token_id in topk_token_ids:
-                    # Slice off the sampled token first element since
-                    # it's already in the subsequent top-k tokens.
-                    token_ids = topk_token_ids
-                    logprobs = logprobs[1:]
-                else:
-                    # First token in token_ids/logprobs is the sampled token.
-                    ranks = itertools.chain((sampled_token_rank, ), ranks)
-            else:
-                # Only produce logprob for sampled token.
-                ranks = (sampled_token_rank, )
-
-            # Detokenize non-incrementally.
+            # Detokenize (non-incrementally).
             decoded_tokens = convert_ids_list_to_tokens(
                 self.tokenizer, token_ids)
 
-            # Note that the logprobs and token_ids lists may be longer than
-            # required since the engine returns a maximum number for the batch,
-            # but the number of dict entries will be controlled by the length
-            # of the ranks generator.
-            pos_logprobs_dict = self._make_pos_logprob_dict(
-                logprobs, token_ids, decoded_tokens, ranks)
-
-            self.logprobs.append(pos_logprobs_dict)
+            # NOTE(rob): this relies on the invariant that the
+            # sampler concatenates the sampled token logprob
+            # in front of the topk logprobs.
+            sampled_token_logprob = logprobs[0]
             assert self.cumulative_logprob is not None
             self.cumulative_logprob += sampled_token_logprob
+
+            # Ranks of the tokens.
+            topk_ranks = range(1, self.num_logprobs + 1)
+            ranks = itertools.chain((rank, ), topk_ranks)
+
+            # NOTE(rob): we do not need a special case for the
+            # sampled token being in the topk, since we insert
+            # the same key into the dictionary twice.
+            logprobs_dict = self._make_logprob_dict(logprobs, token_ids,
+                                                    decoded_tokens, ranks)
+            self.logprobs.append(logprobs_dict)
 
     def _update_prompt_logprobs(
         self,
@@ -206,10 +191,9 @@ class LogprobsProcessor:
                 logprobs = (prompt_logprobs[tok_idx, 0].item(), )
                 ranks = (prompt_token_rank, )
 
-            prompt_logprobs_dict = self._make_pos_logprob_dict(
+            prompt_logprobs_dict = self._make_logprob_dict(
                 logprobs,
                 token_ids_list,
-                # Deal with the flattening from above.
                 decoded_tokens[decoded_tokens_offset:],
                 ranks,
             )
@@ -231,23 +215,18 @@ class LogprobsProcessor:
           List of all prompt logprobs, otherwise.
         """
         plp = self.prompt_logprobs
-        # Pop all prompt logprobs
         if plp:
             self.prompt_logprobs = []
         return plp
 
     @staticmethod
-    def _make_pos_logprob_dict(
+    def _make_logprob_dict(
         logprobs: List[float],
         logprob_token_ids: List[int],
         decoded_tokens: List[str],
         ranks: Iterable[int],
     ) -> Dict[int, Logprob]:
-        """Make a Logprob dictionary for a position in the sequence.
-        
-        Returns a dictionary mapping top token ids to Logprob data
-        structures. Each Logprob data structure includes log probability,
-        decoded token, and rank.
+        """Make a Logprob dictionary for a position.
 
         Args:
           logprobs: list of log probabilities
@@ -270,16 +249,12 @@ class LogprobsProcessor:
         }
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
-        """
-        Update Logprobs from the engine output.
-        """
-
-        # 1) Make Sample Logprobs, if requested.
+        # Sample Logprobs.
         self._update_sample_logprobs(output.new_logprobs_token_ids,
                                      output.new_logprobs,
                                      output.new_sampled_token_ranks)
 
-        # 4) Make Prompt Logprobs.
+        # Prompt Logprobs.
         self._update_prompt_logprobs(output.new_prompt_logprobs_token_ids,
                                      output.new_prompt_logprobs,
                                      output.new_prompt_token_ranks,

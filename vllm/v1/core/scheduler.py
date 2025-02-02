@@ -445,7 +445,7 @@ class Scheduler:
                         self.encoder_cache_manager.free_encoder_input(
                             request, input_id)
 
-            # Extract prompt logprobs for this req if needed.
+            # Get prompt logprobs for this request.
             prompt_logprobs, prompt_logprobs_token_ids, prompt_token_ranks = (
                 prompt_logprobs_dict.get(req_id, (None, None, None)))
 
@@ -469,15 +469,13 @@ class Scheduler:
                     assert logprobs_token_ids_cpu is not None
                     assert logprobs_cpu is not None
                     assert sampled_token_ranks_cpu is not None
-                    # Here we assume there is 1 generated token per step.
-                    # Once we support generating N tokens per step the
-                    # outer list should be length-N
+                    # NOTE: once we support N tokens per step (spec decode),
+                    # the outer lists can be of length > 1.
                     logprobs_token_ids = [logprobs_token_ids_cpu[req_index]]
                     logprobs = [logprobs_cpu[req_index]]
-                    sampled_token_ranks = [sampled_token_ranks_cpu[req_index]]
+                    ranks = [sampled_token_ranks_cpu[req_index]]
                 else:
-                    (logprobs_token_ids, logprobs,
-                     sampled_token_ranks) = [], [], []
+                    logprobs_token_ids, logprobs, ranks = [], [], []
 
                 # Add EngineCoreOutput for this Request.
                 output = EngineCoreOutput(
@@ -486,7 +484,7 @@ class Scheduler:
                     finish_reason=request.get_finished_reason(),
                     new_logprobs_token_ids=logprobs_token_ids,
                     new_logprobs=logprobs,
-                    new_sampled_token_ranks=sampled_token_ranks,
+                    new_sampled_token_ranks=ranks,
                     new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
                     new_prompt_logprobs=prompt_logprobs,
                     new_prompt_token_ranks=prompt_token_ranks,
