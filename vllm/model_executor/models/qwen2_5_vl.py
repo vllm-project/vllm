@@ -972,12 +972,17 @@ class Qwen2_5_VLMultiModalProcessor(
             for i in range(len(video_grid_thw))
         ]
 
+        second_per_grid_ts = hf_inputs.get("second_per_grid_ts",
+                                           torch.empty(0))
+
         return dict(
             pixel_values=MultiModalFieldConfig.flat("image", image_slices),
             image_grid_thw=MultiModalFieldConfig.batched("image"),
             pixel_values_videos=MultiModalFieldConfig.flat(
                 "video", video_slices),
             video_grid_thw=MultiModalFieldConfig.batched("video"),
+            second_per_grid_ts=MultiModalFieldConfig.flat(
+                "video", video_slices),
         )
 
 
