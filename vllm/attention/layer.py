@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.attention import AttentionMetadata, AttentionType
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -40,8 +41,10 @@ class Attention(nn.Module):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         per_layer_sliding_window: Optional[int] = None,
+        use_mla: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        **extra_impl_args,
     ) -> None:
         super().__init__()
         if per_layer_sliding_window is not None:
@@ -57,10 +60,12 @@ class Attention(nn.Module):
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
             is_attention_free = cache_config.is_attention_free
+            calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
             block_size = 16
             is_attention_free = False
+            calculate_kv_scales = False
         if num_kv_heads is None:
             num_kv_heads = num_heads
 
@@ -70,8 +75,15 @@ class Attention(nn.Module):
         # expect the pre-quantized k/v_scale to be loaded along
         # with the model weights.
         self.kv_cache_dtype = kv_cache_dtype
-        self._k_scale = 1.0
-        self._v_scale = 1.0
+        self.calculate_kv_scales = calculate_kv_scales
+        self._k_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._v_scale = torch.tensor(1.0, dtype=torch.float32)
+
+        # We also keep the float32 versions of k/v_scale for attention
+        # backends that don't support tensors (Flashinfer)
+        self._k_scale_float = 1.0
+        self._v_scale_float = 1.0
+
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
         if quant_method is not None:
@@ -91,13 +103,18 @@ class Attention(nn.Module):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size, dtype, kv_cache_dtype,
-                                        block_size, is_attention_free,
-                                        blocksparse_params is not None)
+        attn_backend = get_attn_backend(head_size,
+                                        dtype,
+                                        kv_cache_dtype,
+                                        block_size,
+                                        is_attention_free,
+                                        blocksparse_params is not None,
+                                        use_mla=use_mla)
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
-                             blocksparse_params, logits_soft_cap, attn_type)
+                             blocksparse_params, logits_soft_cap, attn_type,
+                             **extra_impl_args)
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
@@ -127,6 +144,9 @@ class Attention(nn.Module):
             ).parallel_config.pipeline_parallel_size)
         ]
 
+        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
+        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+
     def forward(
         self,
         query: torch.Tensor,
@@ -135,6 +155,9 @@ class Attention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        if self.calculate_kv_scales and \
+            attn_metadata.enable_kv_scales_calculation:
+            self.calc_kv_scales(key, value)
         if self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
@@ -161,6 +184,14 @@ class Attention(nn.Module):
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
 
+    def calc_kv_scales(self, key, value):
+        self._k_scale.copy_(torch.abs(key).max() / self.k_range)
+        self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+        self._k_scale_float = self._k_scale.item()
+        self._v_scale_float = self._v_scale.item()
+        # We only calculate the scales once
+        self.calculate_kv_scales = False
+
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
         s += f", num_heads={self.impl.num_heads}"  # type: ignore
@@ -168,6 +199,10 @@ class Attention(nn.Module):
         s += f", scale={self.impl.scale}"  # type: ignore
         s += f", backend={self.impl.__class__.__name__}"
         return s
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        if hasattr(self.impl, "process_weights_after_loading"):
+            self.impl.process_weights_after_loading(act_dtype)
 
 
 class MultiHeadAttention(nn.Module):
@@ -186,6 +221,9 @@ class MultiHeadAttention(nn.Module):
         self.scale = scale
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+
         dtype = torch.get_default_dtype()
         attn_backend = get_attn_backend(head_size,
                                         dtype,
@@ -197,7 +235,8 @@ class MultiHeadAttention(nn.Module):
             backend = _Backend.XFORMERS
 
         self.attn_backend = backend if backend in {
-            _Backend.TORCH_SDPA, _Backend.XFORMERS
+            _Backend.TORCH_SDPA,
+            _Backend.XFORMERS,
         } else _Backend.TORCH_SDPA
 
     def forward(
@@ -207,13 +246,18 @@ class MultiHeadAttention(nn.Module):
         value: torch.Tensor,
     ) -> torch.Tensor:
         """Input shape: batch_size x seq_len x hidden_size"""
-        # TODO(Isotr0py): Use existing backend implementations and support FA2
+        # TODO(Isotr0py): Use existing backend implementations and support FA3
         bsz, q_len, _ = query.size()
         kv_len = key.size(1)
 
         query = query.view(bsz, q_len, self.num_heads, self.head_size)
         key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
         value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+
+        if (num_repeat := self.num_queries_per_kv) > 1:
+            # Handle MQA and GQA
+            key = torch.repeat_interleave(key, num_repeat, dim=2)
+            value = torch.repeat_interleave(value, num_repeat, dim=2)
 
         if self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
@@ -243,8 +287,7 @@ def unified_attention(
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                             self._k_scale, self._v_scale)
+    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
 
 def unified_attention_fake(
@@ -276,13 +319,12 @@ def unified_attention_with_output(
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    self.impl.forward(query,
+    self.impl.forward(self,
+                      query,
                       key,
                       value,
                       kv_cache,
                       attn_metadata,
-                      self._k_scale,
-                      self._v_scale,
                       output=output)
 
 
