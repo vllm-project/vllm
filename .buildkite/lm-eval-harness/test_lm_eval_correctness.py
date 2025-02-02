@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 LM eval harness on model to compare vs HF baseline computed offline.
 Configs are found in configs/$MODEL.yaml

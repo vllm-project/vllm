@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 WEIGHT_SHAPES = {
     "ideal": [[4 * 256 * 32, 256 * 32]],
     "mistralai/Mistral-7B-v0.1/TP1": [
