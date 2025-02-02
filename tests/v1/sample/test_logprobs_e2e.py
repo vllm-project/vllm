@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import lm_eval
 
 from ...utils import RemoteOpenAIServer

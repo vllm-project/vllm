@@ -1,4 +1,5 @@
-"""Sampler testing utils"""
+# SPDX-License-Identifier: Apache-2.0
+
 import re
 from typing import List, Tuple
 

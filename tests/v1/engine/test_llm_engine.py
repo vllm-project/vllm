@@ -1,4 +1,5 @@
-"""LLMEngine tests"""
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
 from vllm import LLM, SamplingParams
