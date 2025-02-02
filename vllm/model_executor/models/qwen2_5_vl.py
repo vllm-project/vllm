@@ -43,6 +43,7 @@ from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import QuickGELU
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -346,8 +347,8 @@ class Qwen2_5_VisionBlock(nn.Module):
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         
-        self.norm1 = Qwen2RMSNorm(hidden_size, eps=1e-6)
-        self.norm2 = Qwen2RMSNorm(hidden_size, eps=1e-6)
+        self.norm1 = RMSNorm(hidden_size, eps=1e-6)
+        self.norm2 = RMSNorm(hidden_size, eps=1e-6)
 
         self.attn = Qwen2_5_VisionAttention(embed_dim=dim,
                                          num_heads=num_heads,
@@ -413,7 +414,7 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
         self.hidden_size = context_dim * (spatial_merge_size**2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
-        self.ln_q = Qwen2RMSNorm(context_dim, eps=1e-6)
+        self.ln_q = RMSNorm(context_dim, eps=1e-6)
         self.mlp = nn.ModuleList([
             ColumnParallelLinear(self.hidden_size,
                                  self.hidden_size,
@@ -653,7 +654,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         x = self.merger(x)
         reverse_indices = torch.argsort(window_index)
         x = x[reverse_indices, :]
-
+        print("EMBEDDING", x)
         return x
 
     def load_weights(self, weights: Iterable[Tuple[str,
@@ -685,26 +686,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
-
-# Copied from transformers.models.qwen2.modeling_qwen2.Qwen2RMSNorm
-class Qwen2RMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        """
-        Qwen2RMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
-
-    def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 class Qwen2_5_VLProcessingInfo(BaseProcessingInfo):
 
