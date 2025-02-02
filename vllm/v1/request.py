@@ -64,6 +64,7 @@ class Request:
         # Cache the computed kv block hashes of the request to avoid
         # recomputing.
         self._kv_block_hashes: List[BlockHashType] = []
+        self.kv_block_hashes = ConstantList(self._kv_block_hashes)
 
         # Read-only views
         # Prevent directly appending to the these lists since
@@ -121,13 +122,9 @@ class Request:
         num_tokens = self.mm_positions[input_id]["length"]
         return num_tokens
 
-    @property
-    def kv_block_hashes(self) -> ConstantList["BlockHashType"]:
-        # Prevent directly appending to the kv_block_hashes.
-        return ConstantList(self._kv_block_hashes)
-
     def set_kv_block_hashes(self, value: List["BlockHashType"]) -> None:
         self._kv_block_hashes = value
+        self.kv_block_hashes = ConstantList(self._kv_block_hashes)
 
     def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:
         self._kv_block_hashes.append(block_hash)
