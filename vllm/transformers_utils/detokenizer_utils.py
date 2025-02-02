@@ -4,10 +4,6 @@ from .tokenizer import AnyTokenizer
 
 
 def _replace_none_with_empty(tokens: List[Optional[str]]) -> None:
-    """Replace occurrences of None with empty string.
-    In-place operation
-    """
-
     for i, token in enumerate(tokens):
         if token is None:
             tokens[i] = ""
