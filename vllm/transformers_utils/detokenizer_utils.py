@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 from .tokenizer import AnyTokenizer
 
 
-def _replace_none_with_empty(tokens: List[Optional[str]]) -> None:
+def _replace_none_with_empty(tokens: List[Optional[str]]):
     for i, token in enumerate(tokens):
         if token is None:
             tokens[i] = ""
