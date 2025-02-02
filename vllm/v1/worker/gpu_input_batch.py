@@ -165,7 +165,7 @@ class InputBatch:
         self.generators: Dict[int, torch.Generator] = {}
 
         self.num_logprobs: Dict[str, int] = {}
-        # NOTE(rob): num_prompt_logprobs ONLY includes reqs
+        # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: Dict[str, int] = {}
 
