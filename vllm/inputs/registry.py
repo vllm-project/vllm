@@ -29,6 +29,15 @@ C = TypeVar("C", bound=PretrainedConfig, default=PretrainedConfig)
 P = TypeVar("P", bound=ProcessorMixin, default=ProcessorMixin)
 
 
+class HashableDict(dict):
+    """
+    A dictionary that can be hashed by lru_cache.
+    """
+
+    def __hash__(self) -> int:
+        return hash(frozenset(self.items()))
+
+
 @dataclass(frozen=True)
 class InputContext:
     """
@@ -101,6 +110,13 @@ class InputContext:
 
         if isinstance(typ, type):
             merged_kwargs["processor_cls"] = typ
+
+        # NOTE: Pythonic dict is not hashable and will raise unhashable type
+        # error when calling `cached_get_processor`, therefore we need to
+        # wrap it to a hashable dict.
+        for key, value in merged_kwargs.items():
+            if isinstance(value, dict):
+                merged_kwargs[key] = HashableDict(value)
 
         hf_processor = cached_get_processor(
             self.model_config.model,
