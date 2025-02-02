@@ -262,8 +262,10 @@ def hash_block_tokens(
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
     """
-    return BlockHashType(hash((parent_block_hash, *curr_block_token_ids)),
-                         tuple(curr_block_token_ids), extra_keys)
+    curr_block_token_ids_tuple = tuple(curr_block_token_ids)
+    return BlockHashType(
+        hash((parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
+        curr_block_token_ids_tuple, extra_keys)
 
 
 def hash_request_tokens(block_size: int,

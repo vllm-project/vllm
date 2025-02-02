@@ -1343,6 +1343,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
             self.execute_model(model_input, kv_caches, intermediate_tensors)
             torch.cuda.synchronize()
+            if self.lora_config:
+                # Remove dummy loras.
+                assert self.lora_manager is not None
+                self.remove_all_loras()
             return
 
     def remove_all_loras(self):
