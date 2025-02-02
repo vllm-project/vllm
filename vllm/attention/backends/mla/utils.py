@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_dequantize, scaled_quantize)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
 except ImportError:
