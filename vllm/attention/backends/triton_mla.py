@@ -255,7 +255,7 @@ class TritonMLAMetadata(MLACommonMetadata):
 
     num_prefill_tokens: int
 
-    num_kv_splits: int = 4  # TODO(lucas) add heuristic
+    num_kv_splits: int = 8  # TODO(lucas) add heuristic
     attn_logits: Optional[torch.Tensor] = None
     req_idx: Optional[torch.Tensor] = None
 
@@ -319,7 +319,8 @@ class TritonMLAMetadata(MLACommonMetadata):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
-            head_dim=self.head_dim)
+            head_dim=self.head_dim,
+            num_kv_splits=self.num_kv_splits)
         return self._cached_prefill_metadata
 
     @property
@@ -366,7 +367,8 @@ class TritonMLAMetadata(MLACommonMetadata):
             block_tables=block_tables,
             use_cuda_graph=self.use_cuda_graph,
             input_positions=input_positions,
-            head_dim=self.head_dim)
+            head_dim=self.head_dim,
+            num_kv_splits=self.num_kv_splits)
         return self._cached_decode_metadata
 
     def advance_step(self,
@@ -621,6 +623,17 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             for modality, placeholder_map in
             self.multimodal_placeholder_maps.items()
         }
+        
+        # Rough heuristic for num_kv_splits
+        # not empirically validated
+        if max_decode_seq_len < 512:
+            num_kv_splits = 2
+        elif max_decode_seq_len < 512:
+            num_kv_splits = 4
+        elif max_decode_seq_len < 4096:
+            num_kv_splits = 8
+        else:
+            num_kv_splits = 16
 
         return TritonMLAMetadata(
             num_prefills=self.num_prefills,
@@ -641,7 +654,7 @@ class TritonMLAMetadataBuilder(AttentionMetadataBuilder[TritonMLAMetadata]):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
-            num_kv_splits=4,  # TODO(lucas) add heuristic
+            num_kv_splits=8,  # TODO(lucas) add heuristic
             head_dim=self.runner.model_config.get_head_size(),
         )
 
