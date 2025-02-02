@@ -653,7 +653,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         x = self.merger(x)
         reverse_indices = torch.argsort(window_index)
         x = x[reverse_indices, :]
-        print("EMBEDDING", x)
         return x
 
     def load_weights(self, weights: Iterable[Tuple[str,
