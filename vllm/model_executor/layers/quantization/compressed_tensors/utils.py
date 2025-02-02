@@ -78,53 +78,6 @@ def check_equal_or_regex_match(layer_name: str,
     return False
 
 
-def _handle_fused_layers(func):
-    """
-    Decorator to handle fused layers by mapping vllm fused layer names
-    to their corresponding unfused layer names for quantization/pruning schemes.
-    """
-    # fused_layer_name -> unfused_layer_name
-    fused_layer_map = {
-        "qkv_proj": "q_proj",
-        "gate_up_proj": "up_proj",
-    }
-
-    def fused_layer_handler(layer_name: Optional[str], module: Module,
-                            targets: Iterable[str]) -> Optional[str]:
-        """
-        Wrapper function specifically designed to support the
-        find_matched_target function.
-
-        It handles cases where the provided layer name corresponds to a
-        fused layer in vllm, mapping it to its equivalent unfused layer name
-        based on the predefined fused_layer_map. If the original layer name
-        raises a ValueError in the wrapped function, this handler
-        will attempt to resolve the issue by substituting with unfused
-        layer name.
-
-        :param layer_name: Name of the layer, which may be fused.
-        :param module: An instance of torch.nn.Module.
-        :param targets: A list of target names or patterns to match.
-        :return: The result of the wrapped find_matched_target function with
-            the resolved layer name.
-        :raises ValueError: If the layer name cannot be resolved to a 
-            valid target.
-        """
-        try:
-            return func(layer_name, module, targets)
-        except ValueError:
-            if layer_name is None:
-                layer_name = ""
-            parent_name, fused_proj_name = layer_name.rsplit(".", 1)
-            unfused_proj_name = fused_layer_map.get(fused_proj_name,
-                                                    fused_proj_name)
-            new_layer_name = f"{parent_name}.{unfused_proj_name}"
-            return func(new_layer_name, module, targets)
-
-    return fused_layer_handler
-
-
-@_handle_fused_layers
 def find_matched_target(
     layer_name: Optional[str],
     module: Module,
