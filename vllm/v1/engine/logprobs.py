@@ -218,12 +218,10 @@ class LogprobsProcessor:
         }
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
-        # Sample Logprobs.
         self._update_sample_logprobs(output.new_logprobs_token_ids,
                                      output.new_logprobs,
                                      output.new_sampled_token_ranks)
 
-        # Prompt Logprobs.
         self._update_prompt_logprobs(output.new_prompt_logprobs_token_ids,
                                      output.new_prompt_logprobs,
                                      output.new_prompt_token_ranks)
