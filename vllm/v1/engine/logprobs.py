@@ -19,9 +19,6 @@ class LogprobsProcessor:
     # Tokenizer for this request
     tokenizer: AnyTokenizer
 
-    # Prompt tokens
-    prompt_token_ids: List[int]
-
     # Logprobs for this request
     logprobs: Optional[SampleLogprobs]
     prompt_logprobs: Optional[PromptLogprobs]
@@ -39,10 +36,10 @@ class LogprobsProcessor:
         num_prompt_logprobs = request.sampling_params.prompt_logprobs
         return cls(
             tokenizer=tokenizer,
-            prompt_token_ids=request.prompt_token_ids,
             cumulative_logprob=(None if num_logprobs is None else 0.),
             logprobs=(None if num_logprobs is None else []),
-            prompt_logprobs=(None if num_prompt_logprobs is None else []),
+            # NOTE: logprob of first prompt token is None.
+            prompt_logprobs=(None if num_prompt_logprobs is None else [None]),
             num_prompt_logprobs=num_prompt_logprobs,
             num_logprobs=num_logprobs,
         )
@@ -69,31 +66,24 @@ class LogprobsProcessor:
             # Sample logprobs disabled for this request.
             return
         assert self.logprobs is not None
+        assert self.cumulative_logprob is not None
 
         for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst,
                                              token_ids_lst):
-
-            assert len(logprobs) > 0, (
-                "Always generate at least 1 logprobs if enabled.")
 
             # Detokenize (non-incrementally).
             decoded_tokens = convert_ids_list_to_tokens(
                 self.tokenizer, token_ids)
 
-            # NOTE(rob): this relies on the invariant that the
-            # sampler concatenates the sampled token logprob
-            # in front of the topk logprobs.
+            # Sampler puts the sampled logprob in first.
             sampled_token_logprob = logprobs[0]
-            assert self.cumulative_logprob is not None
             self.cumulative_logprob += sampled_token_logprob
 
-            # Ranks of the tokens.
+            # We do not need a special case for the sampled token
+            # being in the topk, since we insert the same data into
+            # a dictionary twice.
             topk_ranks = range(1, self.num_logprobs + 1)
             ranks = itertools.chain((rank, ), topk_ranks)
-
-            # NOTE(rob): we do not need a special case for the
-            # sampled token being in the topk, since we insert
-            # the same key into the dictionary twice.
             logprobs_dict = self._make_logprob_dict(logprobs, token_ids,
                                                     decoded_tokens, ranks)
             self.logprobs.append(logprobs_dict)
@@ -103,16 +93,11 @@ class LogprobsProcessor:
         token_ids: Optional[torch.Tensor],
         prompt_logprobs: Optional[torch.Tensor],
         prompt_token_ranks: Optional[torch.Tensor],
-        prompt_token_ids_lst: List[int],
     ) -> None:
-        """Incorporate prompt logprobs from this step, if they exist.
-
-        If prompt logprobs are enabled for this request and EngineCore
-        prefilled the prompt or a chunk of the prompt in this step,
-        both arguments should be non-empty lists.
+        """Update with prompt logprobs from EngineCore.
 
         If prompt logprobs are enabled but prefill is completed, both
-        arguments should be empty lists.
+        arguments should be empty tensors.
 
         If prompt logprobs are disabled, both arguments should be `None`.
 
@@ -123,8 +108,6 @@ class LogprobsProcessor:
                      `None` if prompt logprobs are disabled in this req
           prompt_logprobs: (num prompt tokens-1) x (topk + 1) logprobs tensor
           prompt_token_ranks: (num prompt_tokens-1) prompt token rank tensor
-          prompt_token_ids_lst: (num prompt tokens)-length list of prompt
-                                token ids
 
         Return:
           Prompt logprobs, if required for this request
@@ -134,71 +117,53 @@ class LogprobsProcessor:
             # Prompt logprobs disabled for this request
             return
 
+        # Prompt logprobs are enabled.
         assert prompt_logprobs is not None
         assert token_ids is not None
         assert prompt_token_ranks is not None
-
-        if prompt_logprobs.numel() == 0:
-            # Prompt logprobs are enabled for this request but prefill
-            # is finished and no more logprobs are being streamed from
-            # engine core.
-            return
-
-        # Prompt logprobs are enabled & engine core is streaming prompt
-        # logprobs, in one or more chunks.
         assert self.prompt_logprobs is not None
 
-        if not self.prompt_logprobs:
-            self.prompt_logprobs = [None]
-
-        if num_prompt_logprobs:
-            # We need to also include topk logprob tokens.
-            prompt_token_ids_lst = token_ids.flatten().tolist()
+        # TODO(rob): can we avoid this case with a better
+        # invariant from EngineCore?
+        # Prompt logprobs are enabled but prefill is finished
+        # so no more logprobs are streamed from EngineCore.
+        if prompt_logprobs.numel() == 0:
+            return
 
         # Detokenize non-incrementally.
-        # NOTE(rob): the output is flattened:
-        # [num_tok, num_lps] -> [num_tok * num_lps]
-        decoded_tokens = convert_ids_list_to_tokens(self.tokenizer,
-                                                    prompt_token_ids_lst)
+        # Output is flat: [num_tok, num_lps] -> [num_tok * num_lps]
+        decoded_tokens = convert_ids_list_to_tokens(
+            self.tokenizer,
+            token_ids.flatten().tolist())
 
-        # Make Logprob for each token.
-        num_chunk_tokens, decoded_tokens_stride = prompt_logprobs.shape
-        for tok_idx in range(num_chunk_tokens):
-            # Iterate over prefill chunk
+        # Recover shapes.
+        num_prompt_tokens, num_logprobs = prompt_logprobs.shape
 
-            decoded_tokens_offset = tok_idx * decoded_tokens_stride
-            prompt_token_id = token_ids[tok_idx, 0].item()
-            prompt_token_rank = prompt_token_ranks[tok_idx].item()
-            ranks: Iterable[int]
+        # Pythonize the torch tensors.
+        # TODO(rob): experiment with doing this in EngineCore?
+        prompt_token_ranks = prompt_token_ranks.tolist()
+        prompt_logprobs = prompt_logprobs.tolist()
+        token_ids = token_ids.tolist()
 
-            if num_prompt_logprobs:
-                ranks = range(1, num_prompt_logprobs + 1)
-                topk_token_ids_tensor = token_ids[tok_idx, 1:]
-                if prompt_token_id in topk_token_ids_tensor:
-                    # Slice off the prompt token first element since
-                    # it's already in the subsequent top-k tokens.
-                    token_ids_list = topk_token_ids_tensor.tolist()
-                    logprobs = prompt_logprobs[tok_idx, 1:].tolist()
-                    # Shift decoded token starting offset by one.
-                    decoded_tokens_offset += 1
-                else:
-                    token_ids_list = token_ids[tok_idx, :].tolist()
-                    logprobs = prompt_logprobs[tok_idx, :].tolist()
-                    # First token in token_ids/logprobs is the sampled token.
-                    ranks = itertools.chain((prompt_token_rank, ), ranks)
-            else:
-                token_ids_list = (prompt_token_id, )
-                logprobs = (prompt_logprobs[tok_idx, 0].item(), )
-                ranks = (prompt_token_rank, )
+        # Make Logprob for each position.
+        for pos in range(num_prompt_tokens):
+            # Index into the flattened list.
+            offset = pos * num_logprobs
+            offset_end = offset + num_logprobs
+            decoded_tokens_for_pos = decoded_tokens[offset:offset_end]
 
-            prompt_logprobs_dict = self._make_logprob_dict(
-                logprobs,
-                token_ids_list,
-                decoded_tokens[decoded_tokens_offset:],
-                ranks,
-            )
-
-            self.prompt_logprobs.append(prompt_logprobs_dict)
+            # We do not need a special case for the sampled token
+            # being in the topk, since we inserting the same data into
+            # a dictionary twice is the same as doing it once.
+            topk_ranks = range(1, num_prompt_logprobs + 1)
+            ranks = itertools.chain((prompt_token_ranks[pos], ), topk_ranks)
+            self.prompt_logprobs.append(
+                self._make_logprob_dict(
+                    prompt_logprobs[pos],
+                    token_ids[pos],
+                    decoded_tokens_for_pos,
+                    ranks,
+                ))
 
     def pop_prompt_logprobs(self) -> Optional[PromptLogprobs]:
         """Pop and return all request prompt logprobs
@@ -257,5 +222,4 @@ class LogprobsProcessor:
         # Prompt Logprobs.
         self._update_prompt_logprobs(output.new_prompt_logprobs_token_ids,
                                      output.new_prompt_logprobs,
-                                     output.new_prompt_token_ranks,
-                                     self.prompt_token_ids)
+                                     output.new_prompt_token_ranks)
