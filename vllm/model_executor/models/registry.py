@@ -162,6 +162,7 @@ _MULTIMODAL_MODELS = {
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": ("llava_onevision", "LlavaOnevisionForConditionalGeneration"),  # noqa: E501
     "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),  # noqa: E501
+    "MiniCPMO": ("minicpmo", "MiniCPMO"),
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
@@ -462,7 +463,8 @@ class _ModelRegistry:
 
 
 ModelRegistry = _ModelRegistry({
-    model_arch: _LazyRegisteredModel(
+    model_arch:
+    _LazyRegisteredModel(
         module_name=f"vllm.model_executor.models.{mod_relname}",
         class_name=cls_name,
     )

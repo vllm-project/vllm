@@ -183,7 +183,9 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
     ) -> list[int]:
         # HF processor adds boa_token_id
         tokenizer = self.info.get_tokenizer()
-        boa_token_id: int = tokenizer.vocab["<0x04>"]  # type: ignore
+        vocab = tokenizer.get_vocab()
+
+        boa_token_id = vocab["<0x04>"]
 
         return prompt_tokens + [boa_token_id]
 
@@ -202,6 +204,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
     ) -> list[PromptReplacement]:
         hf_config = self.info.get_hf_config()
         bos_token_id = hf_config.bos_token_id
+        assert isinstance(bos_token_id, int)
 
         tokenizer = self.info.get_tokenizer()
         eot_token_id = tokenizer.bos_token_id

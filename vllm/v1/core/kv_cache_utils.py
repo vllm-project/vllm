@@ -275,8 +275,10 @@ def hash_block_tokens(
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
     """
-    return BlockHashType(hash((parent_block_hash, *curr_block_token_ids)),
-                         tuple(curr_block_token_ids), extra_keys)
+    curr_block_token_ids_tuple = tuple(curr_block_token_ids)
+    return BlockHashType(
+        hash((parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
+        curr_block_token_ids_tuple, extra_keys)
 
 
 def hash_request_tokens(block_size: int,
@@ -434,6 +436,10 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         num_blocks = num_gpu_blocks_override
 
     logger.info("# GPU blocks: %d", num_blocks)
+    max_concurrency = (num_blocks * vllm_config.cache_config.block_size /
+                       vllm_config.model_config.max_model_len)
+    logger.info("Maximum concurrency for %s tokens per request: %.2fx",
+                vllm_config.model_config.max_model_len, max_concurrency)
 
     per_layer_size = page_size * num_blocks
     grouped_layers = [[layer_name for layer_name in kv_cache_spec]]
