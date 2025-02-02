@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import itertools
 from typing import List, Tuple
 
@@ -392,6 +394,7 @@ def test_zero_logprobs(vllm_runner, model, example_prompts, monkeypatch):
             model,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
+            enable_prefix_caching=False,
     ) as vllm_model:
         sampling_params_logprobs_zero = SamplingParams(max_tokens=max_tokens,
                                                        logprobs=0,
