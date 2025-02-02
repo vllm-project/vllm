@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # ruff: noqa
 """This file contains a dictionary of prompts and golden responses."""
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from functools import cached_property
 from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)

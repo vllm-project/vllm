@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from .base import MultiModalPlaceholderMap, MultiModalPlugin
 from .hasher import MultiModalHashDict, MultiModalHasher
 from .inputs import (BatchedTensorInputs, ModalityData, MultiModalDataBuiltins,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from functools import lru_cache
 from json import loads as json_loads
 from typing import Optional, Union

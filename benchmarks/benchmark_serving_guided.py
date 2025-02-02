@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 r"""Benchmark online serving throughput with guided decoding.
 
 On the server side, run one of the following commands:

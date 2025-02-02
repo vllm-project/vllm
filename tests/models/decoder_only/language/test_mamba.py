@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM when using greedy sampling for Mamba.
 
 Run `pytest tests/models/test_mamba.py`.

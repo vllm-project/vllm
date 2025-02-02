@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import random
 from typing import Tuple
 from unittest.mock import patch

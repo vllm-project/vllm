@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """An OpenVINO worker class."""
 from typing import Any, Dict, List, Optional, Tuple
 

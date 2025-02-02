@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from: https://github.com/huggingface/peft/blob/main/src/peft/tuners/lora/config.py
 
 import json

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from vllm.sequence import (ExecuteModelRequest, SequenceData,
                            SequenceGroupMetadata, get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # adapted from https://github.com/huggingface/transformers/blob/v4.43.2/src/transformers/models/idefics2/modeling_idefics2.py
 # Copyright 2024 The vLLM team.
 # Copyright 2024 the HuggingFace Inc. team. All rights reserved.

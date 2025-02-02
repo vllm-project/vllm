@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the classification outputs of HF and vLLM models.
 
 Run `pytest tests/models/test_cls_models.py`.

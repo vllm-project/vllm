@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 import pytest_asyncio
 from huggingface_hub import snapshot_download

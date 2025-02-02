@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
 from vllm.entrypoints.chat_utils import (apply_hf_chat_template,

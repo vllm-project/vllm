@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import abstractmethod
 from enum import Enum
 from typing import Callable, List, Optional, Tuple

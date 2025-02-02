@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Utils for determining which subset of model tests belong to a specific
 modality, getting all combinations (similar to pytest's parametrization),
 handling multimodal placeholder substitution, and so on.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Description: Test the lazy import module
 # The utility function cannot be placed in `vllm.utils`
 # this needs to be a standalone script

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from copy import deepcopy
 from typing import Callable, Union
 

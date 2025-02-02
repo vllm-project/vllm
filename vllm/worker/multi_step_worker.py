@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple

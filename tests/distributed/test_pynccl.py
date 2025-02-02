@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import multiprocessing
 import os
 from typing import Dict, List

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """vLLM: a high-throughput and memory-efficient inference engine for LLMs"""
 import os
 

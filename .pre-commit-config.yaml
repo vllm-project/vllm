@@ -97,10 +97,14 @@ repos:
     language: system
     verbose: true
     stages: [commit-msg]
+  - id: check-spdx-header
+    name: Check SPDX headers
+    entry: python tools/check_spdx_header.py
+    language: python
+    types: [python]
   - id: suggestion
     name: Suggestion
     entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
     language: system
     verbose: true
     pass_filenames: false
-

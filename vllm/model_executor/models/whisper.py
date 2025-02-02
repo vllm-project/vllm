@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
                     Union)

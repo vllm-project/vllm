@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test model set-up and weight loading for llmcompressor-quantized models.
 
 Run `pytest tests/quantization/test_compressed_tensors.py`.

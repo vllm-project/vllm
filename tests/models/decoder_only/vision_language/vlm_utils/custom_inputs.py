@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Custom input builders for edge-cases in different models."""
 from typing import Callable
 

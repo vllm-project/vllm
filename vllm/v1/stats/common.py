@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field

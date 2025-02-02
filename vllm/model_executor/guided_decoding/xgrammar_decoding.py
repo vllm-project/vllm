@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # noqa: UP007
 from __future__ import annotations
 

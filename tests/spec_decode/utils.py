@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from itertools import count
 from typing import Callable, Dict, List, Optional
 from typing import Sequence as GenericSequence

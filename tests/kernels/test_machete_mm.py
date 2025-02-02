@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the machete kernel.
 
 Run `pytest tests/kernels/test_machete_mm.py`.

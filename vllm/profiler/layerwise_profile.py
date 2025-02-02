@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field

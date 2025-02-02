@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import TYPE_CHECKING, Dict, List, Set, Tuple
 
 from vllm.logger import init_logger

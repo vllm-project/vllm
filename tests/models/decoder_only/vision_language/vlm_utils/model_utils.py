@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Common utility functions relating to different models that are useful
 for manipulating the input / output of HF & vLLM test runners, which are
 typically specific to a small subset of models.

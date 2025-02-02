@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, Generic, List, Optional, Tuple

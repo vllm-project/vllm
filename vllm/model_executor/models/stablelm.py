@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2023 Stability AI, EleutherAI, and The HuggingFace Inc. team.
 # All rights reserved.
 #

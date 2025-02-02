@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A Neuron worker class."""
 from typing import List, Optional, Tuple
 

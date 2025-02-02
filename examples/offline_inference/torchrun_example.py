@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 experimental support for tensor-parallel inference with torchrun,
 see https://github.com/vllm-project/vllm/issues/11400 for

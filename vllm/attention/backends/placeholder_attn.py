@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Type

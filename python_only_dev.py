@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 msg = """Old style python only build (without compilation) is deprecated, please check https://docs.vllm.ai/en/latest/getting_started/installation.html#python-only-build-without-compilation for the new way to do python only build (without compilation).
 
 TL;DR:

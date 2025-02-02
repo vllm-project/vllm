@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Expanded quantized model tests for CPU offloading
 # Base tests: tests/basic_correctness/test_cpu_offload.py
 

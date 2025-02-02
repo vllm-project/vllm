@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for InternVL's multimodal preprocessing kwargs."""
 from typing import Callable, Optional
 

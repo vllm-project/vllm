@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # flake8: noqa
 """Tests Model Optimizer fp8 models against ground truth generation
 Note: these tests will only pass on H100

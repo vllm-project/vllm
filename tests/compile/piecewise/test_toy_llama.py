@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Test the piecewise compilation with a simple model, comparing the output
 with and without the piecewise compilation.

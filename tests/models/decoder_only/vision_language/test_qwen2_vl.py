@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, List, Optional, Tuple, Type, TypedDict, Union
 
 import numpy.typing as npt

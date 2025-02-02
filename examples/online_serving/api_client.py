@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Example Python client for `vllm.entrypoints.api_server`
 NOTE: The API server is used only for demonstration and simple performance
 benchmarks. It is not intended for production use.

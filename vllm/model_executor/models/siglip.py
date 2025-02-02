@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Implementation of SiglipVisionModel intended to be only used
 within a vision language model."""
 

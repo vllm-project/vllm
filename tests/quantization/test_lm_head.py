@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests whether gptq models with quantized lm_head can be loaded.
 
 Run `pytest tests/quantization/test_quant_lm_head_true.py --forked`.

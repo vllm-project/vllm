@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # This file is a pure Python wrapper for the NCCL library.
 # The main purpose is to use NCCL combined with CUDA graph.
 # Before writing this script, we tried the following approach:

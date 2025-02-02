@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs,
                    ExplicitEncoderDecoderPrompt, ProcessorInputs, PromptType,
                    SingletonInputs, SingletonInputsAdapter, SingletonPrompt,

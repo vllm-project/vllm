@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attention backend utils"""
 from collections import defaultdict
 from contextlib import contextmanager

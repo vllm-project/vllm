@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import itertools
 from dataclasses import dataclass, field
 from typing import (Callable, Dict, Iterable, List, Literal, Mapping, Optional,

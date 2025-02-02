@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from .compressed_tensors_scheme import CompressedTensorsScheme
 from .compressed_tensors_w4a16_24 import (W4A16SPARSE24_SUPPORTED_BITS,
                                           CompressedTensorsW4A16Sparse24)

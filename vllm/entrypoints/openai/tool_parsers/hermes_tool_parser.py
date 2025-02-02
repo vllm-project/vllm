@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import re
 from typing import Dict, List, Sequence, Union

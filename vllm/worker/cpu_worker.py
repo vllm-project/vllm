@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A CPU worker class."""
 from typing import Dict, List, Optional, Set, Tuple, Type
 
