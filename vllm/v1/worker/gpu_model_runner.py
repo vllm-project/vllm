@@ -605,12 +605,13 @@ class GPUModelRunner:
         self,
         scheduler_output: "SchedulerOutput",
     ) -> SamplingMetadata:
-        skip_copy = not any((
-            scheduler_output.finished_req_ids,
-            scheduler_output.preempted_req_ids,
-            scheduler_output.scheduled_new_reqs,
-            scheduler_output.scheduled_resumed_reqs,
-        ))
+        skip_copy = True
+        if (scheduler_output.finished_req_ids
+                or scheduler_output.preempted_req_ids):
+            skip_copy = False
+        if (scheduler_output.scheduled_new_reqs
+                or scheduler_output.scheduled_resumed_reqs):
+            skip_copy = False
         # Create the sampling metadata.
         req_id_output_token_ids: Dict[str, List[int]] = \
             {req_id: req.output_token_ids \
