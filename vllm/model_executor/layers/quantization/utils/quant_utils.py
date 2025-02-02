@@ -173,15 +173,20 @@ def unpack_quantized_values_into_int32(w_q: torch.Tensor,
 def is_layer_skipped(
     prefix: str,
     ignored_layers: List[str],
-    packed_modules_mapping: Mapping[str, List[str]] = MappingProxyType({})
+    mapping: Mapping[str, List[str]] = MappingProxyType({})
 ) -> bool:
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
     proj_name = prefix.split(".")[-1]
-    if proj_name in packed_modules_mapping:
+
+    # Fused layers like gate_up_proj or qkv_proj will not be fused
+    # in the safetensors checkpoint. So, we convert the name
+    # from the fused version to unfused + check to make sure that
+    # each shard of the fused layer has the same scheme.
+    if proj_name in mapping:
         shard_prefixes = [
             prefix.replace(proj_name, shard_proj_name)
-            for shard_proj_name in packed_modules_mapping[proj_name]
+            for shard_proj_name in mapping[proj_name]
         ]
 
         is_skipped = None

@@ -19,7 +19,7 @@ def deep_compare(dict1: Any, dict2: Any) -> bool:
 def should_ignore_layer(
     layer_name: Optional[str],
     ignore: Iterable[str],
-    packed_modules_mapping: Mapping[str, List[str]] = MappingProxyType({})
+    mapping: Mapping[str, List[str]] = MappingProxyType({})
 ) -> bool:
     if layer_name is None:
         return False
@@ -32,8 +32,8 @@ def should_ignore_layer(
     # in the safetensors checkpoint. So, we convert the name
     # from the fused version to unfused + check to make sure that
     # each shard of the fused layer has the same scheme.
-    if proj_name in packed_modules_mapping:
-        shard_proj_names = packed_modules_mapping[proj_name]
+    if proj_name in mapping:
+        shard_proj_names = mapping[proj_name]
 
         # Convert fused_name --> [shard_names]
         shard_names = [
