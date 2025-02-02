@@ -167,15 +167,21 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
         max_image_size = image_processor.max_image_size['longest_edge']
         size = image_processor.size['longest_edge']
+        assert size % max_image_size == 0, (
+            "`longest_edge` in image_processor's `size` must be divisible by "
+            "`longest_edge` in `max_image_size`, this may cause by incorrect "
+            "mm_kwargs override.")
 
         resized_height, resized_width = self._get_resize_output_image_size(
             image_width=image_width,
             image_height=image_height,
             resolution_max_side=size,
         )
-
-        grid_h = math.ceil(resized_height / max_image_size)
-        grid_w = math.ceil(resized_width / max_image_size)
+        if resized_height > max_image_size or resized_width > max_image_size:
+            grid_h = math.ceil(resized_height / max_image_size)
+            grid_w = math.ceil(resized_width / max_image_size)
+        else:
+            grid_h = grid_w = 0
         return grid_w, grid_h
 
 
@@ -216,13 +222,14 @@ class Idefics3MultimodalProcessor(
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
-            patches_per_image = [
-                math.prod(self.info._get_image_feature_grid_size(
+            image_grids = [
+                self.info._get_image_feature_grid_size(
                     image_width=img.width,
                     image_height=img.height,
-                )) + 1
+                )
                 for img in mm_data["images"]
             ]
+            patches_per_image = list(map(lambda x: math.prod(x)+1, image_grids))
             processed_outputs = super()._call_hf_processor(prompt, mm_data, mm_kwargs)
             processed_outputs["pixel_values"] = processed_outputs["pixel_values"].flatten(0, 1).split(patches_per_image)
             processed_outputs["pixel_attention_mask"] = processed_outputs["pixel_attention_mask"].flatten(0, 1).split(patches_per_image)
@@ -454,7 +461,7 @@ class Idefics3Model(nn.Module):
         self,
         pixel_values: torch.Tensor,
         pixel_attention_mask: Optional[torch.BoolTensor] = None,
-    ) -> torch.Tensor:
+    ) -> NestedTensors:
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         batch_size, num_images, num_channels, height, width = pixel_values.shape
@@ -500,10 +507,10 @@ class Idefics3Model(nn.Module):
             patch_attention_mask=patch_attention_mask,
         )
 
-        return image_hidden_states
+        return image_hidden_states.split([num_images] * batch_size)
 
     def _process_image_pixels(
-            self, inputs: Idefics3ImagePixelInputs) -> torch.Tensor:
+            self, inputs: Idefics3ImagePixelInputs) -> NestedTensors:
         assert self.vision_model is not None
 
         pixel_values = inputs["data"]
@@ -518,7 +525,9 @@ class Idefics3Model(nn.Module):
 
         assert self.vision_model is not None
         image_features = self._process_image_pixels(image_input)
-        return self.connector(image_features)
+        num_patches = [x.size(0) for x in image_features]
+        image_features = torch.cat(image_features)
+        return self.connector(image_features).split(num_patches)
 
     def get_input_embeddings(
         self,
