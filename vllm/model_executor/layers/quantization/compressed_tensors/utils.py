@@ -165,7 +165,7 @@ def _match_fused_layer(layer_name: str, target_layers: Iterable[str],
                        mapping: Mapping[str, List[str]]) -> Optional[str]:
     """
     Match a fused layer name to its corresponding individual layer in 
-    target_layers.
+    target_layers. Returns first value in mapping which matches targets
 
     Examples:
         layer_name = "model.layers.0.self_attn.qkv_proj"
@@ -173,27 +173,14 @@ def _match_fused_layer(layer_name: str, target_layers: Iterable[str],
                         "model.layers.0.self_attn.k_proj",
                         "model.layers.0.self_attn.v_proj"]
     """
-    # Split into parent path and layer type
-    # e.g., "model.layers.0.self_attn" and "qkv_proj"
-    parent_path = ".".join(layer_name.split(".")[:-1])
-    layer_type = layer_name.split(".")[-1]
+    unfused_paths = sum(
+        (layer_name.replace(fused, unfused)
+         for (fused, unfused) in mapping if layer_name.endswith(fused)),
+        start=[])
 
-    if layer_type not in mapping:
-        return None
-
-    possible_layer_types = mapping[layer_type]
-
-    # Look for a target layer that:
-    # 1. Has the same parent path
-    # 2. Ends with one of the possible individual layer types
     for target in target_layers:
-        is_same_parent = parent_path in target
-        is_matching_type = any(type_suffix in target
-                               for type_suffix in possible_layer_types)
-
-        if is_same_parent and is_matching_type and all(
-                '.'.join([parent_path, type_suffix])
-                for type_suffix in possible_layer_types):
-            return target
+        for unfused_path in unfused_paths:
+            if _is_equal_or_regex_match(unfused_path, target):
+                return target
 
     return None
