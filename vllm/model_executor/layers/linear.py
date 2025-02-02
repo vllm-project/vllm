@@ -597,7 +597,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # Special case for Quantization.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
-            if isinstance(param, (PackedColumnParameter, PackedvLLMParameter
+            if isinstance(param.vllm_parameter, (PackedColumnParameter, PackedvLLMParameter
                                   )) and param.packed_dim == param.output_dim:
                 shard_size, shard_offset = \
                     param.adjust_shard_indexes_for_packing(
@@ -765,7 +765,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             # Special case for Quantization.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
-            if isinstance(param, (PackedColumnParameter, PackedvLLMParameter
+            if isinstance(param.vllm_parameter, (PackedColumnParameter, PackedvLLMParameter
                                   )) and param.packed_dim == param.output_dim:
                 shard_size, shard_offset = \
                     param.adjust_shard_indexes_for_packing(
