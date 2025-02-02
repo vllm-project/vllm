@@ -114,6 +114,9 @@ def _test_case_get_logprobs_and_prompt_logprobs(
             max_num_seqs=max_num_seqs,
             max_model_len=max_model_len,
             enforce_eager=True,
+            # TODO: enable this once we support it for
+            # prompt logprobs.
+            enable_prefix_caching=False,
     ) as vllm_model:
         vllm_results = vllm_model.model.generate(
             test_prompts, sampling_params=vllm_sampling_params)
@@ -349,6 +352,7 @@ def test_none_logprobs(vllm_runner, model, example_prompts, monkeypatch):
             model,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
+            enable_prefix_caching=False,
     ) as vllm_model:
         sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
                                                        logprobs=None,
