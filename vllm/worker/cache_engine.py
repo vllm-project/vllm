@@ -152,6 +152,15 @@ class CacheEngine:
         else:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
+        from vllm.platforms import current_platform
+        if current_platform.is_hpu():
+            key_cache_block = cache_config.block_size * num_heads * head_size
+            # For MLA there is no value cache, since the latent vector
+            # is joint keys and values.
+            value_cache_block = key_cache_block if not model_config.use_mla else 0
+            total = num_attention_layers * (key_cache_block + value_cache_block)
+            dtype_size = get_dtype_size(dtype)
+            return dtype_size * total
         key_cache_entry = num_heads * head_size
         if CacheEngine._align_cache(model_config):
             key_cache_entry = align_to_256bytes(key_cache_entry,

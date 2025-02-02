@@ -30,10 +30,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
-try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
-except ImportError:
-    from flash_attn import flash_attn_varlen_func
+from vllm.platforms import current_platform
+if current_platform.is_cuda_alike():
+    try:
+        from vllm.vllm_flash_attn import flash_attn_varlen_func
+    except ImportError:
+        from flash_attn import flash_attn_varlen_func
+# from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 
 @dataclass
