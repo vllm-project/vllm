@@ -9,10 +9,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
 from mistral_common.tokens.tokenizers.base import SpecialTokens
-# yapf: disable
-from mistral_common.tokens.tokenizers.mistral import (
-    MistralTokenizer as PublicMistralTokenizer)
-# yapf: enable
 from mistral_common.tokens.tokenizers.sentencepiece import (
     SentencePieceTokenizer)
 from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
@@ -23,6 +19,8 @@ from vllm.utils import is_list_of
 
 if TYPE_CHECKING:
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
+    from mistral_common.tokens.tokenizers.mistral import (
+        MistralTokenizer as PublicMistralTokenizer)
 
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
@@ -109,7 +107,7 @@ def find_tokenizer_file(files: List[str]):
 
 class MistralTokenizer:
 
-    def __init__(self, tokenizer: PublicMistralTokenizer) -> None:
+    def __init__(self, tokenizer: "PublicMistralTokenizer") -> None:
         self.mistral = tokenizer
         self.instruct = tokenizer.instruct_tokenizer
 
@@ -154,6 +152,8 @@ class MistralTokenizer:
             assert Path(
                 path_or_repo_id).is_file(), f"Invalid path: {path_or_repo_id}"
 
+        from mistral_common.tokens.tokenizers.mistral import (
+            MistralTokenizer as PublicMistralTokenizer)
         mistral_tokenizer = PublicMistralTokenizer.from_file(tokenizer_file)
         return cls(mistral_tokenizer)
 
