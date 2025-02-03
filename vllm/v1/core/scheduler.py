@@ -515,12 +515,10 @@ class Scheduler:
         sampling_params = request.sampling_params
         if not sampling_params.ignore_eos:
             assert request.eos_token_id is not None
-            # print(request.eos_token_id in request.output_token_ids)
             if request.eos_token_id in request.output_token_ids:
                 request.status = RequestStatus.FINISHED_STOPPED
                 num_total_token = request.num_prompt_tokens + \
                         request.output_token_ids.index(request.eos_token_id) + 1
-                print("**", num_total_token)
                 request.crop(num_total_token)
                 self._free_request(request)
                 return True

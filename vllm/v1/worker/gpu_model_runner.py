@@ -834,7 +834,7 @@ class GPUModelRunner:
             if seq_len >= req_state.num_tokens:
                 # We don't rewind the generator state for requests now
                 # because spec decode only supports greedy decoding for now.
-                token_len = sampled_token_ids[i].shape[-1]
+                token_len = sampled_token_ids.shape[-1]
                 self.input_batch.num_tokens[i] += token_len
                 req_state.output_token_ids.extend([0] * token_len)
                 request_seq_lens.append((i, req_state, seq_len))
@@ -855,8 +855,9 @@ class GPUModelRunner:
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
         # Update with the actual token ids
+        sampled_token_ids = sampled_token_ids.tolist()
         for i, req_state, seq_len in request_seq_lens:
-            token_ids = sampler_output.sampled_token_ids[i].tolist()
+            token_ids = sampled_token_ids[i]
             spec_token_ids = spec_tokens.get(req_id or "", [])
             for j, token_id in enumerate(token_ids):
                 self.input_batch.token_ids_cpu[i,

@@ -369,11 +369,6 @@ class InputBatch:
                 assert req_id_to_spec_token_ids is not None
                 assert len(req_id_to_spec_token_ids) > 0
                 spec_token_ids.append(req_id_to_spec_token_ids[req_id])
-            else:
-                assert req_id_to_spec_token_ids is not None
-                assert len(req_id_to_spec_token_ids) == 0, \
-                    ("spec_token_ids can only be set with "
-                     f"rejection sampling: {req_id_to_spec_token_ids}")
 
         return SamplingMetadata(
             temperature=self.temperature[:self.num_reqs],

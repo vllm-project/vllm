@@ -60,7 +60,7 @@ class Sampler(nn.Module):
         sampled = sampled.to(torch.int32)
 
         sampler_output = SamplerOutput(
-            sampled_token_ids=[[x] for x in sampled.tolist()],
+            sampled_token_ids=sampled.unsqueeze(-1),
             logprob_token_ids=topk_indices,
             logprobs=topk_logprobs,
             prompt_logprob_token_ids=None,
