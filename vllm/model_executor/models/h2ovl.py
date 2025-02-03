@@ -457,8 +457,8 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
             # making it incompatible with processing cache which is supposed
             # to be invariant of how many images are passed per prompt
             self.cache = None
-            logger.warning("%s does not support processing cache.",
-                           type(self).__name__)
+            logger.warning_once(
+                f"{type(self).__name__} does not support processing cache.")
 
     def _get_prompt_replacements(
         self,
