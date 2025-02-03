@@ -387,7 +387,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 layer_name=layer_name,
                 module=layer,
                 targets=self.target_scheme_map.keys(),
-                mapping=self.packed_modules_mapping)
+                fused_mapping=self.packed_modules_mapping,
+                fused_strategy="all")
 
             scheme_dict = self.target_scheme_map[matched_target]
             weight_quant = scheme_dict.get("weights")
@@ -399,7 +400,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 find_matched_target(layer_name=layer_name,
                                     module=layer,
                                     targets=self.sparsity_ignore_list,
-                                    mapping=self.packed_modules_mapping)
+                                    fused_mapping=self.packed_modules_mapping,
+                                    fused_strategy="all")
                 is_ignored = True
 
             # if the layer is in the sparsity ignore list,
@@ -410,7 +412,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                     layer_name=layer_name,
                     module=layer,
                     targets=self.sparsity_scheme_map.keys(),
-                    mapping=self.packed_modules_mapping)
+                    fused_mapping=self.packed_modules_mapping,
+                    fused_strategy="any")
                 sparsity_scheme = self.sparsity_scheme_map.get(matched_target)
 
         if self.supports_cutlass_24(weight_quant=weight_quant,

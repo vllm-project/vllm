@@ -80,12 +80,13 @@ def check_equal_or_regex_match(layer_name: str,
     return False
 
 
-def find_matched_target(
-    layer_name: Optional[str],
-    module: Module,
-    targets: Iterable[str],
-    mapping: Mapping[str, List[str]] = MappingProxyType({})
-) -> str:
+def find_matched_target(layer_name: Optional[str],
+                        module: Module,
+                        targets: Iterable[str],
+                        fused_mapping: Mapping[str,
+                                               List[str]] = MappingProxyType(
+                                                   {}),
+                        fused_strategy: str = "all") -> str:
     """
     Helper function to look up which "target" in the compressed-tensors
     config that a layer corresponds to.
@@ -106,6 +107,9 @@ def find_matched_target(
     :param layer_name: layer name
     :param module: torch.nn.Module
     :param targets: list of targets to match the layer against
+    :param fused_mapping: map from fused layer names to its components
+    :param fused_strategy: either "all" or "any". If using "all", fused
+        layers match if "all" of its components match
     """
 
     if layer_name is None:
@@ -114,7 +118,8 @@ def find_matched_target(
     matched_target = (_find_first_match(layer_name, targets)
                       or _find_first_match(module.__class__.__name__, targets,
                                            True)
-                      or _match_fused_layer(layer_name, targets, mapping))
+                      or _match_fused_layer(layer_name, targets, fused_mapping,
+                                            fused_strategy))
 
     if matched_target is None:
         raise ValueError(
@@ -166,11 +171,19 @@ def _is_equal_or_regex_match(value: str,
     return False
 
 
-def _match_fused_layer(layer_name: str, target_layers: Iterable[str],
-                       mapping: Mapping[str, List[str]]) -> Optional[str]:
+def _match_fused_layer(layer_name: str,
+                       target_layers: Iterable[str],
+                       mapping: Mapping[str, List[str]],
+                       fused_strategy: str = "all") -> Optional[str]:
     """
     Match a fused layer name to its corresponding individual layer in 
     target_layers. Returns first value in mapping which matches targets
+
+    :param layer_name: layer name
+    :param target_layers: list of targets to match the layer against
+    :param mapping: map from fused layer names to its components
+    :param fused_strategy: either "all" or "any". If using "all", fused
+        layers match if "all" of its components match
 
     Examples:
         layer_name = "model.layers.0.self_attn.qkv_proj"
@@ -178,18 +191,30 @@ def _match_fused_layer(layer_name: str, target_layers: Iterable[str],
                         "model.layers.0.self_attn.k_proj",
                         "model.layers.0.self_attn.v_proj"]
     """
-    unfused_paths = sum(
-        (layer_name.replace(fused, unfused)
-         for (fused, unfused) in mapping if layer_name.endswith(fused)),
-        start=[])
-
-    if len(unfused_paths) <= 0:
+    # find layer_name in mapping
+    fused = next((key for key in mapping if layer_name.endswith(key)), None)
+    if fused is None:
         return None
 
-    for unfused_path in unfused_paths:
-        if not any(
-                _is_equal_or_regex_match(unfused_path, target)
-                for target in target_layers):
-            return None
+    # expand path of unfused components
+    unfused_paths = [
+        layer_name.replace(fused, unfused) for unfused in mapping[fused]
+    ]
 
-    return unfused_paths[0]
+    # for each unfused component, find a match in targets
+    unfused_matches = []
+    for unfused in unfused_paths:
+        for target in target_layers:
+            if _is_equal_or_regex_match(unfused, target):
+                unfused_matches.append(target)
+                break
+        else:
+            unfused_matches.append(None)
+
+    # use strategy to aggregate results
+    if fused_strategy == "all" and all(unfused_matches):  # noqa: SIM114
+        return unfused_matches[0]
+    elif fused_strategy == "any" and any(unfused_matches):
+        return next(match for match in unfused_matches if match is not None)
+
+    return None
