@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.base import SpecialTokens
 # yapf: disable
 from mistral_common.tokens.tokenizers.mistral import (
@@ -23,6 +22,8 @@ from vllm.logger import init_logger
 from vllm.utils import is_list_of
 
 if TYPE_CHECKING:
+    from mistral_common.protocol.instruct.request import ChatCompletionRequest
+
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 logger = init_logger(__name__)
@@ -33,7 +34,7 @@ class Encoding:
     input_ids: Union[List[int], List[List[int]]]
 
 
-def maybe_serialize_tool_calls(request: ChatCompletionRequest):
+def maybe_serialize_tool_calls(request: "ChatCompletionRequest"):
     # SEE: https://github.com/vllm-project/vllm/pull/9951
     # Credits go to: @gcalmettes
     # NOTE: There is currently a bug in pydantic where attributes
@@ -284,6 +285,8 @@ class MistralTokenizer:
         if last_message["role"] == "assistant":
             last_message["prefix"] = True
 
+        from mistral_common.protocol.instruct.request import (
+            ChatCompletionRequest)
         request = ChatCompletionRequest(messages=messages,
                                         tools=tools)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
