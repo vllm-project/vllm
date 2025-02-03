@@ -24,6 +24,8 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
 
+from vllm.distributed.utils import get_mesh, get_col_parallel_partition_spec, get_row_parallel_partition_spec, shard_spmd
+
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
@@ -291,6 +293,8 @@ class ColumnParallelLinear(LinearBase):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config, prefix)
 
+        self.mesh = get_mesh()
+        
         self.gather_output = gather_output
 
         # Divide the weight matrix along the last dimension.
@@ -560,6 +564,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
+            
+            shard_spmd(param_data.data, self.mesh, get_col_parallel_partition_spec())
+            torch._sync(param)
+
             start_idx = tp_rank * shard_size
             if not is_sharded_weight:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx,
@@ -586,6 +594,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+        shard_spmd(param.data, self.mesh, get_col_parallel_partition_spec())
+        torch._sync(param)
 
     def _load_fused_module_from_checkpoint(self, param: BasevLLMParameter,
                                            loaded_weight: torch.Tensor):
@@ -1000,6 +1011,9 @@ class QKVParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
+        shard_spmd(param.data, self.mesh, get_col_parallel_partition_spec())
+        torch._sync(param)
+
 
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
@@ -1040,6 +1054,8 @@ class RowParallelLinear(LinearBase):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config, prefix)
 
+        self.mesh = get_mesh()
+        
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
 
@@ -1110,6 +1126,10 @@ class RowParallelLinear(LinearBase):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+        shard_spmd(param.data, self.mesh, get_row_parallel_partition_spec())
+        torch._sync(param)
+
 
     def weight_loader_v2(self, param: BasevLLMParameter,
                          loaded_weight: torch.Tensor):

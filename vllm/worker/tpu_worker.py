@@ -18,6 +18,9 @@ from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerBase,
                                      WorkerInput)
 
+from vllm.distributed.utils import get_mesh
+from vllm.utils import get_tpu_info
+
 logger = init_logger(__name__)
 
 
@@ -38,6 +41,8 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
 
+        self.mesh = get_mesh()
+        
         assert self.device_config.device_type == "tpu"
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
@@ -121,7 +126,7 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
-        m = xm.get_memory_info(self.device)
+        m = get_tpu_info(0)
         total_memory_size = m["bytes_limit"]
         profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
 

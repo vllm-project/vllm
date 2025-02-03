@@ -8,6 +8,10 @@ from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.utils import _make_synced_weight_loader
 
+from vllm.distributed.utils import get_mesh, get_col_parallel_partition_spec, get_row_parallel_partition_spec, shard_spmd
+import torch_xla.distributed.spmd as xs
+from torch_xla.distributed.spmd.debugging import visualize_tensor_sharding
+
 __all__ = [
     "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
     "ModelWeightParameter", "ChannelQuantScaleParameter",
@@ -94,6 +98,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         self._output_dim = output_dim
         super().__init__(**kwargs)
 
+        self.mesh = get_mesh()
+
     @property
     def output_dim(self):
         return self._output_dim
@@ -105,6 +111,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
                                              tp_rank * shard_size, shard_size)
         assert self.data.shape == loaded_weight.shape
         self.data.copy_(loaded_weight)
+
+        shard_spmd(self.data, self.mesh, get_col_parallel_partition_spec())
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
 
@@ -126,6 +134,9 @@ class _ColumnvLLMParameter(BasevLLMParameter):
                                              tp_rank * shard_size, shard_size)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+        shard_spmd(self.data, self.mesh, get_col_parallel_partition_spec())
+
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
 
@@ -151,6 +162,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+        shard_spmd(self.data, self.mesh, get_col_parallel_partition_spec() if self.output_dim == 0 else get_row_parallel_partition_spec())
 
 
 class RowvLLMParameter(BasevLLMParameter):
@@ -180,6 +193,8 @@ class RowvLLMParameter(BasevLLMParameter):
 
         assert self.data.shape == loaded_weight.shape
         self.data.copy_(loaded_weight)
+
+        shard_spmd(self.data, self.mesh, get_row_parallel_partition_spec())
 
 
 class ModelWeightParameter(_ColumnvLLMParameter, RowvLLMParameter):
