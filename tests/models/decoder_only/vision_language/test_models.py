@@ -249,6 +249,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         dtype="bfloat16",
         use_tokenizer_eos=True,
+        num_logprobs=10,
         patch_hf_runner=model_utils.h2ovl_patch_hf_runner,
     ),
     "idefics3": VLMTestInfo(

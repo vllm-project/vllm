@@ -11,13 +11,15 @@ import torch
 from PIL import Image
 from transformers import PretrainedConfig
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
-from vllm.multimodal.processing import (PromptReplacement,
+from vllm.multimodal.processing import (ProcessingCache, PromptReplacement,
                                         PromptReplacementDetails)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .intern_vit import InternVisionModel
@@ -26,6 +28,8 @@ from .internvl import (IMG_CONTEXT, IMG_END, IMG_START,
                        InternVLChatModel, InternVLDummyInputsBuilder,
                        InternVLMultiModalProcessor, build_transform,
                        find_closest_aspect_ratio, get_internvl_target_ratios)
+
+logger = init_logger(__name__)
 
 
 def resolve_h2ovl_min_max_num(
@@ -434,6 +438,27 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
 
 class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
                                ):
+
+    def __init__(self,
+                 info: H2OVLProcessingInfo,
+                 dummy_inputs: "BaseDummyInputsBuilder[H2OVLProcessingInfo]",
+                 *,
+                 cache: Optional[ProcessingCache] = None,
+                 enable_sanity_checks: bool = True) -> None:
+        super().__init__(
+            info,
+            dummy_inputs,
+            cache=cache,
+            enable_sanity_checks=enable_sanity_checks,
+        )
+
+        if self.cache is not None:
+            # The processor output depends on the number of images passed,
+            # making it incompatible with processing cache which is supposed
+            # to be invariant of how many images are passed per prompt
+            self.cache = None
+            logger.warning("%s does not support processing cache.",
+                           type(self).__name__)
 
     def _get_prompt_replacements(
         self,

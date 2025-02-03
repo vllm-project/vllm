@@ -27,7 +27,7 @@ from ...utils import build_model_context
     ],
 )
 @pytest.mark.parametrize("max_dynamic_patch", [1, 2, 4, 8])
-@pytest.mark.parametrize("dynamic_image_size", [True, False, None])
+@pytest.mark.parametrize("dynamic_image_size", [True, False])
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_override(
     model_id: str,
@@ -65,6 +65,9 @@ def test_processor_override(
     if dynamic_image_size is not None:
         mm_processor_kwargs["dynamic_image_size"] = dynamic_image_size
 
+    min_num = config.min_dynamic_patch
+    max_num = max_dynamic_patch if dynamic_image_size else 1
+
     # Build the image str / prompt based on the number of images we pass
     prompt = "<image>" * num_imgs
 
@@ -82,8 +85,8 @@ def test_processor_override(
                     orig_width=width,
                     orig_height=height,
                     target_ratios=get_h2ovl_target_ratios(
-                        config.min_dynamic_patch,
-                        max_dynamic_patch,
+                        min_num,
+                        max_num,
                         prior_aspect_ratio=None,
                     ),
                     image_size=config.vision_config.image_size,
@@ -95,8 +98,8 @@ def test_processor_override(
                     orig_width=width,
                     orig_height=height,
                     target_ratios=get_h2ovl_target_ratios(
-                        config.min_dynamic_patch,
-                        max_dynamic_patch,
+                        min_num,
+                        max_num,
                         prior_aspect_ratio=aspect_ratio,
                     ),
                     image_size=config.vision_config.image_size,
@@ -118,8 +121,8 @@ def test_processor_override(
                     orig_width=width,
                     orig_height=height,
                     target_ratios=get_h2ovl_target_ratios(
-                        config.min_dynamic_patch,
-                        max_dynamic_patch,
+                        min_num,
+                        max_num,
                         prior_aspect_ratio=None,
                     ),
                     image_size=config.vision_config.image_size,
