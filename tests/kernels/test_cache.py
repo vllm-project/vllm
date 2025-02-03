@@ -633,3 +633,66 @@ def test_copy_blocks_mla(
 
     for kv_cache, ref_cache in zip(kv_caches, ref_caches):
         torch.testing.assert_close(kv_cache, ref_cache)
+
+
+@pytest.mark.parametrize("kv_lora_rank", KV_LORA_RANKS)
+@pytest.mark.parametrize("qk_rope_head_dim", QK_ROPE_HEAD_DIMS)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES_MLA)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS_MLA)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@pytest.mark.parametrize("align_cache", [False, True])
+@torch.inference_mode()
+def test_swap_blocks_mla(
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    kv_cache_dtype: str,
+    align_cache: bool,
+) -> None:
+    current_platform.seed_everything(seed)
+    torch.set_default_device(device)
+
+    entry_size = kv_lora_rank + qk_rope_head_dim
+
+    src_cache = _create_mla_cache(num_blocks, block_size, entry_size, dtype,
+                                  kv_cache_dtype, device, align_cache)
+    dst_cache = _create_mla_cache(num_blocks, block_size, entry_size, dtype,
+                                  kv_cache_dtype, device, align_cache)
+
+    _fill_mla_cache(src_cache, kv_cache_dtype)
+    _fill_mla_cache(dst_cache, kv_cache_dtype)
+
+    src_cache_clone = src_cache.clone()
+
+    num_mappings = min(2, num_blocks // 2)
+    src_blocks = random.sample(range(num_blocks), num_mappings)
+    remaining_blocks = list(set(range(num_blocks)) - set(src_blocks))
+    dst_blocks = random.sample(remaining_blocks, num_mappings)
+    block_mapping = list(zip(src_blocks, dst_blocks))
+    block_mapping_tensor = torch.tensor(block_mapping,
+                                        dtype=torch.int64,
+                                        device="cpu").view(-1, 2)
+
+    opcheck(
+        torch.ops._C_cache_ops.swap_blocks,
+        (src_cache, dst_cache, block_mapping_tensor),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+        cond=(kv_lora_rank == KV_LORA_RANKS[0]
+              and qk_rope_head_dim == QK_ROPE_HEAD_DIMS[0]),
+    )
+
+    ops.swap_blocks(src_cache, dst_cache, block_mapping_tensor)
+
+    for src, dst in block_mapping:
+        torch.testing.assert_close(
+            src_cache_clone[src].cpu(),
+            dst_cache[dst].cpu(),
+            msg=f"Block {src} from src should have been swapped to block "
+            f"{dst} in dst_cache.")

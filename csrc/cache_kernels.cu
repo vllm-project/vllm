@@ -46,7 +46,10 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
   char* src_ptr = static_cast<char*>(src.data_ptr());
   char* dst_ptr = static_cast<char*>(dst.data_ptr());
 
-  const int64_t block_size_in_bytes = src.element_size() * src[0].numel();
+  // We use the stride instead of numel in case the cache is padded for memory
+  // alignment reasons, we assume the blocks data (inclusive of any padding)
+  // is contiguous in memory
+  const int64_t block_size_in_bytes = src.element_size() * src.stride(0);
   const at::cuda::OptionalCUDAGuard device_guard(
       src_device.is_cuda() ? src_device : dst_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -69,7 +72,7 @@ template <typename scalar_t>
 __global__ void copy_blocks_kernel(int64_t* key_cache_ptrs,
                                    int64_t* value_cache_ptrs,
                                    const int64_t* __restrict__ block_mapping,
-                                   const int mem_footprint_per_block) {
+                                   const int numel_per_block) {
   const int layer_idx = blockIdx.x;
   const int pair_idx = blockIdx.y;
 
@@ -79,14 +82,14 @@ __global__ void copy_blocks_kernel(int64_t* key_cache_ptrs,
   int64_t src_block_number = block_mapping[2 * pair_idx];
   int64_t dst_block_number = block_mapping[2 * pair_idx + 1];
 
-  const int64_t src_block_offset = src_block_number * mem_footprint_per_block;
-  const int64_t dst_block_offset = dst_block_number * mem_footprint_per_block;
-  for (int i = threadIdx.x; i < mem_footprint_per_block; i += blockDim.x) {
+  const int64_t src_block_offset = src_block_number * numel_per_block;
+  const int64_t dst_block_offset = dst_block_number * numel_per_block;
+  for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
     int64_t src_offset = src_block_offset + i;
     int64_t dst_offset = dst_block_offset + i;
     key_cache[dst_offset] = key_cache[src_offset];
   }
-  for (int i = threadIdx.x; i < mem_footprint_per_block; i += blockDim.x) {
+  for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
     int64_t src_offset = src_block_offset + i;
     int64_t dst_offset = dst_block_offset + i;
     value_cache[dst_offset] = value_cache[src_offset];
@@ -94,6 +97,7 @@ __global__ void copy_blocks_kernel(int64_t* key_cache_ptrs,
 }
 
 // Kernel for MLA, which works on a single joint kv_cache
+// Grid: (num_layers, num_pairs)
 template <typename scalar_t>
 __global__ void copy_blocks_mla_kernel(
     int64_t* cache_ptrs, const int64_t* __restrict__ block_mapping,
@@ -150,12 +154,9 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
           .to(cache_device);
 
   // Launch the kernel.
-  // We use the stride instead of numel in case the cache is padded for memory
-  // alignment reasons, we assume the blocks data (inclusive of any padding)
-  // is contiguous in memory
-  const int mem_footprint_per_block = key_caches[0].stride(0);
+  const int numel_per_block = key_caches[0][0].numel();
   dim3 grid(num_layers, num_pairs);
-  dim3 block(std::min(1024, mem_footprint_per_block));
+  dim3 block(std::min(1024, numel_per_block));
   const at::cuda::OptionalCUDAGuard device_guard(cache_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES(
@@ -163,7 +164,7 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
         vllm::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
             key_cache_ptrs_tensor.data_ptr<int64_t>(),
             value_cache_ptrs_tensor.data_ptr<int64_t>(),
-            block_mapping.data_ptr<int64_t>(), mem_footprint_per_block);
+            block_mapping.data_ptr<int64_t>(), numel_per_block);
       }));
 }
 
