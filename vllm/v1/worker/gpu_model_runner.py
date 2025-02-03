@@ -122,9 +122,9 @@ class GPUModelRunner:
             vocab_size=model_config.get_vocab_size(),
         )
 
-#        self.use_cuda_graph = (self.vllm_config.compilation_config.level
-#                               == CompilationLevel.PIECEWISE
-#                               and not self.model_config.enforce_eager)
+        #        self.use_cuda_graph = (self.vllm_config.compilation_config.level
+        #                               == CompilationLevel.PIECEWISE
+        #                               and not self.model_config.enforce_eager)
         self.use_cuda_graph = not self.model_config.enforce_eager
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
@@ -221,9 +221,10 @@ class GPUModelRunner:
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
-        self.tokenshape_cpu = torch.zeros(4, dtype=torch.int32,
-                                            device="cpu",
-                                            pin_memory=self.pin_memory)
+        self.tokenshape_cpu = torch.zeros(4,
+                                          dtype=torch.int32,
+                                          device="cpu",
+                                          pin_memory=self.pin_memory)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
@@ -459,16 +460,18 @@ class GPUModelRunner:
 
         self.query_start_loc[:num_reqs + 1].copy_(
             self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
-        self.seq_lens[:num_reqs].copy(self.seq_lens_cpu[:num_reqs],
-                                      non_blocking=True)
+        self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
+                                       non_blocking=True)
         self.slot_mapping[:total_num_scheduled_tokens].copy_(
             self.slot_mapping_cpu[:total_num_scheduled_tokens],
             non_blocking=True)
 
-        self.tokenshape_cpu[0] = total_num_scheduled_tokens  # Actual number of tokens to process
-        self.tokenshape_cpu[1] = num_reqs                    # Number of requests
-        self.tokenshape_cpu[2] = max_num_scheduled_tokens    # Maximum query length
-        self.tokenshape_cpu[3] = max_seq_len                 # Maximum sequence length
+        self.tokenshape_cpu[
+            0] = total_num_scheduled_tokens  # Tokens to process
+        self.tokenshape_cpu[1] = num_reqs  # Number of requests
+        self.tokenshape_cpu[
+            2] = max_num_scheduled_tokens  # Maximum query length
+        self.tokenshape_cpu[3] = max_seq_len  # Maximum sequence length
         self.tokenshape.copy_(self.tokenshape_cpu, non_blocking=True)
 
         # Prepare for cascade attention if needed.
@@ -908,7 +911,7 @@ class GPUModelRunner:
                 inputs_embeds=inputs_embeds,
             )
         return hidden_states
-    
+
     def metadata_for_dummy_run(self, num_tokens) -> FlashAttentionMetadata:
         # Create placeholder metadata
         num_reqs = num_tokens
@@ -919,16 +922,17 @@ class GPUModelRunner:
             max_query_len=max_query_len,
             query_start_loc=self.query_start_loc,
             max_seq_len=max_seq_len,
-            seq_start_loc=self.seq_start_loc,
-            block_table=self.input_batch.block_table[:num_reqs],
+            seq_lens=self.seq_lens,
+            block_table=(
+                self.input_batch.block_table.get_device_tensor()[:num_reqs]),
             slot_mapping=self.slot_mapping,
             tokenshape=self.tokenshape,
             # Cascade stuff. Non-piecewise CUDA graphs NYI
-            use_cascade=None,
+            use_cascade=False,
             common_prefix_len=0,
             cu_prefix_query_lens=None,
-            cu_prefix_kv_lens=None,
-            cu_suffix_kv_lens=None,
+            prefix_kv_lens=None,
+            suffix_kv_lens=None,
         )
 
     def profile_run(self) -> None:
@@ -1058,8 +1062,8 @@ class GPUModelRunner:
                 attn_metadata = self.metadata_for_dummy_run(num_tokens)
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(self.model, num_tokens, attn_metadata=attn_metadata)
-                self._dummy_run(self.model, num_tokens, attn_metadata=attn_metadata)
+                    self._dummy_run(num_tokens, attn_metadata=attn_metadata)
+                self._dummy_run(num_tokens, attn_metadata=attn_metadata)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]

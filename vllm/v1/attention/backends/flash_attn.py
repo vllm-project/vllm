@@ -215,16 +215,16 @@ class FlashAttentionImpl(AttentionImpl):
             # Regular attention (common case).
             num_actual_tokens = attn_metadata.num_actual_tokens
             batch_size = attn_metadata.block_table.shape[0]
-            
+
             #TODO: Do we need to slice by [:batch_size+1]?
             flash_attn_varlen_func(
                 q=query[:num_padded_tokens],
                 k=key_cache,
                 v=value_cache,
                 out=output[:num_padded_tokens],
-                cu_seqlens_q=attn_metadata.query_start_loc[:batch_size+1],
+                cu_seqlens_q=attn_metadata.query_start_loc[:batch_size + 1],
                 max_seqlen_q=attn_metadata.max_query_len,
-                seqused_k=attn_metadata.seq_lens[:batch_size+1],
+                seqused_k=attn_metadata.seq_lens[:batch_size],
                 max_seqlen_k=attn_metadata.max_seq_len,
                 softmax_scale=self.scale,
                 causal=True,

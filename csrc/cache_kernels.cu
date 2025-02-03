@@ -262,8 +262,8 @@ __global__ void reshape_and_cache_flash_full_cuda_kernel(
   const int64_t token_idx = blockIdx.x;
 
   int32_t unpadded_num_tokens = tensorshape[0];
-  if(token_idx >= unpadded_num_tokens) {
-      return;
+  if (token_idx >= unpadded_num_tokens) {
+    return;
   }
 
   const int64_t slot_idx = slot_mapping[token_idx];
@@ -437,27 +437,28 @@ void reshape_and_cache_flash(
 // KV_T is the stored data type of kv-cache.
 // CACHE_T is the data type of key and value tensors.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_RESHAPE_AND_CACHE_FLASH_FULL_CUDA(KV_T, CACHE_T, KV_DTYPE)\
-  vllm::reshape_and_cache_flash_full_cuda_kernel<KV_T, CACHE_T, KV_DTYPE> \
-      <<<grid, block, 0, stream>>>(                                   \
-          reinterpret_cast<int32_t*>(tokenshape.data_ptr()),          \
-          reinterpret_cast<KV_T*>(key.data_ptr()),                    \
-          reinterpret_cast<KV_T*>(value.data_ptr()),                  \
-          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
-          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
-          slot_mapping.data_ptr<int64_t>(), block_stride, key_stride, \
-          value_stride, num_heads, head_size, block_size, k_scale, v_scale);
+#define CALL_RESHAPE_AND_CACHE_FLASH_FULL_CUDA(KV_T, CACHE_T, KV_DTYPE) \
+  vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE>         \
+      <<<grid, block, 0, stream>>>(                                     \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                      \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                    \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),             \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),           \
+          slot_mapping.data_ptr<int64_t>(), block_stride, key_stride,   \
+          value_stride, num_heads, head_size, block_size,               \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),           \
+          reinterpret_cast<const float*>(v_scale.data_ptr()));
 
 void reshape_and_cache_flash_full_cuda(
-    torch::Tensor& tokenshape, // true num_tokens at first entry.
-    torch::Tensor& key,        // [num_tokens, num_heads, head_size]
-    torch::Tensor& value,      // [num_tokens, num_heads, head_size]
+    torch::Tensor& tokenshape,  // true num_tokens at first entry.
+    torch::Tensor& key,         // [num_tokens, num_heads, head_size]
+    torch::Tensor& value,       // [num_tokens, num_heads, head_size]
     torch::Tensor& key_cache,  // [num_blocks, block_size, num_heads, head_size]
     torch::Tensor&
         value_cache,  // [num_blocks, block_size, num_heads, head_size]
     torch::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
-    const std::string& kv_cache_dtype, const double k_scale,
-    const double v_scale) {
+    const std::string& kv_cache_dtype, torch::Tensor& k_scale,
+    torch::Tensor& v_scale) {
   int padded_num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
