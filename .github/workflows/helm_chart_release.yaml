@@ -36,7 +36,7 @@ jobs:
 
       - name: helm package
         run: |
-          helm package vllm/examples/online_serving/chart-helm --version $IMAGE_TAG
+          helm package examples/online_serving/chart-helm --version $IMAGE_TAG
 
       - name: helm push
         if: ${{ github.event_name == 'push' }}
