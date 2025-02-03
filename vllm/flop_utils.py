@@ -7,10 +7,11 @@ from typing import List, Any
 from numbers import Number
 from collections import defaultdict
 from torch.utils._python_dispatch import TorchDispatchMode
+import sys 
 
 aten = torch.ops.aten
 
-def prod(x):
+def _prod(x):
     res = 1
     for i in x:
         res *= i
@@ -24,7 +25,7 @@ def matmul_flop(inputs: List[Any], outputs: List[Any]) -> Number:
     input_shapes = [v.shape for v in inputs]
     assert len(input_shapes) == 2, input_shapes
     assert input_shapes[0][-1] == input_shapes[1][-2], input_shapes
-    flop = prod(input_shapes[0]) * input_shapes[-1][-1]
+    flop = _prod(input_shapes[0]) * input_shapes[-1][-1]
     return flop
  
 def addmm_flop(inputs: List[Any], outputs: List[Any]) -> Number:
@@ -63,9 +64,16 @@ def nln_flop(inputs: List[Any], outputs: List[Any]) -> Number:
 def softmax_flop(inputs: List[Any], outputs: List[Any]) -> Number:
     return 2 * inputs[0].numel()
 
+def relu_flop(inputs: List[Any], outputs: List[Any]) -> Number:
+    return 2 * inputs[0].numel()
+
 def attn_flop(q, k, v, *args) -> Number:
-    macs = prod(q.shape) * k.shape[-2] # (b * n * s * d) * s 
-    macs += prod(q.shape[:-1]) * k.shape[-2] * v.shape[-1] # (b * n * s) * s * d
+    """
+    Count flops for attention operation. 
+    Calculation of QK^T and PV each contribute bns^d FLOPS. 
+    """
+    macs = _prod(q.shape) * k.shape[-2]  
+    macs += _prod(q.shape[:-1]) * k.shape[-2] * v.shape[-1] 
 
     return 2 * macs
 
@@ -74,25 +82,50 @@ flop_mapping = {
     aten.mm.default: matmul_flop,
     aten.matmul: matmul_flop,
     aten.addmm: addmm_flop,
-    aten.addmm.default: addmm_flop,
     aten.bmm: bmm_flop,
     aten._log_softmax: log_softmax_flop,
-    aten._log_softmax.default: log_softmax_flop,
     aten.native_layer_norm: nln_flop,
-    aten.native_layer_norm.default: nln_flop,
-    aten.softmax: softmax_flop,
-    aten._softmax.default: softmax_flop
+    aten._softmax: softmax_flop,
+    aten.relu: relu_flop
 }
 
 class FlopContextManager(TorchDispatchMode):
-    def __init__(self, mod = None):
+    '''
+    Creates a Context Manager to count FLOPS for each operation and sub-module of an LLM ran with vLLM.
+    '''
+
+    # @param kwargs should consist of functions to add to the flop_mapping if there are any operations not included in the above mapping. 
+    def __init__(self, **kwargs):
         self.flop_counts = defaultdict(lambda: defaultdict(int))
         self.funcs = set()
         self.parents = ['Global']
-        if mod is not None:
-            for name, module in dict(mod.named_children()).items():
-                module.register_forward_pre_hook(self.enter_module(name))
-                module.register_forward_hook(self.exit_module(name))
+        self.flop_mapping = flop_mapping
+        self.module = None 
+        for key, value in kwargs.items():
+            if isinstance(value, function):
+                self.flop_mapping[key] = value
+        
+    def set_model(self, module):
+        assert module != None
+        if self.module is not None:
+            self.remove_hooks(self.module)
+        
+        self.module = module
+        if module is not None:
+            self.module.apply(self.register_hooks)
+
+    def register_hooks(self, module):
+        name = module.__class__.__name__
+        module.__pre_hook__ = module.register_forward_pre_hook(self.enter_module(name))
+        module.__post_hook__ = module.register_forward_hook(self.exit_module(name))
+    
+    def remove_hooks(module):
+        if hasattr(module, "__pre_hook__"):
+            module.__pre_hook__.remove() 
+            del module.__pre_hook__
+        if hasattr(module, "__post_hook__"):
+            module.__post_hook__.remove() 
+            del module.__post_hook__
 
     def enter_module(self, name):
         def f(module, inputs):
@@ -108,29 +141,51 @@ class FlopContextManager(TorchDispatchMode):
             return outputs
         return f
 
+    def trace_calls(self, frame, event, arg):
+        if event == 'call':
+            func_name = frame.f_code.co_name
+            if 'load_model' == func_name:
+                module = frame.f_globals.get("__name__", "<unknown>")
+        
+                if "self" in frame.f_locals:
+                    class_name = frame.f_locals["self"].__class__.__name__
+                    class_name = class_name
+                else:
+                    assert False
+                
+                print(f"Module: {module}, class: {class_name}")
+                print(f"func name: {func_name}")
+                return self.trace_returns
+        return None
+    
+    def trace_returns(self, frame, event, arg):
+        if event == 'return' and isinstance(arg, torch.nn.Module):
+            self.set_model(arg)
+        return None 
+
     def __enter__(self):
         self.flop_counts.clear()
+        sys.settrace(self.trace_calls)
         super().__enter__()
 
     def __exit__(self, *args):
-        print(f"Total: {sum(self.flop_counts['Global'].values())/1e9 } GFLOPS")
+        print(f"\nTotal: {sum(self.flop_counts['Global'].values())/1e9 } GFLOPS")
         for mod in self.flop_counts.keys():
             print(f"Module: ", mod)
             for k,v in self.flop_counts[mod].items():
                 print(f"{k}: {v/1e9} GFLOPS")
             print()
-        for func in self.funcs:
-            print(func)
+
+        self.remove_hooks()
+        sys.settrace(None)
         super().__exit__(*args)
 
-    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        kwargs = kwargs if kwargs else {}
-
+    def __torch_dispatch__(self, func, types, args=(), kwargs={}):
         out = func(*args, **kwargs)
         func_packet = func._overloadpacket
-        self.funcs.add(func_packet.op.__name__)
-        if func_packet in flop_mapping:
-            flop_count = flop_mapping[func_packet](args, out if isinstance(out, tuple) else (out, ))
+        self.funcs.add(func_packet)
+        if func_packet in self.flop_mapping:
+            flop_count = self.flop_mapping[func_packet](args, out if isinstance(out, tuple) else (out, ))
             for par in self.parents:
                 self.flop_counts[par][func_packet] += flop_count
         elif 'attention' in func_packet.op.__name__: 
