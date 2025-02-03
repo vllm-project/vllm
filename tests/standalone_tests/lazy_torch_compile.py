@@ -8,6 +8,11 @@ from contextlib import nullcontext
 
 from vllm_test_utils import BlameResult, blame
 
+# List of modules that should not be imported too early.
+# Lazy import `torch._inductor.async_compile` to avoid creating
+# too many processes before we set the number of compiler threads.
+# Lazy import `cv2` to avoid bothering users who only use text models.
+# `cv2` can easily mess up the environment.
 module_names = ["torch._inductor.async_compile", "cv2"]
 
 
