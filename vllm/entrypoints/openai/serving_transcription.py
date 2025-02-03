@@ -1,9 +1,7 @@
 import asyncio
 import io
-#import time
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
-## TODO (varun) : This is used for testing.. use pydub instead ?????
 import librosa
 from fastapi import Request
 
@@ -45,10 +43,11 @@ class OpenAIServingTranscription(OpenAIServing):
                 "Overwriting default completion sampling param with: %s",
                 diff_sampling_param)
 
-    # TODO (varun) : pass in a tokenizer and return tokenized values !!
     async def _preprocess_transcription(
-            self, audio_data: bytes,
-            request: TranscriptionRequest) -> Dict[Any, Any]:
+        self,
+        request: TranscriptionRequest,
+        audio_data: bytes,
+    ) -> Dict[Any, Any]:
         return {
             "encoder_prompt": {
                 "prompt": "",
@@ -56,8 +55,10 @@ class OpenAIServingTranscription(OpenAIServing):
                     "audio": librosa.load(io.BytesIO(audio_data)),
                 },
             },
-            # TODO (Varun) : Should this instead be encoder prompt ???
-            "decoder_prompt": f"{request.prompt}",
+            # TODO(rob): tokenize here.
+            "decoder_prompt":
+            "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
+            # "decoder_prompt": f"{request.prompt}",
         }
 
     # TODO (varun) : Make verbose response work !
@@ -71,8 +72,6 @@ class OpenAIServingTranscription(OpenAIServing):
         for the API specification. This API mimics the OpenAI completion API.
         """
 
-        assert request.response_format in ['text', 'json']
-
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -83,38 +82,54 @@ class OpenAIServingTranscription(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
+        if request.response_format not in ['text', 'json']:
+            return self.create_error_response(
+                "Currently only support response_format `text` or `json`")
+
         request_id = f"cmpl-{self._base_request_id(raw_request)}"
-        # TODO (varun) : other serving_* files use this -- we should use
-        # it as well.
-        #created_time = int(time.time())
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        # TODO (varun) : Does Whisper have LoRA ?
-        #tokenizer = await self.engine_client.get_tokenizer(None)
-
-        prompt = await self._preprocess_transcription(audio_data, request)
-
-        default_sampling_params = (self.model_config.get_diff_sampling_param())
-
-        # TODO (Varun) : figure out default_max_tokens by tokenizing first
-        default_max_tokens = 200
-        sampling_params = request.to_sampling_params(default_max_tokens,
-                                                     default_sampling_params)
-
-        self._log_inputs(
-            request_id,
-            prompt['decoder_prompt'],
-            params=sampling_params,
-            lora_request=None,
-            prompt_adapter_request=None,
-        )
-
-        generator: AsyncGenerator[RequestOutput, None] = None
         try:
-            generator = self.engine_client.generate(
+            (
+                lora_request,
+                prompt_adapter_request,
+            ) = self._maybe_get_adapters(request)
+
+            if lora_request:
+                return self.create_error_response(
+                    "Currently do not support LoRA for Transcription.")
+            if prompt_adapter_request:
+                return self.create_error_response(
+                    "Currently do not support PromptAdapter for Transcription."
+                )
+
+            prompt = await self._preprocess_transcription(
+                request=request,
+                audio_data=audio_data,
+            )
+
+        except ValueError as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(str(e))
+
+        result_generator: AsyncGenerator[RequestOutput, None] = None
+        try:
+            # TODO(rob): subtract len of tokenized prompt.
+            default_max_tokens = self.model_config.max_model_len
+            default_params = self.model_config.get_diff_sampling_param()
+            sampling_params = request.to_sampling_params(
+                default_max_tokens, default_params)
+
+            self._log_inputs(request_id,
+                             prompt['decoder_prompt'],
+                             params=sampling_params,
+                             lora_request=None,
+                             prompt_adapter_request=None)
+
+            result_generator = self.engine_client.generate(
                 prompt,
                 sampling_params,
                 request_id,
@@ -123,11 +138,14 @@ class OpenAIServingTranscription(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        # Non-streaming response
-        result: Optional[RequestOutput] = None
+        # TODO(rob): figure out a way to pipe streaming in.
+        stream = False
+        if stream:
+            return None
 
+        # Non-streaming response.
         try:
-            async for op in generator:
+            async for op in result_generator:
                 result = op
             return TranscriptionResponse(text=result.outputs[0].text)
         except asyncio.CancelledError:
