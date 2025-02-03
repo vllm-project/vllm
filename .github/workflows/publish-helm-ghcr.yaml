@@ -7,7 +7,7 @@ on:
       - main
   pull_request:
 env:
-  CHART_NAME: vllm-helm-chart
+  CHART_NAME: chart-vllm
 
 jobs:
   package-and-publish-chart-helm:
