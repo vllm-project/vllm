@@ -71,6 +71,7 @@ steps:
     #depends_on: ~
 
   - label: "Cleanup H100"
+    priority: 100
     agents:
       queue: H100
     depends_on: ~
