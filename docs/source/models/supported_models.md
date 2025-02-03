@@ -770,6 +770,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `Qwen2_5_VLForConditionalGeneration`
+  * Qwen2.5-VL
+  * T + I<sup>+</sup> + V<sup>+</sup>
+  * `Qwen/Qwen2.5-VL-3B-Instruct`, `Qwen/Qwen2.5-VL-72B-Instruct`, etc.
+  *
+  * ✅︎
+  * ✅︎
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
@@ -781,6 +788,10 @@ See [this page](#generative-models) for more information on how to use generativ
 
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
+
+:::{note}
+To use `Qwen2.5-VL` series models, you have to install Huggingface `transformers` library from source via `pip install git+https://github.com/huggingface/transformers`.
+:::
 
 :::{note}
 To use `DeepSeek-VL2` series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.

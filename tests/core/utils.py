@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional

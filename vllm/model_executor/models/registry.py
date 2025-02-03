@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Whenever you add an architecture to this page, please also update
 `tests/models/registry.py` with example HuggingFace models for it.

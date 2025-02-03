@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Types for writing multimodal model tests."""
 from enum import Enum
 from pathlib import PosixPath

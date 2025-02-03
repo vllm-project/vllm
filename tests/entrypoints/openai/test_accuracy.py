@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This file test accuracy of the vLLM server via LMEval.
 It uses local-completions, which interacts with vLLM

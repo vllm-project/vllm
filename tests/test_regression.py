@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Containing tests that check for regressions in vLLM's behavior.
 
 It should include tests that are reported by users and making sure they

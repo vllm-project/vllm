@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test AWQ with fused MoE Marlin kernels.
 
 Run `pytest tests/kernels/test_awq_marlin.py`.

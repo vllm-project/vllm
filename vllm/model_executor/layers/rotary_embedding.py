@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.33.2/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -837,8 +839,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         hf_config: PretrainedConfig,
         image_grid_thw: Union[List[List[int]], torch.Tensor],
         video_grid_thw: Union[List[List[int]], torch.Tensor],
-        video_second_per_grid_ts: Optional[Union[List[float],
-                                                 torch.Tensor]] = None,
+        video_second_per_grid_ts: Optional[List[float]] = None,
         context_len: int = 0,
         seq_len: Optional[int] = None,
     ) -> Tuple[List[List[int]], int]:
@@ -863,8 +864,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         hf_config: PretrainedConfig,
         image_grid_thw: Union[List[List[int]], torch.Tensor],
         video_grid_thw: Union[List[List[int]], torch.Tensor],
-        video_second_per_grid_ts: Optional[Union[List[float],
-                                                 torch.Tensor]] = None,
+        video_second_per_grid_ts: Optional[List[float]] = None,
         context_len: int = 0,
         seq_len: Optional[int] = None,
     ) -> Tuple[torch.Tensor, int]:

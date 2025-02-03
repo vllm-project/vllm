@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This example shows how to use vLLM for running offline inference with
 the correct prompt format on vision language models for text generation.
@@ -542,12 +543,9 @@ def run_qwen2_5_vl(question: str, modality: str):
         mm_processor_kwargs={
             "min_pixels": 28 * 28,
             "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
         },
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
-        limit_mm_per_prompt={
-            "image": 1,
-            "video": 1,
-        },
     )
 
     if modality == "image":
