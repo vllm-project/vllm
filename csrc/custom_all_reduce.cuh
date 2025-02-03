@@ -38,9 +38,13 @@ struct Signal {
 };
 
 #ifdef USE_ROCM
-struct __align__(16) RankData { const void* ptrs[8]; };
+struct __align__(16) RankData {
+  const void* ptrs[8];
+};
 #else
-struct __align__(16) RankData { const void* __restrict__ ptrs[8]; };
+struct __align__(16) RankData {
+  const void* __restrict__ ptrs[8];
+};
 #endif
 
 struct __align__(16) RankSignals {

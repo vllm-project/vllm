@@ -88,8 +88,8 @@ struct MatMulConfig {
   int K;
   hipDataType dtype;
 
-  friend auto operator<(const MatMulConfig& left,
-                        const MatMulConfig& right) -> bool {
+  friend auto operator<(const MatMulConfig& left, const MatMulConfig& right)
+      -> bool {
     return std::tie(left.op_A, left.op_B, left.M, left.N, left.K, left.dtype) <
            std::tie(right.op_A, right.op_B, right.M, right.N, right.K,
                     right.dtype);

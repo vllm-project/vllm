@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import gc
 import time
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
@@ -205,7 +207,7 @@ class GPUModelRunner:
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
-        # Keep the states of the pre-empted requests.
+        # Keep the states of the preempted requests.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.encoder_cache.pop(req_id, None)

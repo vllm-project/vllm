@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import asyncio
 import concurrent
@@ -29,7 +31,7 @@ from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import OrderedDict, UserDict, defaultdict
 from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
-from functools import lru_cache, partial, wraps
+from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     Dict, Generator, Generic, Iterator, List, Literal,
                     NamedTuple, Optional, Tuple, Type, TypeVar, Union,
@@ -252,7 +254,7 @@ class rpd_trace:
             print(f"An error occurred while creating the filename: {e}")
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_hipScopedMarker_available():
     try:
         from hipScopedMarker import hipScopedMarker
@@ -491,7 +493,7 @@ class PyObjectCache:
         self._index = 0
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_mi250() -> bool:
     from vllm.platforms import current_platform
     if not current_platform.is_rocm() or not torch.cuda.is_available():
@@ -501,7 +503,7 @@ def is_mi250() -> bool:
         ("gfx90a" in archName)
 
 
-@lru_cache(maxsize=None)
+@cache
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     from vllm import _custom_ops as ops
@@ -846,7 +848,7 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_pin_memory_available() -> bool:
     from vllm.platforms import current_platform
     return current_platform.is_pin_memory_available()
@@ -1035,7 +1037,7 @@ def init_cached_hf_modules() -> None:
     init_hf_modules()
 
 
-@lru_cache(maxsize=None)
+@cache
 def find_library(lib_name: str) -> str:
     """
     Find the library file in the system.
@@ -1713,7 +1715,7 @@ def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.weak_ref_tensor(tensor)
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_navi() -> bool:
     from vllm.platforms import current_platform
     if not current_platform.is_rocm() or not torch.cuda.is_available():
@@ -1724,7 +1726,7 @@ def is_navi() -> bool:
     return archName is not None and "gfx1" in archName
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_navi3() -> bool:
     from vllm.platforms import current_platform
     if not current_platform.is_rocm() or not torch.cuda.is_available():
@@ -1778,7 +1780,7 @@ def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     return module
 
 
-@lru_cache(maxsize=None)
+@cache
 def get_vllm_optional_dependencies():
     metadata = importlib.metadata.metadata("vllm")
     requirements = metadata.get_all("Requires-Dist", [])
@@ -2377,3 +2379,55 @@ def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
     else:
         func = partial(method, obj)  # type: ignore
     return func(*args, **kwargs)
+
+
+def import_pynvml():
+    """
+    Historical comments:
+
+    libnvml.so is the library behind nvidia-smi, and
+    pynvml is a Python wrapper around it. We use it to get GPU
+    status without initializing CUDA context in the current process.
+    Historically, there are two packages that provide pynvml:
+    - `nvidia-ml-py` (https://pypi.org/project/nvidia-ml-py/): The official
+        wrapper. It is a dependency of vLLM, and is installed when users
+        install vLLM. It provides a Python module named `pynvml`.
+    - `pynvml` (https://pypi.org/project/pynvml/): An unofficial wrapper.
+        Prior to version 12.0, it also provides a Python module `pynvml`,
+        and therefore conflicts with the official one. What's worse,
+        the module is a Python package, and has higher priority than
+        the official one which is a standalone Python file.
+        This causes errors when both of them are installed.
+        Starting from version 12.0, it migrates to a new module
+        named `pynvml_utils` to avoid the conflict.
+    
+    TL;DR: if users have pynvml<12.0 installed, it will cause problems.
+    Otherwise, `import pynvml` will import the correct module.
+    We take the safest approach here, to manually import the correct
+    `pynvml.py` module from the `nvidia-ml-py` package.
+    """
+    if TYPE_CHECKING:
+        import pynvml
+        return pynvml
+    if "pynvml" in sys.modules:
+        import pynvml
+        if pynvml.__file__.endswith("__init__.py"):
+            # this is pynvml < 12.0
+            raise RuntimeError(
+                "You are using a deprecated `pynvml` package. "
+                "Please uninstall `pynvml` or upgrade to at least"
+                " version 12.0. See https://pypi.org/project/pynvml "
+                "for more information.")
+        return sys.modules["pynvml"]
+    import importlib.util
+    import os
+    import site
+    for site_dir in site.getsitepackages():
+        pynvml_path = os.path.join(site_dir, "pynvml.py")
+        if os.path.exists(pynvml_path):
+            spec = importlib.util.spec_from_file_location(
+                "pynvml", pynvml_path)
+            pynvml = importlib.util.module_from_spec(spec)
+            sys.modules["pynvml"] = pynvml
+            spec.loader.exec_module(pynvml)
+            return pynvml

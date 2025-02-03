@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import ast
 import copy
 import enum
@@ -68,7 +70,8 @@ _RUNNER_TASKS: Dict[RunnerType, List[_ResolvedTask]] = {
 
 _TASK_RUNNER: Dict[_ResolvedTask, RunnerType] = {
     task: runner
-    for runner, tasks in _RUNNER_TASKS.items() for task in tasks
+    for runner, tasks in _RUNNER_TASKS.items()
+    for task in tasks
 }
 
 HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
@@ -79,6 +82,12 @@ class SupportsHash(Protocol):
 
     def compute_hash(self) -> str:
         ...
+
+
+class ModelImpl(str, enum.Enum):
+    AUTO = "auto"
+    VLLM = "vllm"
+    TRANSFORMERS = "transformers"
 
 
 class ModelConfig:
@@ -165,6 +174,14 @@ class ModelConfig:
             `logits_processors` extra completion argument. Defaults to None,
             which allows no processors.
         generation_config: Configuration parameter file for generation.
+        model_impl: Which implementation of the model to use:
+            "auto" will try to use the vLLM implementation if it exists and
+                fall back to the Transformers implementation if no vLLM
+                implementation is available.
+            "vllm" will use the vLLM model implementation.
+            "transformers" will use the Transformers model implementation.
+        override_generation_config: Override the generation config with the
+            given config.
     """
 
     def compute_hash(self) -> str:
@@ -225,6 +242,8 @@ class ModelConfig:
         logits_processor_pattern: Optional[str] = None,
         generation_config: Optional[str] = None,
         enable_sleep_mode: bool = False,
+        override_generation_config: Optional[Dict[str, Any]] = None,
+        model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -236,6 +255,7 @@ class ModelConfig:
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
         self.rope_theta = rope_theta
+        self.model_impl = model_impl
 
         if hf_overrides is None:
             hf_overrides = {}
@@ -368,6 +388,7 @@ class ModelConfig:
         self.logits_processor_pattern = logits_processor_pattern
 
         self.generation_config = generation_config
+        self.override_generation_config = override_generation_config or {}
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -734,17 +755,26 @@ class ModelConfig:
     def get_hidden_size(self) -> int:
         return self.hf_text_config.hidden_size
 
+    @property
+    def is_deepseek_mla(self) -> bool:
+        # TODO add deepseek_v3
+        return (hasattr(self.hf_text_config, "model_type")) \
+                and (self.hf_text_config.model_type in \
+                    ('deepseek_v2', 'deepseek_v3'))\
+                and (self.hf_text_config.kv_lora_rank is not None)
+
     def get_head_size(self) -> int:
         # TODO remove hard code
-        if hasattr(self.hf_text_config,
-                   "model_type") and (self.hf_text_config.model_type
-                                      in ('deepseek_v2', 'deepseek_v3')):
+        if self.is_deepseek_mla:
             qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim",
                                        0)
-            qk_nope_head_dim = getattr(self.hf_text_config, "qk_nope_head_dim",
-                                       0)
-            if qk_rope_head_dim and qk_nope_head_dim:
-                return qk_rope_head_dim + qk_nope_head_dim
+            if self.use_mla:
+                return self.hf_text_config.kv_lora_rank + qk_rope_head_dim
+            else:
+                qk_nope_head_dim = getattr(self.hf_text_config,
+                                           "qk_nope_head_dim", 0)
+                if qk_rope_head_dim and qk_nope_head_dim:
+                    return qk_rope_head_dim + qk_nope_head_dim
 
         if self.is_attention_free:
             return 0
@@ -803,6 +833,10 @@ class ModelConfig:
 
     def get_num_kv_heads(self, parallel_config: "ParallelConfig") -> int:
         """Returns the number of KV heads per GPU."""
+        if self.use_mla:
+            # When using MLA during decode it becomes MQA
+            return 1
+
         total_num_kv_heads = self.get_total_num_kv_heads()
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
@@ -906,8 +940,13 @@ class ModelConfig:
         """
         if self.generation_config is None:
             # When generation_config is not set
-            return {}
-        config = self.try_get_generation_config()
+            config = {}
+        else:
+            config = self.try_get_generation_config()
+
+        # Overriding with given generation config
+        config.update(self.override_generation_config)
+
         available_params = [
             "repetition_penalty",
             "temperature",
@@ -947,6 +986,37 @@ class ModelConfig:
     def is_cross_encoder(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_cross_encoder_model(architectures)
+
+    @property
+    def use_mla(self) -> bool:
+        if self.quantization is not None and self.quantization not in [\
+            "fp8", "compressed-tensors"]:
+            logger.warning(
+                "MLA is not supported with %s quantization. "
+                "Disabling MLA.", self.quantization)
+            return False
+
+        # If using a "compressed-tensors" checkpoint, check that all groups
+        # have fp8 for both weights and activations.
+        if self.quantization == "compressed-tensors":
+            quant_config = self._parse_quant_hf_config()
+            for group_name, cfg in quant_config.get("config_groups",
+                                                    ("", {})).items():
+                act_cfg = cfg.get("input_activations", {})
+                act_type = None if act_cfg is None else act_cfg.get("type", "")
+                w_cfg = cfg.get("weights", {})
+                w_type = None if w_cfg is None else w_cfg.get("type", "")
+                if act_type != "fp8" or w_type != "fp8":
+                    logger.warning(
+                        "compressed-tensors MLA support requires fp8 "
+                        "activations and weights in group '%s', but got "
+                        "activations type '%s' and weights type '%s'.\n "
+                        "Full config: %s", group_name, act_type, w_type,
+                        quant_config)
+                    return False
+
+        use_mla = (self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE)
+        return use_mla
 
     @property
     def supported_runner_types(self) -> Set[RunnerType]:
@@ -1712,7 +1782,8 @@ class SpeculativeConfig:
             raise ValueError("Expect the batch size threshold of disabling "
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
-
+        if (enable_chunked_prefill and speculative_model == "eagle"):
+            raise ValueError("Chunked prefill and EAGLE are not compatible.")
         # TODO: The user should be able to specify revision/max model len
         # for the draft model. It is not currently supported.
         draft_revision = None
@@ -1778,12 +1849,6 @@ class SpeculativeConfig:
                         "This speculative model supports a maximum of "
                         f"num_speculative_tokens={n_predict}, but "
                         f"{num_speculative_tokens=} was provided.")
-
-            if enable_chunked_prefill and draft_hf_config.model_type in (
-                    "medusa", "mlp_speculator", "eagle"):
-                raise ValueError(
-                    "Chunked prefill and hidden-state based draft models are "
-                    "not compatible.")
 
             speculative_draft_tensor_parallel_size = \
                 SpeculativeConfig._verify_and_get_draft_model_tensor_parallel_size(
@@ -2008,8 +2073,8 @@ class SpeculativeConfig:
                              "typical_acceptance_sampler.")
 
         if (self.draft_token_acceptance_method != 'rejection_sampler'
-                and self.draft_token_acceptance_method !=
-                'typical_acceptance_sampler'):
+                and self.draft_token_acceptance_method
+                != 'typical_acceptance_sampler'):
             raise ValueError(
                 "Expected draft_token_acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "
@@ -3229,6 +3294,16 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         current_platform.check_and_update_config(self)
+
+        # If MLA is enabled, force disable chunked prefill and prefix caching
+        if self.model_config and self.model_config.use_mla:
+            logger.info("MLA is enabled; forcing chunked prefill and prefix "
+                        "caching to be disabled.")
+            self.scheduler_config.enable_chunked_prefill = False
+            self.scheduler_config.chunked_prefill_enabled = False
+
+            if self.cache_config is not None:
+                self.cache_config.enable_prefix_caching = False
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]

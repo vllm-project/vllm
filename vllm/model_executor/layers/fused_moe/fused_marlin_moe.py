@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Fused MoE utilities for GPTQ."""
 import functools
 from typing import Optional

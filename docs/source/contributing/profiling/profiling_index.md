@@ -6,21 +6,21 @@ The OpenAI server also needs to be started with the `VLLM_TORCH_PROFILER_DIR` en
 
 When using `benchmarks/benchmark_serving.py`, you can enable profiling by passing the `--profile` flag.
 
-```{warning}
+:::{warning}
 Only enable profiling in a development environment.
-```
+:::
 
 Traces can be visualized using <https://ui.perfetto.dev/>.
 
-```{tip}
+:::{tip}
 Only send a few requests through vLLM when profiling, as the traces can get quite large. Also, no need to untar the traces, they can be viewed directly.
-```
+:::
 
-```{tip}
+:::{tip}
 To stop the profiler - it flushes out all the profile trace files to the directory. This takes time, for example for about 100 requests worth of data for a llama 70b, it takes about 10 minutes to flush out on a H100.
 Set the env variable VLLM_RPC_TIMEOUT to a big number before you start the server. Say something like 30 minutes.
 `export VLLM_RPC_TIMEOUT=1800000`
-```
+:::
 
 ## Example commands and usage
 
