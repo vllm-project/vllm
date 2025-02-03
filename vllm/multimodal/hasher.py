@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pickle
 from typing import TYPE_CHECKING, Iterable, Mapping, Optional
 

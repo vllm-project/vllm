@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from https://huggingface.co/mosaicml/mpt-7b/tree/main
 import math
 from typing import Iterable, List, Optional, Set, Tuple, Union

@@ -50,9 +50,9 @@ steps:
   - tests/multimodal
   - tests/test_utils
   - tests/worker
-  - tests/standalone_tests/lazy_torch_compile.py
+  - tests/standalone_tests/lazy_imports.py
   commands:
-  - python3 standalone_tests/lazy_torch_compile.py
+  - python3 standalone_tests/lazy_imports.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
   - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py
@@ -349,6 +349,7 @@ steps:
   - vllm/
   - tests/models
   commands:
+    - pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
     - pytest -v -s models/test_initialization.py
 
@@ -485,6 +486,7 @@ steps:
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   # Avoid importing model tests that cause CUDA reinitialization error
+  - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/encoder_decoder/language/test_bart.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/decoder_only/vision_language/test_models.py -v -s -m 'distributed(num_gpus=2)'

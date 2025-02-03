@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A GPU worker class."""
 import gc
 import os
@@ -264,10 +265,7 @@ class Worker(LocalOrDistributedWorkerBase):
                f"{(available_kv_cache_memory / GiB_bytes):.2f}GiB.")
 
         logger.info(msg)
-
         # Final cleanup
-        if self.model_runner.lora_manager:
-            self.model_runner.remove_all_loras()
         gc.collect()
 
         return num_gpu_blocks, num_cpu_blocks

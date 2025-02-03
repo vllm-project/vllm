@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List
@@ -14,7 +16,7 @@ class SchedulerStats:
     num_running_reqs: int = 0
     num_waiting_reqs: int = 0
 
-    # gpu_cache_usage: float = 0.0
+    gpu_cache_usage: float = 0.0
     # gpu_prefix_cache_hit_rate: float = 0.0
 
 
