@@ -477,7 +477,7 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
             if is_pp_missing_parameter(name, self):
                 continue
             if "lm_head.weight" in name:
-                continue            
+                continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
