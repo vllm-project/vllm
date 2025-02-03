@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """This file is used for /tests and /benchmarks"""
 from types import MappingProxyType
 from typing import List, Mapping, Optional, Tuple

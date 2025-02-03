@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            PackedvLLMParameter)
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,

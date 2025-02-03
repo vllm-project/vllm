@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Common tests for testing .generate() functionality for single / multiple
 image, embedding, and video support for different VLMs in vLLM.
 """
