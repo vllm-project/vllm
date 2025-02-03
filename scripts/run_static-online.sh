@@ -1,6 +1,6 @@
 #!/bin/bash
 tp_parrallel=8
-bs=32
+bs=96
 in_len=1024
 out_len=1024
 multi_step=1
@@ -10,12 +10,13 @@ VLLM_DECODE_BLOCK_BUCKET_MAX=$((total_len * bs / 128 + 128))
 
 # model="/data/models/DeepSeek-R1/"
 # tokenizer="/data/models/DeepSeek-R1/"
-model="/software/data/DeepSeek-R1/"
-tokenizer="/software/data/DeepSeek-R1/"
+model="/data/models/DeepSeek-R1/"
+tokenizer="/data/models/DeepSeek-R1/"
 model_name="DeepSeek-R1"
 
 HABANA_VISIBLE_DEVICES="ALL" \
-VLLM_MOE_N_SLICE=8 \
+VLLM_MOE_N_SLICE=4 \
+VLLM_MLA_DISABLE_REQUANTIZATION=1 \
 PT_HPU_ENABLE_LAZY_COLLECTIVES="true" \
 VLLM_RAY_DISABLE_LOG_TO_DRIVER="1" \
 RAY_IGNORE_UNHANDLED_ERRORS="1" \
@@ -37,7 +38,6 @@ python -m vllm.entrypoints.openai.api_server \
     --use-v2-block-manager \
     --num_scheduler_steps ${multi_step}\
     --max-model-len 2048 \
-    --max-num-batched-tokens 2048 \
     --distributed_executor_backend ray \
     --gpu_memory_utilization 0.9 \
     --trust_remote_code 2>&1 | tee benchmark_logs/serving.log &
@@ -53,7 +53,7 @@ done
 sleep 5s
 echo ${pid}
 
-num_prompts=32
+num_prompts=300
 request_rate=1
 start_time=$(date +%s)
 echo "Start to benchmark"
