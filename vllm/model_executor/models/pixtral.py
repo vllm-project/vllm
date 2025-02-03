@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from dataclasses import dataclass, fields
 from functools import cached_property

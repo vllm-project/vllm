@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This example shows how to use vLLM for running offline inference with
 multi-image input on vision language models for text generation,
@@ -55,7 +56,7 @@ def load_aria(question, image_urls: List[str]) -> ModelRequestData:
 
 
 def load_deepseek_vl2(question: str, image_urls: List[str]):
-    model_name = "deepseek-ai/deepseek-vl2-small"
+    model_name = "deepseek-ai/deepseek-vl2-tiny"
 
     llm = LLM(model=model_name,
               max_model_len=4096,
@@ -186,7 +187,6 @@ def load_mllama(question, image_urls: List[str]) -> ModelRequestData:
         model=model_name,
         max_model_len=4096,
         max_num_seqs=16,
-        enforce_eager=True,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
@@ -394,7 +394,7 @@ def load_qwen2_vl(question, image_urls: List[str]) -> ModelRequestData:
 
 model_example_map = {
     "aria": load_aria,
-    "deepseek_vl2": load_deepseek_vl2,
+    "deepseek_vl_v2": load_deepseek_vl2,
     "h2ovl_chat": load_h2onvl,
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,

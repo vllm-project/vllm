@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import asyncio
 import concurrent
@@ -29,13 +31,14 @@ from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import OrderedDict, UserDict, defaultdict
 from collections.abc import Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
-from functools import lru_cache, partial, wraps
+from functools import cache, lru_cache, partial, wraps
 from typing import (TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable,
                     Dict, Generator, Generic, Iterator, List, Literal,
                     NamedTuple, Optional, Tuple, Type, TypeVar, Union,
                     overload)
 from uuid import uuid4
 
+import cloudpickle
 import numpy as np
 import numpy.typing as npt
 import psutil
@@ -351,7 +354,7 @@ class PyObjectCache:
         self._index = 0
 
 
-@lru_cache(maxsize=None)
+@cache
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     from vllm import _custom_ops as ops
@@ -696,7 +699,7 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_pin_memory_available() -> bool:
     from vllm.platforms import current_platform
     return current_platform.is_pin_memory_available()
@@ -885,7 +888,7 @@ def init_cached_hf_modules() -> None:
     init_hf_modules()
 
 
-@lru_cache(maxsize=None)
+@cache
 def find_library(lib_name: str) -> str:
     """
     Find the library file in the system.
@@ -1606,7 +1609,7 @@ def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     return module
 
 
-@lru_cache(maxsize=None)
+@cache
 def get_vllm_optional_dependencies():
     metadata = importlib.metadata.metadata("vllm")
     requirements = metadata.get_all("Requires-Dist", [])
@@ -1922,36 +1925,57 @@ def kill_process_tree(pid: int):
 @dataclass
 class MemorySnapshot:
     """Memory snapshot."""
-    torch_peak_in_bytes: int = 0
-    torch_memory_in_bytes: int = 0
+    torch_peak: int = 0
+    cuda_memory: int = 0
+    torch_memory: int = 0
+    non_torch_memory: int = 0
     timestamp: float = 0.0
+    auto_measure: bool = True
+
+    def __post_init__(self):
+        if self.auto_measure:
+            self.measure()
 
     def measure(self):
-        self.torch_peak_in_bytes = torch.cuda.max_memory_reserved()
+        # we measure the torch peak memory usage via allocated_bytes,
+        # rather than `torch.cuda.memory_reserved()` .
+        # After `torch.cuda.reset_peak_memory_stats()`,
+        # `torch.cuda.memory_reserved()` will keep growing, and only shrink
+        # when we call `torch.cuda.empty_cache()` or OOM happens.
+        self.torch_peak = torch.cuda.memory_stats().get(
+            "allocated_bytes.all.peak", 0)
+
+        self.cuda_memory = torch.cuda.mem_get_info(
+        )[1] - torch.cuda.mem_get_info()[0]
+
         # torch.cuda.memory_reserved() is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
-        self.torch_memory_in_bytes = torch.cuda.memory_reserved()
+        # this is used to measure the non-torch memory usage
+        self.torch_memory = torch.cuda.memory_reserved()
+
+        self.non_torch_memory = self.cuda_memory - self.torch_memory
         self.timestamp = time.time()
 
     def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
-        """support a - b"""
         return MemorySnapshot(
-            torch_peak_in_bytes=self.torch_peak_in_bytes -
-            other.torch_peak_in_bytes,
-            torch_memory_in_bytes=self.torch_memory_in_bytes -
-            other.torch_memory_in_bytes,
-            timestamp=self.timestamp - other.timestamp)
+            torch_peak=self.torch_peak - other.torch_peak,
+            cuda_memory=self.cuda_memory - other.cuda_memory,
+            torch_memory=self.torch_memory - other.torch_memory,
+            non_torch_memory=self.non_torch_memory - other.non_torch_memory,
+            timestamp=self.timestamp - other.timestamp,
+            auto_measure=False,
+        )
 
 
 @dataclass
 class MemoryProfilingResult:
-    """Memory profiling result.
-    """  # noqa
-    baseline_memory_in_bytes: int = 0
-    non_kv_cache_memory_in_bytes: int = 0
-    torch_peak_increase_in_bytes: int = 0
-    non_torch_increase_in_bytes: int = 0
-    weights_memory_in_bytes: float = 0
+    """Memory profiling result. All numbers are in bytes.
+    """
+    non_kv_cache_memory: int = 0
+    torch_peak_increase: int = 0
+    non_torch_increase: int = 0
+    weights_memory: float = 0
+    before_create: MemorySnapshot = field(default_factory=MemorySnapshot)
     before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     profile_time: float = 0.0
@@ -1959,18 +1983,14 @@ class MemoryProfilingResult:
 
 @contextlib.contextmanager
 def memory_profiling(
-    baseline_memory_in_bytes: int, weights_memory_in_bytes: int
-) -> Generator[MemoryProfilingResult, None, None]:
+        baseline_snapshot: MemorySnapshot,
+        weights_memory: int) -> Generator[MemoryProfilingResult, None, None]:
     """Memory profiling context manager.
-    baseline_memory_in_bytes: memory used by all the components other than
-        the current vLLM instance. It contains: memory used by other processes, memory
-        used by another vLLM instance in the same process, etc. It is usually measured
-        before the current vLLM instance initialize the device. And we assume it is
-        constant during the profiling of the current vLLM instance.
-    weights_memory_in_bytes: memory used by PyTorch when loading the model weights.
+    baseline_snapshot: the memory snapshot before the current vLLM instance.
+    weights_memory: memory used by PyTorch when loading the model weights.
         Note that, before loading the model weights, we also initialize the device
         and distributed environment, which may consume some memory. This part is not
-        included in the weights_memory_in_bytes because PyTorch does not control it.
+        included in the weights_memory because PyTorch does not control it.
 
     The memory in one GPU can be classified into 3 categories:
     1. memory used by anything other than the current vLLM instance.
@@ -2005,20 +2025,21 @@ def memory_profiling(
     b. 2 GiB reserved for the peak activation tensors (category 2)
     c. 1 GiB used by non-torch components (category 3)
 
-    The memory used for loading weights (a.) is directly given from the argument `weights_memory_in_bytes`.
+    The memory used for loading weights (a.) is directly given from the argument `weights_memory`.
 
-    The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]` after profiling gives (b.).
+    The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]` during profiling gives (b.).
 
-    (c.) is tricky. We measure the total memory used in this GPU (`torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]`),
-    subtract the baseline memory, the memory used by the model weights, and diff of `torch.cuda.memory_reserved()`.
+    The increase of `non_torch_memory` from creating the current vLLM instance until after profiling to get (c.).
     """ # noqa
+    gc.collect()
+    torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
 
     result = MemoryProfilingResult()
 
-    result.baseline_memory_in_bytes = baseline_memory_in_bytes
+    result.before_create = baseline_snapshot
     # the part of memory used for holding the model weights
-    result.weights_memory_in_bytes = weights_memory_in_bytes
+    result.weights_memory = weights_memory
 
     result.before_profile.measure()
 
@@ -2029,13 +2050,12 @@ def memory_profiling(
 
     result.after_profile.measure()
 
-    diff = result.after_profile - result.before_profile
-    result.torch_peak_increase_in_bytes = diff.torch_peak_in_bytes
-    current_cuda_memory_bytes = torch.cuda.mem_get_info(
-    )[1] - torch.cuda.mem_get_info()[0]
-    result.non_torch_increase_in_bytes = current_cuda_memory_bytes - baseline_memory_in_bytes - weights_memory_in_bytes - diff.torch_memory_in_bytes  # noqa
-    result.profile_time = diff.timestamp
-    result.non_kv_cache_memory_in_bytes = result.non_torch_increase_in_bytes + result.torch_peak_increase_in_bytes + result.weights_memory_in_bytes  # noqa
+    diff_profile = result.after_profile - result.before_profile
+    diff_from_create = result.after_profile - result.before_create
+    result.torch_peak_increase = diff_profile.torch_peak
+    result.non_torch_increase = diff_from_create.non_torch_memory
+    result.profile_time = diff_profile.timestamp
+    result.non_kv_cache_memory = result.non_torch_increase + result.torch_peak_increase + result.weights_memory  # noqa
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
@@ -2166,3 +2186,25 @@ def bind_kv_cache(
         assert len(forward_ctx.kv_cache) == len(kv_cache)
         for ve, ve_kv_cache in enumerate(kv_cache):
             forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
+
+
+def run_method(obj: Any, method: Union[str, bytes, Callable], args: Tuple[Any],
+               kwargs: Dict[str, Any]) -> Any:
+    """
+    Run a method of an object with the given arguments and keyword arguments.
+    If the method is string, it will be converted to a method using getattr.
+    If the method is serialized bytes and will be deserialized using
+    cloudpickle.
+    If the method is a callable, it will be called directly.
+    """
+    if isinstance(method, bytes):
+        func = partial(cloudpickle.loads(method), obj)
+    elif isinstance(method, str):
+        try:
+            func = getattr(obj, method)
+        except AttributeError:
+            raise NotImplementedError(f"Method {method!r} is not"
+                                      " implemented.") from None
+    else:
+        func = partial(method, obj)  # type: ignore
+    return func(*args, **kwargs)

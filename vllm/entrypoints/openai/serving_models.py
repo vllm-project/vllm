@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import pathlib
 from dataclasses import dataclass
@@ -157,24 +159,16 @@ class OpenAIServingModels:
         # This will also pre-load it for incoming requests
         try:
             await self.engine_client.add_lora(lora_request)
-        except ValueError as e:
-            # Adapter not found or lora configuration errors
-            if "No adapter found" in str(e):
-                return create_error_response(message=str(e),
-                                             err_type="NotFoundError",
-                                             status_code=HTTPStatus.NOT_FOUND)
-            else:
-                return create_error_response(
-                    message=str(e),
-                    err_type="BadRequestError",
-                    status_code=HTTPStatus.BAD_REQUEST)
         except BaseException as e:
-            # Some other unexpected problem loading the adapter, e.g. malformed
-            # input files.
-            # More detailed error messages for the user would be nicer here
+            error_type = "BadRequestError"
+            status_code = HTTPStatus.BAD_REQUEST
+            if isinstance(e, ValueError) and "No adapter found" in str(e):
+                error_type = "NotFoundError"
+                status_code = HTTPStatus.NOT_FOUND
+
             return create_error_response(message=str(e),
-                                         err_type="BadRequestError",
-                                         status_code=HTTPStatus.BAD_REQUEST)
+                                         err_type=error_type,
+                                         status_code=status_code)
 
         self.lora_requests.append(lora_request)
         logger.info("Loaded new LoRA adapter: name '%s', path '%s'", lora_name,
@@ -211,7 +205,7 @@ class OpenAIServingModels:
                for lora_request in self.lora_requests):
             return create_error_response(
                 message=
-                f"The lora adapter '{request.lora_name}' has already been"
+                f"The lora adapter '{request.lora_name}' has already been "
                 "loaded.",
                 err_type="InvalidUserInput",
                 status_code=HTTPStatus.BAD_REQUEST)

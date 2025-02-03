@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
 """An OpenVINO worker class."""
 from typing import Any, Dict, List, Optional, Tuple
 
 import openvino as ov
 import torch
 import torch.distributed
+import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.attention import get_attn_backend
@@ -361,6 +363,9 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
         blocks_to_copy: List[Tuple[int, int]],
     ) -> None:
         self.cache_engine.copy(blocks_to_copy)  # type: ignore
+
+    def get_model(self) -> nn.Module:
+        return self.model_runner.get_model()
 
     @torch.inference_mode()
     def execute_model(

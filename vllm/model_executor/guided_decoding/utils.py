@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import re
 
 
@@ -18,6 +20,13 @@ def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
                     "minimum", "maximum", "exclusiveMinimum",
                     "exclusiveMaximum", "multipleOf"
                 ]):
+            return True
+
+        # Check for array unsupported keywords
+        if obj.get("type") == "array" and any(key in obj for key in [
+                "uniqueItems", "contains", "minContains", "maxContains",
+                "minItems", "maxItems"
+        ]):
             return True
 
         # Recursively check all nested objects and arrays

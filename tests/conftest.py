@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import os
 import tempfile
@@ -244,6 +246,7 @@ def video_assets() -> _VideoAssets:
 
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
+_R = TypeVar("_R")
 
 
 class HfRunner:
@@ -929,6 +932,10 @@ class VllmRunner:
     ) -> List[float]:
         req_outputs = self.model.score(text_1, text_2)
         return [req_output.outputs.score for req_output in req_outputs]
+
+    def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
+        executor = self.model.llm_engine.model_executor
+        return executor.apply_model(func)
 
     def __enter__(self):
         return self

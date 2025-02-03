@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Separate these tests out from test_completion and test_chat, because they
 # require launching a second server with a different flag. Running both servers
 # at the same time on a single node will OOM.

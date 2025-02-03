@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Code inside this file can safely assume cuda platform, e.g. importing
 pynvml. However, it should not initialize cuda context.
 """
@@ -120,13 +121,18 @@ class CudaPlatformBase(Platform):
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
                 if envs.VLLM_USE_V1:
-                    raise NotImplementedError
+                    raise NotImplementedError(
+                        "Multi-step scheduling is not supported (and not "
+                        "needed) on VLLM V1. Please launch without "
+                        "--num-scheduler-steps.")
                 else:
                     parallel_config.worker_cls = \
                         "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
                 if envs.VLLM_USE_V1:
-                    raise NotImplementedError
+                    raise NotImplementedError(
+                        "Speculative decoding is not yet supported on VLLM V1."
+                    )
                 else:
                     parallel_config.worker_cls = \
                         "vllm.spec_decode.spec_decode_worker.create_spec_worker"
@@ -138,28 +144,6 @@ class CudaPlatformBase(Platform):
                             "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
-
-        world_size = parallel_config.world_size
-        tensor_parallel_size = parallel_config.tensor_parallel_size
-
-        from vllm.utils import (cuda_device_count_stateless,
-                                update_environment_variables)
-
-        # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
-        if "CUDA_VISIBLE_DEVICES" not in os.environ:
-            update_environment_variables({
-                "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
-            })
-
-        cuda_device_count = cuda_device_count_stateless()
-        # Use confusing message for more common TP-only case.
-        assert tensor_parallel_size <= cuda_device_count, (
-            f"please set tensor_parallel_size ({tensor_parallel_size}) "
-            f"to less than max local gpu count ({cuda_device_count})")
-
-        assert world_size <= cuda_device_count, (
-            f"please ensure that world_size ({world_size}) "
-            f"is less than than max local gpu count ({cuda_device_count})")
 
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
@@ -174,10 +158,14 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1) -> str:
+                             kv_cache_dtype, block_size, use_v1,
+                             use_mla) -> str:
         if use_v1:
             logger.info("Using Flash Attention backend on V1 engine.")
             return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+        if use_mla:
+            logger.info("Using Triton MLA backend.")
+            return "vllm.attention.backends.triton_mla.TritonMLABackend"
         if selected_backend == _Backend.FLASHINFER:
             logger.info("Using FlashInfer backend.")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"
@@ -188,7 +176,8 @@ class CudaPlatformBase(Platform):
             pass
         elif selected_backend:
             raise ValueError(
-                f"Invalid attention backend for {cls.device_name}")
+                f"Invalid attention backend for {cls.device_name}, "
+                f"with use_v1: {use_v1} use_mla: {use_mla}")
 
         target_backend = _Backend.FLASH_ATTN
         if not cls.has_device_capability(80):

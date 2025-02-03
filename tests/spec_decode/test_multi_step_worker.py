@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import random
 from typing import Dict, List
 from unittest.mock import MagicMock

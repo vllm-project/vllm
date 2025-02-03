@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
@@ -491,7 +493,7 @@ A dictionary containing placeholder ranges for each modality.
 """
 
 
-class MultiModalInputsV2(TypedDict):
+class MultiModalInputs(TypedDict):
     """
     Represents the outputs of
     :class:`vllm.multimodal.processing.BaseMultiModalProcessor`,

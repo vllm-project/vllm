@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 import pickle
 from abc import ABC, abstractmethod
@@ -7,6 +9,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
                     Optional, Type, TypeVar)
 
 import torch
+import torch.nn as nn
 from torch import is_tensor
 
 from vllm.config import VllmConfig
@@ -200,6 +203,11 @@ class ModelRunnerInputBuilderBase(ABC, Generic[T]):
   """
 
     @abstractmethod
+    def prepare(self,
+                finished_requests_ids: Optional[List[str]] = None) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def add_seq_group(self, seq_group_metadata):
         """TBA"""
         raise NotImplementedError
@@ -264,6 +272,10 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def get_model(self) -> nn.Module:
+        raise NotImplementedError
+
     def execute_model(
         self,
         model_input: T,
@@ -297,9 +309,9 @@ class ModelRunnerWrapperBase:
 
     def __init__(
         self,
-        moderl_runner: ModelRunnerBase,
+        model_runner: ModelRunnerBase,
     ) -> None:
-        self.model_runner: ModelRunnerBase = moderl_runner
+        self.model_runner: ModelRunnerBase = model_runner
 
     def __getattr__(self, attr):
         return getattr(self.model_runner, attr)

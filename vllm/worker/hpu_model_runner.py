@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 ###############################################################################
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
@@ -21,6 +23,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
 import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
 import torch
+import torch.nn as nn
 from vllm_hpu_extension.ops import LoraMask as LoraMask
 from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
                                          HabanaMemoryProfiler, format_bytes)
@@ -676,6 +679,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         msg = f"Loading model weights took in total {m.get_summary_string()}"
         logger.info(msg)
 
+    def get_model(self) -> nn.Module:
+        return self.model
+
     def _use_graphs(self, batch_size, seq_len, is_prompt):
         if self.enforce_eager:
             return False
@@ -899,7 +905,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=
-            None  # FIXME(kzawora): mutli-modality will not work here
+            None,  # FIXME(kzawora): mutli-modality will not work here
+            enable_kv_scales_calculation=False,
         )
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
@@ -1053,7 +1060,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             num_prefill_tokens=0,
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=None)
+            multi_modal_placeholder_index_maps=None,
+            enable_kv_scales_calculation=False,
+        )
         return PrepareDecodeMetadata(input_tokens=input_tokens,
                                      input_positions=input_positions,
                                      attn_metadata=attn_metadata,

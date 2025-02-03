@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 a simple demonstration of RLHF with vLLM, inspired by
 the OpenRLHF framework https://github.com/OpenRLHF/OpenRLHF .
@@ -19,7 +20,7 @@ from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
 
-from vllm import LLM, SamplingParams, configure_as_vllm_process
+from vllm import LLM, SamplingParams
 from vllm.utils import get_ip, get_open_port
 from vllm.worker.worker import Worker
 
@@ -98,12 +99,7 @@ class MyLLM(LLM):
 """
 Start the training process, here we use huggingface transformers 
 as an example to hold a model on GPU 0.
-
-It is important for all the processes outside of vLLM to call
-`configure_as_vllm_process` to set some common environment variables
-the same as vLLM workers.
 """
-configure_as_vllm_process()
 
 train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
 train_model.to("cuda:0")

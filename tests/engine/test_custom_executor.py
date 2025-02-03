@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import pytest
 
@@ -18,7 +20,7 @@ class Mock:
 class CustomUniExecutor(UniProcExecutor):
 
     def collective_rpc(self,
-                       method: str,
+                       method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
                        kwargs: Optional[Dict] = None) -> List[Any]:
@@ -51,7 +53,9 @@ def test_custom_executor(model, tmp_path):
         assert not os.path.exists(".marker")
 
         engine_args = EngineArgs(
-            model=model, distributed_executor_backend=CustomUniExecutor)
+            model=model,
+            distributed_executor_backend=CustomUniExecutor,
+        )
         engine = LLMEngine.from_engine_args(engine_args)
         sampling_params = SamplingParams(max_tokens=1)
 
