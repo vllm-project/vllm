@@ -541,10 +541,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
                  ),
 
-    # Align single entrys (within a page) so they are 256 byte aligned for 
-    # better performance, this increases the memory usage of the cache. 
-    # Currenlty this primarily affects MLA that results in non-256 byte aligned
-    # entrys.
+    # When on a Nvidia GPU aligns single entrys (within a page) so they are 256
+    # byte aligned for  better performance, this increases the memory usage of 
+    # the cache. Currently this primarily affects MLA that results in non-256
+    # byte aligned entrys. This mathches the alginment the CUDA runtime uses
+    # for all allocations. Currently this primarily affects MLA, for most other
+    # models the alignment is already naturally aligned to 256 bytes.
     "VLLM_CUDA_MEM_ALIGN_KV_CACHE":
     lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
 }
