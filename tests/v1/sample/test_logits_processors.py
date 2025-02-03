@@ -194,11 +194,14 @@ LogitsProcessorType = Callable[[List[int], torch.Tensor], torch.Tensor]
         ),
     ),
     (
-        [CopyAndIncreaseLogitProcessor(target_token_id=1, incr_value=1.0)],
+        [
+            CopyAndIncreaseLogitProcessor(target_token_id=1, incr_value=1.0),
+            CopyAndIncreaseLogitProcessor(target_token_id=1, incr_value=2.0),
+        ],
         lambda logits: validate_logits_min_max(
             logits,
             expected_min=DEFAULT_LOGIT_VALUE,
-            expected_max=DEFAULT_LOGIT_VALUE + 1.0,
+            expected_max=DEFAULT_LOGIT_VALUE + 3.0,
         ),
     ),
 ])

@@ -149,18 +149,18 @@ class Sampler(nn.Module):
                 continue
 
             logits_row = logits[seq_idx]
+            original_logits_row = logits_row
             past_tokens_ids = sampling_metadata.output_token_ids[seq_idx]
             prompt_tokens_ids = sampling_metadata.prompt_token_ids_cpu[seq_idx]
 
             for logits_processor in seq_logits_processors:
                 parameters = inspect.signature(logits_processor).parameters
                 if len(parameters) == 3:
-                    modified_logits_row = logits_processor(
-                        prompt_tokens_ids, past_tokens_ids, logits_row)
+                    logits_row = logits_processor(prompt_tokens_ids,
+                                                  past_tokens_ids, logits_row)
                 else:
-                    modified_logits_row = logits_processor(
-                        past_tokens_ids, logits_row)
+                    logits_row = logits_processor(past_tokens_ids, logits_row)
 
-            if modified_logits_row is not logits_row:
-                logits[seq_idx] = modified_logits_row
+            if logits_row is not original_logits_row:
+                logits[seq_idx] = logits_row
         return logits
