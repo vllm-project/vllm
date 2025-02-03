@@ -178,6 +178,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: IpexAttnMetadata,  # type: ignore
+        fp8_out_scale: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:

@@ -550,7 +550,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
-        fp8_out_scale: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
@@ -602,8 +601,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        q_scale, prob_scale, fp8_out_scale = fp8_comp_scales or (None, None,
-                                                                 None)
+        q_scale, prob_scale, fp8_out_scale = (None, None, None)
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
             assert value is not None
@@ -687,7 +685,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         1.0 / q_scale.item(), 1.0 / k_scale.item(),
                         1.0 / v_scale.item(), 1.0 / prob_scale.item(),
                         fp8_out_scale.item()) if (
-                            fp8_out_scale
+                            fp8_out_scale and q_scale and prob_scale
                             and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN) else None
                     out, _ = self.attn_func(
                         query,
@@ -807,7 +805,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 else:
                     out = output
                 ops.paged_attention_rocm(
-                    output[num_prefill_tokens:],
+                    out,
                     exp_sums,
                     max_logits,
                     tmp_output,
@@ -816,15 +814,18 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     value_cache,
                     self.num_kv_heads,
                     self.scale,
-                    block_tables,
-                    seq_lens,
+                    decode_meta.block_tables
+                    if self.attn_type != AttentionType.ENCODER_DECODER else
+                    decode_meta.cross_block_tables,
+                    decode_meta.seq_lens_tensor
+                    if self.attn_type != AttentionType.ENCODER_DECODER else
+                    decode_meta.encoder_seq_lens_tensor,
                     block_size,
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
                     layer._k_scale,
                     layer._v_scale,
-                    fp8_out_scale if cpa_fp8_out else None,
                     _PARTITION_SIZE_ROCM,
                 )
             else:
