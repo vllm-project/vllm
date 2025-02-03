@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 import json
 import os
@@ -7,7 +9,8 @@ from typing import Any, Dict, Optional, Type, Union
 import huggingface_hub
 from huggingface_hub import (file_exists, hf_hub_download,
                              try_to_load_from_cache)
-from huggingface_hub.utils import (EntryNotFoundError, LocalEntryNotFoundError,
+from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
+                                   LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
 from torch import nn
@@ -293,6 +296,13 @@ def get_hf_file_to_dict(file_name: str,
                     EntryNotFoundError, LocalEntryNotFoundError) as e:
                 logger.debug("File or repository not found in hf_hub_download",
                              e)
+                return None
+            except HfHubHTTPError as e:
+                logger.warning(
+                    "Cannot connect to Hugging Face Hub. Skipping file "
+                    "download for '%s':",
+                    file_name,
+                    exc_info=e)
                 return None
             file_path = Path(hf_hub_file)
 

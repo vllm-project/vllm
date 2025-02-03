@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """An example showing how to use vLLM to serve multimodal models 
 and run online serving with OpenAI client.
 

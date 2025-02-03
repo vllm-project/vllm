@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
 import math
@@ -333,10 +335,10 @@ class ModifiedWhisperEncoder(WhisperEncoder):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor,
-                                        info=UltravoxProcessingInfo,
-                                        dummy_inputs=UltravoxDummyInputsBuilder
-                                        )
+@MULTIMODAL_REGISTRY.register_processor(
+    UltravoxMultiModalProcessor,
+    info=UltravoxProcessingInfo,
+    dummy_inputs=UltravoxDummyInputsBuilder)
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     hf_to_vllm_mapper = WeightsMapper(

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Make sure ignore_eos works.
 
 Run `pytest tests/samplers/test_ignore_eos.py`.

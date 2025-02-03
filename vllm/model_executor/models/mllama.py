@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2024 the HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -48,7 +50,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SequenceData
@@ -847,7 +850,8 @@ class MllamaTextCrossAttention(nn.Module):
                     i,
                     i,
                 )
-            elif self.attn.backend in (_Backend.XFORMERS, _Backend.TORCH_SDPA):
+            elif self.attn.backend in (_Backend.XFORMERS, _Backend.ROCM_FLASH,
+                                       _Backend.TORCH_SDPA):
                 key_cache, value_cache = PagedAttention.split_kv_cache(
                     kv_cache, self.num_local_key_value_heads, self.head_dim)
                 cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
@@ -859,7 +863,8 @@ class MllamaTextCrossAttention(nn.Module):
                 raise ValueError(
                     f"Unsupported Attention backend {self.attn.backend} "
                     "enum found. Expected the Attention backend to be "
-                    "FLASH_ATTN, FLASH_ATTN_VLLM_V1, XFORMERS or TORCH_SDPA.")
+                    "FLASH_ATTN, FLASH_ATTN_VLLM_V1, "
+                    "XFORMERS or TORCH_SDPA.")
 
         # We have to call torch.sdpa for prefill when using a
         # custom cross-attention mask. Because the mask is not a
@@ -1365,8 +1370,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         # For 1) text-only prefill and decode, 2) image-present decode.
         if image_inputs is None:
             full_text_row_masked_out_mask = (
-                attn_metadata.encoder_seq_lens_tensor != 0).reshape(-1, 1).to(
-                    input_ids.device)
+                attn_metadata.encoder_seq_lens_tensor
+                != 0).reshape(-1, 1).to(input_ids.device)
             skip_cross_attention = max(attn_metadata.encoder_seq_lens) == 0
 
         # For image-present prefill.
@@ -1452,6 +1457,13 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                orig_name = name
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    logger.debug("Missing name %s, orig name %s", name,
+                                 orig_name)
+                    continue
+
                 param = params_dict.pop(name)
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
@@ -1485,14 +1497,23 @@ def convert_sparse_cross_attention_mask_to_dense(
     total_length = sum(lengths)
     total_tiles = sum([sum(tiles) for tiles in num_tiles])
     dense_mask = np.zeros(shape=(total_length, total_tiles), dtype=np.int64)
-    # A list of ranges, range[i] = [start, end] means
-    # if the i-th sample has N tiles in total, the tiles[start, end]
-    # will be used for cross-attention decoding.
+    # A list of ranges, range[i] = [start, end] means that the i-th image will
+    # use tiles[start, end] for cross-attention decoding.
     tile_range_for_decode = []
 
     seq_start = 0
     tile_start = 0
-    for masks, tiles, length in zip(sparse_mask, num_tiles, lengths):
+
+    # sparse_mask has an [] entry for each sequence that does not have images,
+    # but num_tiles does not have these entries...
+    num_tiles_idx = 0
+    for masks, length in zip(sparse_mask, lengths):
+        if len(masks) == 0:
+            # Text only
+            continue
+
+        tiles = num_tiles[num_tiles_idx]
+        num_tiles_idx += 1
         ts, td = -1, 0
         for mask, tile in zip(masks, tiles):
             if len(mask) != 2:
@@ -1512,6 +1533,7 @@ def convert_sparse_cross_attention_mask_to_dense(
         assert td != 0
         tile_range_for_decode.append((ts, ts + td))
         seq_start += length
+    assert num_tiles_idx == len(num_tiles)
 
     return dense_mask, tile_range_for_decode
 

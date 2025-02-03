@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test hashing of cache blocks.
 
 Run `pytest tests/test_cache_block_hashing.py`.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -27,7 +29,8 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -333,12 +336,156 @@ class DeepseekV3Attention(nn.Module):
         return output
 
 
+class DeepseekV3MLAAttention(nn.Module):
+    """
+    Main reference: DeepseekV2 paper, and FlashInfer Implementation
+    (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
+    
+    For more info see MLACommonImpl in: vllm/attention/backends/mla/utils.py
+    """
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        hidden_size: int,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        q_lora_rank: Optional[int],
+        kv_lora_rank: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+
+        self.num_heads = num_heads
+        tp_size = get_tensor_model_parallel_world_size()
+        assert num_heads % tp_size == 0
+        self.num_local_heads = num_heads // tp_size
+
+        self.scaling = self.qk_head_dim**-0.5
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
+
+        if self.q_lora_rank is not None:
+            self.q_a_proj = ReplicatedLinear(self.hidden_size,
+                                             self.q_lora_rank,
+                                             bias=False,
+                                             quant_config=quant_config,
+                                             prefix=f"{prefix}.q_a_proj")
+            self.q_a_layernorm = RMSNorm(self.q_lora_rank,
+                                         eps=config.rms_norm_eps)
+            self.q_b_proj = ColumnParallelLinear(q_lora_rank,
+                                                 self.num_heads *
+                                                 self.qk_head_dim,
+                                                 bias=False,
+                                                 quant_config=quant_config,
+                                                 prefix=f"{prefix}.q_b_proj")
+        else:
+            self.q_proj = ColumnParallelLinear(self.hidden_size,
+                                               self.num_heads *
+                                               self.qk_head_dim,
+                                               bias=False,
+                                               quant_config=quant_config,
+                                               prefix=f"{prefix}.q_proj")
+
+        self.kv_a_proj_with_mqa = ReplicatedLinear(
+            self.hidden_size,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_a_proj_with_mqa")
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
+                                      eps=config.rms_norm_eps)
+        self.kv_b_proj = ColumnParallelLinear(
+            self.kv_lora_rank,
+            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_b_proj")
+        self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
+                                        self.hidden_size,
+                                        bias=False,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.o_proj")
+
+        rope_scaling["rope_type"] = 'deepseek_yarn'
+        self.rotary_emb = get_rope(qk_rope_head_dim,
+                                   rotary_dim=qk_rope_head_dim,
+                                   max_position=max_position_embeddings,
+                                   base=rope_theta,
+                                   rope_scaling=rope_scaling,
+                                   is_neox_style=False)
+        if rope_scaling:
+            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
+            scaling_factor = rope_scaling["factor"]
+            mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
+            self.scaling = self.scaling * mscale * mscale
+
+        self.mla_attn = Attention(
+            num_heads=self.num_local_heads,
+            head_size=self.kv_lora_rank,
+            scale=self.scaling,
+            num_kv_heads=1,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            use_mla=True,
+            # MLA Args
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            qk_head_dim=self.qk_head_dim,
+            v_head_dim=self.v_head_dim,
+            rotary_emb=self.rotary_emb,
+            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
+            kv_b_proj=self.kv_b_proj,
+            o_proj=self.o_proj,
+        )
+
+        self.prefix = prefix
+        self.debug_layer_idx = int(self.prefix.split(".")[-2])
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        if self.q_lora_rank is not None:
+            ckq = self.q_a_proj(hidden_states)[0]
+            hidden_states_or_q_c = self.q_a_layernorm(ckq)
+        else:
+            hidden_states_or_q_c = hidden_states
+        kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+        return self.mla_attn(hidden_states_or_q_c, kv_c_normed, k_pe, kv_cache,
+                             attn_metadata)
+
+
 class DeepseekV3DecoderLayer(nn.Module):
 
     def __init__(
         self,
         config: PretrainedConfig,
         prefix: str,
+        model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
@@ -351,7 +498,11 @@ class DeepseekV3DecoderLayer(nn.Module):
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
-        self.self_attn = DeepseekV3Attention(
+        if model_config.use_mla:
+            attn_cls = DeepseekV3MLAAttention
+        else:
+            attn_cls = DeepseekV3Attention
+        self.self_attn = attn_cls(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -418,8 +569,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-# TODO(simon): check whether we support torch compile for Deepseek V3
-# @support_torch_compile
+@support_torch_compile
 class DeepseekV3Model(nn.Module):
 
     fall_back_to_pt_during_load = False
@@ -428,6 +578,7 @@ class DeepseekV3Model(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -447,6 +598,7 @@ class DeepseekV3Model(nn.Module):
             lambda prefix: DeepseekV3DecoderLayer(
                 config,
                 prefix,
+                model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
             ),

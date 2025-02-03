@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attention layer."""
 from typing import Any, Dict, List, Optional
 
@@ -41,8 +42,10 @@ class Attention(nn.Module):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         per_layer_sliding_window: Optional[int] = None,
+        use_mla: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        **extra_impl_args,
     ) -> None:
         super().__init__()
         if per_layer_sliding_window is not None:
@@ -101,13 +104,18 @@ class Attention(nn.Module):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size, dtype, kv_cache_dtype,
-                                        block_size, is_attention_free,
-                                        blocksparse_params is not None)
+        attn_backend = get_attn_backend(head_size,
+                                        dtype,
+                                        kv_cache_dtype,
+                                        block_size,
+                                        is_attention_free,
+                                        blocksparse_params is not None,
+                                        use_mla=use_mla)
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
-                             blocksparse_params, logits_soft_cap, attn_type)
+                             blocksparse_params, logits_soft_cap, attn_type,
+                             **extra_impl_args)
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
@@ -193,6 +201,10 @@ class Attention(nn.Module):
         s += f", backend={self.impl.__class__.__name__}"
         return s
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        if hasattr(self.impl, "process_weights_after_loading"):
+            self.impl.process_weights_after_loading(act_dtype)
+
 
 class MultiHeadAttention(nn.Module):
     """Multi-headed attention without any cache, used for ViT."""
@@ -210,6 +222,9 @@ class MultiHeadAttention(nn.Module):
         self.scale = scale
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+
         dtype = torch.get_default_dtype()
         attn_backend = get_attn_backend(head_size,
                                         dtype,
@@ -221,7 +236,8 @@ class MultiHeadAttention(nn.Module):
             backend = _Backend.XFORMERS
 
         self.attn_backend = backend if backend in {
-            _Backend.TORCH_SDPA, _Backend.XFORMERS
+            _Backend.TORCH_SDPA,
+            _Backend.XFORMERS,
         } else _Backend.TORCH_SDPA
 
     def forward(
@@ -231,13 +247,18 @@ class MultiHeadAttention(nn.Module):
         value: torch.Tensor,
     ) -> torch.Tensor:
         """Input shape: batch_size x seq_len x hidden_size"""
-        # TODO(Isotr0py): Use existing backend implementations and support FA2
+        # TODO(Isotr0py): Use existing backend implementations and support FA3
         bsz, q_len, _ = query.size()
         kv_len = key.size(1)
 
         query = query.view(bsz, q_len, self.num_heads, self.head_size)
         key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
         value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+
+        if (num_repeat := self.num_queries_per_kv) > 1:
+            # Handle MQA and GQA
+            key = torch.repeat_interleave(key, num_repeat, dim=2)
+            value = torch.repeat_interleave(value, num_repeat, dim=2)
 
         if self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
