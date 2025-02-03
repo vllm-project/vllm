@@ -2247,8 +2247,7 @@ def import_pynvml():
                 " version 12.0. See https://pypi.org/project/pynvml "
                 "for more information.")
         return sys.modules["pynvml"]
-
-    import importlib
+    import importlib.util
     import os
     import site
     for site_dir in site.getsitepackages():
