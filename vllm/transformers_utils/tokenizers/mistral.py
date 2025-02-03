@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
-from mistral_common.tokens.tokenizers.base import SpecialTokens
 from mistral_common.tokens.tokenizers.sentencepiece import (
     SentencePieceTokenizer)
 from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
@@ -182,6 +181,8 @@ class MistralTokenizer:
     # by the guided structured output backends.
     @property
     def all_special_tokens_extended(self) -> List[str]:
+        from mistral_common.tokens.tokenizers.base import SpecialTokens
+
         # tekken defines its own extended special tokens list
         if hasattr(self.tokenizer, "SPECIAL_TOKENS"):
             special_tokens = self.tokenizer.SPECIAL_TOKENS
@@ -295,6 +296,7 @@ class MistralTokenizer:
         return encoded.tokens
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
+        from mistral_common.tokens.tokenizers.base import SpecialTokens
         if self.is_tekken:
             tokens = [
                 t for t in tokens
@@ -366,6 +368,8 @@ class MistralTokenizer:
         ids: List[int],
         skip_special_tokens: bool = True,
     ) -> List[str]:
+        from mistral_common.tokens.tokenizers.base import SpecialTokens
+
         # TODO(Patrick) - potentially allow special tokens to not be skipped
         assert (
             skip_special_tokens
