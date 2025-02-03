@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from contextlib import nullcontext
 from typing import cast
 from unittest.mock import MagicMock

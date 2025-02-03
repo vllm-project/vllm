@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Test the AsyncLLMEngine with multi-step-decoding
 from typing import List, Optional
 

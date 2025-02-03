@@ -45,8 +45,12 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                  b_scale_group_shape == GroupShape{128, 128} &&
                  a.dtype() == torch::kFloat8_e4m3fn &&
                  b.dtype() == torch::kFloat8_e4m3fn),
-                "cutlass_scaled_mm only supports datatype float8_e4m3fn and "
-                "group shapes 1x128 for A and 128x128 for B");
+                "cutlass_scaled_mm only supports datatype float8_e4m3fn.\n"
+                "a_scale_group_shape must be [1, 128]. Got: [",
+                a_scale_group_shape[0], ", ", a_scale_group_shape[1],
+                "]\n"
+                "b_scale_group_shape must be [128, 128]. Got: [",
+                b_scale_group_shape[0], ", ", b_scale_group_shape[1], "]");
     TORCH_CHECK(!bias, "Bias not yet supported blockwise scaled_mm");
 
     vllm::cutlass_scaled_mm_blockwise_sm90_fp8(c, a, b, a_scales, b_scales);

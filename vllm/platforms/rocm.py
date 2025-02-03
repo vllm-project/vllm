@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from functools import lru_cache
 from typing import TYPE_CHECKING, Dict, List, Optional
