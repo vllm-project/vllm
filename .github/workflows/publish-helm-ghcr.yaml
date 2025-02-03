@@ -39,4 +39,4 @@ jobs:
 
       - name: helm push
         # if: ${{ github.event_name == 'push' }}
-        run:  helm push /home/runner/work/vllm/vllm/"$CHART_NAME"-"${{ env.CHART_TAG }}".tgz oci://ghcr.io/${{ github.repository_owner }}
+        run:  helm push /home/runner/work/vllm/vllm/$CHART_NAME-${{ env.CHART_TAG }}.tgz oci://ghcr.io/${{ github.repository_owner }}
