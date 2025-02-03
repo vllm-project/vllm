@@ -32,7 +32,7 @@ jobs:
         run:  echo ${{ secrets.GITHUB_TOKEN }} | helm registry login ghcr.io -u $ --password-stdin
 
       - name: get helm chart version
-        run:  export CHART_TAG="$(helm show chart examples/online_serving/chart-helm | awk '/version/ {print $2}')"
+        run:  echo "CHART_TAG=$(helm show chart examples/online_serving/chart-helm | awk '/version/ {print $2}')" >> $GITHUB_ENV
 
       - name: helm package
         run:  helm package examples/online_serving/chart-helm --version "$CHART_TAG"
@@ -41,4 +41,4 @@ jobs:
         # if: ${{ github.event_name == 'push' }}
         run:  |
           printenv
-          helm push $CHART_NAME-$CHART_TAG.tgz oci://ghcr.io/${{ github.repository_owner }}
+          helm push $CHART_NAME-${{ env.CHART_TAG }}.tgz oci://ghcr.io/${{ github.repository_owner }}
