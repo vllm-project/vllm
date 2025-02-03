@@ -59,6 +59,8 @@ def encode_tokens(
         return tokenizer.encode(text)
     else:
         # MistralTokenizer
+        # avoid importing MistralTokenizer in the type hint,
+        # so that users who use non-mistral models will not be affected.
         return tokenizer.tokenizer.encode(text,
                                           bos=add_special_tokens,
                                           eos=add_special_tokens)
@@ -192,6 +194,8 @@ def get_tokenizer(
             FutureWarning,
             stacklevel=2)
     if tokenizer_mode == "mistral":
+        # lazy import so that users who use
+        # non-mistral models will not be affected.
         from vllm.transformers_utils.tokenizers import MistralTokenizer
         tokenizer = MistralTokenizer.from_pretrained(str(tokenizer_name),
                                                      revision=revision)
