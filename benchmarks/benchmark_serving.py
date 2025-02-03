@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 r"""Benchmark online serving throughput.
 
 On the server side, run one of the following commands:
@@ -926,8 +927,8 @@ def main(args: argparse.Namespace):
                     )
 
         # Traffic
-        result_json["request_rate"] = (
-            args.request_rate if args.request_rate < float("inf") else "inf")
+        result_json["request_rate"] = (args.request_rate if args.request_rate
+                                       < float("inf") else "inf")
         result_json["burstiness"] = args.burstiness
         result_json["max_concurrency"] = args.max_concurrency
 

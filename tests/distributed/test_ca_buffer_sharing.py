@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # can only run on machines with p2p access across GPUs
 # can only run with torchrun:
 # torchrun --nproc_per_node=2 tests/distributed/test_ca_buffer_sharing.py

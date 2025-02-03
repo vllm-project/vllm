@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests whether Marlin models can be loaded from the autogptq config.
 
 Run `pytest tests/quantization/test_configs.py --forked`.

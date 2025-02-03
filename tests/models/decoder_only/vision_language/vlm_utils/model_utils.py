@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Common utility functions relating to different models that are useful
 for manipulating the input / output of HF & vLLM test runners, which are
 typically specific to a small subset of models.
@@ -491,6 +492,17 @@ def mantis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                 tokenizer.convert_tokens_to_ids("<|eot_id|>"),
             ],
         )
+
+    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
+
+    return hf_model
+
+
+def minicpmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    orig_generate = hf_model.model.generate
+
+    def _generate(self, *args, **kwargs):
+        return orig_generate(*args, decode_text=False, **kwargs)
 
     hf_model.model.generate = types.MethodType(_generate, hf_model.model)
 

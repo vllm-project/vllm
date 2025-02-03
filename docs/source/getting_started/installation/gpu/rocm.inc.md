@@ -2,6 +2,10 @@
 
 vLLM supports AMD GPUs with ROCm 6.2.
 
+:::{attention}
+There are no pre-built wheels for this device, so you must either use the pre-built Docker image or build vLLM from source.
+:::
+
 ## Requirements
 
 - GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100)
@@ -12,14 +16,6 @@ vLLM supports AMD GPUs with ROCm 6.2.
 ### Pre-built wheels
 
 Currently, there are no pre-built ROCm wheels.
-
-However, the [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
-docker image designed for validating inference performance on the AMD Instinct™ MI300X accelerator.
-
-```{tip}
-Please check [LLM inference performance validation on AMD Instinct MI300X](https://rocm.docs.amd.com/en/latest/how-to/performance-validation/mi300x/vllm-benchmark.html)
-for instructions on how to use this prebuilt docker image.
-```
 
 ### Build wheel from source
 
@@ -47,9 +43,9 @@ for instructions on how to use this prebuilt docker image.
     cd ../..
     ```
 
-    ```{note}
-    - If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
-    ```
+    :::{note}
+    If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
+    :::
 
 2. Optionally, if you choose to use CK flash attention, you can install [flash attention for ROCm](https://github.com/ROCm/flash-attention/tree/ck_tile)
 
@@ -67,9 +63,9 @@ for instructions on how to use this prebuilt docker image.
     cd ..
     ```
 
-    ```{note}
-    - You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
-    ```
+    :::{note}
+    You might need to downgrade the "ninja" version to 1.10 it is not used when compiling flash-attention-2 (e.g. `pip install ninja==1.10.2.4`)
+    :::
 
 3. Build vLLM. For example, vLLM on ROCM 6.2 can be built with the following steps:
 
@@ -95,23 +91,30 @@ for instructions on how to use this prebuilt docker image.
 
     This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
 
-    ```{tip}
+<!--- pyml disable-num-lines 5 ul-indent-->
+    :::{tip}
     - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
     - Triton flash attention does not currently support sliding window attention. If using half precision, please use CK flash-attention for sliding window support.
     - To use CK flash-attention or PyTorch naive attention, please use this flag `export VLLM_USE_TRITON_FLASH_ATTN=0` to turn off triton flash attention.
     - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
-    ```
+    :::
 
-```{tip}
+:::{tip}
 - For MI300x (gfx942) users, to achieve optimal performance, please refer to [MI300x tuning guide](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html) for performance optimization and tuning tips on system and workflow level.
   For vLLM, please refer to [vLLM performance optimization](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/workload.html#vllm-performance-optimization).
-```
+:::
 
 ## Set up using Docker
 
 ### Pre-built images
 
-Currently, there are no pre-built ROCm images.
+The [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
+docker image designed for validating inference performance on the AMD Instinct™ MI300X accelerator.
+
+:::{tip}
+Please check [LLM inference performance validation on AMD Instinct MI300X](https://rocm.docs.amd.com/en/latest/how-to/performance-validation/mi300x/vllm-benchmark.html)
+for instructions on how to use this prebuilt docker image.
+:::
 
 ### Build image from source
 

@@ -324,6 +324,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("cutlass_scaled_mm_supports_fp8(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
 
+  // Check if cutlass scaled_mm supports block quantization (used by DeepSeekV3)
+  ops.def(
+      "cutlass_scaled_mm_supports_block_fp8(int cuda_device_capability) -> "
+      "bool");
+  ops.impl("cutlass_scaled_mm_supports_block_fp8",
+           &cutlass_scaled_mm_supports_fp8);
+
   // Check if cutlass sparse scaled_mm is supported for CUDA devices of the
   // given capability
   ops.def(
@@ -474,6 +481,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                        float k_scale, float v_scale) -> ()");
   cache_ops.impl("reshape_and_cache_flash_full_cuda", torch::kCUDA,
                  &reshape_and_cache_flash_full_cuda);
+
+  // Concat kv_c and k_pe and cache them.
+  cache_ops.def(
+      "concat_and_cache_mla(Tensor kv_c, Tensor k_pe,"
+      "                     Tensor! kv_cache,"
+      "                     Tensor slot_mapping,"
+      "                     str kv_cache_dtype,"
+      "                     Tensor scale) -> ()");
+  cache_ops.impl("concat_and_cache_mla", torch::kCUDA, &concat_and_cache_mla);
 
   // Convert the key and value cache to fp8 data type.
   cache_ops.def(
