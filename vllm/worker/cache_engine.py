@@ -80,10 +80,13 @@ class CacheEngine:
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
 
+        # We assume the cache shape is (TOTAL_PAGES, PAGE_SIZE, entry_shape...)
         entry_shape = kv_cache_shape[2:]
         entry_size = np.prod(entry_shape)
 
         # Align entries so they are 256 byte aligned for better performance
+        # Primarily targets MLA as this typically only ends up having entries
+        # be 128 byte aligned.
         if current_platform.is_cuda() and envs.VLLM_CUDA_MEM_ALIGN_KV_CACHE:
             alloc_entry_size = align_to_256bytes(entry_size, self.dtype)
         else:
@@ -99,9 +102,13 @@ class CacheEngine:
                                          pin_memory=pin_memory,
                                          device=device)
 
+            # If we allocated with padding for alignment reasons truncate the
+            # shape while preserving the aligned stride
             if alloc_entry_size != entry_size:
                 layer_kv_cache = layer_kv_cache[..., :entry_size]
 
+            # view back to (TOTAL_PAGES, PAGE_SIZE, entry_shape...) for cases
+            # when entry_shape is higher than 1D
             kv_cache.append(layer_kv_cache.view(kv_cache_shape))
         return kv_cache
 
