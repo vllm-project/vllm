@@ -8,7 +8,7 @@ on:
   pull_request:
 env:
   CHART_NAME: vllm-helm-chart
-  CHART_TAG: $(cat examples/online_serving/chart-helm/Chart.yaml | awk '/version:/ {print $2}')
+  CHART_TAG: cat examples/online_serving/chart-helm/Chart.yaml | awk '/version:/ {print $2}'
 
 jobs:
   package-and-publish-chart-helm:
