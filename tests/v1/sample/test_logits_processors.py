@@ -91,6 +91,7 @@ def _create_default_sampling_metadata(
 
 
 class IncreaseLogitProcessor:
+    """Increase the logit of a specific token."""
 
     def __init__(self, target_token_id: int, incr_value: float):
         self.target_token_id = target_token_id
@@ -103,6 +104,7 @@ class IncreaseLogitProcessor:
 
 
 class IncreaseLogitProcessorWithPromptParams:
+    """Increase the logit of a specific token. Receive prompt token ids."""
 
     def __init__(self, target_token_id: int, incr_value: float):
         self.target_token_id = target_token_id
@@ -114,6 +116,18 @@ class IncreaseLogitProcessorWithPromptParams:
         logits[self.target_token_id] += self.incr_value
         return logits
 
+class CopyAndIncreaseLogitProcessor:
+    """Increase the logit of a specific token. Receive prompt token ids."""
+
+    def __init__(self, target_token_id: int, incr_value: float):
+        self.target_token_id = target_token_id
+        self.incr_value = incr_value
+
+    def __call__(self, output_token_ids: List[int],
+                 logits: torch.Tensor) -> torch.Tensor:
+        copied_logits = logits.clone()
+        copied_logits[self.target_token_id] += self.incr_value
+        return copied_logits
 
 def validate_logits_min_max(logits: torch.Tensor, expected_min: float,
                             expected_max: float):
@@ -175,6 +189,14 @@ LogitsProcessorType = Callable[[List[int], torch.Tensor], torch.Tensor]
             logits,
             expected_min=DEFAULT_LOGIT_VALUE,
             expected_max=DEFAULT_LOGIT_VALUE + 2.0,
+        ),
+    ),
+    (
+        [CopyAndIncreaseLogitProcessor(target_token_id=1, incr_value=1.0)],
+        lambda logits: validate_logits_min_max(
+            logits,
+            expected_min=DEFAULT_LOGIT_VALUE,
+            expected_max=DEFAULT_LOGIT_VALUE + 1.0,
         ),
     ),
 ])
