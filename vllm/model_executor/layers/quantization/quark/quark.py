@@ -127,7 +127,8 @@ class QuarkConfig(QuantizationConfig):
             # to keep qkv consistency.
             q_proj_q_config = cast(Dict[str, Any],
                                    layer_quant_config.get("*q_proj"))
-            q_proj_q_config["output_tensors"] = None
+            if q_proj_q_config is not None:
+                q_proj_q_config["output_tensors"] = None
 
         return cls(quant_config=config,
                    kv_cache_group=kv_cache_group,
