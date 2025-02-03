@@ -1,10 +1,9 @@
 from openai import OpenAI
-from openai.types.audio import TranscriptionCreateParams
-from pathlib import Path
-import io
 
-mary_had_lamb = Path('/home/varun/.cache/vllm/assets/vllm_public_assets/mary_had_lamb.ogg')
-winning_call = Path('/home/varun/.cache/vllm/assets/vllm_public_assets/winning_call.ogg')
+from vllm.assets.audio import AudioAsset
+
+mary_had_lamb = AudioAsset('mary_had_lamb').get_asset_path()
+winning_call = AudioAsset('winning_call').get_asset_path()
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
@@ -15,10 +14,9 @@ client = OpenAI(
 )
 with open(str(mary_had_lamb), "rb") as f:
     transcription = client.audio.transcriptions.create(
-                                                    file=f,
-                                                    model="openai/whisper-large-v3",
-                                                    language="en",
-                                                    prompt="<|startoftranscript|>",
-                                                    response_format="text",
-                                                    temperature=0.0) 
+        file=f,
+        model="openai/whisper-large-v3",
+        language="en",
+        response_format="text",
+        temperature=0.0)
     print("transcription result:", transcription)

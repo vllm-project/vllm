@@ -3,13 +3,12 @@
 import re
 import time
 from argparse import Namespace
-from os import PathLike
-from typing import Any, Dict, List, Literal, Optional, Union, TypeAlias, TYPE_CHECKING, Tuple, Mapping
+from typing import Any, Dict, List, Literal, Optional, TypeAlias, Union
 
 import torch
+from fastapi import UploadFile
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Annotated
-from fastapi import UploadFile
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.logger import init_logger
@@ -1337,17 +1336,20 @@ class UnloadLoraAdapterRequest(BaseModel):
     lora_name: str
     lora_int_id: Optional[int] = Field(default=None)
 
+
 ## Protocols for Audio
-AudioResponseFormat: TypeAlias = Literal["json", "text", "srt", "verbose_json", "vtt"]
+AudioResponseFormat: TypeAlias = Literal["json", "text", "srt", "verbose_json",
+                                         "vtt"]
+
 
 class TranscriptionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     #https://platform.openai.com/docs/api-reference/audio/createTranscription
 
-    file: UploadFile 
+    file: UploadFile
     """
-    The audio file object (not file name) to transcribe, in one of these formats:
-    flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, or webm.
+    The audio file object (not file name) to transcribe, in one of these
+    formats: flac, mp3, mp4, mpeg, mpga, m4a, ogg, wav, or webm.
     """
 
     model: str
@@ -1358,8 +1360,8 @@ class TranscriptionRequest(OpenAIBaseModel):
     """The language of the input audio.
 
     Supplying the input language in
-    [ISO-639-1](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) format will
-    improve accuracy and latency.
+    [ISO-639-1](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) format
+    will improve accuracy and latency.
     """
 
     prompt: str = Field(default="")
@@ -1376,23 +1378,24 @@ class TranscriptionRequest(OpenAIBaseModel):
     `verbose_json`, or `vtt`.
     """
 
-    ## TODO (varun) : Support if set to 0, certain thresholds are met !! 
+    ## TODO (varun) : Support if set to 0, certain thresholds are met !!
     temperature: float = Field(default=0.0)
     """The sampling temperature, between 0 and 1.
 
-    Higher values like 0.8 will make the output more random, while lower values like
-    0.2 will make it more focused and deterministic. If set to 0, the model will use
-    [log probability](https://en.wikipedia.org/wiki/Log_probability) to
-    automatically increase the temperature until certain thresholds are hit.
+    Higher values like 0.8 will make the output more random, while lower values
+    like 0.2 will make it more focused / deterministic. If set to 0, the model
+    will use [log probability](https://en.wikipedia.org/wiki/Log_probability)
+    to automatically increase the temperature until certain thresholds are hit.
     """
 
-    timestamp_granularities: List[Literal["word", "segment"]] = Field(alias="timestamp_granularities[]", default=[])
+    timestamp_granularities: List[Literal["word", "segment"]] = Field(
+        alias="timestamp_granularities[]", default=[])
     """The timestamp granularities to populate for this transcription.
 
     `response_format` must be set `verbose_json` to use timestamp granularities.
-    Either or both of these options are supported: `word`, or `segment`. Note: There
-    is no additional latency for segment timestamps, but generating word timestamps
-    incurs additional latency.
+    Either or both of these options are supported: `word`, or `segment`. Note:
+    There is no additional latency for segment timestamps, but generating word
+    timestamps incurs additional latency.
     """
 
     # Default sampling parameters for transcription requests.
@@ -1414,16 +1417,15 @@ class TranscriptionRequest(OpenAIBaseModel):
             temperature = default_sampling_params.get(
                 "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
 
-        # TODO (varun) : ATM the max_tokens are set to the max-model-len - len(prompt_ids).
-        # Tbis makes sense. but is this okay ?
-        return SamplingParams.from_optional(
-            temperature=temperature,
-            max_tokens=max_tokens)
+        return SamplingParams.from_optional(temperature=temperature,
+                                            max_tokens=max_tokens)
+
 
 # Transcription response objects
 class TranscriptionResponse(OpenAIBaseModel):
     text: str
     """The transcribed text."""
+
 
 class TranscriptionWord(OpenAIBaseModel):
     end: float
@@ -1434,6 +1436,7 @@ class TranscriptionWord(OpenAIBaseModel):
 
     word: str
     """The text content of the word."""
+
 
 class TranscriptionSegment(OpenAIBaseModel):
     id: int
@@ -1457,8 +1460,8 @@ class TranscriptionSegment(OpenAIBaseModel):
     no_speech_prob: float
     """Probability of no speech in the segment.
 
-    If the value is higher than 1.0 and the `avg_logprob` is below -1, consider this
-    segment silent.
+    If the value is higher than 1.0 and the `avg_logprob` is below -1, consider
+    this segment silent.
     """
 
     seek: int
@@ -1476,6 +1479,7 @@ class TranscriptionSegment(OpenAIBaseModel):
     tokens: List[int]
     """Array of token IDs for the text content."""
 
+
 class TranscriptionResponseVerbose(OpenAIBaseModel):
     duration: str
     """The duration of the input audio."""
@@ -1491,4 +1495,3 @@ class TranscriptionResponseVerbose(OpenAIBaseModel):
 
     words: Optional[List[TranscriptionWord]] = None
     """Extracted words and their corresponding timestamps."""
-    

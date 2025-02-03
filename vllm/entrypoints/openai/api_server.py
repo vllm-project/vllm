@@ -14,10 +14,10 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncIterator, Dict, Optional, Set, Tuple, Union, List, Annotated
+from typing import Annotated, AsyncIterator, Dict, Optional, Set, Tuple, Union
 
 import uvloop
-from fastapi import APIRouter, FastAPI, HTTPException, Request, Form
+from fastapi import APIRouter, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -58,11 +58,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ScoreRequest, ScoreResponse,
                                               TokenizeRequest,
                                               TokenizeResponse,
-                                              UnloadLoraAdapterRequest,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
-                                              AudioResponseFormat,
-                                              )
+                                              UnloadLoraAdapterRequest)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -74,7 +72,8 @@ from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
 from vllm.entrypoints.openai.serving_score import OpenAIServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
-from vllm.entrypoints.openai.serving_transcription import OpenAIServingTranscription
+from vllm.entrypoints.openai.serving_transcription import (
+    OpenAIServingTranscription)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import with_cancellation
 from vllm.logger import init_logger
@@ -308,6 +307,7 @@ def score(request: Request) -> Optional[OpenAIServingScores]:
 def tokenization(request: Request) -> OpenAIServingTokenization:
     return request.app.state.openai_serving_tokenization
 
+
 def transcription(request: Request) -> OpenAIServingTranscription:
     return request.app.state.openai_serving_transcription
 
@@ -503,9 +503,11 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
 
     return await create_score(request, raw_request)
 
+
 @router.post("/v1/audio/transcriptions")
 @with_cancellation
-async def create_transcriptions(request: Annotated[TranscriptionRequest, Form()],
+async def create_transcriptions(request: Annotated[TranscriptionRequest,
+                                                   Form()],
                                 raw_request: Request):
 
     audio_data = await request.file.read()
@@ -515,7 +517,8 @@ async def create_transcriptions(request: Annotated[TranscriptionRequest, Form()]
         return base(raw_request).create_error_response(
             message="The model does not support Transcriptions API")
 
-    generator = await handler.create_transcription(audio_data, request, raw_request)
+    generator = await handler.create_transcription(audio_data, request,
+                                                   raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
@@ -713,7 +716,6 @@ async def init_app_state(
     state: State,
     args: Namespace,
 ) -> None:
-
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
     else:
