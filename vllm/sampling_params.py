@@ -182,7 +182,7 @@ class SamplingParams(
     min_p: float = 0.0
     ppl_measurement: bool = False
     future_context: Optional[List[int]] = None
-    cntr: Optional[int] = None
+    cntr: Optional[List[int]] = None
     seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = None
     stop_token_ids: Optional[List[int]] = None
