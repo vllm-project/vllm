@@ -986,6 +986,9 @@ class ModelConfig:
 
     @property
     def use_mla(self) -> bool:
+        if not self.is_deepseek_mla or envs.VLLM_MLA_DISABLE:
+            return False
+
         if self.quantization is not None and self.quantization not in [\
             "fp8", "compressed-tensors"]:
             logger.warning(
@@ -1012,8 +1015,7 @@ class ModelConfig:
                         quant_config)
                     return False
 
-        use_mla = (self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE)
-        return use_mla
+        return True
 
     @property
     def supported_runner_types(self) -> Set[RunnerType]:
