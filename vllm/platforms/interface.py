@@ -150,7 +150,7 @@ class Platform:
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     def is_sleep_mode_available(self) -> bool:
-        return self._enum == PlatformEnum.CUDA
+        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,

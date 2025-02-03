@@ -386,7 +386,8 @@ class ModelConfig:
     `--generation-config vllm`, only the override parameters are used.
     When specified via CLI, the argument must be a valid JSON string."""
     enable_sleep_mode: bool = False
-    """Enable sleep mode for the engine (only cuda platform is supported)."""
+    """Enable sleep mode for the engine (only cuda and
+    hip platforms are supported)."""
     model_impl: Union[str, ModelImpl] = ModelImpl.AUTO.value
     """Which implementation of the model to use:\n
     - "auto" will try to use the vLLM implementation, if it exists, and fall
