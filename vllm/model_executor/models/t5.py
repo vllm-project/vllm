@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Adapted from
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py
 # Copyright 2018 Mesh TensorFlow authors, T5 Authors and HuggingFace Inc. team.
@@ -905,8 +906,8 @@ class T5ForConditionalGeneration(nn.Module):
             if ("encoder.embed_tokens.weight" in name
                     or "decoder.embed_tokens.weight" in name
                     or "lm_head.weight" in name):
-                assert (shared_embedding_weight is
-                        None), "Conflicting embedding weights."
+                assert (shared_embedding_weight
+                        is None), "Conflicting embedding weights."
                 shared_embedding_weight = loaded_weight
             else:
                 # Skip the specific downstream task weight.
