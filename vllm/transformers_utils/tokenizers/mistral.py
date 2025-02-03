@@ -13,6 +13,9 @@ from vllm.logger import init_logger
 from vllm.utils import is_list_of
 
 if TYPE_CHECKING:
+    # make sure `mistral_common` is lazy imported,
+    # so that users who only use non-mistral models
+    # will not be bothered by the dependency.
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     from mistral_common.tokens.tokenizers.mistral import (
         MistralTokenizer as PublicMistralTokenizer)
