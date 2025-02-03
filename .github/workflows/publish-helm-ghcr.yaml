@@ -35,9 +35,7 @@ jobs:
         run:  export CHART_TAG="$(helm show chart . | awk '/version/ {print $2}')"
 
       - name: helm package
-        run:  |
-          echo $CHART_TAG
-          helm package examples/online_serving/chart-helm --version $CHART_TAG
+        run:  helm package examples/online_serving/chart-helm --version "$CHART_TAG"
 
       - name: helm push
         if: ${{ github.event_name == 'push' }}
