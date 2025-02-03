@@ -5,20 +5,24 @@ import os
 import warnings
 from pathlib import Path
 from types import MethodType
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import huggingface_hub
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
-                          PreTrainedTokenizerFast)
+                          PreTrainedTokenizerBase, PreTrainedTokenizerFast)
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import make_async
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.transformers_utils.tokenizers import MistralTokenizer
+else:
+    MistralTokenizer = None
 
 AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
                      MistralTokenizer]
@@ -47,13 +51,14 @@ def encode_tokens(
     Backend-agnostic equivalent of HF's
     :code:`tokenizer.encode(text, add_special_tokens=...)`.
     """
-    if isinstance(tokenizer, MistralTokenizer):
-        return tokenizer.tokenizer.encode(text,
-                                          bos=add_special_tokens,
-                                          eos=add_special_tokens)
-    elif add_special_tokens is not None:
+    if isinstance(tokenizer, PreTrainedTokenizerBase):
+        # HF add_special_tokens is True by default
+        if add_special_tokens is not None:
+            return tokenizer.encode(text,
+                                    add_special_tokens=add_special_tokens)
+        return tokenizer.encode(text)
+    else:
         return tokenizer.encode(text, add_special_tokens=add_special_tokens)
-    return tokenizer.encode(text)
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
@@ -184,6 +189,7 @@ def get_tokenizer(
             FutureWarning,
             stacklevel=2)
     if tokenizer_mode == "mistral":
+        from vllm.transformers_utils.tokenizers import MistralTokenizer
         tokenizer = MistralTokenizer.from_pretrained(str(tokenizer_name),
                                                      revision=revision)
     else:
