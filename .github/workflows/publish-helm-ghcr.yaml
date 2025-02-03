@@ -40,5 +40,5 @@ jobs:
       - name: helm push
         # if: ${{ github.event_name == 'push' }}
         run:  |
-          printenv CHART_TAG
+          printenv
           helm push $CHART_NAME-$CHART_TAG.tgz oci://ghcr.io/${{ github.repository_owner }}
