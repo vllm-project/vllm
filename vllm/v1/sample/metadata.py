@@ -35,4 +35,4 @@ class SamplingMetadata:
     stop_token_ids: List[Set[int]]
 
     logits_processors: List[Optional[List[LogitsProcessor]]]
-    prompt_token_ids_cpu: List[torch.Tensor]
+    prompt_token_ids_cpu: List[List[int]]
