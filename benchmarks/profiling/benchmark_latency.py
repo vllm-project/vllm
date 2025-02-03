@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Benchmark the latency of processing a single batch of requests."""
 import argparse
 import dataclasses
