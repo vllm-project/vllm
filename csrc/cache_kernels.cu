@@ -212,9 +212,9 @@ __global__ void reshape_and_cache_flash_kernel(
     cache_t* __restrict__ value_cache,   // [num_blocks, block_size, num_heads,
                                          // head_size]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-    const int block_stride, const int key_stride, const int value_stride,
-    const int num_heads, const int head_size, const int block_size,
-    const float* k_scale, const float* v_scale) {
+    const int block_stride, const int entry_stride, const int key_stride,
+    const int value_stride, const int num_heads, const int head_size,
+    const int block_size, const float* k_scale, const float* v_scale) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   // NOTE: slot_idx can be -1 if the token is padded
@@ -230,7 +230,7 @@ __global__ void reshape_and_cache_flash_kernel(
     const int head_idx = i / head_size;
     const int head_offset = i % head_size;
     const int64_t tgt_key_value_idx = block_idx * block_stride +
-                                      block_offset * num_heads * head_size +
+                                      block_offset * entry_stride +
                                       head_idx * head_size + head_offset;
     scalar_t tgt_key = key[src_key_idx];
     scalar_t tgt_value = value[src_value_idx];
@@ -254,6 +254,7 @@ __global__ void concat_and_cache_mla_kernel(
                                      // + pe_dim)]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int block_stride,                    //
+    const int entry_stride,                    //
     const int kv_c_stride,                     //
     const int k_pe_stride,                     //
     const int kv_lora_rank,                    //
@@ -274,9 +275,8 @@ __global__ void concat_and_cache_mla_kernel(
                   int src_stride, int dst_stride, int size, int offset) {
     for (int i = threadIdx.x; i < size; i += blockDim.x) {
       const int64_t src_idx = token_idx * src_stride + i;
-      const int64_t dst_idx = block_idx * block_stride +
-                              block_offset * (kv_lora_rank + pe_dim) + i +
-                              offset;
+      const int64_t dst_idx =
+          block_idx * block_stride + block_offset * entry_stride + i + offset;
       if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
         dst[dst_idx] = src[src_idx];
       } else {
@@ -338,16 +338,16 @@ void reshape_and_cache(
 // KV_T is the stored data type of kv-cache.
 // CACHE_T is the data type of key and value tensors.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_RESHAPE_AND_CACHE_FLASH(KV_T, CACHE_T, KV_DTYPE)         \
-  vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE>       \
-      <<<grid, block, 0, stream>>>(                                   \
-          reinterpret_cast<KV_T*>(key.data_ptr()),                    \
-          reinterpret_cast<KV_T*>(value.data_ptr()),                  \
-          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
-          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
-          slot_mapping.data_ptr<int64_t>(), block_stride, key_stride, \
-          value_stride, num_heads, head_size, block_size,             \
-          reinterpret_cast<const float*>(k_scale.data_ptr()),         \
+#define CALL_RESHAPE_AND_CACHE_FLASH(KV_T, CACHE_T, KV_DTYPE)           \
+  vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE>         \
+      <<<grid, block, 0, stream>>>(                                     \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                      \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                    \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),             \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),           \
+          slot_mapping.data_ptr<int64_t>(), block_stride, entry_stride, \
+          key_stride, value_stride, num_heads, head_size, block_size,   \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),           \
           reinterpret_cast<const float*>(v_scale.data_ptr()));
 
 void reshape_and_cache_flash(
@@ -377,6 +377,7 @@ void reshape_and_cache_flash(
   int key_stride = key.stride(0);
   int value_stride = value.stride(0);
   int block_stride = key_cache.stride(0);
+  int entry_stride = key_cache.stride(1);
   TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
 
   dim3 grid(num_tokens);
@@ -391,14 +392,14 @@ void reshape_and_cache_flash(
 // KV_T is the stored data type of kv-cache.
 // CACHE_T is the data type of key and value tensors.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)             \
-  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>           \
-      <<<grid, block, 0, stream>>>(                                    \
-          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                    \
-          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                    \
-          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),             \
-          slot_mapping.data_ptr<int64_t>(), block_stride, kv_c_stride, \
-          k_pe_stride, kv_lora_rank, pe_dim, block_size,               \
+#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)              \
+  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>            \
+      <<<grid, block, 0, stream>>>(                                     \
+          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                     \
+          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                     \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),              \
+          slot_mapping.data_ptr<int64_t>(), block_stride, entry_stride, \
+          kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,   \
           reinterpret_cast<const float*>(scale.data_ptr()));
 
 void concat_and_cache_mla(
@@ -428,6 +429,7 @@ void concat_and_cache_mla(
   int kv_c_stride = kv_c.stride(0);
   int k_pe_stride = k_pe.stride(0);
   int block_stride = kv_cache.stride(0);
+  int entry_stride = kv_cache.stride(1);
 
   dim3 grid(num_tokens);
   dim3 block(std::min(kv_lora_rank, 512));
