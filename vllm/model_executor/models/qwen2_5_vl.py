@@ -763,14 +763,16 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
 
         return hf_processor
 
-    def get_image_processor(self,
-                            *,
-                            min_pixels: Optional[int] = None,
-                            max_pixels: Optional[int] = None,
-                            fps: Optional[float] = 2.0):
-        hf_processor = self.get_hf_processor(min_pixels=min_pixels,
-                                             max_pixels=max_pixels,
-                                             fps=fps)
+    def get_image_processor(
+        self,
+        *,
+        min_pixels: Optional[int] = None,
+        max_pixels: Optional[int] = None,
+    ) -> Qwen2_5_VLImageProcessor:
+        hf_processor = self.get_hf_processor(
+            min_pixels=min_pixels,
+            max_pixels=max_pixels,
+        )
         image_processor = hf_processor.image_processor  # type: ignore
         assert isinstance(image_processor, Qwen2_5_VLImageProcessor)
         return image_processor
