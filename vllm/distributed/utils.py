@@ -280,24 +280,6 @@ def get_row_parallel_partition_spec():
 
 def shard_spmd(data, mesh, partition_spec, show_visual=False):
     assert isinstance(data, torch.Tensor), "Object is not an torch.Tensor"
-    # xs.mark_sharding(data, mesh, partition_spec)
-    xm.mark_step()
-    logger.info(f"hosseins: shard_spmd() -> [{type(data)=}]")
-    # sharding = torch_xla._XLAC._get_xla_sharding_spec(data)
-    # logger.info(f"hosseins: shard_spmd() -> [{sharding=}]")
-
-    if show_visual:
-        logger.info("hosseins: after sharding param")
-        generated_table = visualize_tensor_sharding(data, use_color=False)
-
-
-def shard_spmd(data, mesh, partition_spec, show_visual=False):
-    assert isinstance(data, torch.Tensor), "Object is not an torch.Tensor"
-    # mesh_shape = (len(device_ids), )
-    # axis_names = "('axis', )" # string version of axis_names
-    # # partition_spec = "('data', 'model')" # string version of partition spec
-    # torch.ops.xla.dynamo_mark_sharding(data, device_ids, mesh_shape, axis_names, partition_spec)
-
     xs.mark_sharding(data, mesh, partition_spec)
     xm.mark_step()
     logger.info(f"hosseins: shard_spmd() -> [{type(data)=}]")
