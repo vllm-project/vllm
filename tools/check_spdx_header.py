@@ -10,18 +10,25 @@ def check_spdx_header(file_path):
     with open(file_path, encoding='UTF-8') as file:
         lines = file.readlines()
         if not lines:
-            # not necessary for an empty file like __init__.py
+            # Empty file like __init__.py
             return True
-        if not lines[0].strip().startswith(SPDX_HEADER_PREFIX):
-            return False
-    return True
+        for line in lines:
+            if line.strip().startswith(SPDX_HEADER_PREFIX):
+                return True
+    return False
 
 
 def add_header(file_path):
     with open(file_path, 'r+', encoding='UTF-8') as file:
         lines = file.readlines()
         file.seek(0, 0)
-        file.write(SPDX_HEADER + '\n\n' + ''.join(lines))
+        if lines and lines[0].startswith("#!"):
+            file.write(lines[0])
+            file.write(SPDX_HEADER + '\n')
+            file.writelines(lines[1:])
+        else:
+            file.write(SPDX_HEADER + '\n')
+            file.writelines(lines)
 
 
 def main():
