@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """Inference-only Bamba model."""
 # Added by the IBM Team, 2024
 from typing import Iterable, List, Optional, Set, Tuple
