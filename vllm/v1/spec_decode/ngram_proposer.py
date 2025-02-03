@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from typing import List, Optional
 
 from vllm.v1.utils import ConstantList
