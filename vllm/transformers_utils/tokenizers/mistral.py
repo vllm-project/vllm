@@ -269,15 +269,11 @@ class MistralTokenizer:
             input_ids = input_ids[:max_length]
         return input_ids
 
-    def encode(self,
-               prompt: str,
-               add_special_tokens: Optional[bool] = None) -> List[int]:
+    def encode(self, prompt: str) -> List[int]:
         # `encode` should only be used for prompt completion
         # it should never be used for chat_completion.
         # For chat completion use `apply_chat_template`
-        return self.tokenizer.encode(prompt,
-                                     bos=add_special_tokens,
-                                     eos=add_special_tokens)
+        return self.tokenizer.encode(prompt, bos=True, eos=False)
 
     def apply_chat_template(self,
                             messages: List["ChatCompletionMessageParam"],

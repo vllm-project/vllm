@@ -58,7 +58,10 @@ def encode_tokens(
                                     add_special_tokens=add_special_tokens)
         return tokenizer.encode(text)
     else:
-        return tokenizer.encode(text, add_special_tokens=add_special_tokens)
+        # MistralTokenizer
+        return tokenizer.tokenizer.encode(text,
+                                          bos=add_special_tokens,
+                                          eos=add_special_tokens)
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
