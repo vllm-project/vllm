@@ -50,9 +50,9 @@ steps:
   - tests/multimodal
   - tests/test_utils
   - tests/worker
-  - tests/standalone_tests/lazy_torch_compile.py
+  - tests/standalone_tests/lazy_imports.py
   commands:
-  - python3 standalone_tests/lazy_torch_compile.py
+  - python3 standalone_tests/lazy_imports.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
   - NUM_SCHEDULER_STEPS=4 pytest -v -s async_engine/test_async_llm_engine.py
