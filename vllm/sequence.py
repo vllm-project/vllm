@@ -7,7 +7,8 @@ from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import reduce
-from typing import Any, Callable, DefaultDict, Dict, List, Mapping, Optional
+from typing import (TYPE_CHECKING, Any, Callable, DefaultDict, Dict, List,
+                    Mapping, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Union
 
@@ -16,10 +17,15 @@ import torch
 
 from vllm.inputs import SingletonInputs, SingletonInputsAdapter
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+
+if TYPE_CHECKING:
+    from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
+else:
+    MultiModalDataDict = None
+    MultiModalPlaceholderDict = None
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
@@ -459,7 +465,7 @@ class Sequence:
         return self.inputs.multi_modal_data
 
     @property
-    def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
+    def multi_modal_placeholders(self) -> "MultiModalPlaceholderDict":
         return self.inputs.multi_modal_placeholders
 
     @property
@@ -710,7 +716,7 @@ class SequenceGroup:
         return self.first_seq.token_type_ids
 
     @property
-    def multi_modal_data(self) -> MultiModalDataDict:
+    def multi_modal_data(self) -> "MultiModalDataDict":
         if self.first_seq.multi_modal_data:
             return self.first_seq.multi_modal_data
         elif self.encoder_seq is not None:
@@ -718,7 +724,7 @@ class SequenceGroup:
         return {}
 
     @property
-    def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
+    def multi_modal_placeholders(self) -> "MultiModalPlaceholderDict":
         if self.first_seq.multi_modal_data:
             return self.first_seq.multi_modal_placeholders
         elif self.encoder_seq is not None:
@@ -960,7 +966,7 @@ class SequenceGroupMetadata(
     # doesn't allow to have union of 2 different dicts.
     token_type_ids: Optional[List[int]] = None
     multi_modal_data: Optional[Any] = None
-    multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
+    multi_modal_placeholders: Optional[Any] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[List[int]] = None
