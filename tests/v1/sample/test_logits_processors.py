@@ -116,6 +116,7 @@ class IncreaseLogitProcessorWithPromptParams:
         logits[self.target_token_id] += self.incr_value
         return logits
 
+
 class CopyAndIncreaseLogitProcessor:
     """Increase the logit of a specific token. Receive prompt token ids."""
 
@@ -128,6 +129,7 @@ class CopyAndIncreaseLogitProcessor:
         copied_logits = logits.clone()
         copied_logits[self.target_token_id] += self.incr_value
         return copied_logits
+
 
 def validate_logits_min_max(logits: torch.Tensor, expected_min: float,
                             expected_max: float):
