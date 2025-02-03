@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass
 from typing import Literal
 
@@ -26,4 +28,4 @@ class ImageAsset:
         """
         image_path = get_vllm_public_assets(filename=f"{self.name}.pt",
                                             s3_prefix=VLM_IMAGES_DIR)
-        return torch.load(image_path, map_location="cpu")
+        return torch.load(image_path, map_location="cpu", weights_only=True)

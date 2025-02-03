@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import atexit
 import gc
@@ -56,10 +58,12 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               PoolingChatRequest,
                                               PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
+                                              RerankRequest, RerankResponse,
                                               ScoreRequest, ScoreResponse,
                                               TokenizeRequest,
                                               TokenizeResponse,
                                               UnloadLoraAdapterRequest)
+from vllm.entrypoints.openai.reasoning_parsers import ReasoningParserManager
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -68,6 +72,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
+from vllm.entrypoints.openai.serving_rerank import JinaAIServingRerank
 from vllm.entrypoints.openai.serving_score import OpenAIServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
@@ -306,6 +311,10 @@ def score(request: Request) -> Optional[OpenAIServingScores]:
     return request.app.state.openai_serving_scores
 
 
+def rerank(request: Request) -> Optional[JinaAIServingRerank]:
+    return request.app.state.jinaai_serving_reranking
+
+
 def tokenization(request: Request) -> OpenAIServingTokenization:
     return request.app.state.openai_serving_tokenization
 
@@ -502,6 +511,40 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
     return await create_score(request, raw_request)
 
 
+@router.post("/rerank")
+@with_cancellation
+async def do_rerank(request: RerankRequest, raw_request: Request):
+    handler = rerank(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Rerank (Score) API")
+    generator = await handler.do_rerank(request, raw_request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    elif isinstance(generator, RerankResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
+
+
+@router.post("/v1/rerank")
+@with_cancellation
+async def do_rerank_v1(request: RerankRequest, raw_request: Request):
+    logger.warning_once(
+        "To indicate that the rerank API is not part of the standard OpenAI"
+        " API, we have located it at `/rerank`. Please update your client"
+        "accordingly. (Note: Conforms to JinaAI rerank API)")
+
+    return await do_rerank(request, raw_request)
+
+
+@router.post("/v2/rerank")
+@with_cancellation
+async def do_rerank_v2(request: RerankRequest, raw_request: Request):
+    return await do_rerank(request, raw_request)
+
+
 TASK_HANDLERS: Dict[str, Dict[str, tuple]] = {
     "generate": {
         "messages": (ChatCompletionRequest, create_chat_completion),
@@ -512,7 +555,10 @@ TASK_HANDLERS: Dict[str, Dict[str, tuple]] = {
         "default": (EmbeddingCompletionRequest, create_embedding),
     },
     "score": {
-        "default": (ScoreRequest, create_score),
+        "default": (RerankRequest, do_rerank)
+    },
+    "rerank": {
+        "default": (RerankRequest, do_rerank)
     },
     "reward": {
         "messages": (PoolingChatRequest, create_pooling),
@@ -728,6 +774,8 @@ async def init_app_state(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
+        enable_reasoning=args.enable_reasoning,
+        reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
     ) if model_config.runner_type == "generate" else None
     state.openai_serving_completion = OpenAIServingCompletion(
@@ -754,6 +802,12 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
     ) if model_config.task == "embed" else None
     state.openai_serving_scores = OpenAIServingScores(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger
+    ) if model_config.task == "score" else None
+    state.jinaai_serving_reranking = JinaAIServingRerank(
         engine_client,
         model_config,
         state.openai_serving_models,
@@ -794,6 +848,13 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         and args.tool_call_parser not in valid_tool_parses:
         raise KeyError(f"invalid tool call parser: {args.tool_call_parser} "
                        f"(chose from {{ {','.join(valid_tool_parses)} }})")
+
+    valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
+    if args.enable_reasoning \
+        and args.reasoning_parser not in valid_reasoning_parses:
+        raise KeyError(
+            f"invalid reasoning parser: {args.reasoning_parser} "
+            f"(chose from {{ {','.join(valid_reasoning_parses)} }})")
 
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.
