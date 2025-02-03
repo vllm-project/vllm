@@ -823,7 +823,7 @@ class GPUModelRunner:
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
-        request_seq_lens: List[Tuple[int, CachedRequestState, int]] = []
+        request_seq_lens: List[Tuple[int, CachedRequestState, int, int]] = []
         for i, req_id in enumerate(self.input_batch.req_ids):
             if i == num_reqs:
                 break
@@ -838,7 +838,7 @@ class GPUModelRunner:
                            != INVALID_TOKEN_ID).sum().item()
                 self.input_batch.num_tokens[i] += gen_len
                 req_state.output_token_ids.extend([0] * gen_len)
-                request_seq_lens.append((i, req_state, gen_len))
+                request_seq_lens.append((i, req_state, seq_len, gen_len))
             else:
                 # Ignore the sampled token from the partial request.
                 # Rewind the generator state as if the token was not sampled.
@@ -857,11 +857,11 @@ class GPUModelRunner:
         # Move as many CPU operations as possible before this sync point.
         # Update with the actual token ids
         sampled_token_ids = sampled_token_ids.tolist()
-        for i, req_state, gen_len in request_seq_lens:
+        for i, req_state, seq_len, gen_len in request_seq_lens:
             token_ids = sampled_token_ids[i]
             for j, token_id in enumerate(token_ids):
-                self.input_batch.token_ids_cpu[i, -gen_len + j] = token_id
-
+                self.input_batch.token_ids_cpu[i, seq_len - gen_len + j +
+                                               1] = token_id
                 req_state.output_token_ids[-gen_len + j] = token_id
 
         if sampler_output.logprob_token_ids is None:
