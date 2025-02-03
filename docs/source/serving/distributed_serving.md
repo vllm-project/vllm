@@ -60,7 +60,8 @@ bash run_cluster.sh \
                 vllm/vllm-openai \
                 ip_of_head_node \
                 --head \
-                /path/to/the/huggingface/home/in/this/node
+                /path/to/the/huggingface/home/in/this/node \
+                -e VLLM_HOST_IP=ip_of_this_node
 ```
 
 On the rest of the worker nodes, run the following command:
@@ -70,10 +71,11 @@ bash run_cluster.sh \
                 vllm/vllm-openai \
                 ip_of_head_node \
                 --worker \
-                /path/to/the/huggingface/home/in/this/node
+                /path/to/the/huggingface/home/in/this/node \
+                -e VLLM_HOST_IP=ip_of_this_node
 ```
 
-Then you get a ray cluster of containers. Note that you need to keep the shells running these commands alive to hold the cluster. Any shell disconnect will terminate the cluster. In addition, please note that the argument `ip_of_head_node` should be the IP address of the head node, which is accessible by all the worker nodes. A common misunderstanding is to use the IP address of the worker node, which is not correct.
+Then you get a ray cluster of containers. Note that you need to keep the shells running these commands alive to hold the cluster. Any shell disconnect will terminate the cluster. In addition, please note that the argument `ip_of_head_node` should be the IP address of the head node, which is accessible by all the worker nodes. The IP addresses of each worker node should be specified in the `VLLM_HOST_IP` environment variable, and should be different for each worker node. Please check the network configuration of your cluster to make sure the nodes can communicate with each other through the specified IP addresses.
 
 Then, on any node, use `docker exec -it node /bin/bash` to enter the container, execute `ray status` to check the status of the Ray cluster. You should see the right number of nodes and GPUs.
 
@@ -102,4 +104,8 @@ After you start the Ray cluster, you'd better also check the GPU-GPU communicati
 Please make sure you downloaded the model to all the nodes (with the same path), or the model is downloaded to some distributed file system that is accessible by all nodes.
 
 When you use huggingface repo id to refer to the model, you should append your huggingface token to the `run_cluster.sh` script, e.g. `-e HF_TOKEN=`. The recommended way is to download the model first, and then use the path to refer to the model.
+:::
+
+:::{warning}
+If you keep receiving the error message `Error: No available node types can fulfill resource request` but you have enough GPUs in the cluster, chances are your nodes have multiple IP addresses and vLLM cannot find the right one, especially when you are using multi-node inference. Please make sure vLLM and ray use the same IP address. You can set the `VLLM_HOST_IP` environment variable to the right IP address in the `run_cluster.sh` script (different for each node!), and check `ray status` to see the IP address used by Ray. See <gh-issue:7815> for more information.
 :::
