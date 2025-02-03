@@ -1237,6 +1237,8 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
+        self._org_vocab_size = None
+
         self._base_layer_replacement = None
 
         self._base_layer_kwargs = {
@@ -1251,7 +1253,8 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA):
 
     @property
     def org_vocab_size(self):
-        return self.base_layer.org_vocab_size
+        # vocab size with maximal amount of extra symbols added by loras
+        return self._org_vocab_size
 
     @property
     def embedding_dim(self):
@@ -1302,11 +1305,13 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA):
 
         self.dtype = lora_config.lora_dtype
 
+        self._orig_vocab_size = (self.base_layer.org_vocab_size +
+                                 lora_config.lora_extra_vocab_size)
+
         # lora_tensors - lm_head tensors in case of ParallelLMHead base
         # or embed_tokens tensors in case of VocabParallelEmbedding
         self._lora_tensors = torch.zeros(
-            (max_loras, self.padded_vocab_size +
-             lora_config.lora_extra_vocab_size, self.base_layer.embedding_dim),
+            (max_loras, self._orig_vocab_size, self.base_layer.embedding_dim),
             dtype=self.base_layer.weight.dtype,
             device=self.device,
         )

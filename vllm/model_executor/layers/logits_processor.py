@@ -105,7 +105,7 @@ class LogitsProcessor(nn.Module):
             logits = tensor_model_parallel_gather(logits)
         # Remove paddings in vocab (if any).
         if logits is not None:
-            logits = logits[..., :self.org_vocab_size]
+            logits = logits[..., :lm_head.org_vocab_size]
         return logits
 
     def extra_repr(self) -> str:

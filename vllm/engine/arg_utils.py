@@ -636,9 +636,8 @@ class EngineArgs:
             help=('Data type for LoRA. If auto, will default to '
                   'base model dtype.'))
         parser.add_argument(
-            '--enable_lora_modules_to_save',
-            type=bool,
-            default=EngineArgs.enable_lora_modules_to_save,
+            '--enable-lora-modules-to-save',
+            action='store_true',
             help='enable fully trained lm_head and embed_tokens')
         parser.add_argument(
             '--long-lora-scaling-factors',
