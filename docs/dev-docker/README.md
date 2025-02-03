@@ -434,6 +434,14 @@ python /app/vllm/benchmarks/benchmark_latency.py --model amd/Llama-3.1-405B-Inst
 
 You should see some performance improvement about the e2e latency.
 
+### AITER
+
+To get [AITER](https://github.com/ROCm/aiter) kernels support, follow the [Docker build steps](#Docker-manifest) using the [aiter_intergration_final](https://github.com/ROCm/vllm/tree/aiter_intergration_final) branch  
+There is a published release candidate image at `rocm/vllm-dev:nightly_aiter_intergration_final_20250130`
+
+To enable the feature make sure the following environment is set: `VLLM_USE_AITER=1`.  
+The default value is `0` in vLLM, but is set to `1` in the aiter docker.
+
 ## MMLU_PRO_Biology Accuracy Evaluation
 
 ### FP16
@@ -468,5 +476,16 @@ To reproduce the release docker:
     git clone https://github.com/ROCm/vllm.git
     cd vllm
     git checkout 8e87b08c2a284c1a20eb3d8e0fbdc84918bf27dc
+    docker build -f Dockerfile.rocm -t <your_tag> --build-arg BUILD_HIPBLASLT=1 --build-arg USE_CYTHON=1 .
+```
+
+### AITER
+
+Use Aiter release candidate branch instead:
+
+```bash
+    git clone https://github.com/ROCm/vllm.git
+    cd vllm
+    git checkout aiter_intergration_final
     docker build -f Dockerfile.rocm -t <your_tag> --build-arg BUILD_HIPBLASLT=1 --build-arg USE_CYTHON=1 .
 ```
