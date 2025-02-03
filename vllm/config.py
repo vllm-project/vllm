@@ -989,7 +989,8 @@ class ModelConfig:
         if not self.is_deepseek_mla or envs.VLLM_MLA_DISABLE:
             return False
 
-        if self.quantization not in ("fp8", "compressed-tensors"):
+        if self.quantization is not None and self.quantization not in [\
+            "fp8", "compressed-tensors"]:
             logger.warning(
                 "MLA is not supported with %s quantization. "
                 "Disabling MLA.", self.quantization)
