@@ -33,7 +33,7 @@ jobs:
         run:  echo ${{ secrets.GITHUB_TOKEN }} | helm registry login ghcr.io -u $ --password-stdin
 
       - name: helm package
-        run:  helm package examples/online_serving/chart-helm --version "$CHART_TAG"
+        run:  helm package examples/online_serving/chart-helm --version $CHART_TAG
 
       - name: helm push
         # if: ${{ github.event_name == 'push' }}
