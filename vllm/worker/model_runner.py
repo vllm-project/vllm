@@ -717,7 +717,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                         hf_config=hf_config,
                         image_grid_thw=image_grid_thw,
                         video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
+                        video_second_per_grid_ts=second_per_grid_ts,
                         context_len=inter_data.context_lens[seq_idx],
                         seq_len=inter_data.seq_lens[seq_idx],
                     )

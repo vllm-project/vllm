@@ -300,7 +300,7 @@ class GPUModelRunner:
                         hf_config=hf_config,
                         image_grid_thw=image_grid_thw,
                         video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
+                        video_second_per_grid_ts=second_per_grid_ts,
                     )
 
             req_ids_to_add.append(req_id)
