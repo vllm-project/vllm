@@ -448,8 +448,11 @@ class Scheduler:
                             request, input_id)
 
             # Get prompt logprobs for this request.
-            prompt_logprobs_token_ids, prompt_logprobs, prompt_token_ranks = (
-                prompt_logprobs_dict.get(req_id, (None, None, None)))
+            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+
+            stopped = False
+            new_logprobs_token_ids, new_logprobs, new_ranks = None, None, None
+            new_token_ids = None
 
             if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
@@ -476,42 +479,26 @@ class Scheduler:
                     new_logprobs_token_ids = [logprobs_token_ids[req_index]]
                     new_logprobs = [logprobs[req_index]]
                     new_ranks = [sampled_token_ranks[req_index]]
-                else:
-                    new_logprobs_token_ids, new_logprobs, new_ranks = [], [], []
 
+                new_token_ids = request.output_token_ids[-num_new_tokens:]
+
+            # Transmit partial if chunked prefill & prompt logprobs is enabled
+            if new_token_ids or prompt_logprobs_tensors is not None:
                 # Add EngineCoreOutput for this Request.
-                output = EngineCoreOutput(
-                    request_id=req_id,
-                    new_token_ids=request.output_token_ids[-num_new_tokens:],
-                    finish_reason=request.get_finished_reason(),
-                    new_logprobs_token_ids=new_logprobs_token_ids,
-                    new_logprobs=new_logprobs,
-                    new_sampled_token_ranks=new_ranks,
-                    new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
-                    new_prompt_logprobs=prompt_logprobs,
-                    new_prompt_token_ranks=prompt_token_ranks,
-                    stop_reason=request.stop_reason)
-                outputs.append(output)
+                outputs.append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=new_token_ids or [],
+                        finish_reason=request.get_finished_reason(),
+                        new_logprobs_token_ids=new_logprobs_token_ids or [],
+                        new_logprobs=new_logprobs or [],
+                        new_sampled_token_ranks=new_ranks or [],
+                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                        stop_reason=request.stop_reason))
 
-                # Breakout of the loop.
-                if stopped:
-                    continue
+            if not stopped:
+                new_running.append(request)
 
-            elif prompt_logprobs is not None:
-                # Chunked prefill & prompt logprobs is enabled; transmit partial
-                # logprobs via EngineCoreOutput
-                # Add EngineCoreOutput for this Request.
-                output = EngineCoreOutput(
-                    request_id=req_id,
-                    new_token_ids=[],
-                    finish_reason=request.get_finished_reason(),
-                    new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
-                    new_prompt_logprobs=prompt_logprobs,
-                    new_prompt_token_ranks=prompt_token_ranks,
-                    stop_reason=request.stop_reason)
-                outputs.append(output)
-
-            new_running.append(request)
         self.running = new_running
         return EngineCoreOutputs(
             outputs=outputs,

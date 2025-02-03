@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Tuple
 
 import torch
 import torch.nn as nn
 
-from vllm.v1.outputs import SamplerOutput
+from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.penalties import (apply_all_penalties,
                                           apply_min_token_penalties)
@@ -32,7 +31,8 @@ class Sampler(nn.Module):
         # is used for sampling (after penalties and temperature scaling).
         # TODO(rob): provide option for logprobs post sampling.
         # See https://vllm-dev.slack.com/archives/C07UUL8E61Z/p1735907856007919 # noqa: E501
-        if sampling_metadata.max_num_logprobs is not None:
+        num_logprobs = sampling_metadata.max_num_logprobs
+        if num_logprobs is not None:
             raw_logprobs = self.compute_logprobs(logits)
 
         # Use float32 for the logits.
@@ -43,23 +43,19 @@ class Sampler(nn.Module):
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
+
+        # Gather the logprobs of the topk and sampled token (if requested).
+        # Get logprobs and rank tensors (if requested)
+        logprobs_tensors = None if num_logprobs is None else \
+            self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
+
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
-
-        # Gather the logprobs of the topk and sampled token.
-        logprob_token_ids, logprobs, ranks = None, None, None
-        if sampling_metadata.max_num_logprobs is not None:
-            logprob_token_ids, logprobs, ranks = self.gather_logprobs(
-                raw_logprobs,
-                sampling_metadata.max_num_logprobs,
-                token_ids=sampled)
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(
             sampled_token_ids=sampled,
-            logprob_token_ids=logprob_token_ids,
-            logprobs=logprobs,
-            sampled_token_ranks=ranks,
+            logprobs_tensors=logprobs_tensors,
         )
         return sampler_output
 
@@ -114,7 +110,7 @@ class Sampler(nn.Module):
         logprobs: torch.Tensor,
         num_logprobs: int,
         token_ids: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> LogprobsTensors:
         """
         Gather logprobs for topk and sampled/prompt token.
 
@@ -137,12 +133,9 @@ class Sampler(nn.Module):
                                                  num_logprobs,
                                                  dim=-1)
 
-        # Use int32 to reduce the tensor size.
-        topk_indices = topk_indices.to(torch.int32)
-
         # Get with the logprob of the prompt or sampled token.
         token_ids = token_ids.unsqueeze(-1)
-        token_logprobs = logprobs.gather(-1, token_ids.to(torch.int64))
+        token_logprobs = logprobs.gather(-1, token_ids)
 
         # Compute the ranks of the actual token.
         token_ranks = (logprobs >= token_logprobs).sum(-1)
@@ -151,7 +144,10 @@ class Sampler(nn.Module):
         indices = torch.cat((token_ids, topk_indices), dim=1)
         logprobs = torch.cat((token_logprobs, topk_logprobs), dim=1)
 
-        return indices, logprobs, token_ranks
+        # Use int32 to reduce the tensor size.
+        indices = indices.to(torch.int32)
+
+        return LogprobsTensors(indices, logprobs, token_ranks)
 
     def apply_penalties(
         self,

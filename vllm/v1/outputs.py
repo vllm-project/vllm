@@ -1,9 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional
 
 import torch
+
+
+class LogprobsTensors(NamedTuple):
+
+    # [num_reqs, max_num_logprobs + 1]
+    logprob_token_ids: torch.Tensor
+    # [num_reqs, max_num_logprobs + 1]
+    logprobs: torch.Tensor
+    # [num_reqs]
+    selected_token_ranks: torch.Tensor
 
 
 @dataclass
@@ -11,13 +21,7 @@ class SamplerOutput:
 
     # [num_reqs]
     sampled_token_ids: torch.Tensor
-
-    # [num_reqs, max_num_logprobs + 1]
-    logprob_token_ids: Optional[torch.Tensor]
-    # [num_reqs, max_num_logprobs + 1]
-    logprobs: Optional[torch.Tensor]
-    # [num_reqs]
-    sampled_token_ranks: Optional[torch.Tensor]
+    logprobs_tensors: Optional[LogprobsTensors]
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -43,5 +47,4 @@ class ModelRunnerOutput:
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
-    prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor,
-                                          torch.Tensor]]
+    prompt_logprobs_dict: Dict[str, LogprobsTensors]

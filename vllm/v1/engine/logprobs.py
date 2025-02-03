@@ -4,13 +4,12 @@ import itertools
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-import torch
-
 from vllm.logger import init_logger
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_ids_list_to_tokens)
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.outputs import LogprobsTensors
 
 logger = init_logger(__name__)
 
@@ -93,24 +92,16 @@ class LogprobsProcessor:
 
     def _update_prompt_logprobs(
         self,
-        token_ids: Optional[torch.Tensor],
-        logprobs: Optional[torch.Tensor],
-        ranks: Optional[torch.Tensor],
+        prompt_logprobs_tensors: Optional[LogprobsTensors],
     ) -> None:
         """Update with prompt logprobs from EngineCore.
 
-        If prompt logprobs are enabled but prefill is completed, both
-        arguments should be empty tensors.
-
-        If prompt logprobs are disabled, both arguments should be `None`.
-
-        Token rank = (index in logprob-sorted vocab vector) + 1
+        prompt_logprobs_tensors will be None if if prompt logprobs are
+        disabled or prefill is completed.
 
         Args:
-          token_ids: (num prompt tokens-1) x (topk + 1) token ids tensor
-                     `None` if prompt logprobs are disabled in this req
-          logprobs: (num prompt tokens-1) x (topk + 1) logprobs tensor
-          ranks: (num prompt_tokens-1) prompt token rank tensor
+          prompt_logprobs_tensors: tuple containing the prompt logprobs
+                                   tensors.
 
         Return:
           Prompt logprobs, if required for this request
@@ -121,10 +112,10 @@ class LogprobsProcessor:
             return
 
         # Prompt logprobs are enabled.
-        assert logprobs is not None
-        assert token_ids is not None
-        assert ranks is not None
+        assert prompt_logprobs_tensors is not None
         assert self.prompt_logprobs is not None
+
+        token_ids, logprobs, ranks = prompt_logprobs_tensors
 
         # TODO(rob): can we avoid this case with a better
         # invariant from EngineCore?
@@ -224,6 +215,4 @@ class LogprobsProcessor:
                                      output.new_logprobs,
                                      output.new_sampled_token_ranks)
 
-        self._update_prompt_logprobs(output.new_prompt_logprobs_token_ids,
-                                     output.new_prompt_logprobs,
-                                     output.new_prompt_token_ranks)
+        self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)

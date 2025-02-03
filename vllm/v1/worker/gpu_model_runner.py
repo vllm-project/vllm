@@ -29,7 +29,7 @@ from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_mapper import MMInputMapperClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -822,22 +822,19 @@ class GPUModelRunner:
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
         sampled_token_ids = sampler_output.sampled_token_ids.tolist()
-        if sampler_output.logprob_token_ids is not None:
-            logprob_token_ids = sampler_output.logprob_token_ids.tolist()
-            logprobs = sampler_output.logprobs.tolist()
-            ranks = sampler_output.sampled_token_ranks.tolist()
+        logprobs_tensors = sampler_output.logprobs_tensors
+        if logprobs_tensors is not None:
+            logprob_token_ids = logprobs_tensors.logprob_token_ids.tolist()
+            logprobs = logprobs_tensors.logprobs.tolist()
+            ranks = logprobs_tensors.selected_token_ranks.tolist()
         else:
             logprob_token_ids, logprobs, ranks = None, None, None
 
         # Compute prompt logprobs if needed.
-        prompt_logprobs_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor,
-                                              torch.Tensor]] = {}
-        # Since prompt logprobs are a rare feature, prioritize simple,
-        # maintainable loop over optimal performance.
-        for req_id in self.input_batch.num_prompt_logprobs:
-            # GPU<>CPU sync happens here.
-            prompt_logprobs_dict[req_id] = self.get_prompt_logprobs(
-                req_id, hidden_states, scheduler_output)
+        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+            hidden_states,
+            scheduler_output,
+        )
 
         # Update with the actual token ids
         for i, req_state, seq_len in request_seq_lens:
@@ -865,43 +862,56 @@ class GPUModelRunner:
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
 
-    def get_prompt_logprobs(
+    def _get_prompt_logprobs_dict(
         self,
-        req_id: str,
         hidden_states: torch.Tensor,
         scheduler_output: "SchedulerOutput",
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Dict[str, LogprobsTensors]:
+        prompt_logprobs_dict: Dict[str, LogprobsTensors] = {}
 
-        # Get metadata for this request.
-        num_prompt_logprobs = self.input_batch.num_prompt_logprobs[req_id]
-        request = self.requests[req_id]
-        prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
-            self.device, non_blocking=True)
-        req_idx = self.input_batch.req_id_to_index[req_id]
+        # Since prompt logprobs are a rare feature, prioritize simple,
+        # maintainable loop over optimal performance.
+        for req_id in self.input_batch.num_prompt_logprobs:
+            # Get metadata for this request.
+            num_prompt_logprobs = self.input_batch.num_prompt_logprobs[req_id]
+            request = self.requests[req_id]
+            prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
+                self.device, non_blocking=True)
+            req_idx = self.input_batch.req_id_to_index[req_id]
 
-        # Get the logits corresponding to this req's prompt tokens.
-        # If this is a partial request (i.e. chunked prefill),
-        # then there is prompt logprob generated for each index.
-        is_partial_req = req_id == scheduler_output.partial_req_id
-        num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        num_logits = num_tokens if is_partial_req else num_tokens - 1
-        offset = self.query_start_loc_np[req_idx].item()
-        prompt_hidden_states = hidden_states[offset:offset + num_logits]
-        logits = self.model.compute_logits(prompt_hidden_states, None)
+            # Get the logits corresponding to this req's prompt tokens.
+            # If this is a partial request (i.e. chunked prefill),
+            # then there is prompt logprob generated for each index.
+            is_partial_req = req_id == scheduler_output.partial_req_id
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_logits = num_tokens if is_partial_req else num_tokens - 1
+            offset = self.query_start_loc_np[req_idx].item()
+            prompt_hidden_states = hidden_states[offset:offset + num_logits]
+            logits = self.model.compute_logits(prompt_hidden_states, None)
 
-        # Get the "target" tokens for each index. For prompt at index i,
-        # the token at prompt index i+1 is the "sampled" token we want
-        # to gather the logprob for.
-        offset = request.num_computed_tokens + 1
-        tgt_token_ids = prompt_token_ids[offset:offset + num_logits]
+            # Get the "target" tokens for each index. For prompt at index i,
+            # the token at prompt index i+1 is the "sampled" token we want
+            # to gather the logprob for.
+            offset = request.num_computed_tokens + 1
+            tgt_token_ids = prompt_token_ids[offset:offset + num_logits]
 
-        # Compute prompt logprobs.
-        logprobs = self.model.sampler.compute_logprobs(logits)
-        token_ids, logprobs, ranks = self.model.sampler.gather_logprobs(
-            logprobs, num_prompt_logprobs, tgt_token_ids)
+            # Compute prompt logprobs.
+            logprobs = self.model.sampler.compute_logprobs(logits)
+            token_ids, logprobs, ranks = self.model.sampler.gather_logprobs(
+                logprobs, num_prompt_logprobs, tgt_token_ids)
 
-        # GPU<>CPU sync happens here.
-        return (token_ids.cpu(), logprobs.cpu(), ranks.cpu())
+            # Transfer GPU->CPU async.
+            prompt_logprobs_dict[req_id] = LogprobsTensors(
+                token_ids.to("cpu", non_blocking=True),
+                logprobs.to("cpu", non_blocking=True),
+                ranks.to("cpu", non_blocking=True),
+            )
+
+        if prompt_logprobs_dict:
+            # Ensure CPU tensors are synchronized.
+            torch.cuda.synchronize()
+
+        return prompt_logprobs_dict
 
     @torch.inference_mode()
     def _dummy_run(
