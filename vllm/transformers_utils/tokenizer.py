@@ -58,8 +58,8 @@ def encode_tokens(
                                     add_special_tokens=add_special_tokens)
         return tokenizer.encode(text)
     else:
-        # MistralTokenizer
-        # avoid importing MistralTokenizer in the type hint,
+        # this branch is for MistralTokenizer
+        # avoid importing MistralTokenizer in the global scope
         # so that users who use non-mistral models will not be affected.
         return tokenizer.tokenizer.encode(text,
                                           bos=add_special_tokens,
