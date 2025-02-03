@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from openai import OpenAI
 
 from vllm.assets.audio import AudioAsset

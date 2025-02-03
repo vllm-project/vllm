@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import asyncio
 import io
 from typing import Any, AsyncGenerator, Dict, Optional, Union
