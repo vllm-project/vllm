@@ -90,7 +90,7 @@ def _create_default_sampling_metadata(
     return fake_sampling_metadata
 
 
-class IncreaseLogitProcessor:
+class IncreaseLogitsProcessor:
     """Increase the logit of a specific token."""
 
     def __init__(self, target_token_id: int, incr_value: float):
@@ -103,7 +103,7 @@ class IncreaseLogitProcessor:
         return logits
 
 
-class IncreaseLogitProcessorWithPromptParams:
+class IncreaseLogitsProcessorWithPromptParams:
     """Increase the logit of a specific token. Receive prompt token ids."""
 
     def __init__(self, target_token_id: int, incr_value: float):
@@ -117,8 +117,9 @@ class IncreaseLogitProcessorWithPromptParams:
         return logits
 
 
-class CopyAndIncreaseLogitProcessor:
-    """Increase the logit of a specific token. Receive prompt token ids."""
+class CopyAndIncreaseLogitsProcessor:
+    """Make a copy of original logits, 
+       then increase the logit of a specific token."""
 
     def __init__(self, target_token_id: int, incr_value: float):
         self.target_token_id = target_token_id
@@ -142,6 +143,7 @@ def validate_logits_min_max(logits: torch.Tensor, expected_min: float,
 
 UNTOUCHED_VALIDATOR = lambda logits: validate_logits_min_max(
     logits, expected_min=DEFAULT_LOGIT_VALUE, expected_max=DEFAULT_LOGIT_VALUE)
+"""validate the logits is not touched by any logits processor"""
 
 LogitsProcessorType = Callable[[List[int], torch.Tensor], torch.Tensor]
 
@@ -158,7 +160,7 @@ LogitsProcessorType = Callable[[List[int], torch.Tensor], torch.Tensor]
         UNTOUCHED_VALIDATOR,
     ),
     (
-        [IncreaseLogitProcessor(target_token_id=1, incr_value=1.0)],
+        [IncreaseLogitsProcessor(target_token_id=1, incr_value=1.0)],
         lambda logits: validate_logits_min_max(
             logits,
             expected_min=DEFAULT_LOGIT_VALUE,
@@ -167,8 +169,8 @@ LogitsProcessorType = Callable[[List[int], torch.Tensor], torch.Tensor]
     ),
     (
         [
-            IncreaseLogitProcessor(target_token_id=1, incr_value=1.0),
-            IncreaseLogitProcessor(target_token_id=2, incr_value=2.0),
+            IncreaseLogitsProcessor(target_token_id=1, incr_value=1.0),
+            IncreaseLogitsProcessor(target_token_id=2, incr_value=2.0),
         ],
         lambda logits: validate_logits_min_max(
             logits,
@@ -178,11 +180,11 @@ LogitsProcessorType = Callable[[List[int], torch.Tensor], torch.Tensor]
     ),
     (
         [
-            IncreaseLogitProcessorWithPromptParams(
+            IncreaseLogitsProcessorWithPromptParams(
                 target_token_id=1,
                 incr_value=1.0,
             ),
-            IncreaseLogitProcessorWithPromptParams(
+            IncreaseLogitsProcessorWithPromptParams(
                 target_token_id=2,
                 incr_value=2.0,
             ),
@@ -195,8 +197,8 @@ LogitsProcessorType = Callable[[List[int], torch.Tensor], torch.Tensor]
     ),
     (
         [
-            CopyAndIncreaseLogitProcessor(target_token_id=1, incr_value=1.0),
-            CopyAndIncreaseLogitProcessor(target_token_id=1, incr_value=2.0),
+            CopyAndIncreaseLogitsProcessor(target_token_id=1, incr_value=1.0),
+            CopyAndIncreaseLogitsProcessor(target_token_id=1, incr_value=2.0),
         ],
         lambda logits: validate_logits_min_max(
             logits,
