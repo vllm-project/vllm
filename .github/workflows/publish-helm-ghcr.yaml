@@ -8,6 +8,7 @@ on:
   pull_request:
 env:
   CHART_NAME: vllm-helm-chart
+  CHART_TAG: $(cat examples/online_serving/chart-helm/Chart.yaml | awk '/version/ {print $2}')
 
 jobs:
   package-and-publish-chart-helm:
@@ -31,12 +32,9 @@ jobs:
       - name: helm login
         run:  echo ${{ secrets.GITHUB_TOKEN }} | helm registry login ghcr.io -u $ --password-stdin
 
-      - name: get helm chart version
-        run:  export CHART_TAG="$(helm show chart . | awk '/version/ {print $2}')"
-
       - name: helm package
         run:  helm package examples/online_serving/chart-helm --version "$CHART_TAG"
 
       - name: helm push
         # if: ${{ github.event_name == 'push' }}
-        run:  helm push $CHART_NAME-$(echo $CHART_TAG).tgz oci://ghcr.io/${{ github.repository_owner }}
+        run:  helm push $CHART_NAME-$CHART_TAG.tgz oci://ghcr.io/${{ github.repository_owner }}
