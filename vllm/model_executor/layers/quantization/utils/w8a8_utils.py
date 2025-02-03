@@ -1,6 +1,7 @@
 from typing import List, Optional, Tuple, Union
 
 import torch
+from torch import Tensor
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
@@ -73,14 +74,16 @@ def convert_to_channelwise(
 
     return weight_scale_channel
 
+def is_gaudi2():
+    return current_platform.is_hpu() and htexp._get_device_type(
+    ) == htexp.synDeviceType.synDeviceGaudi2
 
 def requantize_with_max_scale(
         weight: torch.Tensor, weight_scale: torch.Tensor,
         logical_widths: List[int]) -> Tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
     max_w_scale = weight_scale.max()
-    if current_platform.is_hpu() and htexp._get_device_type(
-    ) == htexp.synDeviceType.synDeviceGaudi2:
+    if is_gaudi2():
         max_w_scale = max_w_scale * (torch.finfo(torch.float8_e4m3fn).max /
                                      torch.finfo(torch.float8_e4m3fnuz).max)
     # QKV / MLP is fused in the on disk checkpoint if any of the

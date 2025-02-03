@@ -8,7 +8,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_fp8_linear, cutlass_fp8_supported, normalize_e4m3fn_to_e4m3fnuz,
-    requantize_with_max_scale)
+    requantize_with_max_scale, is_gaudi2)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
@@ -82,7 +82,11 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         # INPUT SCALE
         if self.is_static_input_scheme and hasattr(layer, 'input_scale'):
-            layer.input_scale = Parameter(layer.input_scale.max(),
+            input_scale = layer.input_scale.max()
+            if is_gaudi2():
+                input_scale = input_scale * (torch.finfo(torch.float8_e4m3fn).max /
+                                     torch.finfo(torch.float8_e4m3fnuz).max)
+            layer.input_scale = Parameter(input_scale,
                                           requires_grad=False)
         else:
             layer.input_scale = None
