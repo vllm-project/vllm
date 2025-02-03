@@ -199,7 +199,7 @@ def _match_fused_layer(layer_name: str, target_layers: Iterable[str],
     ]
 
     # for each unfused component, find a match in targets
-    unfused_matches = []
+    unfused_matches: List[Optional[str]] = []
     for unfused in unfused_paths:
         for target in target_layers:
             if _is_equal_or_regex_match(unfused, target):
