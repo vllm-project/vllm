@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Helpers for building inputs that can be leveraged for different test types.
 """
 from pathlib import PosixPath

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from functools import lru_cache
 from typing import TYPE_CHECKING, Dict, List, Optional
@@ -75,7 +77,8 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1) -> str:
+                             kv_cache_dtype, block_size, use_v1,
+                             use_mla) -> str:
         selected_backend = (_Backend.ROCM_FLASH if selected_backend
                             == _Backend.FLASH_ATTN else selected_backend)
         if selected_backend == _Backend.ROCM_FLASH:

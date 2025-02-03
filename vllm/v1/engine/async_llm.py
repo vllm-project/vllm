@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import os
 from typing import AsyncGenerator, List, Mapping, Optional, Type, Union
@@ -53,8 +55,7 @@ class AsyncLLM(EngineClient):
         self.log_stats = log_stats
         self.stat_loggers: List[StatLoggerBase] = [
             LoggingStatLogger(),
-            PrometheusStatLogger(labels=dict(
-                model_name=self.model_config.served_model_name)),
+            PrometheusStatLogger(vllm_config.model_config),
         ]
 
         # Tokenizer (+ ensure liveness if running in another process).
@@ -305,7 +306,8 @@ class AsyncLLM(EngineClient):
             return
 
         for logger in self.stat_loggers:
-            logger.log(scheduler_stats=scheduler_stats)
+            logger.log(scheduler_stats=scheduler_stats,
+                       iteration_stats=iteration_stats)
 
     def encode(
         self,

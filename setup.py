@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import ctypes
 import importlib.util
 import logging
@@ -608,7 +610,11 @@ if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
 package_data = {
-    "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
+    "vllm": [
+        "py.typed",
+        "model_executor/layers/fused_moe/configs/*.json",
+        "model_executor/layers/quantization/utils/configs/*.json",
+    ]
 }
 
 if _no_device():

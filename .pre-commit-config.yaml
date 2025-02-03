@@ -85,8 +85,26 @@ repos:
     entry: tools/png-lint.sh
     language: script
     types: [png]
+  - id: signoff-commit
+    name: Sign-off Commit
+    entry: bash
+    args:
+      - -c
+      - |
+        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" .git/COMMIT_EDITMSG; then
+          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> .git/COMMIT_EDITMSG
+        fi
+    language: system
+    verbose: true
+    stages: [commit-msg]
+  - id: check-spdx-header
+    name: Check SPDX headers
+    entry: python tools/check_spdx_header.py
+    language: python
+    types: [python]
   - id: suggestion
     name: Suggestion
     entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
     language: system
     verbose: true
+    pass_filenames: false

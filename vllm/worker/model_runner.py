@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 import gc
 import inspect
@@ -1066,6 +1068,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
+            use_mla=self.model_config.use_mla,
         ) if needs_attn_backend else None
         if self.attn_backend:
             self.attn_state = self.attn_backend.get_state_cls()(
@@ -1345,6 +1348,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
             self.execute_model(model_input, kv_caches, intermediate_tensors)
             torch.cuda.synchronize()
+            if self.lora_config:
+                # Remove dummy loras.
+                assert self.lora_manager is not None
+                self.remove_all_loras()
             return
 
     def remove_all_loras(self):
@@ -1973,7 +1980,8 @@ class CUDAGraphRunner(nn.Module):
 
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
-        self.input_buffers["positions"].copy_(positions, non_blocking=True)
+        if positions is not None:
+            self.input_buffers["positions"].copy_(positions, non_blocking=True)
 
         if self.backend_name != "NO_ATTENTION":
             self.input_buffers["slot_mapping"].copy_(
