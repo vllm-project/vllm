@@ -2241,6 +2241,7 @@ def import_pynvml():
     if "pynvml" in sys.modules:
         import pynvml
         if pynvml.__file__.endswith("__init__.py"):
+            # this is pynvml < 12.0
             raise RuntimeError(
                 "You are using a deprecated `pynvml` package. "
                 "Please uninstall `pynvml` or upgrade to at least"
