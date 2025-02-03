@@ -20,10 +20,8 @@ HEAD_SIZES = [64, 80, 120, 256]
 BLOCK_SIZES = [8, 16, 32]
 
 # Parameters for MLA tests.
-KV_LORA_RANKS = [512]  # the first part of the head dimension
-QK_ROPE_HEAD_DIMS = [
-    64
-]  # the second part; head_dim = kv_lora_rank + qk_rope_head_dim
+KV_LORA_RANKS = [512]
+QK_ROPE_HEAD_DIMS = [64]
 NUM_TOKENS_MLA = [42]
 BLOCK_SIZES_MLA = [16]
 NUM_BLOCKS_MLA = [8]
