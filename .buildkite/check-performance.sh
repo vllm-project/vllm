@@ -30,7 +30,8 @@ run_benchmark() {
 # Compare against *latest* PR base commit. If a rebase happens in the PR,
 # compare against current "rebased" base commit. 
 BASE_BRANCH="$BUILDKITE_PULL_REQUEST_BASE_BRANCH"
-CURRENT_BRANCH="pr-performance-check"
+# Strip fork username from BUILDKITE_BRANCH
+CURRENT_BRANCH=${BUILDKITE_BRANCH#*:}
 
 # Avoid hard links to vllm-project that break forks.
 git remote -v
@@ -39,8 +40,10 @@ echo "$BUILDKITE_COMMIT"
 # TODO auto-rebase if no conflicts are detected?
 git fetch origin "$BASE_BRANCH" >/dev/null 2>&1
 # Buildkite detached head state prevents 'merge-base' from finding common ancestor.
-git switch "$BUILDKITE_BRANCH"
-git checkout -b "$CURRENT_BRANCH" 
+git remote add pr "$BUILDKITE_PULL_REQUEST_REPO"
+git fetch pr >/dev/null 2>&1
+git switch "$CURRENT_BRANCH"
+# git checkout -b "$CURRENT_BRANCH" 
 git log --oneline -n 20 | cat
 git rev-parse HEAD
 
