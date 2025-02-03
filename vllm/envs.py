@@ -83,6 +83,7 @@ if TYPE_CHECKING:
     VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
     VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
+    VLLM_CUDA_MEM_ALIGN_KV_CACHE: bool = True
 
 
 def get_default_cache_root():
@@ -539,6 +540,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON":
     lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
                  ),
+
+    # Align single entrys (within a page) so they are 256 byte aligned for 
+    # better performance, this increases the memory usage of the cache. 
+    # Currenlty this primarily affects MLA that results in non-256 byte aligned
+    # entrys.
+    "VLLM_CUDA_MEM_ALIGN_KV_CACHE":
+    lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
 }
 
 # end-env-vars-definition

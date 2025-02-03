@@ -3,12 +3,16 @@
 from typing import List
 
 import torch
+import numpy as np
 
+from vllm import envs
+from vllm.platforms import current_platform
 from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
-                        get_dtype_size, is_pin_memory_available)
+                        get_dtype_size, align_to_256bytes, 
+                        is_pin_memory_available)
 
 logger = init_logger(__name__)
 
@@ -65,6 +69,7 @@ class CacheEngine:
             self.num_gpu_blocks, self.device_config.device_type)
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
 
+
     def _allocate_kv_cache(
         self,
         num_blocks: int,
@@ -75,15 +80,30 @@ class CacheEngine:
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
+        
+        entry_shape = kv_cache_shape[2:]
+        entry_size = np.prod(entry_shape)
+        
+        # Align entrys so they are 256 byte aligned for better performance
+        if current_platform.is_cuda() and envs.VLLM_CUDA_MEM_ALIGN_KV_CACHE:
+            alloc_entry_size = align_to_256bytes(entry_size, self.dtype)
+        else:
+            alloc_entry_size = entry_size
+        alloc_shape = (*kv_cache_shape[:2], alloc_entry_size)
+
         for _ in range(self.num_attention_layers):
             # null block in CpuGpuBlockAllocator requires at least that
             # block to be zeroed-out.
             # We zero-out everything for simplicity.
-            kv_cache.append(
-                torch.zeros(kv_cache_shape,
-                            dtype=self.dtype,
-                            pin_memory=pin_memory,
-                            device=device))
+            layer_kv_cache = torch.zeros(alloc_shape,
+                                         dtype=self.dtype,
+                                         pin_memory=pin_memory,
+                                         device=device)
+            
+            if alloc_entry_size != entry_size:
+                layer_kv_cache = layer_kv_cache[..., :entry_size]
+
+            kv_cache.append(layer_kv_cache.view(kv_cache_shape))
         return kv_cache
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
@@ -110,14 +130,20 @@ class CacheEngine:
         num_attention_layers = model_config.get_num_layers_by_block_type(
             parallel_config, LayerBlockType.attention)
 
-        key_cache_block = cache_config.block_size * num_heads * head_size
-        # For MLA there is no value cache, since the latent vector
-        # is joint keys and values.
-        value_cache_block = key_cache_block if not model_config.use_mla else 0
-        total = num_attention_layers * (key_cache_block + value_cache_block)
         if cache_config.cache_dtype == "auto":
             dtype = model_config.dtype
         else:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+
+        key_cache_entry = num_heads * head_size
+        if current_platform.is_cuda() and envs.VLLM_CUDA_MEM_ALIGN_KV_CACHE:
+            head_size = align_to_256bytes(key_cache_entry, model_config.dtype)
+
+        # For MLA there is no value cache, since the latent vector
+        # is joint keys and values.
+        value_cache_entry = key_cache_block if not model_config.use_mla else 0
+        total = num_attention_layers * cache_config.block_size * \
+            (key_cache_entry + value_cache_entry)
+
         dtype_size = get_dtype_size(dtype)
         return dtype_size * total
