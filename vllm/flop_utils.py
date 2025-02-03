@@ -1,3 +1,4 @@
+import importlib
 import torch
 
 import torch
@@ -7,7 +8,10 @@ from typing import List, Any
 from numbers import Number
 from collections import defaultdict
 from torch.utils._python_dispatch import TorchDispatchMode
-import sys 
+
+from functools import wraps 
+from vllm.config import VllmConfig
+import vllm.model_executor.model_loader.loader as loader
 
 aten = torch.ops.aten
 
@@ -89,83 +93,82 @@ flop_mapping = {
     aten.relu: relu_flop
 }
 
+context_manager = None
+
 class FlopContextManager(TorchDispatchMode):
     '''
     Creates a Context Manager to count FLOPS for each operation and sub-module of an LLM ran with vLLM.
     '''
 
     # @param kwargs should consist of functions to add to the flop_mapping if there are any operations not included in the above mapping. 
-    def __init__(self, **kwargs):
+    def __init__(self, model_loader_class='DefaultModelLoader', flop_funcs_dict={}):
         self.flop_counts = defaultdict(lambda: defaultdict(int))
         self.funcs = set()
         self.parents = ['Global']
         self.flop_mapping = flop_mapping
-        self.module = None 
-        for key, value in kwargs.items():
+        self.model = None 
+        for key, value in flop_funcs_dict.items():
             if isinstance(value, function):
                 self.flop_mapping[key] = value
+
+        self._wrap_model(model_loader_class)
+        global context_manager
+        context_manager = self
         
-    def set_model(self, module):
-        assert module != None
-        if self.module is not None:
-            self.remove_hooks(self.module)
+    def _set_model(self, model):
+        assert model != None
+        if self.model is not None:
+            self.remove_hooks()
         
-        self.module = module
-        if module is not None:
-            self.module.apply(self.register_hooks)
+        self.model = model
+        if model is not None:
+            self.model.apply(self.register_hooks)
 
     def register_hooks(self, module):
         name = module.__class__.__name__
         module.__pre_hook__ = module.register_forward_pre_hook(self.enter_module(name))
         module.__post_hook__ = module.register_forward_hook(self.exit_module(name))
     
-    def remove_hooks(module):
-        if hasattr(module, "__pre_hook__"):
-            module.__pre_hook__.remove() 
-            del module.__pre_hook__
-        if hasattr(module, "__post_hook__"):
-            module.__post_hook__.remove() 
-            del module.__post_hook__
+    def remove_hooks(self):
+        if hasattr(self.model, "__pre_hook__"):
+            self.model.__pre_hook__.remove() 
+            del self.model.__pre_hook__
+        if hasattr(self.model, "__post_hook__"):
+            self.model.__post_hook__.remove() 
+            del self.model.__post_hook__
 
     def enter_module(self, name):
-        def f(module, inputs):
+        def f(model, inputs):
             self.parents.append(name)
             return inputs
 
         return f
 
     def exit_module(self, name):
-        def f(module, inputs, outputs):
+        def f(model, inputs, outputs):
             assert(self.parents[-1] == name)
             self.parents.pop()
             return outputs
         return f
 
-    def trace_calls(self, frame, event, arg):
-        if event == 'call':
-            func_name = frame.f_code.co_name
-            if 'load_model' == func_name:
-                module = frame.f_globals.get("__name__", "<unknown>")
+    def _wrap_model(self, loader_class_name):
+        if not hasattr(loader, loader_class_name):
+            return
         
-                if "self" in frame.f_locals:
-                    class_name = frame.f_locals["self"].__class__.__name__
-                    class_name = class_name
-                else:
-                    assert False
-                
-                print(f"Module: {module}, class: {class_name}")
-                print(f"func name: {func_name}")
-                return self.trace_returns
-        return None
-    
-    def trace_returns(self, frame, event, arg):
-        if event == 'return' and isinstance(arg, torch.nn.Module):
-            self.set_model(arg)
-        return None 
+        self.loader_class = getattr(loader, loader_class_name)
+        self.original_func = load_model_func = self.loader_class.load_model
+        assert load_model_func != None
+        
+        @wraps(load_model_func)
+        def wrapper(self, *, vllm_config: VllmConfig):
+            model = load_model_func(self, vllm_config=vllm_config)
+            context_manager._set_model(model)
+            return model
+        
+        setattr(self.loader_class, 'load_model', wrapper)
 
     def __enter__(self):
         self.flop_counts.clear()
-        sys.settrace(self.trace_calls)
         super().__enter__()
 
     def __exit__(self, *args):
@@ -177,7 +180,7 @@ class FlopContextManager(TorchDispatchMode):
             print()
 
         self.remove_hooks()
-        sys.settrace(None)
+        setattr(self.loader_class, self.original_func.__name__, self.original_func)
         super().__exit__(*args)
 
     def __torch_dispatch__(self, func, types, args=(), kwargs={}):
