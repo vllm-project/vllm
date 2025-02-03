@@ -32,7 +32,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
-from vllm.v1.utils import bind_kv_cache
+from vllm.v1.utils import ConstantList, bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -403,8 +403,8 @@ class GPUModelRunner:
                 req_id]
             num_compute_tokens = self.input_batch.num_computed_tokens_cpu[i]
             spec_query_end_loc += req_num_scheduled_tokens
-            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
-                req_id, [])
+            spec_token_ids: ConstantList = scheduler_output.\
+                scheduled_spec_decode_tokens.get(req_id, ConstantList([]))
             for j, spec_token_id in enumerate(spec_token_ids):
                 # +1 here because the input for verification is
                 # [last_output_token_id] + spec_token_ids

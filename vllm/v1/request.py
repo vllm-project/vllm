@@ -111,8 +111,8 @@ class Request:
         self._spec_token_ids = []
 
     @property
-    def spec_token_ids(self) -> List[int]:
-        return self._spec_token_ids
+    def spec_token_ids(self) -> ConstantList[int]:
+        return ConstantList(self._spec_token_ids)
 
     @property
     def num_tokens(self) -> int:

@@ -16,6 +16,7 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalKwargs
@@ -120,7 +121,7 @@ class Scheduler:
 
         # Spec Decode-related.
         spec_decode = False
-        scheduled_spec_decode_tokens: Dict[str, List[int]] = {}
+        scheduled_spec_decode_tokens: Dict[str, ConstantList[int]] = {}
 
         # First, schedule the RUNNING requests.
         # NOTE(woosuk): At most 1 request in the RUNNING queue is allowed to be
@@ -675,7 +676,7 @@ class SchedulerOutput:
     total_num_scheduled_tokens: int
     scheduled_encoder_inputs: Dict[str, List[int]]
     use_spec_decode: bool
-    scheduled_spec_decode_tokens: Dict[str, List[int]]
+    scheduled_spec_decode_tokens: Dict[str, ConstantList[int]]
     num_common_prefix_blocks: int
 
     preempted_req_ids: Set[str]

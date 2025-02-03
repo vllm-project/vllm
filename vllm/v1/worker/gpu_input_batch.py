@@ -11,6 +11,7 @@ import torch
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.utils import ConstantList
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
@@ -326,7 +327,8 @@ class InputBatch:
         req_id_output_token_ids: Dict[str, List[int]],
         skip_copy: bool = False,
         rejection_sampling: bool = False,
-        req_id_to_spec_token_ids: Optional[Dict[str, List[int]]] = None,
+        req_id_to_spec_token_ids: Optional[Dict[str,
+                                                ConstantList[int]]] = None,
     ) -> SamplingMetadata:
         if not skip_copy:
             self.temperature[:self.num_reqs].copy_(
@@ -354,7 +356,7 @@ class InputBatch:
                 self.prompt_token_ids = self._make_prompt_token_ids_tensor()
 
         output_token_ids: List[List[int]] = []
-        spec_token_ids: List[List[int]] = []
+        spec_token_ids: List[ConstantList[int]] = []
         for req_id in self.req_ids[:self.num_reqs]:
             assert req_id is not None
             # Currently we create a tensor for output_token_ids from scratch
@@ -367,7 +369,6 @@ class InputBatch:
             output_token_ids.append(req_id_output_token_ids[req_id])
             if rejection_sampling:
                 assert req_id_to_spec_token_ids is not None
-                assert len(req_id_to_spec_token_ids) > 0
                 spec_token_ids.append(req_id_to_spec_token_ids[req_id])
 
         return SamplingMetadata(
