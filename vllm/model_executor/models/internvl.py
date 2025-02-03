@@ -133,8 +133,7 @@ def get_internvl_target_ratios(
     target_ratios = {(i, j)
                      for n in range(min_num, max_num + 1)
                      for i in range(1, n + 1)
-                     for j in range(1, n + 1)
-                     if i * j <= max_num and i * j >= min_num}
+                     for j in range(1, n + 1) if min_num <= i * j <= max_num}
     return sorted(target_ratios, key=lambda x: x[0] * x[1])
 
 

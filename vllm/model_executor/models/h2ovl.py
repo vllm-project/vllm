@@ -197,7 +197,7 @@ def image_to_pixel_values_h2ovl(
         pixel_values2, _ = _preprocess_image(
             image,
             input_size=input_size,
-            min_num=min_num,
+            min_num=3,  # Hardcoded value
             max_num=max_num,
             use_thumbnail=True,
             prior_aspect_ratio=aspect_ratio1,
@@ -297,6 +297,8 @@ class H2OVLProcessor(BaseInternVLProcessor):
             dynamic_image_size=dynamic_image_size,
             use_thumbnail=use_thumbnail,
         )
+        if prior_aspect_ratio:  # hardcoded value for second pass of use_msac
+            min_num = 3
 
         return get_h2ovl_target_ratios(
             min_num,
