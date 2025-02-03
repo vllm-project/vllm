@@ -8,10 +8,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
-from mistral_common.tokens.tokenizers.sentencepiece import (
-    SentencePieceTokenizer)
-from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
-                                                     Tekkenizer)
 
 from vllm.logger import init_logger
 from vllm.utils import is_list_of
@@ -111,7 +107,11 @@ class MistralTokenizer:
         self.instruct = tokenizer.instruct_tokenizer
 
         tokenizer_ = tokenizer.instruct_tokenizer.tokenizer
+        from mistral_common.tokens.tokenizers.tekken import (
+            SpecialTokenPolicy, Tekkenizer)
         self.is_tekken = isinstance(tokenizer_, Tekkenizer)
+        from mistral_common.tokens.tokenizers.sentencepiece import (
+            SentencePieceTokenizer)
         self.is_spm = isinstance(tokenizer_, SentencePieceTokenizer)
         if self.is_tekken:
             # Make sure special tokens will not raise
