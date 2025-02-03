@@ -80,6 +80,8 @@ def _create_default_sampling_metadata(
         no_penalties=True,
         min_tokens=[],
         stop_token_ids=[],
+        logits_processors=[None] * batch_size,
+        prompt_token_ids_cpu=prompt_token_ids[:],
     )
     return fake_sampling_metadata
 

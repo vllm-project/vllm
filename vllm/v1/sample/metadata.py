@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Set
 
 import torch
 
+from vllm.logits_process import LogitsProcessor
+
 
 @dataclass
 class SamplingMetadata:
@@ -31,3 +33,6 @@ class SamplingMetadata:
     output_token_ids: List[List[int]]
     min_tokens: List[int]
     stop_token_ids: List[Set[int]]
+
+    logits_processors: List[Optional[List[LogitsProcessor]]]
+    prompt_token_ids_cpu: List[torch.Tensor]

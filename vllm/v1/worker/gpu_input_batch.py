@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set
 import numpy as np
 import torch
 
+from vllm.logits_process import LogitsProcessor
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -169,6 +170,11 @@ class InputBatch:
         self.num_logprobs: Dict[str, int] = {}
         self.prompt_logprob_reqs: Set[str] = set()
 
+        self.logits_processors: List[Optional[List[LogitsProcessor]]] = \
+            [None] * max_num_reqs
+        self.prompt_token_ids_cpu: List[List[int]] = \
+            [None] * max_num_reqs # type: ignore
+
     def add_request(
         self,
         request: "CachedRequestState",
@@ -223,6 +229,8 @@ class InputBatch:
             self.repetition_penalties_reqs.add(req_id)
         self.min_tokens[req_index] = sampling_params.min_tokens
         self.stop_token_ids[req_index] = sampling_params.all_stop_token_ids
+        self.logits_processors[req_index] = sampling_params.logits_processors
+        self.prompt_token_ids_cpu[req_index] = request.prompt_token_ids
 
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.
@@ -251,6 +259,8 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.prompt_logprob_reqs.discard(req_id)
+        self.logits_processors[req_index] = None
+        self.prompt_token_ids_cpu[req_index] = None  # type: ignore
         return req_index
 
     def clear(self) -> None:
@@ -266,6 +276,8 @@ class InputBatch:
         self.generators.clear()
         self.num_logprobs.clear()
         self.prompt_logprob_reqs.clear()
+        self.logits_processors = [None] * self.max_num_reqs
+        self.prompt_token_ids_cpu = [None] * self.max_num_reqs  # type: ignore
 
     def condense(self, empty_req_indices: List[int]) -> None:
         if self.num_reqs == 0:
@@ -314,6 +326,10 @@ class InputBatch:
             self.min_tokens[empty_index] = self.min_tokens[last_req_index]
             self.stop_token_ids[empty_index] = \
                 self.stop_token_ids[last_req_index]
+            self.logits_processors[empty_index] = \
+                self.logits_processors[last_req_index]
+            self.prompt_token_ids_cpu[empty_index] = \
+                self.prompt_token_ids_cpu[last_req_index]
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
@@ -382,6 +398,8 @@ class InputBatch:
             min_tokens=self.min_tokens[:self.num_reqs],
             stop_token_ids=self.stop_token_ids[:self.num_reqs],
             no_penalties=self.no_penalties,
+            logits_processors=self.logits_processors[:self.num_reqs],
+            prompt_token_ids_cpu=self.prompt_token_ids_cpu[:self.num_reqs],
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:

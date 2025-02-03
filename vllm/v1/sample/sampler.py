@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """A layer that samples the next tokens from the model's outputs."""
+import inspect
 from typing import Tuple
 
 import torch
@@ -46,6 +47,8 @@ class Sampler(nn.Module):
         logits = self.apply_penalties(logits, sampling_metadata)
         # Apply temperature.
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
+        # Apply logits processors.
+        logits = self.apply_logits_processors(logits, sampling_metadata)
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
         # Use int32 to reduce the tensor size.
@@ -133,4 +136,29 @@ class Sampler(nn.Module):
                 sampling_metadata.frequency_penalties,
                 sampling_metadata.repetition_penalties,
                 sampling_metadata.output_token_ids)
+        return logits
+
+    def apply_logits_processors(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        for seq_idx, seq_logits_processors in \
+            enumerate(sampling_metadata.logits_processors):
+            if not seq_logits_processors:
+                continue
+
+            logits_row = logits[seq_idx]
+            past_tokens_ids = sampling_metadata.output_token_ids[seq_idx]
+            prompt_tokens_ids = sampling_metadata.prompt_token_ids_cpu[seq_idx]
+
+            for logits_processor in seq_logits_processors:
+                parameters = inspect.signature(logits_processor).parameters
+                if len(parameters) == 3:
+                    logits_row = logits_processor(prompt_tokens_ids,
+                                                  past_tokens_ids, logits_row)
+                else:
+                    logits_row = logits_processor(past_tokens_ids, logits_row)
+
+            logits[seq_idx] = logits_row
         return logits
