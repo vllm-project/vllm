@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import suppress
 from typing import Any, Dict, List, Literal, Optional, Tuple, cast
 
 import torch
@@ -395,12 +396,14 @@ class CompressedTensorsConfig(QuantizationConfig):
         # assume that fused layers inerhit first component's sparsity scheme
         sparsity_targets = (self.sparsity_scheme_map.keys() -
                             set(self.sparsity_ignore_list))
-        matched_target = find_matched_target(
-            layer_name=layer_name,
-            module=layer,
-            targets=sparsity_targets,
-            fused_mapping=self.packed_modules_mapping)
-        sparsity_scheme = self.sparsity_scheme_map.get(matched_target, None)
+        sparsity_scheme: Optional[SparsityCompressionConfig] = None
+        with suppress(ValueError):
+            matched_target = find_matched_target(
+                layer_name=layer_name,
+                module=layer,
+                targets=sparsity_targets,
+                fused_mapping=self.packed_modules_mapping)
+            sparsity_scheme = self.sparsity_scheme_map[matched_target]
 
         if self.supports_cutlass_24(weight_quant=weight_quant,
                                     input_quant=input_quant,
