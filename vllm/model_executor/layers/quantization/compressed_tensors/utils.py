@@ -97,6 +97,9 @@ def find_matched_target(
 
     First, we try to match the layer_name with a target
     Second, we try to match the module's name with a target
+    Third, we try to map the layer_name to a list of fused module names.
+        All fused module names must match in order for a match to be
+        successful. A successful match returns the first module name
 
     :param layer_name: layer name
     :param module: torch.nn.Module
@@ -178,9 +181,13 @@ def _match_fused_layer(layer_name: str, target_layers: Iterable[str],
          for (fused, unfused) in mapping if layer_name.endswith(fused)),
         start=[])
 
-    for target in target_layers:
-        for unfused_path in unfused_paths:
-            if _is_equal_or_regex_match(unfused_path, target):
-                return target
+    if len(unfused_paths) <= 0:
+        return None
 
-    return None
+    for unfused_path in unfused_paths:
+        if not any(
+                _is_equal_or_regex_match(unfused_path, target)
+                for target in target_layers):
+            return None
+
+    return unfused_paths[0]
