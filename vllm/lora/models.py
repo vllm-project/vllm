@@ -545,7 +545,8 @@ class LoRAModelManager(AdapterModelManager):
             parts = module_name.split(".")
             if module_name not in self.packed_modules:
                 assert embedding_modules is not None
-                if parts[-1] in embedding_modules:
+                if (parts[-1] in embedding_modules) or isinstance(
+                        module, ModulesToSaveWrapper):
                     input_dim = (module.base_layer.org_vocab_size +
                                  self.lora_config.lora_extra_vocab_size if
                                  hasattr(module.base_layer, "org_vocab_size")
