@@ -169,18 +169,19 @@ def _is_equal_or_regex_match(value: str,
     return False
 
 
-def _match_fused_layer(layer_name: str, target_layers: Iterable[str],
-                       mapping: Mapping[str, List[str]]) -> Optional[str]:
+def _match_fused_layer(
+        layer_name: str, target_layers: Iterable[str],
+        fused_mapping: Mapping[str, List[str]]) -> Optional[str]:
     """
     Match a fused layer name to its corresponding individual layer in 
-    target_layers. Returns first value in mapping which matches targets
+    target_layers. Returns first value in fused_mapping which matches targets
 
     Implements an "all" matching strategy where a fused layer matches iff
     "all" of its components match
 
     :param layer_name: layer name
     :param target_layers: list of targets to match the layer against
-    :param mapping: map from fused layer names to its components
+    :param fused_mapping: map from fused layer names to its components
 
     Examples:
         layer_name = "model.layers.0.self_attn.qkv_proj"
@@ -189,13 +190,14 @@ def _match_fused_layer(layer_name: str, target_layers: Iterable[str],
                         "model.layers.0.self_attn.v_proj"]
     """
     # find layer_name in mapping
-    fused = next((key for key in mapping if layer_name.endswith(key)), None)
+    fused = next((key for key in fused_mapping if layer_name.endswith(key)),
+                 None)
     if fused is None:
         return None
 
     # expand path of unfused components
     unfused_paths = [
-        layer_name.replace(fused, unfused) for unfused in mapping[fused]
+        layer_name.replace(fused, unfused) for unfused in fused_mapping[fused]
     ]
 
     # for each unfused component, find a match in targets
