@@ -10,7 +10,7 @@ env:
   CHART_NAME: vllm-helm-chart
 
 jobs:
-  build-and-push-image:
+  package-and-publish-chart-helm:
     runs-on: ubuntu-latest
     # Sets the permissions granted to the `GITHUB_TOKEN` for the actions in this job.
     permissions:
@@ -38,5 +38,5 @@ jobs:
         run:  helm package examples/online_serving/chart-helm --version "$CHART_TAG"
 
       - name: helm push
-        if: ${{ github.event_name == 'push' }}
+        # if: ${{ github.event_name == 'push' }}
         run:  helm push $CHART_NAME-$CHART_TAG.tgz oci://ghcr.io/${{ github.repository_owner }}
