@@ -1,9 +1,4 @@
-import importlib
 import torch
-
-import torch
-import torch.nn as nn
-from torch.utils._pytree import tree_map, tree_flatten
 from typing import List, Any
 from numbers import Number
 from collections import defaultdict
@@ -101,7 +96,7 @@ class FlopContextManager(TorchDispatchMode):
     '''
 
     # @param kwargs should consist of functions to add to the flop_mapping if there are any operations not included in the above mapping. 
-    def __init__(self, model_loader_class='DefaultModelLoader', flop_funcs_dict={}):
+    def __init__(self, load_format='default', flop_funcs_dict={}):
         self.flop_counts = defaultdict(lambda: defaultdict(int))
         self.funcs = set()
         self.parents = ['Global']
@@ -111,7 +106,7 @@ class FlopContextManager(TorchDispatchMode):
             if isinstance(value, function):
                 self.flop_mapping[key] = value
 
-        self._wrap_model(model_loader_class)
+        self._wrap_model(load_format)
         global context_manager
         context_manager = self
         
@@ -151,11 +146,12 @@ class FlopContextManager(TorchDispatchMode):
             return outputs
         return f
 
-    def _wrap_model(self, loader_class_name):
-        if not hasattr(loader, loader_class_name):
+    def _wrap_model(self, load_format):
+        
+        self.loader_class = get_model_loader_type(load_format)
+        if self.loader_class is None:
             return
         
-        self.loader_class = getattr(loader, loader_class_name)
         self.original_func = load_model_func = self.loader_class.load_model
         assert load_model_func != None
         
@@ -181,6 +177,8 @@ class FlopContextManager(TorchDispatchMode):
 
         self.remove_hooks()
         setattr(self.loader_class, self.original_func.__name__, self.original_func)
+        global context_manager 
+        context_manager = None 
         super().__exit__(*args)
 
     def __torch_dispatch__(self, func, types, args=(), kwargs={}):
@@ -196,3 +194,26 @@ class FlopContextManager(TorchDispatchMode):
             for par in self.parents:
                 self.flop_counts[par][func_packet] += flop_count
         return out
+
+def get_model_loader_type(load_format):
+    from vllm.config import LoadFormat
+
+    if load_format == LoadFormat.DUMMY:
+        return loader.DummyModelLoader
+
+    if load_format == LoadFormat.TENSORIZER:
+        return loader.TensorizerLoader
+
+    if load_format == LoadFormat.SHARDED_STATE:
+        return loader.ShardedStateLoader
+
+    if load_format == LoadFormat.BITSANDBYTES:
+        return loader.BitsAndBytesModelLoader
+
+    if load_format == LoadFormat.GGUF:
+        return loader.GGUFModelLoader
+
+    if load_format == LoadFormat.RUNAI_STREAMER:
+        return loader.RunaiModelStreamerLoader
+
+    return loader.DefaultModelLoader
