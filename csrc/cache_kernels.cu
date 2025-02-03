@@ -93,6 +93,23 @@ __global__ void copy_blocks_kernel(int64_t* key_cache_ptrs,
   }
 }
 
+// Kernel for MLA, which works on a single joint kv_cache
+template <typename scalar_t>
+__global__ void copy_blocks_mla_kernel(
+    int64_t* cache_ptrs, const int64_t* __restrict__ block_mapping,
+    const int mem_footprint_per_block) {
+  const int layer_idx = blockIdx.x;
+  const int pair_idx = blockIdx.y;
+  scalar_t* cache = reinterpret_cast<scalar_t*>(cache_ptrs[layer_idx]);
+  int64_t src_block = block_mapping[2 * pair_idx];
+  int64_t dst_block = block_mapping[2 * pair_idx + 1];
+  int64_t src_offset = src_block * mem_footprint_per_block;
+  int64_t dst_offset = dst_block * mem_footprint_per_block;
+  for (int i = threadIdx.x; i < mem_footprint_per_block; i += blockDim.x) {
+    cache[dst_offset + i] = cache[src_offset + i];
+  }
+}
+
 }  // namespace vllm
 
 // Note: the key_caches and value_caches vectors are constant but
@@ -146,6 +163,42 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
         vllm::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
             key_cache_ptrs_tensor.data_ptr<int64_t>(),
             value_cache_ptrs_tensor.data_ptr<int64_t>(),
+            block_mapping.data_ptr<int64_t>(), mem_footprint_per_block);
+      }));
+}
+
+// copy blocks kernel for MLA (assumes a joint KV-cache)
+void copy_blocks_mla(std::vector<torch::Tensor> const& kv_caches,
+                     const torch::Tensor& block_mapping) {
+  int num_layers = kv_caches.size();
+  if (num_layers == 0) {
+    return;
+  }
+  torch::Device cache_device = kv_caches[0].device();
+  TORCH_CHECK(cache_device.is_cuda(), "kv_cache must be on CUDA");
+
+  std::vector<int64_t> cache_ptrs(num_layers);
+  for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
+    cache_ptrs[layer_idx] =
+        reinterpret_cast<int64_t>(kv_caches[layer_idx].data_ptr());
+  }
+  torch::Tensor cache_ptrs_tensor =
+      torch::from_blob(cache_ptrs.data(), {num_layers}, torch::kInt64)
+          .to(cache_device);
+
+  int num_pairs = block_mapping.size(0);
+  // We use the stride instead of numel in case the cache is padded for memory
+  // alignment reasons, we assume the blocks data (inclusive of any padding)
+  // is contiguous in memory
+  int mem_footprint_per_block = kv_caches[0].stride(0);
+  dim3 grid(num_layers, num_pairs);
+  dim3 block(std::min(1024, mem_footprint_per_block));
+  const at::cuda::OptionalCUDAGuard device_guard(cache_device);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES(
+      kv_caches[0].scalar_type(), "copy_blocks_mla_kernel", ([&] {
+        vllm::copy_blocks_mla_kernel<scalar_t><<<grid, block, 0, stream>>>(
+            cache_ptrs_tensor.data_ptr<int64_t>(),
             block_mapping.data_ptr<int64_t>(), mem_footprint_per_block);
       }));
 }

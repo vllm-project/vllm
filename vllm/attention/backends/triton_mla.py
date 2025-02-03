@@ -79,7 +79,7 @@ class TritonMLABackend(AttentionBackend):
         kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
-        PagedAttention.copy_blocks(kv_caches, src_to_dists)
+        ops.copy_blocks_mla(kv_caches, src_to_dists)
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
