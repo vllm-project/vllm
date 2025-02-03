@@ -372,11 +372,11 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
 
         self.linear_1 = nn.Linear(config.vision_config.hidden_size,
                                   config.text_config.hidden_size,
-                                  bias=True)
+                                  bias=config.multimodal_projector_bias)
         self.act = get_act_fn(config.projector_hidden_act)
         self.linear_2 = nn.Linear(config.text_config.hidden_size,
                                   config.text_config.hidden_size,
-                                  bias=True)
+                                  bias=config.multimodal_projector_bias)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear_1(image_features)
