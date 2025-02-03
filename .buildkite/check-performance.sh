@@ -39,14 +39,14 @@ echo "$BUILDKITE_COMMIT"
 # Initial state of the repo is dirty with main branch changes (?)
 git restore .
 # TODO auto-rebase if no conflicts are detected?
-git diff --stat origin | echo
+git diff --stat origin | cat
 git fetch origin "$BASE_BRANCH" >/dev/null 2>&1
-git status | echo
+git status | cat
 # Buildkite detached head state prevents 'merge-base' from finding common ancestor.
 git remote add pr "$BUILDKITE_PULL_REQUEST_REPO"
 git remote -v
 git fetch pr >/dev/null 2>&1
-git status | echo
+git status | cat
 git switch "$CURRENT_BRANCH"
 # git checkout -b "$CURRENT_BRANCH" 
 git log --oneline -n 20 | cat
@@ -70,7 +70,8 @@ git diff
 git checkout -q "$BASE_COMMIT"
 
 # Extra arguments passed to the script are used here to spin up the server.
-run_benchmark $@ && mv benchmark_serving.txt benchmark_base.txt
+# run_benchmark $@ && mv benchmark_serving.txt benchmark_base.txt
+echo "RUN BEENCH"
 
 # Test PR commit
 echo "--- Testing PR commit ($BUILDKITE_COMMIT)"
@@ -78,7 +79,8 @@ git status
 git diff
 git switch "$CURRENT_BRANCH"
 
-run_benchmark $@ && mv benchmark_serving.txt benchmark_pr.txt
+# run_benchmark $@ && mv benchmark_serving.txt benchmark_pr.txt
+echo "RUN BEENCH"
 rm ShareGPT_V3_unfiltered_cleaned_split.json
 
 # Compare results. Run the comparison 3 times to avoid jitter of a single run.
