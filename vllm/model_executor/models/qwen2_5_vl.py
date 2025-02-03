@@ -872,11 +872,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        assert not cache_config.enable_prefix_caching, \
-            "Qwen2.5-VL currently does not support prefix caching"
 
         self.config = config
         self.multimodal_config = multimodal_config
