@@ -396,7 +396,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     hf_config=hf_config,
                     image_grid_thw=image_grid_thw,
                     video_grid_thw=video_grid_thw,
-                    video_second_per_grid_ts=second_per_grid_ts,
+                    second_per_grid_ts=second_per_grid_ts,
                     context_len=computed_len,
                 )
             seq_data.mrope_position_delta = mrope_position_delta

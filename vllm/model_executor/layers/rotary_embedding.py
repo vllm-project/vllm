@@ -839,7 +839,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         hf_config: PretrainedConfig,
         image_grid_thw: Union[List[List[int]], torch.Tensor],
         video_grid_thw: Union[List[List[int]], torch.Tensor],
-        video_second_per_grid_ts: Optional[List[float]] = None,
+        second_per_grid_ts: Optional[List[float]] = None,
         context_len: int = 0,
         seq_len: Optional[int] = None,
     ) -> Tuple[List[List[int]], int]:
@@ -851,7 +851,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                 hf_config=hf_config,
                 image_grid_thw=image_grid_thw,
                 video_grid_thw=video_grid_thw,
-                video_second_per_grid_ts=video_second_per_grid_ts,
+                second_per_grid_ts=second_per_grid_ts,
                 context_len=context_len,
                 seq_len=seq_len,
             )
@@ -864,7 +864,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         hf_config: PretrainedConfig,
         image_grid_thw: Union[List[List[int]], torch.Tensor],
         video_grid_thw: Union[List[List[int]], torch.Tensor],
-        video_second_per_grid_ts: Optional[List[float]] = None,
+        second_per_grid_ts: Optional[List[float]] = None,
         context_len: int = 0,
         seq_len: Optional[int] = None,
     ) -> Tuple[torch.Tensor, int]:
@@ -874,8 +874,8 @@ class MRotaryEmbedding(RotaryEmbedding):
         video_token_id = hf_config.video_token_id
         vision_start_token_id = hf_config.vision_start_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
-        video_tokens_per_second = getattr(hf_config.vision_config,
-                                          "tokens_per_second", 1.0)
+        tokens_per_second = getattr(hf_config.vision_config,
+                                    "tokens_per_second", 1.0)
 
         if isinstance(image_grid_thw, torch.Tensor):
             image_grid_thw = image_grid_thw.tolist()
@@ -920,9 +920,8 @@ class MRotaryEmbedding(RotaryEmbedding):
                     video_grid_thw[video_index][2],
                 )
                 video_second_per_grid_t = 1.0
-                if video_second_per_grid_ts is not None:
-                    video_second_per_grid_t = video_second_per_grid_ts[
-                        video_index]
+                if second_per_grid_ts is not None:
+                    video_second_per_grid_t = second_per_grid_ts[video_index]
                 video_index += 1
                 remain_videos -= 1
                 ed = ed_video
@@ -938,7 +937,7 @@ class MRotaryEmbedding(RotaryEmbedding):
 
             t_index = (torch.arange(llm_grid_t).view(-1, 1).expand(
                 -1, llm_grid_h * llm_grid_w) * video_second_per_grid_t *
-                       video_tokens_per_second).long().flatten()
+                       tokens_per_second).long().flatten()
 
             h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(
                 llm_grid_t, -1, llm_grid_w).flatten()

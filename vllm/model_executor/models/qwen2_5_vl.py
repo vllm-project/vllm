@@ -282,7 +282,8 @@ class Qwen2_5_VisionAttention(nn.Module):
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
         }:
             raise RuntimeError(
-                f"Qwen2.5-VL does not support {self.attn_backend} backend now.")
+                f"Qwen2.5-VL does not support {self.attn_backend} backend now."
+            )
 
     def forward(
         self,
