@@ -85,7 +85,7 @@ def _create_default_sampling_metadata(
         no_penalties=True,
         min_tokens=[],
         stop_token_ids=[],
-        logits_processors=[None] * batch_size,
+        logits_processors={},
         prompt_token_ids_cpu=prompt_token_ids[:],
     )
     return fake_sampling_metadata
@@ -227,12 +227,19 @@ def test_sampler_logits_processors(
     sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
 
+    sampling_metadata.logits_processors = {}
     processors = processors_and_validator[0]
-    sampling_metadata.logits_processors = [processors] * batch_size
-
-    # leave the last but non-first seq untouched
-    if batch_size > 1:
-        sampling_metadata.logits_processors[-1] = None
+    if processors:
+        if batch_size > 1:
+            # leave the last but non-first seq untouched
+            sampling_metadata.logits_processors = {
+                i: processors
+                for i in range(0, batch_size - 1)
+            }
+        else:
+            sampling_metadata.logits_processors = {
+                0: processors,
+            }
 
     sampler = Sampler()
     logits = sampler.apply_logits_processors(fake_logits, sampling_metadata)

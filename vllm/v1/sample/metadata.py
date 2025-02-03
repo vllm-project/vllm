@@ -34,5 +34,5 @@ class SamplingMetadata:
     min_tokens: List[int]
     stop_token_ids: List[Set[int]]
 
-    logits_processors: List[Optional[List[LogitsProcessor]]]
+    logits_processors: Dict[int, List[LogitsProcessor]]
     prompt_token_ids_cpu: List[List[int]]

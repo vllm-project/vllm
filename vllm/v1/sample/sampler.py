@@ -143,11 +143,11 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
-        for seq_idx, seq_logits_processors in \
-            enumerate(sampling_metadata.logits_processors):
-            if not seq_logits_processors:
-                continue
+        if len(sampling_metadata.logits_processors) == 0:
+            return logits
 
+        for seq_idx, seq_logits_processors in \
+            sampling_metadata.logits_processors.items():
             logits_row = logits[seq_idx]
             original_logits_row = logits_row
             past_tokens_ids = sampling_metadata.output_token_ids[seq_idx]
@@ -163,4 +163,5 @@ class Sampler(nn.Module):
 
             if logits_row is not original_logits_row:
                 logits[seq_idx] = logits_row
+
         return logits

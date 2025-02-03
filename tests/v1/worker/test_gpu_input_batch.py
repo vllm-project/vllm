@@ -114,7 +114,7 @@ def _construct_expected_sampling_metadata(
         no_penalties=(all(x ==0 for x in presence_penalties) and \
             all(x ==0 for x in frequency_penalties) and \
                 all(x ==1 for x in repetition_penalties)),
-        logits_processors=[None] * num_reqs,
+        logits_processors={},
         prompt_token_ids_cpu=prompt_token_ids[:],
     )
 
