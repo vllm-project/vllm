@@ -234,8 +234,7 @@ class Idefics3MultimodalProcessor(
                 prompt, mm_data, mm_kwargs)
             processed_outputs["patches_per_image"] = patches_per_image
             for key in ("pixel_values", "pixel_attention_mask"):
-                processed_outputs[key] = list(processed_outputs[key].flatten(
-                    0, 1).split(patches_per_image))
+                processed_outputs[key] = processed_outputs[key].flatten(0, 1)
         else:
             tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
@@ -390,7 +389,7 @@ class Idefics3Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config: Idefics3Config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -463,9 +462,6 @@ class Idefics3Model(nn.Module):
             if isinstance(pixel_values, list):
                 pixel_values = torch.cat(pixel_values, dim=1)
                 pixel_attention_mask = torch.cat(pixel_attention_mask, dim=1)
-            else:
-                pixel_values = flatten_bn(pixel_values)
-                pixel_attention_mask = flatten_bn(pixel_attention_mask)
 
             return Idefics3ImagePixelInputs(
                 type="pixel_values",
@@ -481,12 +477,10 @@ class Idefics3Model(nn.Module):
     ) -> NestedTensors:
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        batch_size, num_images, num_channels, height, width = pixel_values.shape
+        num_patches = [x.size(0) for x in pixel_values]
         pixel_values = pixel_values.to(
             dtype=self.vision_model.embeddings.patch_embedding.weight.dtype
         )  # fp16 compatibility
-        pixel_values = pixel_values.view(batch_size * num_images,
-                                         *pixel_values.shape[2:])
 
         # Remove padding images - padding images are full 0.
         nb_values_per_image = pixel_values.shape[1:].numel()
@@ -504,8 +498,6 @@ class Idefics3Model(nn.Module):
             )
         else:
             # Remove padding images from the mask
-            pixel_attention_mask = pixel_attention_mask.view(
-                batch_size * num_images, *pixel_attention_mask.shape[2:])
             pixel_attention_mask = pixel_attention_mask[
                 real_images_inds].contiguous()
 
@@ -524,7 +516,7 @@ class Idefics3Model(nn.Module):
             patch_attention_mask=patch_attention_mask,
         )
 
-        return image_hidden_states.split([num_images] * batch_size)
+        return image_hidden_states.split(num_patches)
 
     def _process_image_pixels(
             self, inputs: Idefics3ImagePixelInputs) -> NestedTensors:
