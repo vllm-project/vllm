@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This example shows how to use Ray Data for running offline batch inference
 distributively on a multi-nodes cluster.

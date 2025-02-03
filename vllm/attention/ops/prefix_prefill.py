@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # The kernels in this file are adapted from LightLLM's context_attention_fwd:
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 

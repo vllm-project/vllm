@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import contextlib
 import importlib
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
@@ -454,6 +456,11 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
 # cutlass
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
+
+
+def cutlass_scaled_mm_supports_block_fp8(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_scaled_mm_supports_block_fp8(
+        cuda_device_capability)
 
 
 def cutlass_scaled_mm(a: torch.Tensor,
@@ -965,6 +972,15 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
     torch.ops._moe_C.moe_align_block_size(topk_ids, num_experts, block_size,
                                           sorted_token_ids, experts_ids,
                                           num_tokens_post_pad)
+
+
+def sgl_moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
+                             block_size: int, sorted_token_ids: torch.Tensor,
+                             experts_ids: torch.Tensor,
+                             num_tokens_post_pad: torch.Tensor) -> None:
+    torch.ops._moe_C.sgl_moe_align_block_size(topk_ids, num_experts,
+                                              block_size, sorted_token_ids,
+                                              experts_ids, num_tokens_post_pad)
 
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,

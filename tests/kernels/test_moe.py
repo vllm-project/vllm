@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the MOE layers.
 
 Run `pytest tests/kernels/test_moe.py`.

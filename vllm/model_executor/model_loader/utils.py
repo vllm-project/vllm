@@ -1,16 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
 """Utilities for selecting and loading models."""
 import contextlib
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
+import transformers
 from torch import nn
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, ModelImpl
+from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.adapters import (as_classification_model,
                                                  as_embedding_model,
                                                  as_reward_model)
+
+logger = init_logger(__name__)
 
 
 @contextlib.contextmanager
@@ -20,6 +26,50 @@ def set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(dtype)
     yield
     torch.set_default_dtype(old_dtype)
+
+
+def is_transformers_impl_compatible(
+        arch: str,
+        module: Optional[transformers.PreTrainedModel] = None) -> bool:
+    mod = module or getattr(transformers, arch, None)
+    if mod is None:
+        return False
+    if hasattr(mod, "supports_backend"):
+        return mod.is_backend_compatible()
+    else:
+        return mod._supports_flex_attn
+
+
+def resolve_transformers_fallback(model_config: ModelConfig,
+                                  architectures: list[str]):
+    for i, arch in enumerate(architectures):
+        if arch == "TransformersModel":
+            continue
+        custom_module = None
+        auto_map = getattr(model_config.hf_config, "auto_map", None)
+        if auto_map is not None and "AutoModel" in auto_map:
+            custom_module = get_class_from_dynamic_module(
+                model_config.hf_config.auto_map["AutoModel"],
+                model_config.model)
+        # TODO(Isotr0py): Further clean up these raises.
+        # perhaps handled them in _ModelRegistry._raise_for_unsupported?
+        if model_config.model_impl == ModelImpl.TRANSFORMERS:
+            if not is_transformers_impl_compatible(arch, custom_module):
+                raise ValueError(
+                    f"The Transformers implementation of {arch} is not "
+                    "compatible with vLLM.")
+            architectures[i] = "TransformersModel"
+        if model_config.model_impl == ModelImpl.AUTO:
+            if not is_transformers_impl_compatible(arch, custom_module):
+                raise ValueError(
+                    f"{arch} has no vLLM implementation and the Transformers "
+                    "implementation is not compatible with vLLM.")
+            logger.warning(
+                "%s has no vLLM implementation, falling back to Transformers "
+                "implementation. Some features may not be supported and "
+                "performance may not be optimal.", arch)
+            architectures[i] = "TransformersModel"
+    return architectures
 
 
 def get_model_architecture(
@@ -36,6 +86,14 @@ def get_model_architecture(
             and model_config.quantization not in mixtral_supported
             and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
+
+    vllm_supported_archs = ModelRegistry.get_supported_archs()
+    is_vllm_supported = any(arch in vllm_supported_archs
+                            for arch in architectures)
+    if (not is_vllm_supported
+            or model_config.model_impl == ModelImpl.TRANSFORMERS):
+        architectures = resolve_transformers_fallback(model_config,
+                                                      architectures)
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
     if model_config.task == "embed":

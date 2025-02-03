@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashAttention."""
 from collections import defaultdict
 from dataclasses import dataclass
