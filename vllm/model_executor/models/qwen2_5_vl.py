@@ -31,7 +31,7 @@ from typing import (Any, Callable, Iterable, List, Literal, Mapping, Optional,
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange, repeat
+from einops import rearrange
 from transformers import BatchFeature
 from transformers.models.qwen2_5_vl import (Qwen2_5_VLImageProcessor,
                                             Qwen2_5_VLProcessor)
@@ -70,6 +70,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .qwen2_vl import apply_rotary_pos_emb_vision
 from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -202,51 +203,6 @@ class Qwen2_5_VisionMLP(nn.Module):
         x_up, _ = self.up_proj(x)
         x_down, _ = self.down_proj(x_gate * x_up)
         return x_down
-
-
-def rotate_half(x: torch.Tensor, interleaved: bool = False) -> torch.Tensor:
-    if not interleaved:
-        x1, x2 = x.chunk(2, dim=-1)
-        return torch.cat((-x2, x1), dim=-1)
-    else:
-        x1, x2 = x[..., ::2], x[..., 1::2]
-        return rearrange(torch.stack((-x2, x1), dim=-1),
-                         "... d two -> ... (d two)",
-                         two=2)
-
-
-def apply_rotary_emb_torch(x: torch.Tensor,
-                           cos: torch.Tensor,
-                           sin: torch.Tensor,
-                           interleaved: bool = False) -> torch.Tensor:
-    """
-    x: (batch_size, seqlen, nheads, headdim)
-    cos, sin: (seqlen, rotary_dim / 2) or (batch_size, seqlen, rotary_dim / 2)
-    """
-    ro_dim = cos.shape[-1] * 2
-    assert ro_dim <= x.shape[-1]
-    cos = repeat(
-        cos,
-        "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
-    sin = repeat(
-        sin,
-        "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
-    return torch.cat(
-        [
-            x[..., :ro_dim] * cos +
-            rotate_half(x[..., :ro_dim], interleaved) * sin, x[..., ro_dim:]
-        ],
-        dim=-1,
-    )
-
-
-def apply_rotary_pos_emb_vision(t: torch.Tensor,
-                                freqs: torch.Tensor) -> torch.Tensor:
-    t_ = t.float()
-    cos = freqs.cos()
-    sin = freqs.sin()
-    output = apply_rotary_emb_torch(t_, cos, sin).type_as(t)
-    return output
 
 
 class Qwen2_5_VisionAttention(nn.Module):
