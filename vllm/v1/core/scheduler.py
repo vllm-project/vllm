@@ -509,7 +509,6 @@ class Scheduler:
                 request.max_tokens + request.num_prompt_tokens,
                 request.num_output_tokens + request.num_prompt_tokens)
             request.crop(num_total_token)
-            self._free_request(request)
             return True
 
         sampling_params = request.sampling_params
@@ -520,7 +519,6 @@ class Scheduler:
                 num_total_token = request.num_prompt_tokens + \
                         request.output_token_ids.index(request.eos_token_id) + 1
                 request.crop(num_total_token)
-                self._free_request(request)
                 return True
 
         output_token_ids = set(request.output_token_ids)
@@ -531,7 +529,6 @@ class Scheduler:
                 num_total_token = request.num_prompt_tokens + \
                         request.output_token_ids.index(stop_token_id) + 1
                 request.crop(num_total_token)
-                self._free_request(request)
                 return True
         return False
 
