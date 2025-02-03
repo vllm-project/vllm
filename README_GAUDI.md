@@ -81,6 +81,7 @@ To install latest [HabanaAI/vLLM-fork](https://github.com/HabanaAI/vllm-fork), r
 $ git clone https://github.com/HabanaAI/vllm-fork.git
 $ cd vllm-fork
 $ git checkout habana_main
+$ pip install --upgrade pip
 $ pip install -r requirements-hpu.txt
 $ python setup.py develop
 ```
