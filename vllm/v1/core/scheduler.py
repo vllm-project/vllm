@@ -59,6 +59,7 @@ class Scheduler:
         # Priority queues for requests.
         self.waiting: Deque[Request] = deque()
         self.running: List[Request] = []
+        self.running_pipelined: List[Request] = []
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -163,6 +164,7 @@ class Scheduler:
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
+            self.running_pipelined.append(request)
             req_to_new_block_ids[request.request_id] = [
                 b.block_id for b in new_blocks
             ]
@@ -190,7 +192,7 @@ class Scheduler:
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             while self.waiting and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+                if len(self.running) + len(self.running_pipelined) == self.max_num_running_reqs:
                     break
 
                 request = self.waiting[0]
@@ -249,7 +251,7 @@ class Scheduler:
                     break
 
                 self.waiting.popleft()
-                self.running.append(request)
+                self.running_pipelined.append(request)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
@@ -444,8 +446,8 @@ class Scheduler:
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
-        for request in self.running:
-            req_id = request.request_id
+        for req_id in model_runner_output.req_ids:
+            request = self.requests[req_id]
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
             if num_tokens_scheduled == 0:
                 # The request was not scheduled in this step.
@@ -495,12 +497,12 @@ class Scheduler:
                     stop_reason=request.stop_reason)
                 outputs.append(output)
 
+                self.running_pipelined.remove(request)
                 # Breakout of the loop.
                 if stopped:
                     continue
 
-            new_running.append(request)
-        self.running = new_running
+            self.running.append(request)
         return EngineCoreOutputs(
             outputs=outputs,
             scheduler_stats=self.make_stats(),
@@ -570,6 +572,9 @@ class Scheduler:
 
     def has_unfinished_requests(self) -> bool:
         return self.get_num_unfinished_requests() > 0
+
+    def has_schedulable_requests(self) -> bool:
+        return len(self.waiting) + len(self.running) > 0
 
     def reset_prefix_cache(self) -> bool:
         return self.kv_cache_manager.reset_prefix_cache()
