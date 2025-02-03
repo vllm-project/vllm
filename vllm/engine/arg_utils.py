@@ -465,7 +465,9 @@ class EngineArgs:
         parser.add_argument(
             '--use-padding-aware-scheduling',
             default=EngineArgs.use_padding_aware_scheduling,
-            action='store_true',
+            action=StoreBoolean,
+            nargs="?",
+            const="True",
             help=('Use padding-aware scheduling. If True, the scheduler '
                   'will consider padded tokens in prefill. '
                   'By default this is set to False on non-HPU devices. '))
