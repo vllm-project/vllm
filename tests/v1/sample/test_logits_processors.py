@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.sampling_params import LogitsProcessor
 from vllm.utils import make_tensor_with_pad
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
@@ -145,8 +146,6 @@ UNTOUCHED_VALIDATOR = lambda logits: validate_logits_min_max(
     logits, expected_min=DEFAULT_LOGIT_VALUE, expected_max=DEFAULT_LOGIT_VALUE)
 """validate the logits is not touched by any logits processor"""
 
-LogitsProcessorType = Callable[[List[int], torch.Tensor], torch.Tensor]
-
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
@@ -212,7 +211,7 @@ def test_sampler_logits_processors(
     batch_size: int,
     processors_and_validator: Tuple[
         # logits_processors
-        Optional[List[LogitsProcessorType]],
+        Optional[List[LogitsProcessor]],
         # validator
         Callable[[torch.Tensor], None],
     ],
