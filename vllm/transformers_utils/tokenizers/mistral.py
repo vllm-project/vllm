@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.base import SpecialTokens
 # yapf: disable
 from mistral_common.tokens.tokenizers.mistral import (
@@ -23,7 +22,11 @@ from vllm.logger import init_logger
 from vllm.utils import is_list_of
 
 if TYPE_CHECKING:
+    from mistral_common.protocol.instruct.request import ChatCompletionRequest
+
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+else:
+    ChatCompletionRequest = Any
 
 logger = init_logger(__name__)
 
@@ -283,7 +286,8 @@ class MistralTokenizer:
         last_message = cast(Dict[str, Any], messages[-1])
         if last_message["role"] == "assistant":
             last_message["prefix"] = True
-
+        from mistral_common.protocol.instruct.request import (
+            ChatCompletionRequest)
         request = ChatCompletionRequest(messages=messages,
                                         tools=tools)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
