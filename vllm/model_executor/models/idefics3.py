@@ -234,8 +234,8 @@ class Idefics3MultimodalProcessor(
                 prompt, mm_data, mm_kwargs)
             processed_outputs["patches_per_image"] = patches_per_image
             for key in ("pixel_values", "pixel_attention_mask"):
-                processed_outputs[key] = processed_outputs[key].flatten(
-                    0, 1).split(patches_per_image)
+                processed_outputs[key] = list(processed_outputs[key].flatten(
+                    0, 1).split(patches_per_image))
         else:
             tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
@@ -278,7 +278,8 @@ class Idefics3MultimodalProcessor(
         image_seq_len = hf_processor.image_seq_len
         grid_placeholder = "<row_{n_h}_col_{n_w}>"
 
-        global_img_placeholder = global_img_token + image_token * image_seq_len
+        global_img_placeholder = fake_image_token + global_img_token + (
+            image_token * image_seq_len)
         tile_img_placeholder = grid_placeholder + image_token * image_seq_len
 
         def get_replacement_idefics3(item_idx: int) -> str:
@@ -289,16 +290,23 @@ class Idefics3MultimodalProcessor(
                 image_width=image_size.width,
                 image_height=image_size.height,
             )
-
-            if grid_w == 1 and grid_h == 1:
+            if grid_w == 0 and grid_h == 0:
                 image_placeholder = global_img_placeholder
             else:
-                tiles_placeholder = "".join(
-                    tile_img_placeholder.format(n_h=i + 1, n_w=j + 1)
-                    for i in range(grid_h) for j in range(grid_w))
-                image_placeholder = (tiles_placeholder + "\n\n" +
+                placeholder_per_tile = []
+                for i in range(grid_h):
+                    for j in range(grid_w):
+                        image_placeholder = tile_img_placeholder.format(
+                            n_h=i + 1, n_w=j + 1)
+                        if j == grid_w - 1:
+                            image_placeholder += "\n"
+                        placeholder_per_tile.append(image_placeholder)
+
+                tiles_placeholder = fake_image_token + fake_image_token.join(
+                    placeholder_per_tile)
+                image_placeholder = (tiles_placeholder + "\n" +
                                      global_img_placeholder)
-            return fake_image_token + image_placeholder + fake_image_token
+            return image_placeholder + fake_image_token
 
         return [
             PromptReplacement(

@@ -146,6 +146,7 @@ def _test_processing_correctness(
     "facebook/chameleon-7b",
     "deepseek-ai/deepseek-vl2-tiny",
     "adept/fuyu-8b",
+    "HuggingFaceM4/Idefics3-8B-Llama3",
     "llava-hf/llava-1.5-7b-hf",
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
