@@ -258,7 +258,7 @@ class GrammarConfig:
     def choice_as_grammar(choice: List[str] | None) -> str:
         if choice is None:
             raise ValueError("Choice is not set")
-        escaped_choices = [GrammarConfig.escape_ebnf_string(c) for c in choice]
+        escaped_choices = (GrammarConfig.escape_ebnf_string(c) for c in choice)
         grammar = ('root ::= ' + ' | '.join(f'"{c}"' for c in escaped_choices))
         return grammar
 
