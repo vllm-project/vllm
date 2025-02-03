@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # ruff: noqa: SIM117
 import collections
 import copy
@@ -23,6 +25,7 @@ from torch import nn
 from transformers import AutoModelForCausalLM
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
+from vllm.attention import Attention
 from vllm.config import (LoadConfig, LoadFormat, ModelConfig, ParallelConfig,
                          VllmConfig, set_current_vllm_config)
 from vllm.distributed import (get_tensor_model_parallel_rank,
@@ -114,7 +117,7 @@ def _initialize_model(
     all_params = [param.name for param in signatures.parameters.values()]
     if "vllm_config" in all_params and "prefix" in all_params:
         # new-style model class
-        with set_current_vllm_config(vllm_config):
+        with set_current_vllm_config(vllm_config, check_compile=True):
             return model_class(vllm_config=vllm_config, prefix=prefix)
 
     msg = ("vLLM model class should accept `vllm_config` and `prefix` as "
@@ -142,7 +145,7 @@ def _initialize_model(
         kwargs["lora_config"] = vllm_config.lora_config
     if "scheduler_config" in all_params:
         kwargs["scheduler_config"] = vllm_config.scheduler_config
-    with set_current_vllm_config(vllm_config):
+    with set_current_vllm_config(vllm_config, check_compile=True):
         return model_class(**kwargs)
 
 
@@ -397,6 +400,13 @@ class DefaultModelLoader(BaseModelLoader):
                     # parameters onto device for processing and back off after.
                     with device_loading_context(module, target_device):
                         quant_method.process_weights_after_loading(module)
+                if isinstance(module, Attention) and \
+                    hasattr(module, "process_weights_after_loading"):
+                    # When attention modules need to process weights after
+                    # currently only used by MLA
+                    # TODO(lucas): see if there is a way to unify the signatures
+                    # of process_weights_after_loading
+                    module.process_weights_after_loading(model_config.dtype)
         return model.eval()
 
 
@@ -433,6 +443,11 @@ class DummyModelLoader(BaseModelLoader):
                     with device_loading_context(
                             module, torch.device(device_config.device)):
                         quant_method.process_weights_after_loading(module)
+                if isinstance(module, Attention) and \
+                    hasattr(module, "process_weights_after_loading"):
+                    # When attention modules need to process weights after
+                    # currently only used by MLA
+                    module.process_weights_after_loading(model_config.dtype)
         return model.eval()
 
 
@@ -627,6 +642,12 @@ class ShardedStateLoader(BaseModelLoader):
                     quant_method = getattr(module, "quant_method", None)
                     if quant_method is not None:
                         quant_method.process_weights_after_loading(module)
+                    if isinstance(module, Attention) and \
+                        hasattr(module, "process_weights_after_loading"):
+                        # When attention modules need to process weights after
+                        # currently only used by MLA
+                        module.process_weights_after_loading(
+                            model_config.dtype)
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(
                 local_model_path,
@@ -1121,8 +1142,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 # from being incorrectly identified as being present in
                 # 'vpm.encoder.layers.0.self_attn.qkv_proj.weight
                 shard_pos = quant_param_name.find(shard_name)
-                can_correct_rename = (shard_pos > 0) and (
-                    quant_param_name[shard_pos - 1] == ".")
+                can_correct_rename = (shard_pos
+                                      > 0) and (quant_param_name[shard_pos - 1]
+                                                == ".")
                 # If the quant_param_name is packed, it won't occur in the
                 # param_dict before renaming.
                 new_quant_param_name = quant_param_name.replace(
@@ -1265,7 +1287,7 @@ class GGUFModelLoader(BaseModelLoader):
 
 class RunaiModelStreamerLoader(BaseModelLoader):
     """
-        Model loader that can load safetensors 
+        Model loader that can load safetensors
         files from local FS or S3 bucket.
     """
 
@@ -1362,6 +1384,11 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 if quant_method is not None:
                     with device_loading_context(module, target_device):
                         quant_method.process_weights_after_loading(module)
+                if isinstance(module, Attention) and \
+                    hasattr(module, "process_weights_after_loading"):
+                    # When attention modules need to process weights after
+                    # currently only used by MLA
+                    module.process_weights_after_loading(model_config.dtype)
         return model.eval()
 
 

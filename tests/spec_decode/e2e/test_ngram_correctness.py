@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """This docstring details important information on the testing methodology.
 
 Most of the tests rely on "greedy equality", where we expect the output of
@@ -26,6 +27,7 @@ for the target model outputs.
 
 import pytest
 
+from ..utils import maybe_enable_chunked_prefill
 from .conftest import run_equality_correctness_test
 
 
@@ -49,11 +51,13 @@ from .conftest import run_equality_correctness_test
         "speculative_model": "[ngram]",
         "num_speculative_tokens": 5,
         "ngram_prompt_lookup_max": 3,
+        "speculative_disable_mqa_scorer": False,
     },
     {
         "speculative_model": "[ngram]",
         "num_speculative_tokens": 5,
         "ngram_prompt_lookup_max": 3,
+        "speculative_disable_mqa_scorer": True,
     },
 ])
 @pytest.mark.parametrize("output_len", [
@@ -68,15 +72,7 @@ def test_ngram_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
                                       batch_size: int, output_len: int,
                                       prefill_chunk_size: int, seed: int):
     """Verify greedy equality on a tiny model with different batch size."""
-    if prefill_chunk_size > 0:
-        common_llm_kwargs.update(
-            **{
-                "enable_chunked_prefill": True,
-                "max_num_batched_tokens": prefill_chunk_size,
-                "max_num_seqs": prefill_chunk_size
-            })
-    else:
-        common_llm_kwargs["enable_chunked_prefill"] = False
+    maybe_enable_chunked_prefill(prefill_chunk_size, common_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,

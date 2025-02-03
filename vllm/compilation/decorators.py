@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import inspect
 from typing import Callable, Dict, List, Optional, TypeVar, Union, overload
 from unittest.mock import patch

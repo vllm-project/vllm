@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, List, Type
 
 from vllm.model_executor.layers.quantization.base_config import (
@@ -26,7 +28,8 @@ QUANTIZATION_METHODS: List[str] = [
     "experts_int8",
     "neuron_quant",
     "ipex",
-    "quark"
+    "quark",
+    "moe_wna16"
 ]
 
 # The customized quantization methods which will be added to this dict.
@@ -94,6 +97,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .ipex_quant import IPEXConfig
     from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config
+    from .moe_wna16 import MoeWNA16Config
     from .neuron_quant import NeuronQuantConfig
     from .qqq import QQQConfig
     from .tpu_int8 import Int8TpuConfig
@@ -121,7 +125,8 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "experts_int8": ExpertsInt8Config,
         "neuron_quant": NeuronQuantConfig,
         "ipex": IPEXConfig,
-        "quark": QuarkConfig
+        "quark": QuarkConfig,
+        "moe_wna16": MoeWNA16Config,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)

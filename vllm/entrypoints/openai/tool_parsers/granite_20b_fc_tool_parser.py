@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import re
 from json import JSONDecoder
@@ -62,8 +64,8 @@ class Granite20bFCToolParser(ToolParser):
                 start_of_json = match.end()
                 # end_index == the start of the next function call
                 # (if exists)
-                next_function_call_start = (matches[i + 1].start()
-                                            if i + 1 < len(matches) else None)
+                next_function_call_start = (matches[i + 1].start() if i +
+                                            1 < len(matches) else None)
 
                 raw_function_calls.append(
                     dec.raw_decode(

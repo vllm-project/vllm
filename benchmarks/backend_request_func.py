@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import os
 import sys
@@ -51,7 +53,8 @@ async def async_request_tgi(
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
 
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+    async with aiohttp.ClientSession(trust_env=True,
+                                     timeout=AIOHTTP_TIMEOUT) as session:
         params = {
             "best_of": request_func_input.best_of,
             "max_new_tokens": request_func_input.output_len,
@@ -123,7 +126,8 @@ async def async_request_trt_llm(
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
 
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+    async with aiohttp.ClientSession(trust_env=True,
+                                     timeout=AIOHTTP_TIMEOUT) as session:
         assert request_func_input.best_of == 1
         payload = {
             "accumulate_tokens": True,
@@ -187,7 +191,8 @@ async def async_request_deepspeed_mii(
     request_func_input: RequestFuncInput,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+    async with aiohttp.ClientSession(trust_env=True,
+                                     timeout=AIOHTTP_TIMEOUT) as session:
         assert request_func_input.best_of == 1
 
         payload = {
@@ -235,7 +240,8 @@ async def async_request_openai_completions(
         ("completions", "profile")
     ), "OpenAI Completions API URL must end with 'completions' or 'profile'."
 
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+    async with aiohttp.ClientSession(trust_env=True,
+                                     timeout=AIOHTTP_TIMEOUT) as session:
         payload = {
             "model": request_func_input.model_name \
                 if request_func_input.model_name else request_func_input.model,
@@ -245,11 +251,12 @@ async def async_request_openai_completions(
             "max_tokens": request_func_input.output_len,
             "logprobs": request_func_input.logprobs,
             "stream": True,
-            "ignore_eos": request_func_input.ignore_eos,
             "stream_options": {
                 "include_usage": True,
             },
         }
+        if request_func_input.ignore_eos:
+            payload["ignore_eos"] = request_func_input.ignore_eos
         if request_func_input.extra_body:
             payload.update(request_func_input.extra_body)
         headers = {
@@ -297,7 +304,7 @@ async def async_request_openai_completions(
                                                       most_recent_timestamp)
 
                                 most_recent_timestamp = timestamp
-                                generated_text += text
+                                generated_text += text or ""
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get(
                                     "completion_tokens")
@@ -332,7 +339,8 @@ async def async_request_openai_chat_completions(
         "chat/completions"
     ), "OpenAI Chat Completions API URL must end with 'chat/completions'."
 
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+    async with aiohttp.ClientSession(trust_env=True,
+                                     timeout=AIOHTTP_TIMEOUT) as session:
         content = [{"type": "text", "text": request_func_input.prompt}]
         if request_func_input.multi_modal_content:
             content.append(request_func_input.multi_modal_content)
@@ -348,11 +356,12 @@ async def async_request_openai_chat_completions(
             "temperature": 0.0,
             "max_completion_tokens": request_func_input.output_len,
             "stream": True,
-            "ignore_eos": request_func_input.ignore_eos,
             "stream_options": {
                 "include_usage": True,
             },
         }
+        if request_func_input.ignore_eos:
+            payload["ignore_eos"] = request_func_input.ignore_eos
         if request_func_input.extra_body:
             payload.update(request_func_input.extra_body)
         headers = {
@@ -394,7 +403,7 @@ async def async_request_openai_chat_completions(
                                     output.itl.append(timestamp -
                                                       most_recent_timestamp)
 
-                                generated_text += content
+                                generated_text += content or ""
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get(
                                     "completion_tokens")

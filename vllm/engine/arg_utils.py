@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import dataclasses
 import json
@@ -98,10 +100,8 @@ class EngineArgs:
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
-    quantization_param_path: Optional[str] = None
     seed: int = 0
     max_model_len: Optional[int] = None
-    worker_use_ray: bool = False
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -197,7 +197,10 @@ class EngineArgs:
     kv_transfer_config: Optional[KVTransferConfig] = None
 
     generation_config: Optional[str] = None
+    override_generation_config: Optional[Dict[str, Any]] = None
     enable_sleep_mode: bool = False
+
+    calculate_kv_scales: Optional[bool] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -350,17 +353,6 @@ class EngineArgs:
             help='Data type for kv cache storage. If "auto", will use model '
             'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
             'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
-        parser.add_argument(
-            '--quantization-param-path',
-            type=nullable_str,
-            default=None,
-            help='Path to the JSON file containing the KV cache '
-            'scaling factors. This should generally be supplied, when '
-            'KV cache dtype is FP8. Otherwise, KV cache scaling factors '
-            'default to 1.0, which may cause accuracy issues. '
-            'FP8_E5M2 (without scaling) is only supported on cuda version '
-            'greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
-            'supported for common inference criteria.')
         parser.add_argument('--max-model-len',
                             type=int,
                             default=EngineArgs.max_model_len,
@@ -399,10 +391,6 @@ class EngineArgs:
             'to "ray" if Ray is installed and fail otherwise. Note that tpu '
             'only supports Ray for distributed inference.')
 
-        parser.add_argument(
-            '--worker-use-ray',
-            action='store_true',
-            help='Deprecated, use ``--distributed-executor-backend=ray``.')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,
@@ -945,22 +933,43 @@ class EngineArgs:
             type=str,
             default="auto",
             help='The worker class to use for distributed execution.')
-
         parser.add_argument(
             "--generation-config",
             type=nullable_str,
             default=None,
             help="The folder path to the generation config. "
-            "Defaults to None, will use the default generation config in vLLM. "
-            "If set to 'auto', the generation config will be automatically "
-            "loaded from model. If set to a folder path, the generation config "
-            "will be loaded from the specified folder path.")
+            "Defaults to None, no generation config is loaded, vLLM defaults "
+            "will be used. If set to 'auto', the generation config will be "
+            "loaded from model path. If set to a folder path, the generation "
+            "config will be loaded from the specified folder path. If "
+            "`max_new_tokens` is specified in generation config, then "
+            "it sets a server-wide limit on the number of output tokens "
+            "for all requests.")
+
+        parser.add_argument(
+            "--override-generation-config",
+            type=json.loads,
+            default=None,
+            help="Overrides or sets generation config in JSON format. "
+            "e.g. ``{\"temperature\": 0.5}``. If used with "
+            "--generation-config=auto, the override parameters will be merged "
+            "with the default config from the model. If generation-config is "
+            "None, only the override parameters are used.")
 
         parser.add_argument("--enable-sleep-mode",
                             action="store_true",
                             default=False,
                             help="Enable sleep mode for the engine. "
                             "(only cuda platform is supported)")
+
+        parser.add_argument(
+            '--calculate-kv-scales',
+            action='store_true',
+            help='This enables dynamic calculation of '
+            'k_scale and v_scale when kv-cache-dtype is fp8. '
+            'If calculate-kv-scales is false, the scales will '
+            'be loaded from the model checkpoint if available. '
+            'Otherwise, the scales will default to 1.0.')
 
         return parser
 
@@ -991,7 +1000,6 @@ class EngineArgs:
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,
-            quantization_param_path=self.quantization_param_path,
             enforce_eager=self.enforce_eager,
             max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
@@ -1007,6 +1015,7 @@ class EngineArgs:
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,
+            override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
         )
 
@@ -1068,11 +1077,11 @@ class EngineArgs:
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
             cpu_offload_gb=self.cpu_offload_gb,
+            calculate_kv_scales=self.calculate_kv_scales,
         )
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
-            worker_use_ray=self.worker_use_ray,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             tokenizer_pool_config=TokenizerPoolConfig.create_config(
@@ -1280,11 +1289,22 @@ class EngineArgs:
         self.enable_chunked_prefill = True
         # When no user override, set the default values based on the usage
         # context.
-        # TODO(woosuk): Tune the default values for different hardware.
-        default_max_num_batched_tokens = {
-            UsageContext.LLM_CLASS: 8192,
-            UsageContext.OPENAI_API_SERVER: 2048,
-        }
+        # Use different default values for different hardware.
+        from vllm.platforms import current_platform
+        device_name = current_platform.get_device_name().lower()
+        if "h100" in device_name or "h200" in device_name:
+            # For H100 and H200, we use larger default values.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 8192,
+            }
+        else:
+            # TODO(woosuk): Tune the default values for other hardware.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 8192,
+                UsageContext.OPENAI_API_SERVER: 2048,
+            }
+
         if (self.max_num_batched_tokens is None
                 and usage_context in default_max_num_batched_tokens):
             self.max_num_batched_tokens = default_max_num_batched_tokens[

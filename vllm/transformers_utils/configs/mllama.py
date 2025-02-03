@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from transformers.models.mllama import configuration_mllama as mllama_hf_config
 
 

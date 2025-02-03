@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2023 The vLLM team.
 # Copyright (c) Google Inc.
 #
@@ -13,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Gemma model compatible with HuggingFace weights."""
-from functools import lru_cache
+from functools import cache
 from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
@@ -48,7 +50,7 @@ from .utils import (is_pp_missing_parameter,
 logger = init_logger(__name__)
 
 
-@lru_cache(maxsize=None)
+@cache
 def _get_gemma_act_fn(
     hidden_act: Optional[str],
     hidden_activation: Optional[str],

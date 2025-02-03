@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, List, Optional, Tuple
 
 try:
@@ -52,8 +54,8 @@ class _PagedAttention:
         value_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
-        k_scale: float,
-        v_scale: float,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
         *args,
     ) -> None:
         ops.reshape_and_cache(
@@ -80,8 +82,8 @@ class _PagedAttention:
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
-        k_scale: float,
-        v_scale: float,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
         *args,
     ) -> None:
         tp_rank: int = 0
@@ -149,8 +151,8 @@ class _IPEXPagedAttention(_PagedAttention):
         value_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
-        k_scale: float,
-        v_scale: float,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
         *args,
     ) -> None:
         ipex_modules.PagedAttention.reshape_and_cache(
@@ -170,8 +172,8 @@ class _IPEXPagedAttention(_PagedAttention):
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
-        k_scale: float,
-        v_scale: float,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
         *args,
     ) -> None:
         block_size = value_cache.shape[2]
