@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for H2OVL's multimodal preprocessing kwargs."""
 from typing import Optional
 
