@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 import requests
 
@@ -10,12 +12,7 @@ MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 
 @pytest.fixture(scope="module")
 def server():
-    args = [
-        "--enforce-eager",
-        # Will be used on tests to compare prompt input length
-        "--max-model-len",
-        "100"
-    ]
+    args = ["--enforce-eager", "--max-model-len", "100"]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

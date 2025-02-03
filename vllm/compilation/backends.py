@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import ast
 import copy
 import dataclasses
@@ -680,7 +682,7 @@ class VllmBackend:
 class ConcreteSizeEntry:
     runtime_shape: int
     need_to_compile: bool  # the size is in compile_sizes
-    use_cudagraph: bool  # the size is in capture_sizes
+    use_cudagraph: bool  # the size is in cudagraph_capture_sizes
 
     compiled: bool = False
     runnable: Callable = None  # type: ignore
@@ -727,8 +729,8 @@ class PiecewiseBackend:
 
         self.compile_sizes: Set[int] = set(
             self.compilation_config.compile_sizes)
-        self.capture_sizes: Set[int] = set(
-            self.compilation_config.capture_sizes
+        self.cudagraph_capture_sizes: Set[int] = set(
+            self.compilation_config.cudagraph_capture_sizes
         ) if self.compilation_config.use_cudagraph else set()
 
         self.first_run_finished = False
@@ -746,11 +748,11 @@ class PiecewiseBackend:
         # to_be_compiled_sizes tracks the remaining sizes to compile,
         # and updates during the compilation process, so we need to copy it
         self.to_be_compiled_sizes: Set[int] = self.compile_sizes.copy()
-        for shape in self.compile_sizes.union(self.capture_sizes):
+        for shape in self.compile_sizes.union(self.cudagraph_capture_sizes):
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,
                 need_to_compile=shape in self.compile_sizes,
-                use_cudagraph=shape in self.capture_sizes,
+                use_cudagraph=shape in self.cudagraph_capture_sizes,
             )
 
     def check_for_ending_compilation(self):

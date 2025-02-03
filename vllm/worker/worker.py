@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A GPU worker class."""
 import gc
 import os
@@ -264,10 +265,7 @@ class Worker(LocalOrDistributedWorkerBase):
                f"{(available_kv_cache_memory / GiB_bytes):.2f}GiB.")
 
         logger.info(msg)
-
         # Final cleanup
-        if self.model_runner.lora_manager:
-            self.model_runner.remove_all_loras()
         gc.collect()
 
         return num_gpu_blocks, num_cpu_blocks
@@ -323,6 +321,18 @@ class Worker(LocalOrDistributedWorkerBase):
                       self.gpu_cache)
 
     def _warm_up_model(self) -> None:
+        # warm up sizes that are not in cudagraph capture sizes,
+        # but users still want to compile for better performance,
+        # e.g. for the max-num-batched token size in chunked prefill.
+        warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
+        if not self.model_config.enforce_eager:
+            warmup_sizes = [
+                x for x in warmup_sizes if x not in
+                self.vllm_config.compilation_config.cudagraph_capture_sizes
+            ]
+        for size in sorted(warmup_sizes, reverse=True):
+            logger.info("Compile and warming up model for size %d", size)
+            self.model_runner._dummy_run(size)
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model(self.gpu_cache)
         # Reset the seed to ensure that the random state is not affected by

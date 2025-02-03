@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 from typing import TYPE_CHECKING, List, Optional, Union
 
@@ -58,11 +60,19 @@ class Request:
 
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
-        assert len(self.mm_inputs) == len(self.mm_hashes)
+        if self.mm_hashes:
+            assert len(self.mm_inputs) == len(self.mm_hashes)
 
         # Cache the computed kv block hashes of the request to avoid
         # recomputing.
         self._kv_block_hashes: List[BlockHashType] = []
+        self.kv_block_hashes = ConstantList(self._kv_block_hashes)
+
+        # Read-only views
+        # Prevent directly appending to the these lists since
+        # they should also be updated simultaneously.
+        self.output_token_ids = ConstantList(self._output_token_ids)
+        self.all_token_ids = ConstantList(self._all_token_ids)
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -78,18 +88,6 @@ class Request:
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
         )
-
-    @property
-    def output_token_ids(self) -> ConstantList[int]:
-        # Prevent directly appending to the output_token_ids since
-        # all_token_ids should also be updated simultaneously.
-        return ConstantList(self._output_token_ids)
-
-    @property
-    def all_token_ids(self) -> ConstantList[int]:
-        # Prevent directly appending to the all_token_ids since
-        # output_token_ids should also be updated simultaneously
-        return ConstantList(self._all_token_ids)
 
     def append_output_token_ids(
         self,
@@ -126,13 +124,9 @@ class Request:
         num_tokens = self.mm_positions[input_id]["length"]
         return num_tokens
 
-    @property
-    def kv_block_hashes(self) -> ConstantList["BlockHashType"]:
-        # Prevent directly appending to the kv_block_hashes.
-        return ConstantList(self._kv_block_hashes)
-
     def set_kv_block_hashes(self, value: List["BlockHashType"]) -> None:
         self._kv_block_hashes = value
+        self.kv_block_hashes = ConstantList(self._kv_block_hashes)
 
     def append_kv_block_hashes(self, block_hash: "BlockHashType") -> None:
         self._kv_block_hashes.append(block_hash)

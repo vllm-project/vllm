@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
@@ -123,6 +125,10 @@ class AttentionMetadata:
     multi_modal_placeholder_index_maps: Optional[Dict[
         str, MultiModalPlaceholderMap.IndexMap]]
 
+    # Enable/disable KV scales calculation. This is so that we can disable the
+    # calculation until after prefill and cuda graph capture.
+    enable_kv_scales_calculation: bool
+
     @property
     @abstractmethod
     def prefill_metadata(self) -> Optional["AttentionMetadata"]:
@@ -226,8 +232,10 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
 
 class AttentionLayer(Protocol):
 
-    _k_scale: float
-    _v_scale: float
+    _k_scale: torch.Tensor
+    _v_scale: torch.Tensor
+    _k_scale_float: float
+    _v_scale_float: float
 
     def forward(
         self,
@@ -265,6 +273,22 @@ class AttentionImpl(ABC, Generic[T]):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: T,
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+
+class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
+
+    @abstractmethod
+    def forward(
+        self,
+        layer: AttentionLayer,
+        hidden_states_or_cq: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import random
 from collections import defaultdict
 from types import SimpleNamespace
@@ -754,6 +756,7 @@ def test_populate_seq_ids_with_bonus_tokens():
         seq_group_metadata_list=seq_group_metadata_list,
         accepted_token_ids=accepted_token_ids,
         target_logprobs=target_token_logprobs,
+        prompt_logprobs=None,
         k=k,
         stage_times=(0, 0, 0))
     # Verify that _seq_with_bonus_token_in_last_step contains the following:
