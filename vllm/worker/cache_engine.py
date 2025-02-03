@@ -42,6 +42,7 @@ class CacheEngine:
         self.num_attention_layers = model_config.get_num_layers_by_block_type(
             parallel_config, LayerBlockType.attention)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        self.use_mla = model_config.use_mla
 
         self.block_size = cache_config.block_size
         self.num_gpu_blocks = cache_config.num_gpu_blocks
@@ -80,18 +81,23 @@ class CacheEngine:
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
 
-        # We assume the cache shape is (TOTAL_PAGES, PAGE_SIZE, entry_shape...)
-        entry_shape = kv_cache_shape[2:]
-        entry_size = np.prod(entry_shape)
+        align_cache = self.use_mla and current_platform.is_cuda() \
+            and envs.VLLM_CUDA_MEM_ALIGN_KV_CACHE
 
         # Align entries so they are 256 byte aligned for better performance
         # Primarily targets MLA as this typically only ends up having entries
         # be 128 byte aligned.
-        if current_platform.is_cuda() and envs.VLLM_CUDA_MEM_ALIGN_KV_CACHE:
+        if align_cache:
+            # We assume the cache shape is:
+            #    (TOTAL_PAGES, PAGE_SIZE, entry_shape...)
+            # NOTE this assumption currently only holds for MLA so we only apply
+            # this optimization when `use_mla` is true
+            entry_shape = kv_cache_shape[2:]
+            entry_size = np.prod(entry_shape)
             alloc_entry_size = align_to_256bytes(entry_size, self.dtype)
+            alloc_shape = (*kv_cache_shape[:2], alloc_entry_size)
         else:
-            alloc_entry_size = entry_size
-        alloc_shape = (*kv_cache_shape[:2], alloc_entry_size)
+            alloc_shape = kv_cache_shape
 
         for _ in range(self.num_attention_layers):
             # null block in CpuGpuBlockAllocator requires at least that
@@ -104,7 +110,7 @@ class CacheEngine:
 
             # If we allocated with padding for alignment reasons truncate the
             # shape while preserving the aligned stride
-            if alloc_entry_size != entry_size:
+            if align_cache:
                 layer_kv_cache = layer_kv_cache[..., :entry_size]
 
             # view back to (TOTAL_PAGES, PAGE_SIZE, entry_shape...) for cases

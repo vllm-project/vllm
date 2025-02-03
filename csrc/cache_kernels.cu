@@ -69,7 +69,7 @@ template <typename scalar_t>
 __global__ void copy_blocks_kernel(int64_t* key_cache_ptrs,
                                    int64_t* value_cache_ptrs,
                                    const int64_t* __restrict__ block_mapping,
-                                   const int numel_per_block) {
+                                   const int mem_footprint_per_block) {
   const int layer_idx = blockIdx.x;
   const int pair_idx = blockIdx.y;
 
@@ -79,14 +79,14 @@ __global__ void copy_blocks_kernel(int64_t* key_cache_ptrs,
   int64_t src_block_number = block_mapping[2 * pair_idx];
   int64_t dst_block_number = block_mapping[2 * pair_idx + 1];
 
-  const int64_t src_block_offset = src_block_number * numel_per_block;
-  const int64_t dst_block_offset = dst_block_number * numel_per_block;
-  for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
+  const int64_t src_block_offset = src_block_number * mem_footprint_per_block;
+  const int64_t dst_block_offset = dst_block_number * mem_footprint_per_block;
+  for (int i = threadIdx.x; i < mem_footprint_per_block; i += blockDim.x) {
     int64_t src_offset = src_block_offset + i;
     int64_t dst_offset = dst_block_offset + i;
     key_cache[dst_offset] = key_cache[src_offset];
   }
-  for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
+  for (int i = threadIdx.x; i < mem_footprint_per_block; i += blockDim.x) {
     int64_t src_offset = src_block_offset + i;
     int64_t dst_offset = dst_block_offset + i;
     value_cache[dst_offset] = value_cache[src_offset];
@@ -133,9 +133,12 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
           .to(cache_device);
 
   // Launch the kernel.
-  const int numel_per_block = key_caches[0][0].numel();
+  // We use the stride instead of numel in case the cache is padded for memory
+  // alignment reasons, we assume the blocks data (inclusive of any padding)
+  // is contiguous in memory
+  const int mem_footprint_per_block = key_caches[0].stride(0);
   dim3 grid(num_layers, num_pairs);
-  dim3 block(std::min(1024, numel_per_block));
+  dim3 block(std::min(1024, mem_footprint_per_block));
   const at::cuda::OptionalCUDAGuard device_guard(cache_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES(
@@ -143,7 +146,7 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
         vllm::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
             key_cache_ptrs_tensor.data_ptr<int64_t>(),
             value_cache_ptrs_tensor.data_ptr<int64_t>(),
-            block_mapping.data_ptr<int64_t>(), numel_per_block);
+            block_mapping.data_ptr<int64_t>(), mem_footprint_per_block);
       }));
 }
 
@@ -212,9 +215,9 @@ __global__ void reshape_and_cache_flash_kernel(
     cache_t* __restrict__ value_cache,   // [num_blocks, block_size, num_heads,
                                          // head_size]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-    const int block_stride, const int entry_stride, const int key_stride,
-    const int value_stride, const int num_heads, const int head_size,
-    const int block_size, const float* k_scale, const float* v_scale) {
+    const int block_stride, const int key_stride, const int value_stride,
+    const int num_heads, const int head_size, const int block_size,
+    const float* k_scale, const float* v_scale) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   // NOTE: slot_idx can be -1 if the token is padded
@@ -230,7 +233,7 @@ __global__ void reshape_and_cache_flash_kernel(
     const int head_idx = i / head_size;
     const int head_offset = i % head_size;
     const int64_t tgt_key_value_idx = block_idx * block_stride +
-                                      block_offset * entry_stride +
+                                      block_offset * num_heads * head_size +
                                       head_idx * head_size + head_offset;
     scalar_t tgt_key = key[src_key_idx];
     scalar_t tgt_value = value[src_value_idx];
@@ -338,16 +341,16 @@ void reshape_and_cache(
 // KV_T is the stored data type of kv-cache.
 // CACHE_T is the data type of key and value tensors.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_RESHAPE_AND_CACHE_FLASH(KV_T, CACHE_T, KV_DTYPE)           \
-  vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE>         \
-      <<<grid, block, 0, stream>>>(                                     \
-          reinterpret_cast<KV_T*>(key.data_ptr()),                      \
-          reinterpret_cast<KV_T*>(value.data_ptr()),                    \
-          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),             \
-          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),           \
-          slot_mapping.data_ptr<int64_t>(), block_stride, entry_stride, \
-          key_stride, value_stride, num_heads, head_size, block_size,   \
-          reinterpret_cast<const float*>(k_scale.data_ptr()),           \
+#define CALL_RESHAPE_AND_CACHE_FLASH(KV_T, CACHE_T, KV_DTYPE)         \
+  vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE>       \
+      <<<grid, block, 0, stream>>>(                                   \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                    \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                  \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
+          slot_mapping.data_ptr<int64_t>(), block_stride, key_stride, \
+          value_stride, num_heads, head_size, block_size,             \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),         \
           reinterpret_cast<const float*>(v_scale.data_ptr()));
 
 void reshape_and_cache_flash(
@@ -377,7 +380,6 @@ void reshape_and_cache_flash(
   int key_stride = key.stride(0);
   int value_stride = value.stride(0);
   int block_stride = key_cache.stride(0);
-  int entry_stride = key_cache.stride(1);
   TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
 
   dim3 grid(num_tokens);
