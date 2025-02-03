@@ -37,7 +37,9 @@ def _create_test_request(request_id: str, max_tokens: int,
                    multi_modal_hashes=None,
                    multi_modal_placeholders=None,
                    sampling_params=SamplingParams(
-                       max_tokens=max_tokens, stop_token_ids=stop_token_ids),
+                       max_tokens=max_tokens,
+                       stop_token_ids=stop_token_ids,
+                       ignore_eos=False),
                    eos_token_id=EOS_TOKEN_ID,
                    arrival_time=0.0)
 

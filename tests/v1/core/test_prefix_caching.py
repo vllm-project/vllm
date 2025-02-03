@@ -587,3 +587,72 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     assert {block.ref_cnt for block in block_part1[:3]} == {1}
     # Block 3-5 are free.
     assert {block.ref_cnt for block in block_part1[3:]} == {0}
+
+
+def test_reset_prefix_cache():
+    manager = KVCacheManager(
+        block_size=16,
+        num_gpu_blocks=10,
+        max_model_len=8192,
+        sliding_window=None,
+        enable_caching=True,
+        num_preallocate_tokens=0,
+    )
+
+    full_block_token_ids = [i for i in range(3) for _ in range(16)]
+    unique_token_ids = [3] * 7
+    all_token_ids = full_block_token_ids + unique_token_ids
+    req0 = make_request("0", all_token_ids)
+    blocks = manager.allocate_slots(req0, 55, [])
+    assert [b.block_id for b in blocks] == [0, 1, 2, 3]
+
+    unique_token_ids = [4] * 7
+    all_token_ids = full_block_token_ids + unique_token_ids
+    req1 = make_request("1", all_token_ids)
+    computed_blocks, _ = manager.get_computed_blocks(req1)
+    assert len(req1.kv_block_hashes) == 3
+    assert len(computed_blocks) == 3
+    blocks = manager.allocate_slots(req1, 7, computed_blocks)
+    assert [b.block_id for b in blocks] == [4]
+
+    # Failed to reset prefix cache because some blocks are not freed yet.
+    assert not manager.reset_prefix_cache()
+    assert manager.cached_block_hash_to_block
+
+    # Free the blocks.
+    manager.free(req0)
+    manager.free(req1)
+
+    assert manager.reset_prefix_cache()
+    assert not manager.cached_block_hash_to_block
+    assert all([blk.block_hash is None for blk in manager.block_pool])
+
+
+def test_uncache_blocks():
+    manager = KVCacheManager(
+        block_size=16,
+        num_gpu_blocks=10,
+        max_model_len=8192,
+        sliding_window=None,
+        enable_caching=True,
+        num_preallocate_tokens=0,
+    )
+
+    req0 = make_request("0", list(range(30)))
+    blocks = manager.allocate_slots(req0, 30, [])
+    assert [b.block_id for b in blocks] == [0, 1]
+    assert len(manager.cached_block_hash_to_block) == 1
+
+    req0.num_computed_tokens = 30
+
+    # Simulate speculative tokens.
+    for _ in range(5):
+        req0.append_output_token_ids(8)
+    manager.append_slots(req0, 5)
+    assert len(manager.cached_block_hash_to_block) == 2
+
+    # After sampling, assuming only 1 token is accepted.
+    req0.num_computed_tokens = 31
+    num_uncached_blocks = manager.uncache_blocks(req0)
+    assert num_uncached_blocks == 1
+    assert len(manager.cached_block_hash_to_block) == 1

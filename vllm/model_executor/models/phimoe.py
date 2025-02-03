@@ -167,8 +167,8 @@ def sparsemixer(scores, jitter_eps=0.01):
         # compute mask for sparsity
         mask_logits_threshold, max_ind = scores.max(dim=-1, keepdim=True)
         factor = scores.abs().clamp(min=mask_logits_threshold)
-        mask_logits_threshold = (
-            (mask_logits_threshold - scores) / factor) > (2 * jitter_eps)
+        mask_logits_threshold = ((mask_logits_threshold - scores) /
+                                 factor) > (2 * jitter_eps)
 
     # apply mask
     masked_gates = scores.masked_fill(mask_logits_threshold, float("-inf"))
@@ -192,8 +192,8 @@ def sparsemixer(scores, jitter_eps=0.01):
         mask_logits_threshold, max_ind = masked_scores.max(dim=-1,
                                                            keepdim=True)
         factor = scores.abs().clamp(min=mask_logits_threshold)
-        mask_logits_threshold = (
-            (mask_logits_threshold - scores) / factor) > (2 * jitter_eps)
+        mask_logits_threshold = ((mask_logits_threshold - scores) /
+                                 factor) > (2 * jitter_eps)
 
     # apply mask
     masked_gates_top2 = masked_scores.masked_fill(mask_logits_threshold,

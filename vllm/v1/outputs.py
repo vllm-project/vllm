@@ -7,9 +7,8 @@ import torch
 @dataclass
 class SamplerOutput:
 
-    # num_reqs x [num_generated_tokens]
-    # num_generated_tokens might be different for each request.
-    sampled_token_ids: List[List[int]]
+    # num_reqs x [max_num_generated_tokens]
+    sampled_token_ids: torch.Tensor
 
     # [num_reqs, max_num_logprobs + 1]
     logprob_token_ids: Optional[torch.Tensor]

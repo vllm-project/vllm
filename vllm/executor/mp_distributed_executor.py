@@ -148,7 +148,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         async_run_tensor_parallel_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
-    ) -> Any:
+    ) -> List[Any]:
         """Runs the given method on all workers.
 
         Args:

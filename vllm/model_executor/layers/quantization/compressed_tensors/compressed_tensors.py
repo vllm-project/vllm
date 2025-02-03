@@ -9,6 +9,7 @@ from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationType)
 from pydantic import BaseModel
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
@@ -26,6 +27,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
 
 __all__ = ["CompressedTensorsLinearMethod"]
 
@@ -79,6 +82,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            if scheme is None:
+                return UnquantizedLinearMethod()
             layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
         if isinstance(layer, Attention):
@@ -340,10 +345,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")
 
-    def get_scheme(
-            self,
-            layer: torch.nn.Module,
-            layer_name: Optional[str] = None) -> "CompressedTensorsScheme":
+    def get_scheme(self,
+                   layer: torch.nn.Module,
+                   layer_name: Optional[str] = None
+                   ) -> Optional["CompressedTensorsScheme"]:
         """
         compressed-tensors supports non uniform in the following way:
 
@@ -353,10 +358,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             which can be a full layer_name, a regex for a layer_name, or
             an nn.Module name.
 
-        We first check whether a layer is in the ignore group and use
-        CompressedTensorsUnquantized (i.e. fp16/bf16) scheme for the layer
-
-        We then detect whether a layer_name is found in any target and
+        Detect whether a layer_name is found in any target and
         use the quantization scheme corresponding to the matched target
         to select the CompressedTensorsScheme used for infernece.
         """
@@ -394,6 +396,13 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self.supports_cutlass_24(weight_quant=weight_quant,
                                     input_quant=input_quant,
                                     sparsity_scheme=sparsity_scheme):
+            # FIXME(tlrmchlsmth): layers using W16A16 CUTLASS 2:4 sparse kernels
+            # currently produce bad output in some cases
+            if weight_quant is None:
+                logger.warning_once(
+                    "CompressedTensors24 scheme is disabled for the w16a16 "
+                    "case. Falling back to UnquantizedLinearMethod")
+                return None
             # Have a valid sparsity scheme
             # Validate layer is supported by Cutlass 2:4 Kernel
             scheme = CompressedTensors24(quantized=weight_quant is not None

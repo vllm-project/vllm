@@ -3,6 +3,13 @@
 
 # Dependencies for CPUs
 torch==2.5.1+cpu; platform_machine != "ppc64le" and platform_machine != "aarch64" and platform_system != "Darwin"
-torch==2.5.1; platform_machine == "aarch64" or platform_system == "Darwin" 
-torchvision; platform_machine != "ppc64le"  # required for the image processor of phi3v, this must be updated alongside torch
+torch==2.5.1; platform_machine == "ppc64le" or platform_machine == "aarch64" or platform_system == "Darwin" 
+
+# required for the image processor of minicpm-o-2_6, this must be updated alongside torch
+torchaudio; platform_machine != "ppc64le"
+torchaudio==2.5.1; platform_machine == "ppc64le"
+
+# required for the image processor of phi3v, this must be updated alongside torch
+torchvision; platform_machine != "ppc64le"
+torchvision==0.20.1; platform_machine == "ppc64le"
 datasets # for benchmark scripts
