@@ -16,6 +16,7 @@ from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
+from vllm.logits_process import normalize_logits_processor
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
@@ -302,6 +303,14 @@ class GPUModelRunner:
                         spatial_merge_size=hf_config.vision_config.
                         spatial_merge_size,
                     )
+
+            # normalize logits_processors
+            if self.requests[req_id].sampling_params.logits_processors:
+                self.requests[req_id].normalized_logits_processors = [
+                    normalize_logits_processor(logits_processor)
+                    for logits_processor in
+                    self.requests[req_id].sampling_params.logits_processors
+                ]
 
             req_ids_to_add.append(req_id)
 

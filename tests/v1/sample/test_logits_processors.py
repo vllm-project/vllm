@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.sampling_params import LogitsProcessor
+from vllm.logits_process import LogitsProcessor, normalize_logits_processor
 from vllm.utils import make_tensor_with_pad
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
@@ -230,6 +230,7 @@ def test_sampler_logits_processors(
     sampling_metadata.logits_processors = {}
     processors = processors_and_validator[0]
     if processors:
+        processors = [normalize_logits_processor(p) for p in processors]
         if batch_size > 1:
             # leave the last but non-first seq untouched
             sampling_metadata.logits_processors = {

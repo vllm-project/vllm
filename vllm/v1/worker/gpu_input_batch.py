@@ -36,6 +36,10 @@ class CachedRequestState:
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None
 
+    normalized_logits_processors: Optional[List[LogitsProcessor]] = None
+    """copy of sampling_params.logits_processors which
+       ensured to receive 3 arguments."""
+
     @property
     def num_tokens(self) -> int:
         return len(self.prompt_token_ids) + len(self.output_token_ids)
@@ -228,9 +232,9 @@ class InputBatch:
             self.repetition_penalties_reqs.add(req_id)
         self.min_tokens[req_index] = sampling_params.min_tokens
         self.stop_token_ids[req_index] = sampling_params.all_stop_token_ids
-        if sampling_params.logits_processors:
+        if request.normalized_logits_processors:
             self.logits_processors[req_index] = \
-                sampling_params.logits_processors
+                request.normalized_logits_processors
         self.prompt_token_ids_cpu[req_index] = request.prompt_token_ids
 
         # NOTE(woosuk): self.generators should not include the requests that

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 from typing import Callable, List, Tuple, Union
 
 import torch
@@ -14,6 +15,20 @@ of previously generated tokens, the logits tensor
 for the next token and, optionally, prompt tokens as a
 first argument, and returns a modified tensor of logits
 to sample from."""
+
+
+def normalize_logits_processor(
+        logits_processor: LogitsProcessor) -> LogitsProcessor:
+    """ensure given logits_processor takes 3 arguments"""
+    parameters = inspect.signature(logits_processor).parameters
+    if len(parameters) == 3:
+        return logits_processor
+
+    def wrapper(promot_token_ids: List[int], output_token_ids: List[int],
+                logits: torch.Tensor):
+        return logits_processor(output_token_ids, logits)
+
+    return wrapper
 
 
 def get_bad_words_logits_processors(
