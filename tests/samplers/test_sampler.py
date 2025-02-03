@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import itertools
 import random
 from dataclasses import dataclass

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,

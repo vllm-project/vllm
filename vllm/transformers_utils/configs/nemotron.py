@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2024 HuggingFace Inc. team. All rights reserved.
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 #

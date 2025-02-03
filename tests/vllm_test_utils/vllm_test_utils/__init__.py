@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 vllm_utils is a package for vLLM testing utilities.
 It does not import any vLLM modules.
