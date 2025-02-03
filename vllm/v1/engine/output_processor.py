@@ -173,6 +173,8 @@ class OutputProcessor:
             finish_reason = "stop"
         finished = bool(finish_reason)
         output_kind = request_state.output_kind
+        # In follow up, we will switch to invariant where EngineCore
+        # does not stream partial prefills.
         if not finished and (request_state.is_prefilling
                              or output_kind == RequestOutputKind.FINAL_ONLY):
             # Only the final output is required in FINAL_ONLY mode.
@@ -183,8 +185,13 @@ class OutputProcessor:
 
         delta = output_kind == RequestOutputKind.DELTA
         logprobs = logprobs_processor.logprobs
-        if logprobs and delta:
-            logprobs = logprobs[-len(new_token_ids):]
+        if delta:
+            if logprobs:
+                logprobs = logprobs[-len(new_token_ids):]
+            # Side effect: logprobs processor forgets prompt logprobs
+            prompt_logprobs = logprobs_processor.pop_prompt_logprobs()
+        else:
+            prompt_logprobs = logprobs_processor.prompt_logprobs
 
         request_output = RequestOutput.new(
             request_id=request_state.request_id,
@@ -193,11 +200,7 @@ class OutputProcessor:
             text=detokenizer.get_next_output_text(finished, delta),
             token_ids=new_token_ids if delta else detokenizer.output_token_ids,
             logprobs=logprobs,
-            # Side effect: logprobs processor forgets prompt logprobs
-            # FIXME(rob): this does not handle output_kind.CUMULATIVE.
-            # In follow up, we will switch to invariant where EngineCore
-            # does not stream partial prefills.
-            prompt_logprobs=logprobs_processor.pop_prompt_logprobs(),
+            prompt_logprobs=prompt_logprobs,
             cumulative_logprob=logprobs_processor.cumulative_logprob,
             finished=finished,
         )
