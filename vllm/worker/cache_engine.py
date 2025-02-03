@@ -42,7 +42,7 @@ class CacheEngine:
         self.num_attention_layers = model_config.get_num_layers_by_block_type(
             parallel_config, LayerBlockType.attention)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        self.use_mla = model_config.use_mla
+        self.align_cache = self._align_cache(model_config)
 
         self.block_size = cache_config.block_size
         self.num_gpu_blocks = cache_config.num_gpu_blocks
@@ -81,13 +81,10 @@ class CacheEngine:
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
 
-        align_cache = self.use_mla and current_platform.is_cuda() \
-            and envs.VLLM_CUDA_MEM_ALIGN_KV_CACHE
-
         # Align entries so they are 256 byte aligned for better performance
         # Primarily targets MLA as this typically only ends up having entries
         # be 128 byte aligned.
-        if align_cache:
+        if self.align_cache:
             # We assume the cache shape is:
             #    (TOTAL_PAGES, PAGE_SIZE, entry_shape...)
             # NOTE this assumption currently only holds for MLA so we only apply
@@ -110,7 +107,7 @@ class CacheEngine:
 
             # If we allocated with padding for alignment reasons truncate the
             # shape while preserving the aligned stride
-            if align_cache:
+            if self.align_cache:
                 layer_kv_cache = layer_kv_cache[..., :entry_size]
 
             # view back to (TOTAL_PAGES, PAGE_SIZE, entry_shape...) for cases
@@ -132,6 +129,14 @@ class CacheEngine:
         self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
 
     @staticmethod
+    def _align_cache(model_config: ModelConfig):
+        # Currently align_cache only applies to MLA models since the other
+        # cache kernels haven't been updated yet to support non-continguous
+        # tensors
+        return model_config.use_mla and current_platform.is_cuda() \
+            and envs.VLLM_CUDA_MEM_ALIGN_KV_CACHE
+
+    @staticmethod
     def get_cache_block_size(
         cache_config: CacheConfig,
         model_config: ModelConfig,
@@ -148,8 +153,9 @@ class CacheEngine:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         key_cache_entry = num_heads * head_size
-        if current_platform.is_cuda() and envs.VLLM_CUDA_MEM_ALIGN_KV_CACHE:
-            head_size = align_to_256bytes(key_cache_entry, model_config.dtype)
+        if CacheEngine._align_cache(model_config):
+            key_cache_entry = align_to_256bytes(key_cache_entry,
+                                                model_config.dtype)
 
         # For MLA there is no value cache, since the latent vector
         # is joint keys and values.
