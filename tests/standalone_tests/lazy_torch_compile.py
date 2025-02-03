@@ -8,7 +8,12 @@ from contextlib import nullcontext
 
 from vllm_test_utils import BlameResult, blame
 
-module_name = "torch._inductor.async_compile"
+module_names = ["torch._inductor.async_compile", "cv2"]
+
+
+def any_module_imported():
+    return any(module_name in sys.modules for module_name in module_names)
+
 
 # In CI, we only check finally if the module is imported.
 # If it is indeed imported, we can rerun the test with `use_blame=True`,
@@ -16,8 +21,7 @@ module_name = "torch._inductor.async_compile"
 # and help find the root cause.
 # We don't run it in CI by default because it is slow.
 use_blame = False
-context = blame(
-    lambda: module_name in sys.modules) if use_blame else nullcontext()
+context = blame(any_module_imported) if use_blame else nullcontext()
 with context as result:
     import vllm  # noqa
 
@@ -25,6 +29,6 @@ if use_blame:
     assert isinstance(result, BlameResult)
     print(f"the first import location is:\n{result.trace_stack}")
 
-assert module_name not in sys.modules, (
-    f"Module {module_name} is imported. To see the first"
+assert not any_module_imported(), (
+    f"Some the modules in {module_names} are imported. To see the first"
     f" import location, run the test with `use_blame=True`.")
