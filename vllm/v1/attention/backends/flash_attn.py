@@ -75,9 +75,6 @@ class FlashAttentionMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
-    # [num_actual_tokens, batch_size, max_query_len, max_seq_len]
-    tokenshape: torch.Tensor
-
     # For cascade attention.
     use_cascade: bool
     common_prefix_len: int
@@ -194,17 +191,15 @@ class FlashAttentionImpl(AttentionImpl):
         # Whenever making a change in this method, please benchmark the
         # performance to make sure it does not introduce any overhead.
 
-        tokenshape = attn_metadata.tokenshape
-        num_padded_tokens = key.shape[0]
+        num_actual_tokens = attn_metadata.num_actual_tokens
         # Reshape the input keys and values and store them in the cache.
         key_cache, value_cache = kv_cache.unbind(0)
-        torch.ops._C_cache_ops.reshape_and_cache_flash_full_cuda(
-            tokenshape,
+        torch.ops._C_cache_ops.reshape_and_cache_flash(
             key,
             value,
             key_cache,
             value_cache,
-            attn_metadata.slot_mapping[:num_padded_tokens],
+            attn_metadata.slot_mapping[:num_actual_tokens],
             self.kv_cache_dtype,
             layer._k_scale,
             layer._v_scale,
@@ -213,16 +208,15 @@ class FlashAttentionImpl(AttentionImpl):
         # Compute attention and update output up to `num_actual_tokens`.
         if not attn_metadata.use_cascade:
             # Regular attention (common case).
-            num_actual_tokens = attn_metadata.num_actual_tokens
             batch_size = attn_metadata.block_table.shape[0]
-
+            
             #TODO: Do we need to slice by [:batch_size+1]?
             flash_attn_varlen_func(
-                q=query[:num_padded_tokens],
+                q=query[:num_actual_tokens],
                 k=key_cache,
                 v=value_cache,
-                out=output[:num_padded_tokens],
-                cu_seqlens_q=attn_metadata.query_start_loc[:batch_size + 1],
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=attn_metadata.query_start_loc[:batch_size+1],
                 max_seqlen_q=attn_metadata.max_query_len,
                 seqused_k=attn_metadata.seq_lens[:batch_size],
                 max_seqlen_k=attn_metadata.max_seq_len,

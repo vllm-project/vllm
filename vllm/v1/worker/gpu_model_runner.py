@@ -185,7 +185,6 @@ class GPUModelRunner:
             # this one must be int64
             dtype=torch.int64,
             device=self.device)
-        self.tokenshape = torch.zeros(4, dtype=torch.int32, device=self.device)
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
         self.arange_np = np.arange(max(self.max_num_reqs + 1,
@@ -220,11 +219,6 @@ class GPUModelRunner:
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
-
-        self.tokenshape_cpu = torch.zeros(4,
-                                          dtype=torch.int32,
-                                          device="cpu",
-                                          pin_memory=self.pin_memory)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
@@ -466,13 +460,9 @@ class GPUModelRunner:
             self.slot_mapping_cpu[:total_num_scheduled_tokens],
             non_blocking=True)
 
-        self.tokenshape_cpu[
-            0] = total_num_scheduled_tokens  # Tokens to process
-        self.tokenshape_cpu[1] = num_reqs  # Number of requests
-        self.tokenshape_cpu[
-            2] = max_num_scheduled_tokens  # Maximum query length
-        self.tokenshape_cpu[3] = max_seq_len  # Maximum sequence length
-        self.tokenshape.copy_(self.tokenshape_cpu, non_blocking=True)
+        self.query_start_loc[num_reqs + 1:].fill_(-1)
+        self.positions[total_num_scheduled_tokens:].fill_(0)
+        self.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
 
         # Prepare for cascade attention if needed.
         common_prefix_len = (scheduler_output.num_common_prefix_blocks *
@@ -561,7 +551,6 @@ class GPUModelRunner:
             block_table=(
                 self.input_batch.block_table.get_device_tensor()[:num_reqs]),
             slot_mapping=self.slot_mapping,
-            tokenshape=self.tokenshape,
             # Cascade stuff
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
@@ -926,7 +915,6 @@ class GPUModelRunner:
             block_table=(
                 self.input_batch.block_table.get_device_tensor()[:num_reqs]),
             slot_mapping=self.slot_mapping,
-            tokenshape=self.tokenshape,
             # Cascade stuff. Non-piecewise CUDA graphs NYI
             use_cascade=False,
             common_prefix_len=0,
