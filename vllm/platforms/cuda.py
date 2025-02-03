@@ -8,7 +8,6 @@ from functools import lru_cache, wraps
 from typing import (TYPE_CHECKING, Callable, List, Optional, Tuple, TypeVar,
                     Union)
 
-import pynvml
 import torch
 from typing_extensions import ParamSpec
 
@@ -16,6 +15,7 @@ from typing_extensions import ParamSpec
 import vllm._C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils import import_pynvml
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -29,13 +29,7 @@ logger = init_logger(__name__)
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
-if pynvml.__file__.endswith("__init__.py"):
-    logger.warning(
-        "You are using a deprecated `pynvml` package. Please install"
-        " `nvidia-ml-py` instead, and make sure to uninstall `pynvml`."
-        " When both of them are installed, `pynvml` will take precedence"
-        " and cause errors. See https://pypi.org/project/pynvml "
-        "for more information.")
+pynvml = import_pynvml()
 
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details
