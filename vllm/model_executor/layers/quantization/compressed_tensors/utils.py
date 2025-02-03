@@ -20,7 +20,7 @@ def is_activation_quantization_format(format: str) -> bool:
 def should_ignore_layer(
     layer_name: Optional[str],
     ignore: Iterable[str] = tuple(),
-    mapping: Mapping[str, List[str]] = MappingProxyType({})
+    fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
 ) -> bool:
     if layer_name is None:
         return False
@@ -33,8 +33,8 @@ def should_ignore_layer(
     # in the safetensors checkpoint. So, we convert the name
     # from the fused version to unfused + check to make sure that
     # each shard of the fused layer has the same scheme.
-    if proj_name in mapping and layer_name not in ignore:
-        shard_proj_names = mapping[proj_name]
+    if proj_name in fused_mapping and layer_name not in ignore:
+        shard_proj_names = fused_mapping[proj_name]
 
         # Convert fused_name --> [shard_names]
         shard_names = [
@@ -80,13 +80,12 @@ def check_equal_or_regex_match(layer_name: str,
     return False
 
 
-def find_matched_target(layer_name: Optional[str],
-                        module: Module,
-                        targets: Iterable[str],
-                        fused_mapping: Mapping[str,
-                                               List[str]] = MappingProxyType(
-                                                   {}),
-                        fused_strategy: str = "all") -> str:
+def find_matched_target(
+    layer_name: Optional[str],
+    module: Module,
+    targets: Iterable[str],
+    fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
+) -> str:
     """
     Helper function to look up which "target" in the compressed-tensors
     config that a layer corresponds to.
@@ -101,8 +100,8 @@ def find_matched_target(layer_name: Optional[str],
     First, we try to match the layer_name with a target
     Second, we try to match the module's name with a target
     Third, we try to map the layer_name to a list of fused module names.
-        All fused module names must match in order for a match to be
-        successful. A successful match returns the first module name
+        *All* component module names must match in order for a match to be
+        successful. A successful match returns the first component target
 
     :param layer_name: layer name
     :param module: torch.nn.Module
@@ -115,11 +114,10 @@ def find_matched_target(layer_name: Optional[str],
     if layer_name is None:
         layer_name = ""
 
-    matched_target = (_find_first_match(layer_name, targets)
-                      or _find_first_match(module.__class__.__name__, targets,
-                                           True)
-                      or _match_fused_layer(layer_name, targets, fused_mapping,
-                                            fused_strategy))
+    matched_target = (
+        _find_first_match(layer_name, targets)
+        or _find_first_match(module.__class__.__name__, targets, True)
+        or _match_fused_layer(layer_name, targets, fused_mapping))
 
     if matched_target is None:
         raise ValueError(
@@ -171,19 +169,18 @@ def _is_equal_or_regex_match(value: str,
     return False
 
 
-def _match_fused_layer(layer_name: str,
-                       target_layers: Iterable[str],
-                       mapping: Mapping[str, List[str]],
-                       fused_strategy: str = "all") -> Optional[str]:
+def _match_fused_layer(layer_name: str, target_layers: Iterable[str],
+                       mapping: Mapping[str, List[str]]) -> Optional[str]:
     """
     Match a fused layer name to its corresponding individual layer in 
     target_layers. Returns first value in mapping which matches targets
 
+    Implements an "all" matching strategy where a fused layer matches iff
+    "all" of its components match
+
     :param layer_name: layer name
     :param target_layers: list of targets to match the layer against
     :param mapping: map from fused layer names to its components
-    :param fused_strategy: either "all" or "any". If using "all", fused
-        layers match if "all" of its components match
 
     Examples:
         layer_name = "model.layers.0.self_attn.qkv_proj"
@@ -211,10 +208,4 @@ def _match_fused_layer(layer_name: str,
         else:
             unfused_matches.append(None)
 
-    # use strategy to aggregate results
-    if fused_strategy == "all" and all(unfused_matches):  # noqa: SIM114
-        return unfused_matches[0]
-    elif fused_strategy == "any" and any(unfused_matches):
-        return next(match for match in unfused_matches if match is not None)
-
-    return None
+    return unfused_matches[0] if all(unfused_matches) else None

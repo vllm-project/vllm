@@ -58,7 +58,7 @@ class QuarkConfig(QuantizationConfig):
         exclude_layers = cast(List[str], self.quant_config.get("exclude"))
         if should_ignore_layer(prefix,
                                ignore=exclude_layers,
-                               mapping=self.packed_modules_mapping):
+                               fused_mapping=self.packed_modules_mapping):
             return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
