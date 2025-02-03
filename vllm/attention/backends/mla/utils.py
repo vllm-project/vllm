@@ -428,6 +428,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
         attn_metadata: T,
+        fp8_out_scale: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if output is not None:

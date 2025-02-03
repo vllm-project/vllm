@@ -84,8 +84,8 @@ class Attention(nn.Module):
 
         # We also keep the float32 versions of k/v_scale for attention
         # backends that don't support tensors (Flashinfer)
-        self._k_scale_float = torch.tensor(1.0, dtype=torch.float32)
-        self._v_scale_float = torch.tensor(1.0, dtype=torch.float32)
+        self._k_scale_float = 1.0
+        self._v_scale_float = 1.0
 
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
