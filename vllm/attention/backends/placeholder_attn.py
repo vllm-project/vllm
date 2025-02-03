@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import accumulate
