@@ -2,16 +2,16 @@
 """CacheEngine class for managing the KV cache."""
 from typing import List
 
-import torch
 import numpy as np
+import torch
 
 from vllm import envs
-from vllm.platforms import current_platform
 from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
-                        get_dtype_size, align_to_256bytes, 
+                        align_to_256bytes, get_dtype_size,
                         is_pin_memory_available)
 
 logger = init_logger(__name__)
@@ -69,7 +69,6 @@ class CacheEngine:
             self.num_gpu_blocks, self.device_config.device_type)
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
 
-
     def _allocate_kv_cache(
         self,
         num_blocks: int,
@@ -80,11 +79,11 @@ class CacheEngine:
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
-        
+
         entry_shape = kv_cache_shape[2:]
         entry_size = np.prod(entry_shape)
-        
-        # Align entrys so they are 256 byte aligned for better performance
+
+        # Align entries so they are 256 byte aligned for better performance
         if current_platform.is_cuda() and envs.VLLM_CUDA_MEM_ALIGN_KV_CACHE:
             alloc_entry_size = align_to_256bytes(entry_size, self.dtype)
         else:
@@ -99,7 +98,7 @@ class CacheEngine:
                                          dtype=self.dtype,
                                          pin_memory=pin_memory,
                                          device=device)
-            
+
             if alloc_entry_size != entry_size:
                 layer_kv_cache = layer_kv_cache[..., :entry_size]
 
@@ -141,7 +140,7 @@ class CacheEngine:
 
         # For MLA there is no value cache, since the latent vector
         # is joint keys and values.
-        value_cache_entry = key_cache_block if not model_config.use_mla else 0
+        value_cache_entry = key_cache_entry if not model_config.use_mla else 0
         total = num_attention_layers * cache_config.block_size * \
             (key_cache_entry + value_cache_entry)
 
