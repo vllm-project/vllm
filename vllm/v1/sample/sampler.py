@@ -155,10 +155,11 @@ class Sampler(nn.Module):
             for logits_processor in seq_logits_processors:
                 parameters = inspect.signature(logits_processor).parameters
                 if len(parameters) == 3:
-                    logits_row = logits_processor(prompt_tokens_ids,
+                    modified_logits_row = logits_processor(prompt_tokens_ids,
                                                   past_tokens_ids, logits_row)
                 else:
-                    logits_row = logits_processor(past_tokens_ids, logits_row)
+                    modified_logits_row = logits_processor(past_tokens_ids, logits_row)
 
-            logits[seq_idx] = logits_row
+            if not modified_logits_row is logits_row:
+                logits[seq_idx] = modified_logits_row
         return logits
