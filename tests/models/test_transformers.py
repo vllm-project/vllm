@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test the functionality of the Transformers backend.
 
 Run `pytest tests/models/test_transformers.py`.
