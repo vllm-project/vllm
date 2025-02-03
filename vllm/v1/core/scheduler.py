@@ -115,16 +115,8 @@ class Scheduler:
         encoder_budget = self.max_num_encoder_input_tokens
 
         # First, schedule the RUNNING requests.
-        # NOTE(woosuk): At most 1 request in the RUNNING queue is allowed to be
-        # in the "partial" state, where the request has some tokens computed
-        # but not all. The constraint is due to the persistent batch in the
-        # V1 model runner.
-        # TODO(woosuk): Remove this constraint after refactoring model runner.
-        has_partial_request = False
         req_index = 0
         while req_index < len(self.running):
-            # Only the last request in the RUNNING queue can be "partial".
-            assert not has_partial_request
             assert token_budget > 0
             request = self.running[req_index]
             num_new_tokens = request.num_tokens - request.num_computed_tokens
@@ -172,8 +164,6 @@ class Scheduler:
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
-            has_partial_request = (request.num_computed_tokens + num_new_tokens
-                                   < request.num_tokens)
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -187,8 +177,6 @@ class Scheduler:
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             while self.waiting:
-                if has_partial_request:
-                    break
                 if len(self.running) == self.max_num_running_reqs:
                     break
                 if token_budget == 0:
@@ -249,8 +237,6 @@ class Scheduler:
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                has_partial_request = (num_computed_tokens + num_new_tokens
-                                       < request.num_tokens)
 
                 # Encoder-related.
                 if encoder_inputs_to_schedule:

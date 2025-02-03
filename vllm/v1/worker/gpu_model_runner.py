@@ -220,13 +220,21 @@ class GPUModelRunner:
                 if not encoder_outputs:
                     self.encoder_cache.pop(req_id, None)
 
-        # Remove the requests from the persistent batch.
-        stopped_req_ids = set().union(
-            scheduler_output.preempted_req_ids,
-            scheduler_output.finished_req_ids,
-        )
+        # Remove the unscheduled requests from the persistent batch.
+        # NOTE(woosuk): The unscheduled requests include 1) finished requests,
+        # 2) preempted requests, and 3) running requests that are not scheduled
+        # in this step. For 1) finished requests, we will remove them from the
+        # persistent batch and the cached states. For 2) & 3), we will remove
+        # them from the persistent batch only and keep their cached states.
+        scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
+        cached_req_ids = self.input_batch.req_id_to_index.keys()
+        unscheduled_req_ids = cached_req_ids - scheduled_req_ids
+        # NOTE(woosuk): The persistent batch optimization assumes that
+        # consecutive batches contain mostly the same requests. If batches
+        # have low request overlap (e.g., alternating between two distinct
+        # sets of requests), this optimization becomes very inefficient.
         removed_req_indices: List[int] = []
-        for req_id in stopped_req_ids:
+        for req_id in unscheduled_req_ids:
             req_index = self.input_batch.remove_request(req_id)
             if req_index is not None:
                 removed_req_indices.append(req_index)
@@ -536,10 +544,10 @@ class GPUModelRunner:
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
         )
-        # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
-        # request in the batch. While we should not sample any token from this
-        # partial request, we do so for simplicity. We will ignore the sampled
-        # token from the partial request.
+        # NOTE(woosuk): Due to chunked prefills, the batch may contain partial
+        # requests. While we should not sample any token from these partial
+        # requests, we do so for simplicity. We will ignore the sampled
+        # tokens from the partial requests.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
         return attn_metadata, logits_indices
