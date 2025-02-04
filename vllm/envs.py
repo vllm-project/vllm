@@ -83,6 +83,7 @@ if TYPE_CHECKING:
     VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
     VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
+    VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE: bool = False
 
 
 def get_default_cache_root():
@@ -539,6 +540,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON":
     lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
                  ),
+
+    # If set, set `any_whitespace=False` when creating grammar for JSON schema
+    # with xgrammar.
+    # This might be useful when using Mistral models with JSON schema that
+    # can generate endless space for guided decoding.
+    "VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE":
+    lambda: bool(int(os.getenv("VLLM_DISABLE_XGRAMMAR_ANY_WHITESPACE", "0"))),
 }
 
 # end-env-vars-definition
