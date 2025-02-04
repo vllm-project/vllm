@@ -236,7 +236,7 @@ def _match_fused_layer(layer_name: str,
                                for type_suffix in possible_layer_types)
 
         if is_same_parent and is_matching_type and all(
-                '.'.join([parent_path, type_suffix])
+            (f"{parent_path}.{type_suffix}" in target_layers)
                 for type_suffix in possible_layer_types):
             return target
 
