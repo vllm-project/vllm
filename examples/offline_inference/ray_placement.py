@@ -104,6 +104,10 @@ for (i, bundle_indices) in enumerate([[0, 1], [2, 3]]):
         bundle_indices=bundle_indices,
     )
     inference_engines.append(llm)
+    # don't call any method on the inference engine here,
+    # otherwise it will block until the vLLM instance is created.
+
+for i, llm in enumerate(inference_engines):
     inference_engine_device_ids.append(
         ray.get(llm.collective_rpc.remote("report_device_id", args=tuple())))
     print(f"inference engine {i} is on {inference_engine_device_ids[-1]}")
