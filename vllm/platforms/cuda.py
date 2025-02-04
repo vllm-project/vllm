@@ -276,6 +276,12 @@ class NvmlCudaPlatform(CudaPlatformBase):
         return cls._get_physical_device_name(physical_device_id)
 
     @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        physical_device_id = device_id_to_physical_device_id(device_id)
+        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        return pynvml.nvmlDeviceGetUUID(handle)
+
+    @classmethod
     @lru_cache(maxsize=8)
     @with_nvml_context
     def get_device_total_memory(cls, device_id: int = 0) -> int:
