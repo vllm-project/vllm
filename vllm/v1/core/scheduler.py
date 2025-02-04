@@ -131,6 +131,8 @@ class Scheduler:
         # TODO(woosuk): Remove this constraint after refactoring model runner.
         has_partial_request = False
         req_index = 0
+        spec_lens = [len(req.spec_token_ids) for req in self.running]
+        max_speculative_tokens = max(spec_lens) if spec_lens else 0
         while req_index < len(self.running):
             # Only the last request in the RUNNING queue can be "partial".
             assert not has_partial_request
@@ -151,7 +153,9 @@ class Scheduler:
 
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens)
+                    request,
+                    num_new_tokens,
+                    max_speculative_tokens=max_speculative_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.

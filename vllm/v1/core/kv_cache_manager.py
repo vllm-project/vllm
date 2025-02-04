@@ -213,23 +213,28 @@ class KVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
-        # We subtract max_speculative_tokens from num_computed_tokens to
-        # get the least number of tokens in the KV cache.
-        # All tokens before this number are guaranteed to be valid and
-        # stored in the cache.
-        max_speculative_tokens = max_speculative_tokens or 0
-        min_num_last_step_computed_tokens = request.num_computed_tokens \
-                                    - max_speculative_tokens
-        min_num_last_step_computed_full_blocks = \
-                        min_num_last_step_computed_tokens // self.block_size
-
         # Calculate the total number of complete blocks needed after appending
         # new valid tokens.
-        # num_tokens_wo_spec_tokens = 1 represents a single new token.
-        # Here, speculated tokens generated in the last step are counted in
-        # request.num_computed_tokens. Specualted tokens in the current step
-        # are not counted and cached because they are not verified/accepted it.
-        num_tokens_wo_spec_tokens = 1
+        if max_speculative_tokens is None:  # prefill phase
+            num_tokens_wo_spec_tokens = num_tokens
+            min_num_last_step_computed_tokens = request.num_computed_tokens
+        else:  # decoding phase
+            assert max_speculative_tokens >= 0
+            # We subtract max_speculative_tokens from num_computed_tokens to
+            # get the least number of tokens in the KV cache.
+            # All tokens before this number are guaranteed to be valid and
+            # stored in the cache.
+            min_num_last_step_computed_tokens = request.num_computed_tokens \
+                                    - max_speculative_tokens
+            # num_tokens_wo_spec_tokens = 1 represents a single new token.
+            # Here, speculated tokens generated in the last step are counted in
+            # request.num_computed_tokens. Specualted tokens in the current step
+            # are not counted and cached because they are not verified/accepted
+            # it.
+            num_tokens_wo_spec_tokens = 1
+
+        min_num_last_step_computed_full_blocks = \
+                        min_num_last_step_computed_tokens // self.block_size
         num_full_blocks_after_append = (
             request.num_computed_tokens +
             num_tokens_wo_spec_tokens) // self.block_size
