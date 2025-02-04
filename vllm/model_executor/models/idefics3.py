@@ -99,12 +99,18 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
             image_width=image_processor.size['longest_edge'],
             image_height=image_processor.size['longest_edge'],
         )
-        # Non-image-token:
-        # <fake_token_around_image><row_{n_h}_col_{n_w}> cost 2 token per patch
-        # each row has one line break cost 1 token
-        # <fake_token_around_image> at the last
         num_image_token = (grid_w * grid_h + 1) * hf_processor.image_seq_len
-        non_image_token = (grid_w * grid_h + 1) * 2 + grid_h + 1
+        # Calculate Non-image-token length
+        # NOTE: <row_1_col_1> and <global-img> are special token for SmolVLM
+        # but not for Idefic3, so we need to tokenize them to get actual length.
+        tokenizer = self.get_tokenizer()
+        tile_token_len = len(tokenizer.tokenize("<row_1_col_1>"))
+        glob_token_len = len(tokenizer.tokenize(hf_processor.global_image_tag))
+        # linebreak and <fake_token_around_image> always cost 1 token
+        fake_token_len = lb_len = 1
+        non_image_token = (grid_w * grid_h) * (
+            tile_token_len + fake_token_len) + glob_token_len + (
+                grid_h + 1) * lb_len + fake_token_len
         return {"image": num_image_token + non_image_token}
 
     def _resize_output_size(self,
