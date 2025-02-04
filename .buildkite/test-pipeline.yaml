@@ -288,8 +288,11 @@ steps:
   - vllm/attention
   - tests/kernels
   commands:
-    - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 4
+    # - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    # DEBUG
+    - pytest -v -s kernels/test_mamba_ssm_ssd.py
+  parallelism: 1
+  #parallelism: 4
 
 - label: Tensorizer Test # 11min
   mirror_hardwares: [amd]
