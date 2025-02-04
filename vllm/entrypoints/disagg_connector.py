@@ -5,7 +5,6 @@ import json
 import signal
 import traceback
 import uuid
-# from fastapi.lifespan import Lifespan
 from asyncio import Queue
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
