@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import jax
+import numpy as np
 from jax import numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
@@ -25,8 +26,8 @@ def create_tensors(T, D, L, N):
         loras:      jax.Array - shape (N, 1, L, D)
     """
     inputs = jax.random.normal(jax.random.PRNGKey(0), (T, D))
-    lora = jax.random.normal(jax.random.PRNGKey(1), (L, D))
-    ref_output = inputs @ lora.T
+    lora = jax.random.normal(jax.random.PRNGKey(1), (1, L, D))
+    ref_output = inputs @ lora.squeeze(0).T
 
     return inputs, lora, ref_output
 
@@ -38,7 +39,7 @@ def bgmv_kernel(inp_ref, lora_ref, out_ref, acc_ref):
         acc_ref[...] = jnp.zeros_like(acc_ref[...], dtype=jnp.float32)
 
     acc_ref[...] += jax.lax.dot_general(inp_ref[...],
-                                        lora_ref[...],
+                                        lora_ref[0, ...],
                                         (((1, ), (1, )), ((), ())),
                                         preferred_element_type=jnp.float32)
 
@@ -50,7 +51,7 @@ def bgmv_kernel(inp_ref, lora_ref, out_ref, acc_ref):
 @jax.jit
 def bgmv(inputs: jax.Array, lora: jax.Array):
     T, D = inputs.shape
-    L, _ = lora.shape
+    _, L, _ = lora.shape
 
     # TODO: Tune
     # Also figure out how to make bT % 128 instead of bL,
@@ -67,7 +68,7 @@ def bgmv(inputs: jax.Array, lora: jax.Array):
             grid=(T // bT, L // bL, D // bD),
             in_specs=[
                 pl.BlockSpec((bT, bD), lambda i, j, k: (i, k)),
-                pl.BlockSpec((bL, bD), lambda i, j, k: (j, k)),
+                pl.BlockSpec((1, bL, bD), lambda i, j, k: (0, j, k)),
             ],
             out_specs=pl.BlockSpec((bT, bL), lambda i, j, k: (i, j)),
             scratch_shapes=[pltpu.VMEM((bT, bL), jnp.float32)]),
@@ -86,5 +87,5 @@ if __name__ == "__main__":
 
     print(jnp.isnan(output1).sum(), "NaN values")
 
-    # np.testing.assert_allclose(ref_output, output1)
-    # print("Success")
+    np.testing.assert_allclose(ref_output, output1, rtol=1e-2)
+    print("Success")
