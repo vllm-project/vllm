@@ -68,6 +68,7 @@ for bundle_indices in [[0, 1], [0, 1], [2, 3], [2, 3]]:
         worker_cls=MyWorker,
         tensor_parallel_size=2,
         distributed_executor_backend="ray",
+        gpu_memory_utilization=0.4,
         bundle_indices=bundle_indices,
     )
     llms.append(llm)
