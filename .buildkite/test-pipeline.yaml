@@ -93,6 +93,7 @@ steps:
 
 - label: Core Test # 10min
   mirror_hardwares: [amd]
+  amd_gpus: 4   # Just for the sake of queue testing
   fast_check: true
   source_file_dependencies:
   - vllm/core
@@ -105,6 +106,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   mirror_hardwares: [amd]
+  amd_gpus: 2   # Just for the sake of queue testing
   source_file_dependencies:
   - vllm/
   commands:
@@ -257,6 +259,7 @@ steps:
 
 - label: LoRA Test %N # 15min each
   mirror_hardwares: [amd]
+  amd_gpus: 8
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -283,6 +286,7 @@ steps:
 
 - label: Kernels Test %N # 1h each
   mirror_hardwares: [amd]
+  amd_gpus: 8
   source_file_dependencies:
   - csrc/
   - vllm/attention
