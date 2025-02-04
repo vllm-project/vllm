@@ -211,6 +211,8 @@ class MultiModalBatchedField(BaseMultiModalField):
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
+            if len(batch) == 1:
+                return batch[0].unsqueeze(0).contiguous()
             first_shape = batch[0].shape
             if all(elem.shape == first_shape for elem in batch):
                 return torch.stack(batch)
@@ -234,6 +236,8 @@ class MultiModalFlatField(BaseMultiModalField):
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
+            if len(batch) == 1:
+                return batch[0].contiguous()
             first_shape = batch[0].shape
             if all(elem.shape[1:] == first_shape[1:] for elem in batch):
                 return torch.concat(batch)
@@ -396,6 +400,9 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
             return stacked
 
         tensors_ = cast(list[torch.Tensor], stacked)
+        if len(tensors_) == 1:
+            return tensors_[0].unsqueeze(0).contiguous()
+
         if any(t.shape != tensors_[0].shape for t in tensors_):
             # The tensors have incompatible shapes and can't be stacked.
             return tensors_
