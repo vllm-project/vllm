@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import re
 import weakref
@@ -174,11 +176,6 @@ def test_guided_choice_completion(sample_guided_choice, llm,
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 def test_guided_grammar(sample_sql_statements, llm,
                         guided_decoding_backend: str):
-    if guided_decoding_backend == "outlines":
-        pytest.skip("Outlines backend fails in this test case with:\n"
-                    "AttributeError: Error in model execution: 'ParserConf' "
-                    "object has no attribute 'deterministic'")
-
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      max_tokens=1000,

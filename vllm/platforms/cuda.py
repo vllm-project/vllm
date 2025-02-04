@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Code inside this file can safely assume cuda platform, e.g. importing
 pynvml. However, it should not initialize cuda context.
 """
@@ -7,7 +8,6 @@ from functools import lru_cache, wraps
 from typing import (TYPE_CHECKING, Callable, List, Optional, Tuple, TypeVar,
                     Union)
 
-import pynvml
 import torch
 from typing_extensions import ParamSpec
 
@@ -15,8 +15,9 @@ from typing_extensions import ParamSpec
 import vllm._C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils import import_pynvml
 
-from .interface import DeviceCapability, Platform, PlatformEnum
+from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -28,13 +29,7 @@ logger = init_logger(__name__)
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
-if pynvml.__file__.endswith("__init__.py"):
-    logger.warning(
-        "You are using a deprecated `pynvml` package. Please install"
-        " `nvidia-ml-py` instead, and make sure to uninstall `pynvml`."
-        " When both of them are installed, `pynvml` will take precedence"
-        " and cause errors. See https://pypi.org/project/pynvml "
-        "for more information.")
+pynvml = import_pynvml()
 
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details
@@ -77,6 +72,8 @@ class CudaPlatformBase(Platform):
     device_name: str = "cuda"
     device_type: str = "cuda"
     dispatch_key: str = "CUDA"
+    ray_device_key: str = "GPU"
+    device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
     @classmethod
     def get_device_capability(cls,
@@ -118,13 +115,18 @@ class CudaPlatformBase(Platform):
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
                 if envs.VLLM_USE_V1:
-                    raise NotImplementedError
+                    raise NotImplementedError(
+                        "Multi-step scheduling is not supported (and not "
+                        "needed) on VLLM V1. Please launch without "
+                        "--num-scheduler-steps.")
                 else:
                     parallel_config.worker_cls = \
                         "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
                 if envs.VLLM_USE_V1:
-                    raise NotImplementedError
+                    raise NotImplementedError(
+                        "Speculative decoding is not yet supported on VLLM V1."
+                    )
                 else:
                     parallel_config.worker_cls = \
                         "vllm.spec_decode.spec_decode_worker.create_spec_worker"
@@ -140,6 +142,97 @@ class CudaPlatformBase(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
+
+    @classmethod
+    def get_current_memory_usage(cls,
+                                 device: Optional[torch.types.Device] = None
+                                 ) -> float:
+        torch.cuda.reset_peak_memory_stats(device)
+        return torch.cuda.max_memory_allocated(device)
+
+    @classmethod
+    def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
+                             kv_cache_dtype, block_size, use_v1,
+                             use_mla) -> str:
+        if use_v1:
+            logger.info("Using Flash Attention backend on V1 engine.")
+            return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+        if use_mla:
+            logger.info("Using Triton MLA backend.")
+            return "vllm.attention.backends.triton_mla.TritonMLABackend"
+        if selected_backend == _Backend.FLASHINFER:
+            logger.info("Using FlashInfer backend.")
+            return "vllm.attention.backends.flashinfer.FlashInferBackend"
+        elif selected_backend == _Backend.XFORMERS:
+            logger.info("Using XFormers backend.")
+            return "vllm.attention.backends.xformers.XFormersBackend"
+        elif selected_backend == _Backend.FLASH_ATTN:
+            pass
+        elif selected_backend:
+            raise ValueError(
+                f"Invalid attention backend for {cls.device_name}, "
+                f"with use_v1: {use_v1} use_mla: {use_mla}")
+
+        target_backend = _Backend.FLASH_ATTN
+        if not cls.has_device_capability(80):
+            # Volta and Turing NVIDIA GPUs.
+            logger.info(
+                "Cannot use FlashAttention-2 backend for Volta and Turing "
+                "GPUs.")
+            target_backend = _Backend.XFORMERS
+        elif dtype not in (torch.float16, torch.bfloat16):
+            logger.info(
+                "Cannot use FlashAttention-2 backend for dtype other than "
+                "torch.float16 or torch.bfloat16.")
+            target_backend = _Backend.XFORMERS
+        elif kv_cache_dtype is not None and \
+            kv_cache_dtype.startswith("fp8"):
+            logger.info(
+                "Cannot use FlashAttention-2 backend for FP8 KV cache.")
+            logger.warning(
+                "Please use FlashInfer backend with FP8 KV Cache for "
+                "better performance by setting environment variable  "
+                "VLLM_ATTENTION_BACKEND=FLASHINFER")
+            target_backend = _Backend.XFORMERS
+        elif block_size % 16 != 0:
+            logger.info(
+                "Cannot use FlashAttention-2 backend for block size not "
+                "divisible by 16.")
+            target_backend = _Backend.XFORMERS
+
+        # FlashAttn is valid for the model, checking if the package is
+        # installed.
+        if target_backend == _Backend.FLASH_ATTN:
+            try:
+                import vllm.vllm_flash_attn  # noqa: F401
+                from vllm.attention.backends.flash_attn import (  # noqa: F401
+                    FlashAttentionBackend)
+
+                supported_sizes = \
+                    FlashAttentionBackend.get_supported_head_sizes()
+                if head_size not in supported_sizes:
+                    logger.info(
+                        "Cannot use FlashAttention-2 backend for head size %d.",
+                        head_size)
+                    target_backend = _Backend.XFORMERS
+            except ImportError:
+                logger.info(
+                    "Cannot use FlashAttention-2 backend because the "
+                    "vllm.vllm_flash_attn package is not found. "
+                    "Make sure that vllm_flash_attn was built and installed "
+                    "(on by default).")
+                target_backend = _Backend.XFORMERS
+
+        if target_backend == _Backend.XFORMERS:
+            logger.info("Using XFormers backend.")
+            return "vllm.attention.backends.xformers.XFormersBackend"
+
+        logger.info("Using Flash Attention backend.")
+        return "vllm.attention.backends.flash_attn.FlashAttentionBackend"
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 
 
 # NVML utils

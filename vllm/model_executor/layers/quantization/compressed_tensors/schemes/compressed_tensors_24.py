@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Callable, List, Optional
 
 import torch
@@ -42,7 +44,7 @@ class CompressedTensors24(CompressedTensorsScheme):
 
         if not sparse_cutlass_supported():
             raise ValueError(
-                "Sparse CUTLASS not supported. vLLM must be built with"
+                "Sparse CUTLASS not supported. vLLM must be built with "
                 "CUDA 12.2 or later to use this feature")
 
         self.output_dtype = params_dtype

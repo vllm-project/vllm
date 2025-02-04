@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Configuration file for the Sphinx documentation builder.
 #
 # This file only contains a selection of the most common options. For a full
@@ -43,6 +45,11 @@ extensions = [
     "sphinx.ext.autosummary",
     "myst_parser",
     "sphinxarg.ext",
+    "sphinx_design",
+    "sphinx_togglebutton",
+]
+myst_enable_extensions = [
+    "colon_fence",
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -51,7 +58,7 @@ templates_path = ['_templates']
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns: List[str] = ["**/*.template.rst"]
+exclude_patterns: List[str] = ["**/*.template.md", "**/*.inc.md"]
 
 # Exclude the prompt "$" when copying code
 copybutton_prompt_text = r"\$ "
@@ -65,6 +72,7 @@ copybutton_prompt_is_regexp = True
 html_title = project
 html_theme = 'sphinx_book_theme'
 html_logo = 'assets/logos/vllm-logo-text-light.png'
+html_favicon = 'assets/logos/vllm-logo-only-light.ico'
 html_theme_options = {
     'path_to_docs': 'docs/source',
     'repository_url': 'https://github.com/vllm-project/vllm',
@@ -73,6 +81,35 @@ html_theme_options = {
 }
 html_static_path = ["_static"]
 html_js_files = ["custom.js"]
+
+myst_url_schemes = {
+    'http': None,
+    'https': None,
+    'mailto': None,
+    'ftp': None,
+    "gh-issue": {
+        "url":
+        "https://github.com/vllm-project/vllm/issues/{{path}}#{{fragment}}",
+        "title": "Issue #{{path}}",
+        "classes": ["github"],
+    },
+    "gh-pr": {
+        "url":
+        "https://github.com/vllm-project/vllm/pull/{{path}}#{{fragment}}",
+        "title": "Pull Request #{{path}}",
+        "classes": ["github"],
+    },
+    "gh-dir": {
+        "url": "https://github.com/vllm-project/vllm/tree/main/{{path}}",
+        "title": "{{path}}",
+        "classes": ["github"],
+    },
+    "gh-file": {
+        "url": "https://github.com/vllm-project/vllm/blob/main/{{path}}",
+        "title": "{{path}}",
+        "classes": ["github"],
+    },
+}
 
 # see https://docs.readthedocs.io/en/stable/reference/environment-variables.html # noqa
 READTHEDOCS_VERSION_TYPE = os.environ.get('READTHEDOCS_VERSION_TYPE')
@@ -162,6 +199,7 @@ def linkcode_resolve(domain, info):
 
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
 autodoc_mock_imports = [
+    "blake3",
     "compressed_tensors",
     "cpuinfo",
     "cv2",
@@ -178,7 +216,7 @@ autodoc_mock_imports = [
     "tensorizer",
     "pynvml",
     "outlines",
-    "xgrammar,"
+    "xgrammar",
     "librosa",
     "soundfile",
     "gguf",

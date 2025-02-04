@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Test the piecewise compilation with a simple model, comparing the output
 with and without the piecewise compilation.
@@ -7,7 +8,7 @@ if the config `tractable_init` is set to True. Otherwise, the weights are
 initialized randomly with a fixed seed.
 """
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -53,6 +54,16 @@ class LlamaConfig:
     init_value: float = 1.0
     tractable_init: bool = False
     random_seed: int = 0
+
+    def compute_hash(self) -> str:
+        factors: List[Any] = []
+        for k, v in self.__dict__.items():
+            if k == "random_seed":
+                continue
+            factors.append((k, v))
+        factors.sort()
+        import hashlib
+        return hashlib.md5(str(factors).encode()).hexdigest()
 
     def __post_init__(self):
         assert self.mlp_size >= self.hidden_size
@@ -263,7 +274,8 @@ def run_model(llama_config,
         compilation_config = CompilationConfig(
             level=CompilationLevel.NO_COMPILATION, )
 
-    vllm_config = VllmConfig(compilation_config=compilation_config)
+    vllm_config = VllmConfig(compilation_config=compilation_config,
+                             additional_config=llama_config)
     with set_current_vllm_config(vllm_config):
         model = LlamaModel(config=llama_config,
                            vllm_config=vllm_config,
