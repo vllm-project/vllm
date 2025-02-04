@@ -10,6 +10,7 @@ import inspect
 import itertools
 import math
 import os
+import time
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -190,6 +191,8 @@ class DefaultModelLoader(BaseModelLoader):
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
+        self.model_disk_load_time = 0.0
+        self.model_device_load_time = 0.0
         if load_config.model_loader_extra_config:
             raise ValueError(f"Model loader extra config is not supported for "
                              f"load format {load_config.load_format}")
@@ -229,78 +232,85 @@ class DefaultModelLoader(BaseModelLoader):
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
-        model_name_or_path = (self._maybe_download_from_modelscope(
-            model_name_or_path, revision) or model_name_or_path)
+        disk_load_start = time.time()
+        try:
+            model_name_or_path = (self._maybe_download_from_modelscope(
+                model_name_or_path, revision) or model_name_or_path)
 
-        is_local = os.path.isdir(model_name_or_path)
-        load_format = self.load_config.load_format
-        use_safetensors = False
-        index_file = SAFE_WEIGHTS_INDEX_NAME
-        # Some quantized models use .pt files for storing the weights.
-        if load_format == LoadFormat.AUTO:
-            allow_patterns = ["*.safetensors", "*.bin"]
-        elif load_format == LoadFormat.SAFETENSORS:
-            use_safetensors = True
-            allow_patterns = ["*.safetensors"]
-        elif load_format == LoadFormat.MISTRAL:
-            use_safetensors = True
-            allow_patterns = ["consolidated*.safetensors"]
-            index_file = "consolidated.safetensors.index.json"
-        elif load_format == LoadFormat.PT:
-            allow_patterns = ["*.pt"]
-        elif load_format == LoadFormat.NPCACHE:
-            allow_patterns = ["*.bin"]
-        else:
-            raise ValueError(f"Unknown load_format: {load_format}")
+            is_local = os.path.isdir(model_name_or_path)
+            load_format = self.load_config.load_format
+            use_safetensors = False
+            index_file = SAFE_WEIGHTS_INDEX_NAME
+            # Some quantized models use .pt files for storing the weights.
+            if load_format == LoadFormat.AUTO:
+                allow_patterns = ["*.safetensors", "*.bin"]
+            elif load_format == LoadFormat.SAFETENSORS:
+                use_safetensors = True
+                allow_patterns = ["*.safetensors"]
+            elif load_format == LoadFormat.MISTRAL:
+                use_safetensors = True
+                allow_patterns = ["consolidated*.safetensors"]
+                index_file = "consolidated.safetensors.index.json"
+            elif load_format == LoadFormat.PT:
+                allow_patterns = ["*.pt"]
+            elif load_format == LoadFormat.NPCACHE:
+                allow_patterns = ["*.bin"]
+            else:
+                raise ValueError(f"Unknown load_format: {load_format}")
 
-        if fall_back_to_pt:
-            allow_patterns += ["*.pt"]
+            if fall_back_to_pt:
+                allow_patterns += ["*.pt"]
 
-        if allow_patterns_overrides is not None:
-            allow_patterns = allow_patterns_overrides
+            if allow_patterns_overrides is not None:
+                allow_patterns = allow_patterns_overrides
 
-        if not is_local:
-            hf_folder = download_weights_from_hf(
-                model_name_or_path,
-                self.load_config.download_dir,
-                allow_patterns,
-                revision,
-                ignore_patterns=self.load_config.ignore_patterns,
-            )
-        else:
-            hf_folder = model_name_or_path
-
-        hf_weights_files: List[str] = []
-        for pattern in allow_patterns:
-            hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
-            if len(hf_weights_files) > 0:
-                if pattern == "*.safetensors":
-                    use_safetensors = True
-                break
-
-        if use_safetensors:
-            # For models like Mistral-7B-Instruct-v0.3
-            # there are both sharded safetensors files and a consolidated
-            # safetensors file. Using both breaks.
-            # Here, we download the `model.safetensors.index.json` and filter
-            # any files not found in the index.
             if not is_local:
-                download_safetensors_index_file_from_hf(
+                hf_folder = download_weights_from_hf(
                     model_name_or_path,
-                    index_file,
                     self.load_config.download_dir,
+                    allow_patterns,
                     revision,
+                    ignore_patterns=self.load_config.ignore_patterns,
                 )
-            hf_weights_files = filter_duplicate_safetensors_files(
-                hf_weights_files, hf_folder, index_file)
-        else:
-            hf_weights_files = filter_files_not_needed_for_inference(
-                hf_weights_files)
+            else:
+                hf_folder = model_name_or_path
 
-        if len(hf_weights_files) == 0:
-            raise RuntimeError(
-                f"Cannot find any model weights with `{model_name_or_path}`")
+            hf_weights_files: List[str] = []
+            for pattern in allow_patterns:
+                hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
+                if len(hf_weights_files) > 0:
+                    if pattern == "*.safetensors":
+                        use_safetensors = True
+                    break
 
+            if use_safetensors:
+                # For models like Mistral-7B-Instruct-v0.3
+                # there are both sharded safetensors files and a consolidated
+                # safetensors file. Using both breaks.
+                # Here, we download the `model.safetensors.index.json`
+                # and filter any files not found in the index.
+                if not is_local:
+                    download_safetensors_index_file_from_hf(
+                        model_name_or_path,
+                        index_file,
+                        self.load_config.download_dir,
+                        revision,
+                    )
+                    hf_weights_files = filter_duplicate_safetensors_files(
+                        hf_weights_files, hf_folder, index_file)
+            else:
+                hf_weights_files = filter_files_not_needed_for_inference(
+                    hf_weights_files)
+
+            if len(hf_weights_files) == 0:
+                raise RuntimeError(
+                    f"Cannot find any model weights with `{model_name_or_path}`"
+                )
+
+        finally:
+            self.model_disk_load_time = time.time() - disk_load_start
+            logger.info("Model disk load time: %.2fs",
+                        self.model_disk_load_time)
         return hf_folder, hf_weights_files, use_safetensors
 
     def _get_weights_iterator(
@@ -370,43 +380,58 @@ class DefaultModelLoader(BaseModelLoader):
                               allow_patterns_overrides=None)
 
     def load_model(self, vllm_config: VllmConfig) -> nn.Module:
-        device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
+        gpu_load_start = time.time()
+        try:
+            device_config = vllm_config.device_config
+            model_config = vllm_config.model_config
 
-        target_device = torch.device(device_config.device)
-        with set_default_torch_dtype(model_config.dtype):
-            with target_device:
-                model = _initialize_model(vllm_config=vllm_config)
+            logger.info("Starting to load model %s...", model_config.model)
 
-            weights_to_load = {name for name, _ in model.named_parameters()}
-            loaded_weights = model.load_weights(
-                self._get_all_weights(model_config, model))
-            # We only enable strict check for non-quantized models
-            # that have loaded weights tracking currently.
-            if model_config.quantization is None and loaded_weights is not None:
-                weights_not_loaded = weights_to_load - loaded_weights
-                if weights_not_loaded:
-                    raise ValueError(
-                        "Following weights were not initialized from "
-                        f"checkpoint: {weights_not_loaded}")
+            target_device = torch.device(device_config.device)
+            with set_default_torch_dtype(model_config.dtype):
+                with target_device:
+                    model = _initialize_model(vllm_config=vllm_config)
 
-            for _, module in model.named_modules():
-                quant_method = getattr(module, "quant_method", None)
-                if isinstance(quant_method, QuantizeMethodBase):
-                    # When quant methods need to process weights after loading
-                    # (for repacking, quantizing, etc), they expect parameters
-                    # to be on the global target device. This scope is for the
-                    # case where cpu offloading is used, where we will move the
-                    # parameters onto device for processing and back off after.
-                    with device_loading_context(module, target_device):
-                        quant_method.process_weights_after_loading(module)
-                if isinstance(module, Attention) and \
-                    hasattr(module, "process_weights_after_loading"):
-                    # When attention modules need to process weights after
-                    # currently only used by MLA
-                    # TODO(lucas): see if there is a way to unify the signatures
-                    # of process_weights_after_loading
-                    module.process_weights_after_loading(model_config.dtype)
+                weights_to_load = {
+                    name
+                    for name, _ in model.named_parameters()
+                }
+                loaded_weights = model.load_weights(
+                    self._get_all_weights(model_config, model))
+                # We only enable strict check for non-quantized models
+                # that have loaded weights tracking currently.
+                if (model_config.quantization is None
+                        and loaded_weights is not None):
+                    weights_not_loaded = weights_to_load - loaded_weights
+                    if weights_not_loaded:
+                        raise ValueError(
+                            "Following weights were not initialized from "
+                            f"checkpoint: {weights_not_loaded}")
+
+                for _, module in model.named_modules():
+                    quant_method = getattr(module, "quant_method", None)
+                    if isinstance(quant_method, QuantizeMethodBase):
+                        # When quant methods need to process weights after
+                        # loading (for repacking, quantizing, etc), they
+                        # expect parameters to be on the global target device.
+                        # This scope is for the case where cpu offloading is
+                        # used, where we will move the parameters onto device
+                        # for processing and back off after.
+                        with device_loading_context(module, target_device):
+                            quant_method.process_weights_after_loading(module)
+                    if isinstance(module, Attention) and \
+                        hasattr(module, "process_weights_after_loading"):
+                        # When attention modules need to process weights after
+                        # currently only used by MLA
+                        # TODO(lucas): see if there is a way to unify the
+                        # signatures of process_weights_after_loading
+                        module.process_weights_after_loading(
+                            model_config.dtype)
+
+        finally:
+            self.model_device_load_time = time.time() - gpu_load_start
+            logger.info("Model device load time: %.2fs",
+                        self.model_device_load_time)
         return model.eval()
 
 

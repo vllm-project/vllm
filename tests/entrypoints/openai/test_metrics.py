@@ -92,14 +92,32 @@ EXPECTED_VALUES = {
     [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
      ("_count", _NUM_REQUESTS)],
     "vllm:request_params_n": [("_count", _NUM_REQUESTS)],
-    "vllm:request_params_max_tokens":
-    [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
-     ("_count", _NUM_REQUESTS)],
+    "vllm:request_params_max_tokens": [
+        ("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
+        ("_count", _NUM_REQUESTS)
+    ],
     "vllm:prompt_tokens": [("_total",
                             _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
     "vllm:generation_tokens": [
         ("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)
     ],
+    "vllm:model_load_time_seconds": [("_count", 1)],
+    "vllm:max_token_capacity_tokens":
+    [("_sum", _NUM_REQUESTS *
+      (_NUM_PROMPT_TOKENS_PER_REQUEST + _NUM_GENERATION_TOKENS_PER_REQUEST)),
+     ("_count", _NUM_REQUESTS)],
+    "vllm:time_per_prefill_token_requests_milliseconds": [("_count",
+                                                           _NUM_REQUESTS)],
+    "vllm:total_tokens_in_current_batch": [
+        ("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
+        ("_count", _NUM_REQUESTS)
+    ],
+    "vllm:total_tokens_in_queue_requests": [
+        ("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
+        ("_count", _NUM_REQUESTS)
+    ],
+    "vllm:requests_with_evicted_tokens_total": [("_total", 0)],
+    "vllm:total_evicted_tokens_total": [("_total", 0)],
     "vllm:request_success": [("_total", _NUM_REQUESTS)],
 }
 
@@ -166,6 +184,9 @@ EXPECTED_METRICS = [
     "vllm:time_per_output_token_seconds_sum",
     "vllm:time_per_output_token_seconds_bucket",
     "vllm:time_per_output_token_seconds_count",
+    "vllm:time_per_prefill_token_requests_milliseconds_bucket",
+    "vllm:time_per_prefill_token_requests_milliseconds_sum",
+    "vllm:time_per_prefill_token_requests_milliseconds_count",
     "vllm:e2e_request_latency_seconds_sum",
     "vllm:e2e_request_latency_seconds_bucket",
     "vllm:e2e_request_latency_seconds_count",
@@ -184,6 +205,15 @@ EXPECTED_METRICS = [
     "vllm:num_preemptions_total",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
+    "vllm:model_load_time_seconds_count",
+    "vllm:total_tokens_in_current_batch_sum",
+    "vllm:total_tokens_in_current_batch_count",
+    "vllm:total_tokens_in_queue_requests_sum",
+    "vllm:total_tokens_in_queue_requests_count",
+    "vllm:max_token_capacity_tokens_sum",
+    "vllm:max_token_capacity_tokens_count",
+    "vllm:requests_with_evicted_tokens_total",
+    "vllm:total_evicted_tokens_total",
     "vllm:request_success_total",
     "vllm:cache_config_info",
     # labels in cache_config_info
