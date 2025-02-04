@@ -29,7 +29,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -99,7 +99,13 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
             image_width=image_processor.size['longest_edge'],
             image_height=image_processor.size['longest_edge'],
         )
-        return {"image": (grid_w * grid_h + 1) * hf_processor.image_seq_len}
+        # Non-image-token:
+        # <fake_token_around_image><row_{n_h}_col_{n_w}> cost 2 token per patch
+        # each row has one line break cost 1 token
+        # <fake_token_around_image> at the last
+        num_image_token = (grid_w * grid_h + 1) * hf_processor.image_seq_len
+        non_image_token = (grid_w * grid_h + 1) * 2 + grid_h + 1
+        return {"image": num_image_token + non_image_token}
 
     def _resize_output_size(self,
                             *,
@@ -616,7 +622,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         if self.config.text_config.tie_word_embeddings:
             self.lm_head.weight = self.model.text_model.wte.weight
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self.model._parse_and_validate_image_input(**kwargs)
