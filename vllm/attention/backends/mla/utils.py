@@ -409,8 +409,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     def _forward_prefill(
         self,
         q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
+        kv_c: torch.Tensor,
         k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: T,
     ) -> torch.Tensor:
         raise NotImplementedError
@@ -446,22 +447,25 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         k_pe = k_pe.unsqueeze(1)
         assert hasattr(attn_metadata, "input_positions")
 
+        num_prefill_tokens: int = attn_metadata.num_prefill_tokens
+
         if is_decode:
-            q_nope = self._q_proj_and_k_up_proj(hidden_states_or_q_c)
-            q_pe = torch.matmul(hidden_states_or_q_c, self.W_QR)\
+            decode_q_nope = self._q_proj_and_k_up_proj(
+                hidden_states_or_q_c[num_prefill_tokens:])
+            decode_q_pe = torch.matmul(hidden_states_or_q_c[num_prefill_tokens:], self.W_QR)\
                 .view(-1, self.num_heads, self.qk_rope_head_dim)
-            q_pe, k_pe = self.rotary_emb(attn_metadata.input_positions, q_pe,
-                                         k_pe)
-        else:
-            assert is_prefill
-            q = self.q_proj(hidden_states_or_q_c)[0]\
+            decode_q_pe, k_pe[num_prefill_tokens:] = \
+                self.rotary_emb(attn_metadata.input_positions[num_prefill_tokens:],
+                                decode_q_pe, k_pe[num_prefill_tokens:])
+        if is_prefill:
+            prefill_q = self.q_proj(hidden_states_or_q_c[:num_prefill_tokens])[0]\
                 .view(-1, self.num_heads, self.qk_head_dim)
 
             # TODO(lucas): there must be a nicer way to write this line
-            q[..., self.qk_nope_head_dim:], k_pe = \
+            prefill_q[..., self.qk_nope_head_dim:], k_pe[:num_prefill_tokens] = \
                 self.rotary_emb(
-                    attn_metadata.input_positions,
-                    q[..., self.qk_nope_head_dim:], k_pe)
+                    attn_metadata.input_positions[:num_prefill_tokens],
+                    prefill_q[..., self.qk_nope_head_dim:], k_pe[:num_prefill_tokens])
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
@@ -473,13 +477,25 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 kv_cache_dtype=self.kv_cache_dtype,
                 scale=layer._k_scale,
             )
+        output = torch.empty(attn_metadata.num_prefill_tokens +
+                             attn_metadata.num_decode_tokens,
+                             self.o_proj.output_size,
+                             device=hidden_states_or_q_c.device,
+                             dtype=hidden_states_or_q_c.dtype)
+        # output shape: [2048, 16, 512]
 
-        if attn_metadata.prefill_metadata is not None:
-            return self._forward_prefill(q, k_c_normed, k_pe, kv_cache,
-                                         attn_metadata)
+        if is_prefill:
+            # forward prefill output shape: [2048, 7168]
+            output[:num_prefill_tokens] = self._forward_prefill(
+                prefill_q, k_c_normed[:num_prefill_tokens].contiguous(),
+                k_pe[:num_prefill_tokens].contiguous(), kv_cache,
+                attn_metadata)
 
-        if attn_metadata.decode_metadata is not None:
-            return self._forward_decode(q_nope, q_pe, kv_cache, attn_metadata)
+        if is_decode:
+            output[num_prefill_tokens:] = self._forward_decode(
+                decode_q_nope, decode_q_pe, kv_cache, attn_metadata)
+
+        return output
 
     # Optional common flash-attn based prefill
     def _forward_prefill_flash(
@@ -489,6 +505,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         k_pe: torch.Tensor,
         seq_start_loc: torch.Tensor,
         max_prefill_seq_len: int,
+        query_start_loc: torch.Tensor,
+        max_query_len: int,
     ) -> torch.Tensor:
 
         kv_nope = self.kv_b_proj(k_c_normed)[0]\
@@ -507,9 +525,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             q=q,
             k=k,
             v=v_padded,
-            cu_seqlens_q=seq_start_loc,
+            cu_seqlens_q=query_start_loc,
             cu_seqlens_k=seq_start_loc,
-            max_seqlen_q=max_prefill_seq_len,
+            max_seqlen_q=max_query_len,
             max_seqlen_k=max_prefill_seq_len,
             softmax_scale=self.scale,
             causal=True,

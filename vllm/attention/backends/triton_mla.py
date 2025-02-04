@@ -657,7 +657,6 @@ def _gather_kv_cache(
     block_tables,  # (batch_size, max_blocks_per_seq)
     block_table_stride,
     kv_cache,  # (num_blocks, block_size, head_size)
-    kv_page_stride,
     kv_out,
     CACHE_PAGE_SIZE: tl.constexpr,
     CACHE_ENTRY_SIZE: tl.constexpr,
@@ -684,16 +683,17 @@ def _gather_kv_cache(
     cache_page_mask = cache_page_range < CACHE_PAGE_SIZE
     for i in range(pages_to_copy - 1):
         page = tl.load(block_table + i)
-        page_start = kv_cache + page * kv_page_stride
+        page_start = kv_cache + page * CACHE_PAGE_SIZE
         page_data = tl.load(page_start + cache_page_range,
                             mask=cache_page_mask)
         tl.store(kv_out + i * CACHE_PAGE_SIZE + cache_page_range,
                  page_data,
                  mask=cache_page_mask)
 
-    last_page_len = seq_len % CACHE_ENTRIES_PER_PAGE
+    last_page_len = (seq_len + CACHE_ENTRIES_PER_PAGE -
+                     1) % CACHE_ENTRIES_PER_PAGE + 1
     last_page = tl.load(block_table + pages_to_copy - 1)
-    last_page_start = kv_cache + last_page * kv_page_stride
+    last_page_start = kv_cache + last_page * CACHE_PAGE_SIZE
 
     cache_entry_range = tl.arange(0, CACHE_ENTRY_SIZE_POW_2)
     cache_entry_mask = cache_entry_range < CACHE_ENTRY_SIZE
@@ -753,11 +753,19 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
     ) -> torch.Tensor:
         assert isinstance(attn_metadata, TritonMLAMetadata)
 
-        if attn_metadata.prefill_metadata.context_lens_tensor is not None and \
-            max(attn_metadata.prefill_metadata.context_lens_tensor) > 0:
-            entries_total = attn_metadata.prefill_metadata.seq_start_loc[-1]
-            kv_c_k_pe_cache = torch.empty(
+        prefill_meta = attn_metadata.prefill_metadata
+        assert prefill_meta is not None
+
+        if kv_c_and_k_pe_cache.numel() > 0 and \
+            prefill_meta.block_tables is not None and \
+            prefill_meta.block_tables.numel() > 0:
+            assert prefill_meta.seq_start_loc is not None
+            assert prefill_meta.max_query_len is not None
+
+            entries_total = prefill_meta.seq_start_loc[-1]
+            kv_c_k_pe_cache = torch.empty_strided(
                 (entries_total, kv_c_and_k_pe_cache.shape[-1]),
+                (kv_c_and_k_pe_cache.stride(1), 1),
                 dtype=kv_c_and_k_pe_cache.dtype,
                 device=kv_c_and_k_pe_cache.device,
             )
@@ -765,25 +773,42 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
             assert kv_c_and_k_pe_cache.shape[-1] == 576
             assert kv_c_and_k_pe_cache.shape[-2] == 16
             _gather_kv_cache[(attn_metadata.num_prefills, )](
-                attn_metadata.prefill_metadata.seq_start_loc,
-                attn_metadata.prefill_metadata.block_tables,
-                attn_metadata.prefill_metadata.block_tables.stride(0),
+                prefill_meta.seq_start_loc,
+                prefill_meta.block_tables,
+                prefill_meta.block_tables.stride(0),
                 kv_c_and_k_pe_cache,
-                kv_c_and_k_pe_cache.stride(0),
                 kv_c_k_pe_cache,
-                CACHE_PAGE_SIZE=576 * 16,
-                CACHE_ENTRY_SIZE=576,
-                CACHE_ENTRIES_PER_PAGE=16,
-                CACHE_ENTRY_SIZE_POW_2=triton.next_power_of_2(576),
-                CACHE_PAGE_SIZE_POW_2=triton.next_power_of_2(576 * 16),
+                CACHE_PAGE_SIZE=kv_c_and_k_pe_cache.stride(0),
+                CACHE_ENTRY_SIZE=kv_c_and_k_pe_cache.stride(1),
+                CACHE_ENTRIES_PER_PAGE=kv_c_and_k_pe_cache.shape[1],
+                CACHE_ENTRY_SIZE_POW_2=triton.next_power_of_2(
+                    kv_c_and_k_pe_cache.stride(1)),
+                CACHE_PAGE_SIZE_POW_2=triton.next_power_of_2(
+                    kv_c_and_k_pe_cache.stride(0)),
             )
 
-            kv_c = kv_c_k_pe_cache[..., :self.kv_lora_rank].unsqueeze(1)
-            k_pe = kv_c_k_pe_cache[..., self.kv_lora_rank:].unsqueeze(1)
+            kv_c = kv_c_k_pe_cache[..., :self.kv_lora_rank].unsqueeze(
+                1).contiguous()
+            k_pe = kv_c_k_pe_cache[..., self.kv_lora_rank:].unsqueeze(
+                1).contiguous()
 
-        return self._forward_prefill_flash(q, kv_c, k_pe,
-                                           attn_metadata.seq_start_loc,
-                                           attn_metadata.max_prefill_seq_len)
+            return self._forward_prefill_flash(
+                q,
+                kv_c,
+                k_pe,
+                seq_start_loc=prefill_meta.seq_start_loc,
+                max_prefill_seq_len=prefill_meta.max_prefill_seq_len,
+                query_start_loc=prefill_meta.query_start_loc,
+                max_query_len=prefill_meta.max_query_len)
+        else:
+            return self._forward_prefill_flash(
+                q,
+                kv_c,
+                k_pe,
+                seq_start_loc=prefill_meta.seq_start_loc,
+                max_prefill_seq_len=prefill_meta.max_prefill_seq_len,
+                query_start_loc=prefill_meta.seq_start_loc,
+                max_query_len=prefill_meta.max_prefill_seq_len)
 
     def _forward_decode(
         self,
