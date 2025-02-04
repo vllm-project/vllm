@@ -499,6 +499,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             hidden_size=self.hidden_size,
         )
 
+        # NOTE: We use torch native RMSNorm here for precision purposes.
         norm_layer = partial(Qwen2RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
