@@ -9,6 +9,7 @@ from pathlib import PosixPath
 from typing import Type
 
 import pytest
+from packaging.version import Version
 from transformers import AutoModelForVision2Seq
 from transformers import __version__ as TRANSFORMERS_VERSION
 
@@ -176,13 +177,7 @@ VLM_TEST_SETTINGS = {
         stop_str=["<|im_end|>"],
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,
-        marks=[
-            pytest.mark.skipif(
-                TRANSFORMERS_VERSION < "4.48.0",
-                reason="HF model requires transformers>=4.48.0",
-            ),
-            large_gpu_mark(min_gb=64),
-        ],
+        marks=[large_gpu_mark(min_gb=64)],
     ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
@@ -228,7 +223,7 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(), (1.0, ), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
         marks=[
             pytest.mark.skipif(
-                TRANSFORMERS_VERSION >= "4.48.0",
+                Version(TRANSFORMERS_VERSION) >= Version("4.48"),
                 reason="HF model is not compatible with transformers>=4.48.0",
             )
         ],
@@ -276,14 +271,14 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.h2ovl_patch_hf_runner,
     ),
     "idefics3": VLMTestInfo(
-        models=["HuggingFaceM4/Idefics3-8B-Llama3"],
+        models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<image>",
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
-        marks=[large_gpu_mark(min_gb=48)],
+        hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
     ),
     "intern_vl": VLMTestInfo(
         models=[
@@ -361,6 +356,12 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
         patch_hf_runner=model_utils.mantis_patch_hf_runner,
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) >= Version("4.48"),
+                reason="HF model is not compatible with transformers>=4.48.0",
+            )
+        ],
     ),
     "minicpmv_25": VLMTestInfo(
         models=["openbmb/MiniCPM-Llama3-V-2_5"],
