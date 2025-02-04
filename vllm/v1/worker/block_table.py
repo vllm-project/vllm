@@ -30,8 +30,7 @@ class BlockTable:
         self.num_kv_cache_groups = num_kv_cache_groups
 
         # NOTE: Pad the block table to the max possible number of blocks among
-        # all KV cache groups. This waste some memory if block_size of the
-        # groups differ.
+        # all KV cache groups.
         self.block_table = torch.zeros(
             (num_kv_cache_groups, max_num_reqs, max_num_blocks_per_req),
             device=self.device,
