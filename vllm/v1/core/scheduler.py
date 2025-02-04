@@ -120,11 +120,11 @@ class Scheduler:
         # but not all. The constraint is due to the persistent batch in the
         # V1 model runner.
         # TODO(woosuk): Remove this constraint after refactoring model runner.
-        partial_req_id: Optional[str] = None
+        has_partial_request = False
         req_index = 0
         while req_index < len(self.running):
             # Only the last request in the RUNNING queue can be "partial".
-            assert not partial_req_id
+            assert not has_partial_request
             assert token_budget > 0
             request = self.running[req_index]
             num_new_tokens = request.num_tokens - request.num_computed_tokens
@@ -171,11 +171,9 @@ class Scheduler:
             ]
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
-            if (request.num_computed_tokens + num_new_tokens
-                    < request.num_tokens):
-                assert not partial_req_id
-                partial_req_id = request.request_id
             req_index += 1
+            has_partial_request = (request.num_computed_tokens + num_new_tokens
+                                   < request.num_tokens)
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -189,7 +187,7 @@ class Scheduler:
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             while self.waiting:
-                if partial_req_id:
+                if has_partial_request:
                     break
                 if len(self.running) == self.max_num_running_reqs:
                     break
@@ -251,9 +249,8 @@ class Scheduler:
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if num_computed_tokens + num_new_tokens < request.num_tokens:
-                    assert not partial_req_id
-                    partial_req_id = request.request_id
+                has_partial_request = (num_computed_tokens + num_new_tokens
+                                       < request.num_tokens)
 
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
@@ -303,7 +300,6 @@ class Scheduler:
             scheduled_new_reqs=new_reqs_data,
             scheduled_resumed_reqs=resumed_reqs_data,
             scheduled_running_reqs=running_reqs_data,
-            partial_req_id=partial_req_id,
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
@@ -654,10 +650,6 @@ class SchedulerOutput:
     scheduled_new_reqs: List[NewRequestData]
     scheduled_resumed_reqs: List[ResumedRequestData]
     scheduled_running_reqs: List[RunningRequestData]
-
-    # Remember the ID of the currently-scheduled
-    # partial request (`None` if none exists.)
-    partial_req_id: Optional[str]
 
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int

@@ -251,10 +251,6 @@ class GPUModelRunner:
             self.input_batch.block_table.append_row(req_index, start_index,
                                                     req_data.new_block_ids)
 
-            # Remove from prompt logprobs once out of prefill phase.
-            if req_id != scheduler_output.partial_req_id:
-                self.input_batch.num_prompt_logprobs.pop(req_id, None)
-
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -861,30 +857,40 @@ class GPUModelRunner:
         hidden_states: torch.Tensor,
         scheduler_output: "SchedulerOutput",
     ) -> Dict[str, LogprobsTensors]:
+        num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
+        if not num_prompt_logprobs_dict:
+            return {}
+
         prompt_logprobs_dict: Dict[str, LogprobsTensors] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
         # maintainable loop over optimal performance.
-        for req_id in self.input_batch.num_prompt_logprobs:
+        completed_prefill_reqs = []
+        for req_id, num_prompt_logprobs in num_prompt_logprobs_dict.items():
 
-            is_partial_req = req_id == scheduler_output.partial_req_id
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_logits = num_tokens if is_partial_req else num_tokens - 1
-
-            if not num_logits:
-                # No more logprobs to return.
-                continue
 
             # Get metadata for this request.
-            num_prompt_logprobs = self.input_batch.num_prompt_logprobs[req_id]
             request = self.requests[req_id]
+            num_prompt_tokens = len(request.prompt_token_ids)
             prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
                 self.device, non_blocking=True)
-            req_idx = self.input_batch.req_id_to_index[req_id]
+
+            # Determine number of logits to retrieve.
+            start_tok = request.num_computed_tokens + 1
+            num_remaining_tokens = num_prompt_tokens - start_tok
+            if num_tokens < num_remaining_tokens:
+                # This is a chunk, more tokens remain.
+                num_logits = num_tokens
+            else:
+                # This is the last chunk of prompt tokens to return.
+                num_logits = num_remaining_tokens
+                completed_prefill_reqs.append(req_id)
 
             # Get the logits corresponding to this req's prompt tokens.
             # If this is a partial request (i.e. chunked prefill),
             # then there is prompt logprob generated for each index.
+            req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc_np[req_idx].item()
             prompt_hidden_states = hidden_states[offset:offset + num_logits]
             logits = self.model.compute_logits(prompt_hidden_states, None)
@@ -892,8 +898,7 @@ class GPUModelRunner:
             # Get the "target" tokens for each index. For prompt at index i,
             # the token at prompt index i+1 is the "sampled" token we want
             # to gather the logprob for.
-            offset = request.num_computed_tokens + 1
-            tgt_token_ids = prompt_token_ids[offset:offset + num_logits]
+            tgt_token_ids = prompt_token_ids[start_tok:start_tok + num_logits]
 
             # Compute prompt logprobs.
             logprobs = self.model.sampler.compute_logprobs(logits)
@@ -907,9 +912,13 @@ class GPUModelRunner:
                 ranks.to("cpu", non_blocking=True),
             )
 
-        if prompt_logprobs_dict:
-            # Ensure CPU tensors are synchronized.
-            torch.cuda.synchronize()
+        # Remove requests that have completed prefill from the batch
+        # num_prompt_logprobs_dict.
+        for req_id in completed_prefill_reqs:
+            del num_prompt_logprobs_dict[req_id]
+
+        # Must synchronize the non-blocking GPU->CPU transfers.
+        torch.cuda.synchronize()
 
         return prompt_logprobs_dict
 
