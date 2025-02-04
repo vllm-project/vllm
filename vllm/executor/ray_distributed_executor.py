@@ -162,6 +162,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get(current_platform.ray_device_key, 0):
                 continue
+            if rank >= self.parallel_config.world_size:
+                # We have created enough workers.
+                break
             if bundle_indices is not None:
                 bundle_id = bundle_indices[rank]
             scheduling_strategy = PlacementGroupSchedulingStrategy(
