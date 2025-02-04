@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for rejection sampling."""
 from typing import List, Tuple
 

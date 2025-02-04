@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """KV-Cache Utilities."""
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -262,6 +263,15 @@ def hash_block_tokens(
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
     """
+    if not parent_block_hash:
+        # Note that we use 'None' as a string here instead of None because
+        # as of Python 3.12, hash(None) returns a constant predictable value.
+        # This could possibly make it easier to find and exploit hash
+        # collisions. 'None' as a string will be hashed differently per process,
+        # but consistently within the same process. This is the same as the
+        # behavior of None prior to Python 3.12.
+        parent_block_hash = hash('None')
+
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
     return BlockHashType(
         hash((parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
