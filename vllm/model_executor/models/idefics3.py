@@ -235,7 +235,7 @@ class Idefics3MultimodalProcessor(
                 self.info._get_image_feature_grid_size(
                     image_width=img.width,
                     image_height=img.height,
-                    size=mm_kwargs.get("size", None),
+                    **mm_kwargs,
                 ) for img in mm_data["images"]
             ]
             image_patches = list(map(lambda x: math.prod(x) + 1, image_grids))
@@ -275,9 +275,9 @@ class Idefics3MultimodalProcessor(
         image_seq_len = hf_processor.image_seq_len
         grid_placeholder = "<row_{n_h}_col_{n_w}>"
 
-        global_img_placeholder = fake_image_token + global_img_token + (
-            image_token * image_seq_len)
-        tile_img_placeholder = grid_placeholder + image_token * image_seq_len
+        p_img = image_token * image_seq_len
+        global_img_placeholder = fake_image_token + global_img_token + p_img
+        tile_img_placeholder = fake_image_token + grid_placeholder + p_img
 
         def get_replacement_idefics3(item_idx: int) -> str:
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -291,17 +291,16 @@ class Idefics3MultimodalProcessor(
             if grid_w == 0 and grid_h == 0:
                 image_placeholder = global_img_placeholder
             else:
-                placeholder_per_tile = []
+                tiles_placeholder = ""
                 for i in range(grid_h):
                     for j in range(grid_w):
-                        image_placeholder = tile_img_placeholder.format(
+                        placeholder_per_tile = tile_img_placeholder.format(
                             n_h=i + 1, n_w=j + 1)
+                        # Add line break if it is the last tile in the row
                         if j == grid_w - 1:
-                            image_placeholder += "\n"
-                        placeholder_per_tile.append(image_placeholder)
+                            placeholder_per_tile += "\n"
+                        tiles_placeholder += placeholder_per_tile
 
-                tiles_placeholder = fake_image_token + fake_image_token.join(
-                    placeholder_per_tile)
                 image_placeholder = (tiles_placeholder + "\n" +
                                      global_img_placeholder)
             return image_placeholder + fake_image_token
