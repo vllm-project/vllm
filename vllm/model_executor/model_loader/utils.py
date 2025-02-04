@@ -131,3 +131,10 @@ class ParamMapping:
                     packed_name,
                     index,
                 )
+
+    def get_sub_modules(self,
+                        module_name: str) -> Optional[Tuple[str, List[str]]]:
+        for key, value in self.packed_mapping.items():
+            if module_name.endswith(key):
+                return key, value
+        return None
