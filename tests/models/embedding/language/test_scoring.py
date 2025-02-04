@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the scoring outputs of HF and vLLM models.
 
 Run `pytest tests/models/embedding/language/test_scoring.py`.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 #  https://github.com/modelscope/ms-swift/blob/v2.4.2/swift/utils/module_mapping.py
 

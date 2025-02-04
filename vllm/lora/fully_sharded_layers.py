@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # pylint: disable=unused-argument
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union, cast
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests which cover integration of the speculative decoding framework with
 tensor parallelism.
 """

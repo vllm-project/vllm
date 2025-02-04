@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This script is mainly used to test whether trtion kernels can run normally
 under different conditions, including various batches, numbers of LoRA , and
