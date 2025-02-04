@@ -62,7 +62,11 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"video": 1}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         target_width, target_height = self.get_image_size_with_most_features()
 
         max_video_tokens = self.get_num_video_tokens(

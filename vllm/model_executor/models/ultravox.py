@@ -92,7 +92,11 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         feature_extractor = self.get_feature_extractor()
         max_audio_tokens = math.ceil(feature_extractor.chunk_length *
                                      _AUDIO_TOKENS_PER_SECOND)

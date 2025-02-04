@@ -110,7 +110,11 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         hf_config = self.get_hf_config()
         max_source_positions = hf_config.audio_config.max_source_positions
         max_output_lengths = (max_source_positions - 2) // 2 + 1

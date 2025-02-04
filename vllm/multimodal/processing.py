@@ -680,7 +680,11 @@ class BaseProcessingInfo:
         raise NotImplementedError
 
     @abstractmethod
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         """
         Get the maximum possible number of tokens per data item
         for each modality.
