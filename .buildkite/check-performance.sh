@@ -33,23 +33,17 @@ BASE_BRANCH="$BUILDKITE_PULL_REQUEST_BASE_BRANCH"
 # Strip fork username from BUILDKITE_BRANCH
 CURRENT_BRANCH=${BUILDKITE_BRANCH#*:}
 
-# Avoid hard links to vllm-project that break forks.
+# Avoid hard links to vllm-project that would break forks.
 git branch | cat
 echo "$BUILDKITE_COMMIT"
 # Initial state of the repo is dirty with main branch changes (?)
 git restore .
 # TODO auto-rebase if no conflicts are detected?
-git diff --stat origin | cat
 git fetch origin "$BASE_BRANCH" >/dev/null 2>&1
 # Buildkite detached head state prevents 'merge-base' from finding common ancestor.
 git remote add pr "$BUILDKITE_PULL_REQUEST_REPO"
-git remote -v
 git fetch pr >/dev/null 2>&1
-git status | cat
 git switch "$CURRENT_BRANCH"
-# git checkout -b "$CURRENT_BRANCH" 
-git log --oneline -n 20 | cat
-git rev-parse HEAD
 
 # Find the common ancestor between PR and base/main
 BASE_COMMIT=$(git merge-base "origin/$BASE_BRANCH" "$BUILDKITE_COMMIT" || echo "") 
