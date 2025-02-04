@@ -80,6 +80,10 @@ for bundle_index in [0, 1, 2, 3]:
     training_actor_device_ids.append(device_id)
 
 for (i, bundle_indices) in enumerate([[0, 1], [2, 3]]):
+    # IMPORTANT: when creating vLLM instances, we need to
+    # make sure there are no GPU activities on the target GPUs,
+    # otherwise, they will interfere with the vLLM memory profiling,
+    # and cause unexpected behaviors.
     llm = ray.remote(
         num_cpus=0,
         num_gpus=0,
