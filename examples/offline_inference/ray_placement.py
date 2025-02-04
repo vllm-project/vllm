@@ -78,7 +78,7 @@ device_ids = []
 for llm in llms:
     device_ids.append(
         ray.get(llm.collective_rpc.remote("report_device_id", args=tuple())))
-print(device_ids)
+print(f"{device_ids=}")
 
 assert device_ids[0] == device_ids[1]
 assert device_ids[2] == device_ids[3]
