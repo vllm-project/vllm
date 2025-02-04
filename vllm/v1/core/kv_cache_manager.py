@@ -236,9 +236,7 @@ class KVCacheManager:
 
         new_full_blocks = req_blocks[min_num_last_step_computed_full_blocks:
                                      num_full_blocks_after_append]
-        print(num_tokens, max_speculative_tokens,
-              min_num_last_step_computed_full_blocks,
-              num_full_blocks_after_append)
+
         if new_full_blocks:
             self._cache_full_blocks(
                 request=request,
