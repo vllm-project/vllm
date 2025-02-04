@@ -162,8 +162,9 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
+        size: Optional[dict[str, object]] = None,
     ) -> tuple[int, int]:
-        hf_processor = self.get_hf_processor()
+        hf_processor = self.get_hf_processor(size=size)
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
         max_image_size = image_processor.max_image_size['longest_edge']
         size = image_processor.size['longest_edge']
@@ -228,6 +229,7 @@ class Idefics3MultimodalProcessor(
                 self.info._get_image_feature_grid_size(
                     image_width=img.width,
                     image_height=img.height,
+                    size=mm_kwargs.get("size", None),
                 ) for img in mm_data["images"]
             ]
             image_patches = list(map(lambda x: math.prod(x) + 1, image_grids))
@@ -259,7 +261,7 @@ class Idefics3MultimodalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_processor = self.info.get_hf_processor()
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         image_token = hf_processor.image_token.content
         fake_image_token = hf_processor.fake_image_token.content
@@ -278,6 +280,7 @@ class Idefics3MultimodalProcessor(
             grid_w, grid_h = self.info._get_image_feature_grid_size(
                 image_width=image_size.width,
                 image_height=image_size.height,
+                **hf_processor_mm_kwargs,
             )
             if grid_w == 0 and grid_h == 0:
                 image_placeholder = global_img_placeholder

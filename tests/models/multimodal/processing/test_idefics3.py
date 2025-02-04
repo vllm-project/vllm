@@ -1,5 +1,6 @@
 """Tests for Idefics3's multimodal preprocessing kwargs."""
 import pytest
+from transformers import Idefics3Config
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import cached_get_tokenizer
@@ -42,17 +43,18 @@ def test_processor_override(image_assets: _ImageAssets, model: str,
     hf_processor = processor.info.get_hf_processor(**mm_processor_kwargs)
 
     # Build the image str / prompt based on the number of images we pass
-    # placeholders = "<image>" if num_imgs == 1 else "\n".join(
-    #     f"Image-{i}: <image>\n" for i in range(1, num_imgs + 1))
     placeholders = "<image>" if num_imgs == 1 else "\n".join(
         f"Image-{i}: <image>\n" for i in range(1, num_imgs + 1))
     prompt = f"<|begin_of_text|>User:{placeholders}\n<end_of_utterance>\nAssistant:"  # noqa: E501
-    mm_data = {
-        "image": [image_assets[0].pil_image.resize(
-            (336 * 4, 336 * 4))] * num_imgs
-    }
+
+    # Build mm_data
+    image_size = ctx.get_hf_config(Idefics3Config).vision_config.image_size
+    dummy_image_size = (image_size * 4, image_size * 4)
+    dummy_image = image_assets[0].pil_image.resize(dummy_image_size)
+    mm_data = {"image": [dummy_image] * num_imgs}
 
     processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
+    # Ensure the placeholders format are correct
     hf_processed_inputs = hf_processor(text=prompt, images=mm_data["image"])
     assert processed_inputs["prompt_token_ids"] == hf_processed_inputs[
         "input_ids"][0]
