@@ -291,18 +291,18 @@ class Idefics3MultimodalProcessor(
             if grid_w == 0 and grid_h == 0:
                 image_placeholder = global_img_placeholder
             else:
-                tiles_placeholder = ""
+                tiles_placeholder = []
                 for i in range(grid_h):
                     for j in range(grid_w):
                         placeholder_per_tile = tile_img_placeholder.format(
                             n_h=i + 1, n_w=j + 1)
                         # Add line break if it is the last tile in the row
                         if j == grid_w - 1:
-                            placeholder_per_tile += "\n"
-                        tiles_placeholder += placeholder_per_tile
+                            placeholder_per_tile += ["\n"]
+                        tiles_placeholder += [placeholder_per_tile]
 
-                image_placeholder = (tiles_placeholder + "\n" +
-                                     global_img_placeholder)
+                image_placeholder = "".join([tiles_placeholder, "\n",
+                                     global_img_placeholder])
             return image_placeholder + fake_image_token
 
         return [
