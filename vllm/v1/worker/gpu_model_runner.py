@@ -206,6 +206,16 @@ class GPUModelRunner:
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
+        """Update the cached states and the persistent batch with the scheduler
+        output.
+
+        The updated states are used by the `_prepare_inputs` function to create
+        the input GPU tensors for the model.
+
+        Returns:
+            True if there is a new/resumed/paused/finished request in the batch.
+            If False, we can skip copying SamplingMetadata to the GPU.
+        """
         # Remove stopped requests from the cached states.
         # Keep the states of the preempted requests.
         for req_id in scheduler_output.finished_req_ids:

@@ -256,6 +256,9 @@ class Scheduler:
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
+        # Since some requests in the RUNNING queue may not be scheduled in
+        # this step, the total number of scheduled requests can be smaller than
+        # len(self.running).
         assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
                 len(scheduled_running_reqs) <= len(self.running))
 
@@ -590,6 +593,9 @@ class NewRequestData:
 class CachedRequestData:
 
     req_id: str
+    # If resumed_from_preemption is False, new_block_ids will be appended to
+    # the request's block IDs. If True, new_block_ids will be used as the
+    # request's block IDs instead of appending to the existing block IDs.
     resumed_from_preemption: bool
     new_block_ids: List[int]
     num_computed_tokens: int
