@@ -858,7 +858,10 @@ class GPUModelRunner:
         # Update with the actual token ids
         sampled_token_ids = sampled_token_ids.tolist()
         for i, req_state, seq_len, gen_len in request_seq_lens:
-            token_ids = sampled_token_ids[i]
+            token_ids = [
+                x for x in sampled_token_ids[i] if x != INVALID_TOKEN_ID
+            ]
+            sampled_token_ids[i] = token_ids
             for j, token_id in enumerate(token_ids):
                 self.input_batch.token_ids_cpu[i, seq_len - gen_len + j +
                                                1] = token_id
