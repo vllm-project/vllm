@@ -170,9 +170,9 @@ def as_classification_model(cls: _T) -> _T:
 
     ModelForPooling = _create_pooling_model_cls(
         cls,
-        default_pooling_type=PoolingType.LAST,
+        default_pooling_type=PoolingType.STEP,
         default_normalize=False,
-        default_softmax=True,
+        default_softmax=False,
     )
 
     class ModelForClassification(ModelForPooling):
@@ -188,6 +188,8 @@ def as_classification_model(cls: _T) -> _T:
 
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
+
+            self.step_tag_id = config.step_tag_id
 
             self.score = RowParallelLinear(config.hidden_size,
                                            config.num_labels,
