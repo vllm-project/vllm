@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from openai import OpenAI
 
 # Modify OpenAI's API key and API base to use vLLM's API server.

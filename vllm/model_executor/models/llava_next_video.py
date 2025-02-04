@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
@@ -60,7 +62,11 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"video": 1}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         target_width, target_height = self.get_image_size_with_most_features()
 
         max_video_tokens = self.get_num_video_tokens(
@@ -251,16 +257,16 @@ class LlavaNextVideoPooler(nn.Module):
 class LlavaNextMultiModalProjector(nn.Module):
 
     def __init__(self, vision_hidden_size: int, text_hidden_size: int,
-                 projector_hidden_act: str):
+                 projector_hidden_act: str, multimodal_projector_bias: bool):
         super().__init__()
 
         self.linear_1 = nn.Linear(vision_hidden_size,
                                   text_hidden_size,
-                                  bias=True)
+                                  bias=multimodal_projector_bias)
         self.act = get_act_fn(projector_hidden_act)
         self.linear_2 = nn.Linear(text_hidden_size,
                                   text_hidden_size,
-                                  bias=True)
+                                  bias=multimodal_projector_bias)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear_1(image_features)
@@ -296,7 +302,8 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.multi_modal_projector = LlavaNextMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
-            projector_hidden_act=config.projector_hidden_act)
+            projector_hidden_act=config.projector_hidden_act,
+            multimodal_projector_bias=config.multimodal_projector_bias)
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,

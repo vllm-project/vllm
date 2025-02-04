@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from vllm import SamplingParams
 from vllm.config import LoadConfig, LoadFormat
 from vllm.model_executor.model_loader.loader import (RunaiModelStreamerLoader,

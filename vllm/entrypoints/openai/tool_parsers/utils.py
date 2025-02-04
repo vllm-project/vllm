@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, List, Tuple

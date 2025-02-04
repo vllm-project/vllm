@@ -48,9 +48,9 @@ Further update the model as follows:
             return vision_embeddings
     ```
 
-    ```{important}
+    :::{important}
     The returned `multimodal_embeddings` must be either a **3D {class}`torch.Tensor`** of shape `(num_items, feature_size, hidden_size)`, or a **list / tuple of 2D {class}`torch.Tensor`'s** of shape `(feature_size, hidden_size)`, so that `multimodal_embeddings[i]` retrieves the embeddings generated from the `i`-th multimodal data item (e.g, image) of the request.
-    ```
+    :::
 
 - Implement {meth}`~vllm.model_executor.models.interfaces.SupportsMultiModal.get_input_embeddings` to merge `multimodal_embeddings` with text embeddings from the `input_ids`. If input processing for the model is implemented correctly (see sections below), then you can leverage the utility function we provide to easily merge the embeddings.
 
@@ -89,10 +89,10 @@ Further update the model as follows:
   + class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
   ```
 
-  ```{note}
+  :::{note}
   The model class does not have to be named {code}`*ForCausalLM`.
   Check out [the HuggingFace Transformers documentation](https://huggingface.co/docs/transformers/model_doc/auto#multimodal) for some examples.
-  ```
+  :::
 
 ## 2. Specify processing information
 
@@ -120,8 +120,8 @@ When calling the model, the output embeddings from the visual encoder are assign
 containing placeholder feature tokens. Therefore, the number of placeholder feature tokens should be equal
 to the size of the output embeddings.
 
-::::{tab-set}
-:::{tab-item} Basic example: LLaVA
+:::::{tab-set}
+::::{tab-item} Basic example: LLaVA
 :sync: llava
 
 Looking at the code of HF's `LlavaForConditionalGeneration`:
@@ -250,16 +250,20 @@ def get_max_image_tokens(self) -> int:
 And thus, we can override the method as:
 
 ```python
-def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+def get_mm_max_tokens_per_item(
+    self,
+    seq_len: int,
+    mm_counts: Mapping[str, int],
+) -> Mapping[str, int]:
     return {"image": self.get_max_image_tokens()}
 ```
 
-```{note}
+:::{note}
 Our [actual code](gh-file:vllm/model_executor/models/llava.py) is more abstracted to support vision encoders other than CLIP.
-```
-
 :::
+
 ::::
+:::::
 
 ## 3. Specify dummy inputs
 
@@ -315,17 +319,17 @@ def get_dummy_processor_inputs(
 Afterwards, create a subclass of {class}`~vllm.multimodal.processing.BaseMultiModalProcessor`
 to fill in the missing details about HF processing.
 
-```{seealso}
+:::{seealso}
 [Multi-Modal Data Processing](#mm-processing)
-```
+:::
 
 ### Multi-modal fields
 
 Override {class}`~vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config` to
 return a schema of the tensors outputted by the HF processor that are related to the input multi-modal items.
 
-::::{tab-set}
-:::{tab-item} Basic example: LLaVA
+:::::{tab-set}
+::::{tab-item} Basic example: LLaVA
 :sync: llava
 
 Looking at the model's `forward` method:
@@ -367,13 +371,13 @@ def _get_mm_fields_config(
     )
 ```
 
-```{note}
+:::{note}
 Our [actual code](gh-file:vllm/model_executor/models/llava.py) additionally supports
 pre-computed image embeddings, which can be passed to be model via the `image_embeds` argument.
-```
-
 :::
+
 ::::
+:::::
 
 ### Prompt replacements
 

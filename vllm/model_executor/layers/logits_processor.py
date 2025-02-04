@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A layer that compute logits from hidden_stats."""
 import inspect
 from typing import Optional

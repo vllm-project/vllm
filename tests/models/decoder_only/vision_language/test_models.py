@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Common tests for testing .generate() functionality for single / multiple
 image, embedding, and video support for different VLMs in vLLM.
 """
@@ -8,6 +9,7 @@ from pathlib import PosixPath
 from typing import Type
 
 import pytest
+from packaging.version import Version
 from transformers import AutoModelForVision2Seq
 from transformers import __version__ as TRANSFORMERS_VERSION
 
@@ -153,13 +155,7 @@ VLM_TEST_SETTINGS = {
         stop_str=["<|im_end|>"],
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,
-        marks=[
-            pytest.mark.skipif(
-                TRANSFORMERS_VERSION < "4.48.0",
-                reason="HF model requires transformers>=4.48.0",
-            ),
-            large_gpu_mark(min_gb=64),
-        ],
+        marks=[large_gpu_mark(min_gb=64)],
     ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
@@ -205,7 +201,7 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(), (1.0, ), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
         marks=[
             pytest.mark.skipif(
-                TRANSFORMERS_VERSION >= "4.48.0",
+                Version(TRANSFORMERS_VERSION) >= Version("4.48"),
                 reason="HF model is not compatible with transformers>=4.48.0",
             )
         ],
@@ -249,17 +245,18 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         dtype="bfloat16",
         use_tokenizer_eos=True,
+        num_logprobs=10,
         patch_hf_runner=model_utils.h2ovl_patch_hf_runner,
     ),
     "idefics3": VLMTestInfo(
-        models=["HuggingFaceM4/Idefics3-8B-Llama3"],
+        models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<image>",
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
-        marks=[large_gpu_mark(min_gb=48)],
+        hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
     ),
     "intern_vl": VLMTestInfo(
         models=[
@@ -281,7 +278,6 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
-        marks=[large_gpu_mark(min_gb=32)],
     ),
     "llava_next": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
@@ -338,6 +334,12 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
         patch_hf_runner=model_utils.mantis_patch_hf_runner,
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) >= Version("4.48"),
+                reason="HF model is not compatible with transformers>=4.48.0",
+            )
+        ],
     ),
     "minicpmv_25": VLMTestInfo(
         models=["openbmb/MiniCPM-Llama3-V-2_5"],
@@ -349,6 +351,20 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id],
         postprocess_inputs=model_utils.wrap_inputs_post_processor,
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
+    ),
+    "minicpmo_26": VLMTestInfo(
+        models=["openbmb/MiniCPM-o-2_6"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
+        postprocess_inputs=model_utils.ignore_inputs_post_processor(
+            "image_sizes"
+        ),
+        hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
+        patch_hf_runner=model_utils.minicpmo_patch_hf_runner
     ),
     "minicpmv_26": VLMTestInfo(
         models=["openbmb/MiniCPM-V-2_6"],

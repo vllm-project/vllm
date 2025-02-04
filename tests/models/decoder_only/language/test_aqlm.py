@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of a AQLM model between vLLM and HF Transformers
 
 Run `pytest tests/models/test_aqlm.py`.
