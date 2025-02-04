@@ -291,7 +291,7 @@ class Idefics3MultimodalProcessor(
             if grid_w == 0 and grid_h == 0:
                 image_placeholder = global_img_placeholder
             else:
-                tiles_placeholder = []
+                tiles_placeholder = list[str]()
                 for i in range(grid_h):
                     for j in range(grid_w):
                         placeholder_per_tile = tile_img_placeholder.format(
