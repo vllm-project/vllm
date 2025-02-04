@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from .interfaces import (HasInnerState, SupportsLoRA, SupportsMultiModal,
                          SupportsPP, has_inner_state, supports_lora,
                          supports_multimodal, supports_pp)

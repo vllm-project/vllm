@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attention layer."""
 from typing import Any, Dict, List, Optional
 

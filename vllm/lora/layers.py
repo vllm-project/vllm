@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # pylint: disable=unused-argument
 import math
 from dataclasses import dataclass

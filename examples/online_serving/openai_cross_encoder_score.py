@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Example online usage of Score API.
 

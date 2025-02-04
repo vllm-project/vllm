@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # The CLI entrypoint to vLLM.
 import argparse
 import os

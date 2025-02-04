@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import deque
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
@@ -139,7 +141,7 @@ class Scheduler:
             assert num_new_tokens > 0
 
             while True:
-                new_blocks = self.kv_cache_manager.append_slots(
+                new_blocks = self.kv_cache_manager.allocate_slots(
                     request, num_new_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -212,7 +214,7 @@ class Scheduler:
                     # improve the performance.
                     num_computed_tokens -= self.block_size
                     num_new_tokens = self.block_size
-                    computed_blocks.pop()
+                    computed_blocks[0].pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
 

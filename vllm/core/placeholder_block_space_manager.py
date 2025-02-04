@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Tuple
 
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager

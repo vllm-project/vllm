@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from functools import cached_property
 from typing import Callable, Dict, List, Optional, Sequence, Type, Union
