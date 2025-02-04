@@ -26,7 +26,6 @@ import math
 import re
 from collections import Counter
 from functools import cached_property, partial
-from itertools import accumulate
 from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
                     Optional, Set, Tuple, TypedDict, Union)
 
@@ -365,7 +364,11 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         else:
             return {"image": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         mm_max_tokens = {"image": self.get_max_image_tokens()}
         if self.get_model_version() == (2, 6):
             mm_max_tokens["video"] = self.get_max_video_tokens(seq_len)
@@ -761,30 +764,25 @@ class MiniCPMVMultiModalProcessor(
         hf_inputs,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        image_num_slices = hf_inputs.get("image_num_slices", torch.empty(0))
+        video_num_slices = hf_inputs.get("video_num_slices", torch.empty(0))
 
-        def get_slices(num_slices: List[int]) -> List[int]:
-            slice_indices = [0] + list(accumulate(num_slices))
-            slices = [(slice_indices[i], slice_indices[i + 1])
-                      for i in range(len(num_slices))]
-            return [slice(*slice_item) for slice_item in slices]
-
-        image_slices = get_slices(
-            hf_inputs.get("image_num_slices", torch.empty(0)))
-        video_slices = get_slices(
-            hf_inputs.get("video_num_slices", torch.empty(0)))
-
-        return dict(
-            pixel_values=MultiModalFieldConfig.flat("image", image_slices),
-            image_sizes=MultiModalFieldConfig.batched("image"),
-            tgt_sizes=MultiModalFieldConfig.flat("image", image_slices),
-            image_num_slices=MultiModalFieldConfig.batched("image"),
-            image_embeds=MultiModalFieldConfig.flat("image", image_slices),
-            video_pixel_values=MultiModalFieldConfig.flat(
-                "video", video_slices),
-            video_image_sizes=MultiModalFieldConfig.batched("video"),
-            video_tgt_sizes=MultiModalFieldConfig.flat("video", video_slices),
-            video_embeds=MultiModalFieldConfig.flat("video", video_slices),
-            video_num_slices=MultiModalFieldConfig.batched("video"))
+        return dict(pixel_values=MultiModalFieldConfig.flat_from_sizes(
+            "image", image_num_slices),
+                    image_sizes=MultiModalFieldConfig.batched("image"),
+                    tgt_sizes=MultiModalFieldConfig.flat_from_sizes(
+                        "image", image_num_slices),
+                    image_num_slices=MultiModalFieldConfig.batched("image"),
+                    image_embeds=MultiModalFieldConfig.flat_from_sizes(
+                        "image", image_num_slices),
+                    video_pixel_values=MultiModalFieldConfig.flat_from_sizes(
+                        "video", video_num_slices),
+                    video_image_sizes=MultiModalFieldConfig.batched("video"),
+                    video_tgt_sizes=MultiModalFieldConfig.flat_from_sizes(
+                        "video", video_num_slices),
+                    video_embeds=MultiModalFieldConfig.flat_from_sizes(
+                        "video", video_num_slices),
+                    video_num_slices=MultiModalFieldConfig.batched("video"))
 
     def apply(
         self,
