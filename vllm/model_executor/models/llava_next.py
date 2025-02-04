@@ -231,7 +231,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=vision_hidden_size,
             text_hidden_size=config.text_config.hidden_size,
-            projector_hidden_act=config.projector_hidden_act)
+            projector_hidden_act=config.projector_hidden_act,
+            multimodal_projector_bias=config.multimodal_projector_bias)
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
