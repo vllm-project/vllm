@@ -35,23 +35,26 @@ class QuarkW8A8Fp8(QuarkScheme):
         # tensor scales (thus N scales being passed to the kernel),
         # requantize so we can always run per tensor
         if self.qscheme == "per_tensor":
+            if current_platform.is_rocm():
+                weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                    weight=layer.weight,
+                    weight_scale=layer.weight_scale,
+                    input_scale=layer.input_scale)
+            else:
+                max_w_scale = layer.weight_scale
+                weight = layer.weight
+                input_scale = layer.input_scape
+
             max_w_scale, weight = requantize_with_max_scale(
-                weight=layer.weight,
-                weight_scale=layer.weight_scale,
+                weight=weight,
+                weight_scale=max_w_scale,
                 logical_widths=layer.logical_widths,
             )
 
-            if current_platform.is_rocm():
-                weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                    weight=weight,
-                    weight_scale=max_w_scale,
-                    input_scale=layer.input_scale)
-                if input_scale is not None:
-                    layer.input_scale = Parameter(input_scale,
-                                                  requires_grad=False)
-
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
+            if input_scale is not None:
+                layer.input_scale = Parameter(input_scale, requires_grad=False)
 
         # If channelwise, scales are already lined up, so just transpose.
         elif self.qscheme == "per_channel":
