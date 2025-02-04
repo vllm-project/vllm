@@ -9,6 +9,7 @@ from pathlib import PosixPath
 from typing import Type
 
 import pytest
+from packaging.version import Version
 from transformers import AutoModelForVision2Seq
 from transformers import __version__ as TRANSFORMERS_VERSION
 
@@ -154,13 +155,7 @@ VLM_TEST_SETTINGS = {
         stop_str=["<|im_end|>"],
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,
-        marks=[
-            pytest.mark.skipif(
-                TRANSFORMERS_VERSION < "4.48.0",
-                reason="HF model requires transformers>=4.48.0",
-            ),
-            large_gpu_mark(min_gb=64),
-        ],
+        marks=[large_gpu_mark(min_gb=64)],
     ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
@@ -206,7 +201,7 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(), (1.0, ), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
         marks=[
             pytest.mark.skipif(
-                TRANSFORMERS_VERSION >= "4.48.0",
+                Version(TRANSFORMERS_VERSION) >= Version("4.48"),
                 reason="HF model is not compatible with transformers>=4.48.0",
             )
         ],
@@ -339,6 +334,12 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
         patch_hf_runner=model_utils.mantis_patch_hf_runner,
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) >= Version("4.48"),
+                reason="HF model is not compatible with transformers>=4.48.0",
+            )
+        ],
     ),
     "minicpmv_25": VLMTestInfo(
         models=["openbmb/MiniCPM-Llama3-V-2_5"],
