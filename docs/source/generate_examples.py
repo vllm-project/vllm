@@ -147,7 +147,7 @@ class Example:
             return content
 
         content += "## Example materials\n\n"
-        for file in self.other_files:
+        for file in sorted(self.other_files):
             include = "include" if file.suffix == ".md" else "literalinclude"
             content += f":::{{admonition}} {file.relative_to(self.path)}\n"
             content += ":class: dropdown\n\n"
