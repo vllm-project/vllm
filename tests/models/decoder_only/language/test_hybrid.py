@@ -9,7 +9,7 @@ from vllm.sampling_params import SamplingParams
 from ...utils import check_outputs_equal
 
 # This test is for the hybrid models
-MODELS = ["ai21labs/Jamba-tiny-dev", "ibm-fms/Bamba-9B"]
+MODELS = ["ai21labs/Jamba-tiny-dev", "ibm-ai-platform/Bamba-9B"]
 
 
 @pytest.mark.parametrize("model", MODELS)
