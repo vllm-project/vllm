@@ -1,8 +1,8 @@
 # Built-in Extensions
 
-```{toctree}
+:::{toctree}
 :maxdepth: 1
 
 runai_model_streamer
 tensorizer
-```
+:::

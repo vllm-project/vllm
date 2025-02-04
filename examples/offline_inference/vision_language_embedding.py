@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This example shows how to use vLLM for running offline inference with
 the correct prompt format on vision language models for multimodal embedding.

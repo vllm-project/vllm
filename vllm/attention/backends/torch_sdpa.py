@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """ Attention layer with torch scaled_dot_product_attention
     and PagedAttention."""
 from dataclasses import dataclass

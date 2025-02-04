@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from functools import cached_property
 from typing import (Final, Iterable, List, Literal, Mapping, Optional,
@@ -101,7 +103,11 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         return {
             "image": self.get_max_image_tokens(),
             "video": self.get_max_video_tokens(seq_len),
@@ -370,11 +376,11 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
 
         self.linear_1 = nn.Linear(config.vision_config.hidden_size,
                                   config.text_config.hidden_size,
-                                  bias=True)
+                                  bias=config.multimodal_projector_bias)
         self.act = get_act_fn(config.projector_hidden_act)
         self.linear_2 = nn.Linear(config.text_config.hidden_size,
                                   config.text_config.hidden_size,
-                                  bias=True)
+                                  bias=config.multimodal_projector_bias)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear_1(image_features)

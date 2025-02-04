@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 '''
 Demonstrate prompting of text-to-text
 encoder/decoder models, specifically Florence-2
