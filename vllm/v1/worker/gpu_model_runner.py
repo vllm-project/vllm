@@ -216,11 +216,21 @@ class GPUModelRunner:
             True if there is a new/resumed/paused/finished request in the batch.
             If False, we can skip copying SamplingMetadata to the GPU.
         """
-        # Remove stopped requests from the cached states.
-        # Keep the states of the preempted requests.
+        # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.encoder_cache.pop(req_id, None)
+        # Remove the finished requests from the persistent batch.
+        # NOTE(woosuk): There could be an edge case where finished_req_ids and
+        # scheduled_req_ids overlap. This happens when a request is aborted and
+        # then resubmitted with the same ID. In this case, we treat them as two
+        # distinct requests - clearing the cached states for the first request
+        # and handling the second as a new request.
+        removed_req_indices: List[int] = []
+        for req_id in scheduler_output.finished_req_ids:
+            req_index = self.input_batch.remove_request(req_id)
+            if req_index is not None:
+                removed_req_indices.append(req_index)
 
         # Free the cached encoder outputs.
         for req_id, input_id in scheduler_output.free_encoder_input_ids:
@@ -231,11 +241,10 @@ class GPUModelRunner:
                     self.encoder_cache.pop(req_id, None)
 
         # Remove the unscheduled requests from the persistent batch.
-        # NOTE(woosuk): The unscheduled requests include 1) finished requests,
-        # 2) preempted requests, and 3) running requests that are not scheduled
-        # in this step. For 1) finished requests, we will remove them from the
-        # persistent batch and the cached states. For 2) & 3), we will remove
-        # them from the persistent batch only and keep their cached states.
+        # NOTE(woosuk): The unscheduled requests are either preempted requests
+        # or running requests that are not scheduled in this step. We remove
+        # them from the persistent batch but keep their cached states since
+        # they will be scheduled again sometime in the future.
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
         cached_req_ids = self.input_batch.req_id_to_index.keys()
         unscheduled_req_ids = cached_req_ids - scheduled_req_ids
@@ -243,11 +252,10 @@ class GPUModelRunner:
         # consecutive batches contain mostly the same requests. If batches
         # have low request overlap (e.g., alternating between two distinct
         # sets of requests), this optimization becomes very inefficient.
-        removed_req_indices: List[int] = []
         for req_id in unscheduled_req_ids:
             req_index = self.input_batch.remove_request(req_id)
-            if req_index is not None:
-                removed_req_indices.append(req_index)
+            assert req_index is not None
+            removed_req_indices.append(req_index)
 
         req_ids_to_add: List[str] = []
         # Add new requests to the cached states.
