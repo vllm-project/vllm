@@ -152,6 +152,14 @@ def test_schedule_multimodal_requests():
 
 
 def test_schedule_partial_requests():
+    """Test scheduling behavior with partial requests.
+
+    This test verifies that:
+    1. The scheduler can handle multiple partial requests in a single step when
+       constrained by encoder budget.
+    2. A request in RUNNING state may be unscheduled in subsequent steps if
+       there is insufficient encoder budget.
+    """
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
         max_num_batched_tokens=1024,
