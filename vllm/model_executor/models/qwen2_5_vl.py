@@ -56,7 +56,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
-from vllm.multimodal.parse import ModalityDataItems
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
@@ -709,51 +708,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         return loaded_params
 
 
-class QwenVLEmbeddingItems(ModalityDataItems[dict[str, torch.Tensor],
-                                             dict[str, torch.Tensor]]):
-
-    def __init__(self, data: dict, modality: str) -> None:
-        super().__init__(data, modality)
-
-        grid_thw = data[f"{modality}_grid_thw"]
-        slice_idxs = [0] + grid_thw.prod(-1).cumsum_(0).tolist()
-        self._slices = [
-            slice(slice_idxs[i], slice_idxs[i + 1])
-            for i in range(len(grid_thw))
-        ]
-
-    def get_count(self) -> int:
-        return len(self.data[f"{self.modality}_grid_thw"])
-
-    def get(self, index: int) -> dict[str, torch.Tensor]:
-        out = {}
-        for k, v in self.data.items():
-            if v != f"{self.modality}_grid_thw":
-                v = v[self._slices[index]]
-
-            out[k] = v
-
-        return out
-
-    def get_processor_data(self) -> Mapping[str, object]:
-        return {}
-
-    def get_passthrough_data(self) -> Mapping[str, object]:
-        return self.data
-
-
-class QwenVLImageEmbeddingItems(QwenVLEmbeddingItems):
-
-    def __init__(self, data: dict) -> None:
-        super().__init__(data, "image")
-
-
-class QwenVLVideoEmbeddingItems(QwenVLEmbeddingItems):
-
-    def __init__(self, data: dict) -> None:
-        super().__init__(data, "video")
-
-
 class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
 
     def get_hf_config(self):
@@ -806,28 +760,8 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
-        image_slice_idxs = [0] + image_grid_thw.prod(-1).cumsum_(0).tolist()
-        image_slices = [
-            slice(image_slice_idxs[i], image_slice_idxs[i + 1])
-            for i in range(len(image_grid_thw))
-        ]
-
-        video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
-        video_slice_idxs = [0] + video_grid_thw.prod(-1).cumsum_(0).tolist()
-        video_slices = [
-            slice(video_slice_idxs[i], video_slice_idxs[i + 1])
-            for i in range(len(video_grid_thw))
-        ]
-
         return dict(
-            pixel_values=MultiModalFieldConfig.flat("image", image_slices),
-            image_embeds=MultiModalFieldConfig.flat("image", image_slices),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
-            pixel_values_videos=MultiModalFieldConfig.flat(
-                "video", video_slices),
-            video_embeds=MultiModalFieldConfig.flat("video", video_slices),
-            video_grid_thw=MultiModalFieldConfig.batched("video"),
+            **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
             second_per_grid_ts=MultiModalFieldConfig.batched("video"),
         )
 
