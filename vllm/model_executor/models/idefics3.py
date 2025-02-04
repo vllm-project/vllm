@@ -131,8 +131,8 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
             width = int(height * aspect_ratio)
 
         # Ensure both width and height are even (if needed)
-        height += 1 if height % 2 != 0 else 0
-        width += 1 if width % 2 != 0 else 0
+        height += height % 2
+        width += width % 2
 
         # Ensure dimensions are not smaller than the minimum length
         height = max(height, min_len)
