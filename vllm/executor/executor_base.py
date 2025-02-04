@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 from abc import ABC, abstractmethod
 from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
@@ -47,6 +49,7 @@ class ExecutorBase(ABC):
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self._init_executor()
+        self.is_sleeping = False
 
     @abstractmethod
     def _init_executor(self) -> None:
@@ -192,6 +195,20 @@ class ExecutorBase(ABC):
 
     def stop_profile(self) -> None:
         self.collective_rpc("stop_profile")
+
+    def sleep(self, level: int = 1):
+        if self.is_sleeping:
+            logger.warning("Executor is already sleeping.")
+            return
+        self.collective_rpc("sleep", kwargs=dict(level=level))
+        self.is_sleeping = True
+
+    def wake_up(self):
+        if not self.is_sleeping:
+            logger.warning("Executor is not sleeping.")
+            return
+        self.collective_rpc("wake_up")
+        self.is_sleeping = False
 
     def save_sharded_state(
         self,

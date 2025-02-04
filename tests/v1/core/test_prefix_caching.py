@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the with and without prefix caching."""
 import pytest
 
@@ -164,7 +165,7 @@ def test_decode():
     req0.num_computed_tokens = 55
     for _ in range(4):
         req0.append_output_token_ids(8)
-    new_blocks = manager.append_slots(req0, 4)
+    new_blocks = manager.allocate_slots(req0, 4)
     assert new_blocks is not None and len(new_blocks) == 0
     assert manager.req_to_blocks[req0.request_id][-2].block_hash is None
 
@@ -175,7 +176,7 @@ def test_decode():
     # the preallocated block.
     for _ in range(5 + 10):
         req0.append_output_token_ids(7)
-    new_blocks = manager.append_slots(req0, 15)
+    new_blocks = manager.allocate_slots(req0, 15)
     assert new_blocks is not None and len(new_blocks) == 0
     assert manager.req_to_blocks[req0.request_id][-2].block_hash is not None
 
@@ -185,7 +186,7 @@ def test_decode():
     # the preallocated block.
     for _ in range(6 + 11):
         req0.append_output_token_ids(12)
-    new_blocks = manager.append_slots(req0, 17)
+    new_blocks = manager.allocate_slots(req0, 17)
     # Plus one preallocated block.
     assert new_blocks is not None and len(new_blocks) == 2
 
@@ -395,12 +396,14 @@ def test_preallocate_blocks(num_preallocate_tokens: int, block_size: int):
     req.num_computed_tokens = block_size
     assert len(blocks) == 1 + num_preallocated_blocks
 
-    # Assume all computed.
-    manager.append_slots(req, block_size * (len(blocks) - 1))
-    req.num_computed_tokens = block_size * len(blocks)
+    # Assume all computed, only when num_preallocate_tokens > 0, we need to
+    # consume the previously preallocated blocks.
+    if num_preallocated_blocks > 0:
+        manager.allocate_slots(req, block_size * (len(blocks) - 1))
+        req.num_computed_tokens = block_size * len(blocks)
 
     # Append 1 block.
-    blocks = manager.append_slots(req, block_size)
+    blocks = manager.allocate_slots(req, block_size)
     assert len(blocks) == 1 + num_preallocated_blocks
 
 
@@ -503,7 +506,7 @@ def test_mm_prefix_caching():
     # Append slots without allocating a new block.
     for _ in range(5):
         req0.append_output_token_ids(8)
-    new_blocks = manager.append_slots(req0, 5)
+    new_blocks = manager.allocate_slots(req0, 5)
     assert new_blocks is not None and len(new_blocks) == 0
 
     # The just completed block should have hashes with extra keys.
@@ -587,3 +590,42 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     assert {block.ref_cnt for block in block_part1[:3]} == {1}
     # Block 3-5 are free.
     assert {block.ref_cnt for block in block_part1[3:]} == {0}
+
+
+def test_reset_prefix_cache():
+    manager = KVCacheManager(
+        block_size=16,
+        num_gpu_blocks=10,
+        max_model_len=8192,
+        sliding_window=None,
+        enable_caching=True,
+        num_preallocate_tokens=0,
+    )
+
+    full_block_token_ids = [i for i in range(3) for _ in range(16)]
+    unique_token_ids = [3] * 7
+    all_token_ids = full_block_token_ids + unique_token_ids
+    req0 = make_request("0", all_token_ids)
+    blocks = manager.allocate_slots(req0, 55)
+    assert [b.block_id for b in blocks] == [0, 1, 2, 3]
+
+    unique_token_ids = [4] * 7
+    all_token_ids = full_block_token_ids + unique_token_ids
+    req1 = make_request("1", all_token_ids)
+    computed_blocks, _ = manager.get_computed_blocks(req1)
+    assert len(req1.kv_block_hashes) == 3
+    assert len(computed_blocks) == 3
+    blocks = manager.allocate_slots(req1, 7, computed_blocks)
+    assert [b.block_id for b in blocks] == [4]
+
+    # Failed to reset prefix cache because some blocks are not freed yet.
+    assert not manager.reset_prefix_cache()
+    assert manager.cached_block_hash_to_block
+
+    # Free the blocks.
+    manager.free(req0)
+    manager.free(req1)
+
+    assert manager.reset_prefix_cache()
+    assert not manager.cached_block_hash_to_block
+    assert all([blk.block_hash is None for blk in manager.block_pool])

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A layer that samples the next tokens from the model's outputs."""
 from typing import Tuple
 
@@ -50,9 +51,8 @@ class Sampler(nn.Module):
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
 
-        # NOTE: CPU-GPU synchronization happens here.
         sampler_output = SamplerOutput(
-            sampled_token_ids=sampled.tolist(),
+            sampled_token_ids=sampled,
             logprob_token_ids=topk_indices,
             logprobs=topk_logprobs,
             prompt_logprob_token_ids=None,

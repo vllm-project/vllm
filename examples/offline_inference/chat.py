@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from vllm import LLM, SamplingParams
 
 llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")

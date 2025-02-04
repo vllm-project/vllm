@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
@@ -65,11 +67,6 @@ class AttentionBackend(ABC):
     def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
         raise NotImplementedError
 
-    @classmethod
-    def make_metadata_builder(cls, *args,
-                              **kwargs) -> "AttentionMetadataBuilder":
-        return cls.get_builder_cls()(*args, **kwargs)
-
     @staticmethod
     @abstractmethod
     def get_kv_cache_shape(
@@ -127,6 +124,10 @@ class AttentionMetadata:
     # `model_executable`.
     multi_modal_placeholder_index_maps: Optional[Dict[
         str, MultiModalPlaceholderMap.IndexMap]]
+
+    # Enable/disable KV scales calculation. This is so that we can disable the
+    # calculation until after prefill and cuda graph capture.
+    enable_kv_scales_calculation: bool
 
     @property
     @abstractmethod
@@ -214,6 +215,12 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
 
     @abstractmethod
     def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
+        """Create the builder, remember some configuration and parameters."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def prepare(self) -> None:
+        """Prepare for one batch."""
         raise NotImplementedError
 
     @abstractmethod
@@ -225,8 +232,10 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
 
 class AttentionLayer(Protocol):
 
-    _k_scale: float
-    _v_scale: float
+    _k_scale: torch.Tensor
+    _v_scale: torch.Tensor
+    _k_scale_float: float
+    _v_scale_float: float
 
     def forward(
         self,
@@ -264,6 +273,22 @@ class AttentionImpl(ABC, Generic[T]):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: T,
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+
+class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
+
+    @abstractmethod
+    def forward(
+        self,
+        layer: AttentionLayer,
+        hidden_states_or_cq: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,

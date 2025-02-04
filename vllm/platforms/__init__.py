@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import logging
 import traceback
 from itertools import chain
@@ -31,7 +33,8 @@ def cuda_platform_plugin() -> Optional[str]:
     is_cuda = False
 
     try:
-        import pynvml
+        from vllm.utils import import_pynvml
+        pynvml = import_pynvml()
         pynvml.nvmlInit()
         try:
             if pynvml.nvmlDeviceGetCount() > 0:
@@ -101,7 +104,7 @@ def cpu_platform_plugin() -> Optional[str]:
     try:
         from importlib.metadata import version
         is_cpu = "cpu" in version("vllm")
-        if is_cpu == False:
+        if not is_cpu:
             import platform
             is_cpu = platform.machine().lower().startswith("arm")
 

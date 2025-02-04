@@ -11,6 +11,6 @@ For more information on CoreWeave's Tensorizer, please refer to
 [CoreWeave's Tensorizer documentation](https://github.com/coreweave/tensorizer). For more information on serializing a vLLM model, as well a general usage guide to using Tensorizer with vLLM, see
 the [vLLM example script](https://docs.vllm.ai/en/stable/getting_started/examples/offline_inference/tensorize_vllm_model.html).
 
-```{note}
+:::{note}
 Note that to use this feature you will need to install `tensorizer` by running `pip install vllm[tensorizer]`.
-```
+:::

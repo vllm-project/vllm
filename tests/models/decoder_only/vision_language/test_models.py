@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Common tests for testing .generate() functionality for single / multiple
 image, embedding, and video support for different VLMs in vLLM.
 """
@@ -249,17 +250,18 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         dtype="bfloat16",
         use_tokenizer_eos=True,
+        num_logprobs=10,
         patch_hf_runner=model_utils.h2ovl_patch_hf_runner,
     ),
     "idefics3": VLMTestInfo(
-        models=["HuggingFaceM4/Idefics3-8B-Llama3"],
+        models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<image>",
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
-        marks=[large_gpu_mark(min_gb=48)],
+        hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
     ),
     "intern_vl": VLMTestInfo(
         models=[
@@ -281,7 +283,6 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
-        marks=[large_gpu_mark(min_gb=32)],
     ),
     "llava_next": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
@@ -349,6 +350,20 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id],
         postprocess_inputs=model_utils.wrap_inputs_post_processor,
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
+    ),
+    "minicpmo_26": VLMTestInfo(
+        models=["openbmb/MiniCPM-o-2_6"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
+        postprocess_inputs=model_utils.ignore_inputs_post_processor(
+            "image_sizes"
+        ),
+        hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
+        patch_hf_runner=model_utils.minicpmo_patch_hf_runner
     ),
     "minicpmv_26": VLMTestInfo(
         models=["openbmb/MiniCPM-V-2_6"],
@@ -521,12 +536,13 @@ VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
 # - image embeddings
 # - video
 # - custom inputs
-@pytest.mark.parametrize("model_type,test_case",
-                         get_parametrized_options(
-                             VLM_TEST_SETTINGS,
-                             test_type=VLMTestType.IMAGE,
-                             fork_new_process_for_each_test=False,
-                         ))
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.IMAGE,
+        fork_new_process_for_each_test=False,
+    ))
 def test_single_image_models(tmp_path: PosixPath, model_type: str,
                              test_case: ExpandableVLMTestArgs,
                              hf_runner: Type[HfRunner],
@@ -543,12 +559,13 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str,
     )
 
 
-@pytest.mark.parametrize("model_type,test_case",
-                         get_parametrized_options(
-                             VLM_TEST_SETTINGS,
-                             test_type=VLMTestType.MULTI_IMAGE,
-                             fork_new_process_for_each_test=False,
-                         ))
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.MULTI_IMAGE,
+        fork_new_process_for_each_test=False,
+    ))
 def test_multi_image_models(tmp_path: PosixPath, model_type: str,
                             test_case: ExpandableVLMTestArgs,
                             hf_runner: Type[HfRunner],
@@ -565,12 +582,13 @@ def test_multi_image_models(tmp_path: PosixPath, model_type: str,
     )
 
 
-@pytest.mark.parametrize("model_type,test_case",
-                         get_parametrized_options(
-                             VLM_TEST_SETTINGS,
-                             test_type=VLMTestType.EMBEDDING,
-                             fork_new_process_for_each_test=False,
-                         ))
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.EMBEDDING,
+        fork_new_process_for_each_test=False,
+    ))
 def test_image_embedding_models(model_type: str,
                                 test_case: ExpandableVLMTestArgs,
                                 hf_runner: Type[HfRunner],
@@ -586,12 +604,13 @@ def test_image_embedding_models(model_type: str,
     )
 
 
-@pytest.mark.parametrize("model_type,test_case",
-                         get_parametrized_options(
-                             VLM_TEST_SETTINGS,
-                             test_type=VLMTestType.VIDEO,
-                             fork_new_process_for_each_test=False,
-                         ))
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.VIDEO,
+        fork_new_process_for_each_test=False,
+    ))
 def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
                       hf_runner: Type[HfRunner], vllm_runner: Type[VllmRunner],
                       video_assets: _VideoAssets):
@@ -605,12 +624,13 @@ def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
     )
 
 
-@pytest.mark.parametrize("model_type,test_case",
-                         get_parametrized_options(
-                             VLM_TEST_SETTINGS,
-                             test_type=VLMTestType.CUSTOM_INPUTS,
-                             fork_new_process_for_each_test=False,
-                         ))
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.CUSTOM_INPUTS,
+        fork_new_process_for_each_test=False,
+    ))
 def test_custom_inputs_models(
     model_type: str,
     test_case: ExpandableVLMTestArgs,
@@ -627,12 +647,13 @@ def test_custom_inputs_models(
 
 
 #### Tests filtering for things running each test as a new process
-@pytest.mark.parametrize("model_type,test_case",
-                         get_parametrized_options(
-                             VLM_TEST_SETTINGS,
-                             test_type=VLMTestType.IMAGE,
-                             fork_new_process_for_each_test=True,
-                         ))
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.IMAGE,
+        fork_new_process_for_each_test=True,
+    ))
 @fork_new_process_for_each_test
 def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                    test_case: ExpandableVLMTestArgs,
@@ -650,12 +671,13 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
     )
 
 
-@pytest.mark.parametrize("model_type,test_case",
-                         get_parametrized_options(
-                             VLM_TEST_SETTINGS,
-                             test_type=VLMTestType.MULTI_IMAGE,
-                             fork_new_process_for_each_test=True,
-                         ))
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.MULTI_IMAGE,
+        fork_new_process_for_each_test=True,
+    ))
 @fork_new_process_for_each_test
 def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                   test_case: ExpandableVLMTestArgs,
@@ -673,12 +695,13 @@ def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
     )
 
 
-@pytest.mark.parametrize("model_type,test_case",
-                         get_parametrized_options(
-                             VLM_TEST_SETTINGS,
-                             test_type=VLMTestType.EMBEDDING,
-                             fork_new_process_for_each_test=True,
-                         ))
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.EMBEDDING,
+        fork_new_process_for_each_test=True,
+    ))
 @fork_new_process_for_each_test
 def test_image_embedding_models_heavy(model_type: str,
                                       test_case: ExpandableVLMTestArgs,
@@ -695,12 +718,13 @@ def test_image_embedding_models_heavy(model_type: str,
     )
 
 
-@pytest.mark.parametrize("model_type,test_case",
-                         get_parametrized_options(
-                             VLM_TEST_SETTINGS,
-                             test_type=VLMTestType.VIDEO,
-                             fork_new_process_for_each_test=True,
-                         ))
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.VIDEO,
+        fork_new_process_for_each_test=True,
+    ))
 def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
                             hf_runner: Type[HfRunner],
                             vllm_runner: Type[VllmRunner],
@@ -715,12 +739,13 @@ def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
     )
 
 
-@pytest.mark.parametrize("model_type,test_case",
-                         get_parametrized_options(
-                             VLM_TEST_SETTINGS,
-                             test_type=VLMTestType.CUSTOM_INPUTS,
-                             fork_new_process_for_each_test=True,
-                         ))
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.CUSTOM_INPUTS,
+        fork_new_process_for_each_test=True,
+    ))
 @fork_new_process_for_each_test
 def test_custom_inputs_models_heavy(
     model_type: str,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
                     Union)
@@ -636,6 +638,19 @@ def input_mapper_for_whisper(
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
     "audio", get_max_whisper_audio_tokens)
 class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
+    packed_modules_mapping = {
+        "self_attn.qkv_proj": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+        ],
+        "encoder_attn.kv_proj": ["encoder_attn.k_proj", "encoder_attn.v_proj"],
+    }
+
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={
+        ".fc1.": ".mlp.fc1.",
+        ".fc2.": ".mlp.fc2."
+    })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -729,7 +744,22 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["proj_out."])
-        loaded_weights = [(name, loaded_weight)
-                          for name, loaded_weight in weights]
-        mapper = WeightsMapper({".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."})
-        return loader.load_weights(loaded_weights, mapper=mapper)
+
+        # add fake zeros bias for k_proj to state_dict
+        weights = _create_fake_bias_for_k_proj(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+
+def _create_fake_bias_for_k_proj(
+    weights: Iterable[Tuple[str, torch.Tensor]]
+) -> Iterable[Tuple[str, torch.Tensor]]:
+    """
+    Create full zeros bias for k_proj weight in self-attention layers.
+    So that the bias for k_proj in qkv_proj can be initialized with zeros.
+    """
+    for name, weight in weights:
+        if name.endswith(".self_attn.k_proj.weight"):
+            bias = torch.zeros(weight.size(0))
+            bias_name = name.replace("weight", "bias")
+            yield from [(name, weight), (bias_name, bias)]
+        yield name, weight

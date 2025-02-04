@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -8,7 +10,7 @@ from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.engine.detokenizer import (DetokenizerOutput,
                                         IncrementalDetokenizer)
-from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.metrics.stats import IterationStats, RequestStateStats
 
 
 @dataclass
@@ -27,6 +29,7 @@ class RequestState:
         prompt: Optional[str],
         prompt_token_ids: List[int],
         detokenizer: IncrementalDetokenizer,
+        arrival_time: float,
         queue: Optional[asyncio.Queue[RequestOutput]],
     ):
         self.request_id = request_id
@@ -36,6 +39,8 @@ class RequestState:
         self.detokenizer = detokenizer
         self.is_prefilling = True
         self.queue = queue
+
+        self.stats = RequestStateStats(last_token_time=arrival_time)
 
     @classmethod
     def from_new_request(
@@ -52,6 +57,7 @@ class RequestState:
                 tokenizer=tokenizer,
                 request=request,
             ),
+            arrival_time=request.arrival_time,
             queue=queue,
         )
 
@@ -101,6 +107,7 @@ class OutputProcessor:
     def process_outputs(
         self,
         engine_core_outputs: List[EngineCoreOutput],
+        iteration_stats: Optional[IterationStats] = None,
     ) -> OutputProcessorOutput:
         """
         Process the EngineCoreOutputs:
@@ -133,7 +140,8 @@ class OutputProcessor:
 
         request_outputs: List[RequestOutput] = []
         reqs_to_abort: List[str] = []
-        iteration_stats = IterationStats(self.log_stats)
+        if not iteration_stats:
+            iteration_stats = IterationStats(self.log_stats)
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
@@ -144,7 +152,8 @@ class OutputProcessor:
             # 1) Compute stats for this iteration.
             iteration_stats.update_from_output(engine_core_output,
                                                req_state.is_prefilling,
-                                               req_state.prompt_len)
+                                               req_state.prompt_len,
+                                               req_state.stats)
             req_state.is_prefilling = False
 
             # 2) Detokenize the token ids into text.
@@ -169,14 +178,18 @@ class OutputProcessor:
                         # detected stop string, abort needed in EngineCore.
                         reqs_to_abort.append(req_id)
 
+                    # Track per-request stats
+                    iteration_stats.update_from_finished_request(
+                        request_output, req_state.stats)
+
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
             iteration_stats=iteration_stats,
         )
 
+    @staticmethod
     def _make_request_output(
-        self,
         request_state: RequestState,
         detokenizer_output: Optional[DetokenizerOutput],
     ) -> Optional[RequestOutput]:

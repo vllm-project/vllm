@@ -1,8 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
+import asyncio
 import os
 import signal
 import weakref
 from abc import ABC, abstractmethod
-from typing import List, Type
+from typing import List, Optional, Type
 
 import msgspec
 import zmq
@@ -14,7 +17,7 @@ from vllm.utils import (get_open_zmq_ipc_path, kill_process_tree,
                         make_zmq_socket)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreProfile,
                             EngineCoreRequest, EngineCoreRequestType,
-                            EngineCoreRequestUnion)
+                            EngineCoreRequestUnion, EngineCoreResetPrefixCache)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import PickleEncoder
@@ -69,6 +72,9 @@ class EngineCoreClient(ABC):
     def profile(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
+    def reset_prefix_cache(self) -> None:
+        raise NotImplementedError
+
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
@@ -79,6 +85,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def profile_async(self, is_start: bool = True) -> None:
+        raise NotImplementedError
+
+    async def reset_prefix_cache_async(self) -> None:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
@@ -108,11 +117,14 @@ class InprocClient(EngineCoreClient):
         if len(request_ids) > 0:
             self.engine_core.abort_requests(request_ids)
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         self.engine_core.shutdown()
 
     def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
+
+    def reset_prefix_cache(self) -> None:
+        self.engine_core.reset_prefix_cache()
 
 
 class MPClient(EngineCoreClient):
@@ -229,6 +241,10 @@ class SyncMPClient(MPClient):
         self._send_input(EngineCoreRequestType.PROFILE,
                          EngineCoreProfile(is_start))
 
+    def reset_prefix_cache(self) -> None:
+        self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE,
+                         EngineCoreResetPrefixCache())
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
@@ -242,10 +258,24 @@ class AsyncMPClient(MPClient):
             log_stats=True,
         )
 
-    async def get_output_async(self) -> EngineCoreOutputs:
+        self.outputs_queue: Optional[asyncio.Queue[bytes]] = None
+        self.queue_task: Optional[asyncio.Task] = None
 
-        frames = await self.output_socket.recv_multipart(copy=False)
-        return self.decoder.decode(frames[0].buffer)
+    async def get_output_async(self) -> EngineCoreOutputs:
+        if self.outputs_queue is None:
+            # Perform IO in separate task to parallelize as much as possible
+            self.outputs_queue = asyncio.Queue()
+
+            async def process_outputs_socket():
+                assert self.outputs_queue is not None
+                while True:
+                    (frame, ) = await self.output_socket.recv_multipart(
+                        copy=False)
+                    self.outputs_queue.put_nowait(frame.buffer)
+
+            self.queue_task = asyncio.create_task(process_outputs_socket())
+
+        return self.decoder.decode(await self.outputs_queue.get())
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: EngineCoreRequestUnion) -> None:
@@ -266,3 +296,7 @@ class AsyncMPClient(MPClient):
     async def profile_async(self, is_start: bool = True) -> None:
         await self._send_input(EngineCoreRequestType.PROFILE,
                                EngineCoreProfile(is_start))
+
+    async def reset_prefix_cache_async(self) -> None:
+        await self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE,
+                               EngineCoreResetPrefixCache())
