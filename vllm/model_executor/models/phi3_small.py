@@ -476,7 +476,7 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
                 continue
             if is_pp_missing_parameter(name, self):
                 continue
-            if "lm_head.weight" in name:
+            if "lm_head.weight" in name and self.config.tie_word_embeddings:
                 continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
