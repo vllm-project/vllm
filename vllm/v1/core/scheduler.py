@@ -203,7 +203,6 @@ class Scheduler:
                             req_lora_id not in requested_loras):
                         # cannot schedule
                         break
-                    requested_loras.add(req_lora_id)
 
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
@@ -252,6 +251,8 @@ class Scheduler:
                     raise RuntimeError(
                         f"Invalid request status: {request.status}")
 
+                if self.lora_config and request.lora_request:
+                    requested_loras.add(request.lora_request.lora_int_id)
                 req_to_new_block_ids[request.request_id] = [
                     b.block_id for b in computed_blocks + new_blocks
                 ]
