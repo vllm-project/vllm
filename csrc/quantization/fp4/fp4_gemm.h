@@ -18,11 +18,10 @@ class CutlassFp4GemmRunnerInterface {
 
   virtual ~CutlassFp4GemmRunnerInterface() {}
 
-  virtual void cutlass_fp4_gemm(void* D, void const* A, void const* B,
-                                void const* input_sf, void const* weight_sf,
-                                float const* global_sf, int m, int n, int k,
-                                char* workspace, const size_t workspaceBytes,
-                                cudaStream_t stream) = 0;
+  virtual void cutlass_scaled_fp4_mm(
+      void* D, void const* A, void const* B, void const* input_sf,
+      void const* weight_sf, float const* global_sf, int m, int n, int k,
+      char* workspace, const size_t workspaceBytes, cudaStream_t stream) = 0;
 
   // Returns desired workspace size in bytes.
   virtual size_t getWorkspaceSize(int const m, int const n, int const k) = 0;
@@ -36,18 +35,18 @@ class CutlassFp4GemmRunner : public virtual CutlassFp4GemmRunnerInterface {
   CutlassFp4GemmRunner();
   ~CutlassFp4GemmRunner();
 
-  void CutlassFp4GemmRunner::cutlass_fp4_gemm(
+  void CutlassFp4GemmRunner::cutlass_scaled_fp4_mm(
       torch::Tensor& D, torch::Tensor& A, torch::Tensor& B,
       torch::Tensor& input_sf, torch::Tensor& weight_sf,
       torch::Tensor& global_sf, CutlassGemmConfig gemmConfig,
       torch::Tensor& workspace, const size_t workspaceBytes);
 
-  void cutlass_fp4_gemm(void* D, void const* A, void const* B,
-                        void const* input_sf, void const* weight_sf,
-                        float const* global_sf, int m, int n, int k,
-                        CutlassGemmConfig gemmConfig, char* workspace,
-                        const size_t workspaceBytes,
-                        cudaStream_t stream) override;
+  void cutlass_scaled_fp4_mm(void* D, void const* A, void const* B,
+                             void const* input_sf, void const* weight_sf,
+                             float const* global_sf, int m, int n, int k,
+                             CutlassGemmConfig gemmConfig, char* workspace,
+                             const size_t workspaceBytes,
+                             cudaStream_t stream) override;
 
   // Returns desired workspace size in bytes.
   size_t getWorkspaceSize(int const m, int const n, int const k) override;

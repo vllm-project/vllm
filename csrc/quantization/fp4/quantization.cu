@@ -335,23 +335,21 @@ inline int getMultiProcessorCount() {
   return multi_processor_count;  // Return the cached value on subsequent calls
 }
 
-void quantize_to_fp4(torch::Tensor& output, torch::Tensor& input,
-                     torch::Tensor& output_sf, torch::Tensor& input_sf) {
+void scaled_fp4_quant(torch::Tensor& output, torch::Tensor& input,
+                      torch::Tensor& block_scale_out,
+                      torch::Tensor& global_scale) {
   int32_t m = input.size(0);
   int32_t n = input.size(1);
 
-  TORCH_CHECK(n % 16 == 0, "Input dim(1) must be multiple of 16.");
+  TORCH_CHECK(n % 16 == 0, "The N dimension must be multiple of 16.");
 
   int multiProcessorCount = getMultiProcessorCount();
 
-  auto input_sf_ptr = static_cast<float const*>(input_sf.data_ptr());
-  auto sf_out = static_cast<int32_t*>(output_sf.data_ptr());
+  auto input_sf_ptr = static_cast<float const*>(global_scale.data_ptr());
+  auto sf_out = static_cast<int32_t*>(block_scale_out.data_ptr());
   auto output_ptr = static_cast<int64_t*>(output.data_ptr());
   at::cuda::CUDAGuard device_guard{(char)input.get_device()};
-  auto stream = at::cuda::getStreamFromPool(false, input.get_device());
-  if (stream == nullptr) {
-    std::cerr << "Warning: Null CUDA stream" << std::endl;
-  }
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(A.get_device());
 
   // We don't support e8m0 scales at this moment.
   bool useUE8M0 = false;
@@ -373,7 +371,7 @@ void quantize_to_fp4(torch::Tensor& output, torch::Tensor& input,
       std::cerr << "Observing: " << input.scalar_type()
                 << " for the input datatype which is invalid";
       throw std::runtime_error(
-          "Unsupported input data type for quantize_to_fp4.");
+          "Unsupported input data type for scaled_fp4_quant.");
     }
   }
 }

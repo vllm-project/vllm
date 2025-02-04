@@ -161,15 +161,15 @@ def test_nvfp4_gemm(
     b_global_scale = ((448.0 * 6.0) /
                       torch.amax(b_dtype.flatten(), dim=-1)).to(torch.float32)
     alpha = 1 / (a_global_scale * b_global_scale)
-    a_fp4, a_scale_interleaved = ops.quantize_to_fp4(a_dtype, a_global_scale)
-    b_fp4, b_scale_interleaved = ops.quantize_to_fp4(b_dtype, b_global_scale)
+    a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(a_dtype, a_global_scale)
+    b_fp4, b_scale_interleaved = ops.scaled_fp4_quant(b_dtype, b_global_scale)
 
     expected_out = get_ref_results(a_fp4, b_fp4, a_scale_interleaved,
                                    b_scale_interleaved, a_global_scale,
                                    b_global_scale, m, n, dtype, block_size,
                                    device)
-    out = ops.cutlass_fp4_gemm(a_fp4, b_fp4, a_scale_interleaved,
-                               b_scale_interleaved, alpha, dtype)
+    out = ops.cutlass_scaled_fp4_mm(a_fp4, b_fp4, a_scale_interleaved,
+                                    b_scale_interleaved, alpha, dtype)
 
     torch.testing.assert_close(out,
                                expected_out.to(dtype=dtype),

@@ -628,10 +628,12 @@ def cutlass_scaled_sparse_mm(
     return out
 
 
-def cutlass_fp4_gemm(a: torch.Tensor, b: torch.Tensor, input_sf: torch.Tensor,
-                     weight_sf: torch.dtype, global_sf: torch.dtype,
-                     workspace: torch.dtype, workspace_bytes: int,
-                     out_dtype: torch.dtype) -> torch.Tensor:
+# nvfp4
+def cutlass_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
+                          block_scale_a: torch.Tensor,
+                          block_scale_b: torch.dtype, gscale: torch.dtype,
+                          workspace: torch.dtype, workspace_bytes: int,
+                          out_dtype: torch.dtype) -> torch.Tensor:
     """
     Gemm when a and b have nvfp4 datatype(currently represented as a byte),
     along with their respective block scales and a global scaling factor.
@@ -643,19 +645,80 @@ def cutlass_fp4_gemm(a: torch.Tensor, b: torch.Tensor, input_sf: torch.Tensor,
     n = b.shape[1]
     workspace_bytes = workspace.nbytes
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-    torch.ops._C.cutlass_fp4_gemm(out, a, b, input_sf, weight_sf, global_sf,
-                                  workspace, workspace_bytes)
+    torch.ops._C.cutlass_scaled_fp4_mm(out, a, b, block_scale_a, block_scale_b,
+                                       gscale, workspace, workspace_bytes)
     return out
 
 
-def quantize_to_fp4(input: torch.Tensor, input_sf: torch.Tensor,
-                    output_sf: torch.Tensor) -> torch.Tensor:
-    assert (input is torch.bfloat16 or input is torch.float16)
-    m = input.shape[0]
-    n = input.shape[1]
-    output = torch.empty((m, n // 2), dtype=torch.uint8, device=input.device)
-    torch.ops._C.quantize_fp4(output, input, input_sf, output_sf, False)
-    return output, output_sf
+def pad_up_fn(x, y):
+    """Pads up x to the nearest multiple of y."""
+    return ((x + y - 1) // y) * y
+
+
+def scaled_fp4_quant(
+        input: torch.Tensor,
+        global_scale: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantizes the input in FP32/BF16/FP16 to NVFP4 Precision
+    The function returns quantized fp4 tensor and its 
+    corresponding block scale. The 
+    """
+    assert input.ndim >= 1, (
+        f'input.ndim needs to be >= 1, but got {input.ndim}.')
+    other_dims = 1 if input.ndim == 1 else -1
+    input = input.reshape(other_dims, input.shape[-1])
+    m, n = input.shape
+    block_size = 16
+    device = input.device
+
+    assert n % block_size == 0, (
+        f'last dim has to be multiple of 16, but got {n}.')
+    assert input.dtype in (torch.float16, torch.bfloat16), (
+        f'input.dtype needs to be fp16 or bf16 but got {input.dtype}.')
+
+    # Two fp4 values will be packed into an uint8.
+    output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
+
+    # We use the rounded values to store the swizzled values. Then, the scaling
+    # factors in float8_e4m3fn are packed into an int32 for every 4 values.
+    rounded_m = pad_up_fn(m, 128)
+    scale_n = n // block_size
+    rounded_n = pad_up_fn(scale_n, 4)
+    block_scale_out = torch.empty((rounded_m, rounded_n // 4),
+                                  device=device,
+                                  dtype=torch.int32)
+    torch.ops._C.scaled_fp4_quant(output, input, block_scale_out, global_scale,
+                                  False)
+    return output, block_scale_out
+
+
+def blockscale_interleave(input: torch.Tensor) -> torch.Tensor:
+    """
+    This method takes in `input` scale and returns an interleaved
+    version of itself. The output `interleaved_block_scale` may
+    return a padded version.   
+    """
+    blockScaleShape = input.size()
+
+    # Check if the tensor is 2D or 3D
+    if len(blockScaleShape) != 2 and len(blockScaleShape) != 3:
+        raise ValueError("Block Scale should be a 2D or 3D tensor.")
+
+    # Extract dimensions based on whether the tensor is 2D or 3D
+    num_experts = blockScaleShape[0] if len(blockScaleShape) == 3 else 1
+    rows = blockScaleShape[1] if len(
+        blockScaleShape) == 3 else blockScaleShape[0]
+    cols = blockScaleShape[2] if len(
+        blockScaleShape) == 3 else blockScaleShape[1]
+
+    expert_out_size = pad_up_fn(rows, 128) * pad_up_fn(cols, 4)
+    interleaved_block_scale = torch.zeros(expert_out_size * num_experts,
+                                          dtype=torch.int8,
+                                          device=input.device)
+
+    torch.ops._C.blockscale_interleave(interleaved_block_scale, input, rows,
+                                       cols, num_experts, expert_out_size)
+    return interleaved_block_scale
 
 
 # aqlm

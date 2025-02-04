@@ -390,18 +390,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // fp4 gemm
   ops.def(
-      "cutlass_fp4_gemm(Tensor! out, Tensor! a,"
-      "                 Tensor! b, Tensor! input_sf,"
-      "                 Tensor! weight_sf, Tensor! global_sf,"
+      "cutlass_scaled_fp4_mm(Tensor! out, Tensor! a,"
+      "                 Tensor! b, Tensor! block_scale_a,"
+      "                 Tensor! block_scale_b, Tensor! gscale,"
       "                 Tensor! workspace, int workspace_bytes) -> ()");
-  ops.impl("cutlass_fp4_gemm", torch::kCUDA, &cutlass_fp4_gemm);
+  ops.impl("cutlass_scaled_fp4_mm", torch::kCUDA, &cutlass_scaled_fp4_mm);
 
   // fp4 quantization
   ops.def(
-      "quantize_to_fp4(Tensor! output, Tensor! input,"
-      "                 Tensor! output_sf, Tensor! input_sf,"
-      "                 bool useUE8M0) -> ()");
-  ops.impl("quantize_to_fp4", torch::kCUDA, &quantize_to_fp4);
+      "scaled_fp4_quant(Tensor! output, Tensor! input,"
+      "                 Tensor! block_scale_out, Tensor! input_global_scale"
+      "                 ) -> ()");
+  ops.impl("scaled_fp4_quant", torch::kCUDA, &scaled_fp4_quant);
 
 #endif
 

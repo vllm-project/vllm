@@ -100,7 +100,7 @@ def recover_swizzled_scales(sf, m, n):
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_quantize_to_fp4(
+def test_scaled_fp4_quant(
     dtype: torch.dtype,
     shape: tuple[int, int],
     seed: int,
@@ -116,8 +116,8 @@ def test_quantize_to_fp4(
     global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / tensor_amax
     out_ref, scale_ref = ref_nvfp4_quant(x, global_scale)
 
-    out, out_sf = ops.quantize_to_fp4(x, global_scale)
-    scale_ans = recover_swizzled_scales(out_sf, m, n)
+    out, block_scale = ops.scaled_fp4_quant(x, global_scale)
+    scale_ans = recover_swizzled_scales(block_scale, m, n)
     out_ans = cast_from_fp4(out, m, n)
 
     torch.testing.assert_close(out_ans, out_ref)
@@ -126,7 +126,7 @@ def test_quantize_to_fp4(
 
 @pytest.mark.parametrize("pad_shape", PAD_SHAPES)
 @torch.inference_mode()
-def test_quantize_to_fp4_padded(pad_shape: tuple[int, int], ) -> None:
+def test_scaled_fp4_quant_padded(pad_shape: tuple[int, int], ) -> None:
     dtype = torch.float16
     current_platform.seed_everything(42)
     torch.set_default_device('cuda:0')
@@ -139,9 +139,9 @@ def test_quantize_to_fp4_padded(pad_shape: tuple[int, int], ) -> None:
     global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / tensor_amax
     out_ref, scale_ref = ref_nvfp4_quant(x, global_scale)
 
-    out, out_sf = ops.quantize_to_fp4(x, global_scale)
+    out, block_scale = ops.scaled_fp4_quant(x, global_scale)
 
-    scale_ans = recover_swizzled_scales(out_sf, m, n)
+    scale_ans = recover_swizzled_scales(block_scale, m, n)
     out_ans = cast_from_fp4(out, m, n)
 
     torch.testing.assert_close(out_ans, out_ref)

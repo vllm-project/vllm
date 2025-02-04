@@ -298,12 +298,6 @@ size_t dispatchGemmToCutlassSm100(T* D, void const* A, void const* B,
           D, A, B, input_sf, weight_sf, global_sf, m, n, k, gemmConfig,
           workspace, workspaceBytes, stream, Out_dtype, occupancy);
       break;
-    // case CutlassTileConfigSM100::CtaShape256x256x64B:
-    //     return genericFp4GemmKernelLauncher<T, Arch, cute::Shape<cute::_256,
-    //     cute::_256, cute::_64>>(
-    //         D, A, B, input_sf, weight_sf, global_sf, m, n, k, gemmConfig,
-    //         workspace, workspaceBytes, stream, occupancy);
-    //     break;
     case CutlassTileConfigSM100::Undefined:
       throw std::runtime_error(
           "[FP4][dispatch_gemm_to_cutlass] gemm config undefined.");
@@ -447,10 +441,10 @@ void check_input(torch::Tensor& A, c10::ScalarType type, const char* str) {
 
 /// Expectations: A: [m, k] Contiguous dim: k
 ///               B: [n, k] Contiguous dim: k
-void cutlass_fp4_gemm(torch::Tensor& D, torch::Tensor& A, torch::Tensor& B,
-                      torch::Tensor& input_sf, torch::Tensor& weight_sf,
-                      torch::Tensor& global_sf, torch::Tensor& workspace,
-                      const int64_t workspaceBytes) {
+void cutlass_scaled_fp4_mm(torch::Tensor& D, torch::Tensor& A, torch::Tensor& B,
+                           torch::Tensor& input_sf, torch::Tensor& weight_sf,
+                           torch::Tensor& global_sf, torch::Tensor& workspace,
+                           const int64_t workspaceBytes) {
   check_input(A, at::ScalarType::Byte, "Matrix A ");
   check_input(B, at::ScalarType::Byte, "Matrix B ");
   check_input(input_sf, at::ScalarType::Float8_e4m3fn,
@@ -535,11 +529,10 @@ __device__ int computeSFIndex(int rowIdx, int colIdx, int totalRow,
          rowGroupIdx * rowGroupStride;
 }
 
-__global__ void blockscale_interleave_fp4_kernel(int8_t* output_ptr,
-                                                 const int8_t* input_ptr,
-                                                 int rows, int cols,
-                                                 int num_experts,
-                                                 int expert_out_size) {
+__global__ void blockscale_interleave_kernel(int8_t* output_ptr,
+                                             const int8_t* input_ptr, int rows,
+                                             int cols, int num_experts,
+                                             int expert_out_size) {
   int eIdx = blockIdx.z;  // Expert index (z-dimension of grid)
   int rIdx = blockIdx.y * blockDim.y + threadIdx.y;  // Row index
   int cIdx = blockIdx.x * blockDim.x + threadIdx.x;  // Column index
@@ -554,9 +547,9 @@ __global__ void blockscale_interleave_fp4_kernel(int8_t* output_ptr,
   }
 }
 
-void blockscale_interleave_fp4(torch::Tensor& output, torch::Tensor& input,
-                               int64_t rows, int64_t cols, int64_t num_experts,
-                               int64_t expert_out_size) {
+void blockscale_interleave(torch::Tensor& output, torch::Tensor& input,
+                           int64_t rows, int64_t cols, int64_t num_experts,
+                           int64_t expert_out_size) {
   auto input_ptr = static_cast<int8_t*>(input.data_ptr());
   auto output_ptr = static_cast<int8_t*>(output.data_ptr());
 
@@ -565,7 +558,7 @@ void blockscale_interleave_fp4(torch::Tensor& output, torch::Tensor& input,
                  (rows + threadsPerBlock.y - 1) / threadsPerBlock.y,
                  num_experts);
 
-  blockscale_interleave_fp4_kernel<<<numBlocks, threadsPerBlock>>>(
+  blockscale_interleave_kernel<<<numBlocks, threadsPerBlock>>>(
       output_ptr, input_ptr, rows, cols, num_experts, expert_out_size);
 
   cudaDeviceSynchronize();
