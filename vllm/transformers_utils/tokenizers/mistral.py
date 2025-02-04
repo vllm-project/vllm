@@ -73,7 +73,7 @@ def maybe_serialize_tool_calls(request: ChatCompletionRequest):
 
                     if not re.match(r"^[a-zA-Z0-9]{9}$", tool_call["id"]):
                         raise ValueError(
-                            "Invalid tool_call ID after truncation: %s",
+                            "Invalid tool_call ID: %s",
                             "(must be exactly 9 alphanumeric characters)",
                             tool_call["id"],
                         )
@@ -98,7 +98,7 @@ def maybe_serialize_tool_calls(request: ChatCompletionRequest):
 
                 if not re.match(r"^[a-zA-Z0-9]{9}$", tool_call_id):
                     raise ValueError(
-                        "Invalid tool_call_id after truncation: %s",
+                        "Invalid tool_call_id: %s",
                         "(must be exactly 9 alphanumeric characters)",
                         tool_call_id,
                     )
