@@ -83,6 +83,8 @@ if TYPE_CHECKING:
     VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
     VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
+    VLLM_RAY_PER_WORKER_GPUS: float = 1.0
+    VLLM_RAY_BUNDLE_INDICES: str = ""
 
 
 def get_default_cache_root():
@@ -539,6 +541,17 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON":
     lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
                  ),
+
+    # Number of GPUs per worker in Ray, if it is set to be a fraction,
+    # it allows ray to schedule multiple actors on a single GPU.
+    "VLLM_RAY_PER_WORKER_GPUS":
+    lambda: float(os.getenv("VLLM_RAY_PER_WORKER_GPUS", "1.0")),
+
+    # Bundle indices for Ray, if it is set, it can control precisely
+    # which indices are used for the Ray bundle, for every worker.
+    # Format: comma-separated list of integers, e.g. "0,1,2,3"
+    "VLLM_RAY_BUNDLE_INDICES":
+    lambda: os.getenv("VLLM_RAY_BUNDLE_INDICES", ""),
 }
 
 # end-env-vars-definition

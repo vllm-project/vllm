@@ -129,13 +129,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
-        if (self.parallel_config.tensor_parallel_size == 1
-                and self.parallel_config.pipeline_parallel_size == 1):
-            # For single GPU case, we use a ray worker with constrained memory.
-            num_gpus = self.cache_config.gpu_memory_utilization
-        else:
-            # Otherwise, the ray workers are allocated with a full GPU.
-            num_gpus = 1
+        num_gpus = envs.VLLM_RAY_PER_WORKER_GPUS
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
@@ -157,10 +151,19 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # Create the workers.
         driver_ip = get_ip()
         rank = 0
+        bundle_indices: Optional[List[int]] = None
+        if envs.VLLM_RAY_BUNDLE_INDICES:
+            bundle_indices = list(
+                map(int, envs.VLLM_RAY_BUNDLE_INDICES.split(",")))
+            assert len(bundle_indices) == self.parallel_config.world_size, \
+            ("VLLM_RAY_BUNDLE_INDICES must have the same length"
+            " as the world size.")
         worker_metadata: List[RayWorkerMetaData] = []
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get(current_platform.ray_device_key, 0):
                 continue
+            if bundle_indices is not None:
+                bundle_id = bundle_indices[rank]
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
                 placement_group_capture_child_tasks=True,
