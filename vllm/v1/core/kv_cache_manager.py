@@ -122,7 +122,8 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[List[KVCacheBlock]] = None
+        new_computed_blocks: Optional[List[KVCacheBlock]] = None,
+        max_speculative_tokens: Optional[int] = None,
     ) -> Optional[List[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -212,22 +213,39 @@ class KVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
-        # NOTE(rickyx): We are assuming the `num_tokens` are actual
-        # tokens rather than lookahead slots (e.g. for speculative decoding).
-        # TODO(rickyx): When supporting speculative decoding, we will need to
-        # differentiate between them so that we can know how many blocks are
-        # full after appending the actual tokens.
-        num_full_blocks = (num_computed_tokens + num_tokens) // self.block_size
-        num_computed_full_blocks = num_computed_tokens // self.block_size
-        new_full_blocks = req_blocks[num_computed_full_blocks:num_full_blocks]
+        # We subtract max_speculative_tokens from num_computed_tokens to
+        # get the least number of tokens in the KV cache.
+        # All tokens before this number are guaranteed to be valid and
+        # stored in the cache.
+        max_speculative_tokens = max_speculative_tokens or 0
+        min_num_last_step_computed_tokens = request.num_computed_tokens \
+                                    - max_speculative_tokens
+        min_num_last_step_computed_full_blocks = \
+                        min_num_last_step_computed_tokens // self.block_size
+
+        # Calculate the total number of complete blocks needed after appending
+        # new valid tokens.
+        # num_tokens_wo_spec_tokens = 1 represents a single new token.
+        # Here, speculated tokens generated in the last step are counted in
+        # request.num_computed_tokens. Specualted tokens in the current step
+        # are not counted and cached because they are not verified/accepted it.
+        num_tokens_wo_spec_tokens = 1
+        num_full_blocks_after_append = (
+            request.num_computed_tokens +
+            num_tokens_wo_spec_tokens) // self.block_size
+
+        new_full_blocks = req_blocks[min_num_last_step_computed_full_blocks:
+                                     num_full_blocks_after_append]
         if new_full_blocks:
             self._cache_full_blocks(
                 request=request,
-                blk_start_idx=num_computed_full_blocks,
+                blk_start_idx=min_num_last_step_computed_full_blocks,
                 # The new full blocks are the full blocks that are not computed.
                 full_blocks=new_full_blocks,
-                prev_block=(req_blocks[num_computed_full_blocks - 1]
-                            if num_computed_full_blocks > 0 else None))
+                prev_block=(req_blocks[min_num_last_step_computed_full_blocks -
+                                       1]
+                            if min_num_last_step_computed_full_blocks > 0 else
+                            None))
 
         return new_blocks
 
