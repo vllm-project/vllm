@@ -9,7 +9,7 @@ from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_ids_list_to_tokens)
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
-from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 logger = init_logger(__name__)
 
@@ -47,9 +47,7 @@ class LogprobsProcessor:
 
     def _update_sample_logprobs(
         self,
-        token_ids_lst: List[List[int]],
-        logprobs_lst: List[List[float]],
-        ranks_lst: List[int],
+        logprobs_lists: Optional[LogprobsLists],
     ) -> None:
         """Update with sample logprobs from EngineCore.
 
@@ -57,17 +55,18 @@ class LogprobsProcessor:
         >1 tokens in prior step (e.g. in spec decoding).
 
         Args:
-          token_ids_lst: list of (topk + 1) token ids tensors at each pos
-          logprobs_lst: list of (topk + 1) logprobs tensors at each pos
-          ranks_lst: list of rank of each samples token
+          logprobs_lists: the lists of logprob tokens, logprobs, and ranks.
 
-        Lists are empty if logprobs are not enabled for this req.
+        None if logprobs are not enabled for this req.
         """
-        if self.num_logprobs is None:
-            # Sample logprobs disabled for this request.
+        if logprobs_lists is None:
             return
+
+        assert self.num_logprobs is not None
         assert self.logprobs is not None
         assert self.cumulative_logprob is not None
+
+        token_ids_lst, logprobs_lst, ranks_lst = logprobs_lists
 
         for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst,
                                              token_ids_lst):
@@ -106,23 +105,14 @@ class LogprobsProcessor:
         Return:
           Prompt logprobs, if required for this request
         """
-        num_prompt_logprobs = self.num_prompt_logprobs
-        if num_prompt_logprobs is None:
-            # Prompt logprobs disabled for this request
+        if prompt_logprobs_tensors is None:
             return
 
         # Prompt logprobs are enabled.
-        assert prompt_logprobs_tensors is not None
+        assert self.num_prompt_logprobs is not None
         assert self.prompt_logprobs is not None
 
         token_ids, logprobs, ranks = prompt_logprobs_tensors
-
-        # TODO(rob): can we avoid this case with a better
-        # invariant from EngineCore?
-        # Prompt logprobs are enabled but prefill is finished
-        # so no more logprobs are streamed from EngineCore.
-        if logprobs.numel() == 0:
-            return
 
         # Detokenize non-incrementally.
         # Output is flat: [num_tok, num_lps] -> [num_tok * num_lps]
@@ -151,7 +141,7 @@ class LogprobsProcessor:
                 self._make_logprob_dict(prompt_logprobs[pos], token_ids[pos],
                                         decoded_tokens_for_pos,
                                         prompt_token_ranks[pos],
-                                        num_prompt_logprobs))
+                                        self.num_prompt_logprobs))
 
     def pop_prompt_logprobs(self) -> Optional[PromptLogprobs]:
         """Pop and return all request prompt logprobs
@@ -211,8 +201,5 @@ class LogprobsProcessor:
         }
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
-        self._update_sample_logprobs(output.new_logprobs_token_ids,
-                                     output.new_logprobs,
-                                     output.new_sampled_token_ranks)
-
+        self._update_sample_logprobs(output.new_logprobs)
         self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)

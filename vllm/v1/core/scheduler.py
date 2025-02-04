@@ -415,9 +415,7 @@ class Scheduler:
     ) -> EngineCoreOutputs:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids
-        logprobs_token_ids = model_runner_output.logprob_token_ids
         logprobs = model_runner_output.logprobs
-        sampled_token_ranks = model_runner_output.sampled_token_ranks
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
@@ -451,7 +449,7 @@ class Scheduler:
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
 
             stopped = False
-            new_logprobs_token_ids, new_logprobs, new_ranks = None, None, None
+            new_logprobs = None
             new_token_ids = None
 
             if request.num_computed_tokens == request.num_tokens:
@@ -471,14 +469,10 @@ class Scheduler:
 
                 # Extract sample logprobs if needed.
                 if request.sampling_params.logprobs is not None:
-                    assert logprobs_token_ids is not None
                     assert logprobs is not None
-                    assert sampled_token_ranks is not None
                     # NOTE: once we support N tokens per step (spec decode),
                     # the outer lists can be of length > 1.
-                    new_logprobs_token_ids = [logprobs_token_ids[req_index]]
-                    new_logprobs = [logprobs[req_index]]
-                    new_ranks = [sampled_token_ranks[req_index]]
+                    new_logprobs = logprobs.slice(req_index, req_index + 1)
 
                 new_token_ids = request.output_token_ids[-num_new_tokens:]
 
@@ -490,9 +484,7 @@ class Scheduler:
                         request_id=req_id,
                         new_token_ids=new_token_ids or [],
                         finish_reason=request.get_finished_reason(),
-                        new_logprobs_token_ids=new_logprobs_token_ids or [],
-                        new_logprobs=new_logprobs or [],
-                        new_sampled_token_ranks=new_ranks or [],
+                        new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason))
 

@@ -823,12 +823,8 @@ class GPUModelRunner:
         # Move as many CPU operations as possible before this sync point.
         sampled_token_ids = sampler_output.sampled_token_ids.tolist()
         logprobs_tensors = sampler_output.logprobs_tensors
-        if logprobs_tensors is not None:
-            logprob_token_ids = logprobs_tensors.logprob_token_ids.tolist()
-            logprobs = logprobs_tensors.logprobs.tolist()
-            ranks = logprobs_tensors.selected_token_ranks.tolist()
-        else:
-            logprob_token_ids, logprobs, ranks = None, None, None
+        logprobs_lists = logprobs_tensors.tolists() \
+            if logprobs_tensors is not None else None
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
@@ -846,9 +842,7 @@ class GPUModelRunner:
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=sampled_token_ids,
-            logprob_token_ids=logprob_token_ids,
-            logprobs=logprobs,
-            sampled_token_ranks=ranks,
+            logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
@@ -872,6 +866,15 @@ class GPUModelRunner:
         # Since prompt logprobs are a rare feature, prioritize simple,
         # maintainable loop over optimal performance.
         for req_id in self.input_batch.num_prompt_logprobs:
+
+            is_partial_req = req_id == scheduler_output.partial_req_id
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_logits = num_tokens if is_partial_req else num_tokens - 1
+
+            if not num_logits:
+                # No more logprobs to return.
+                continue
+
             # Get metadata for this request.
             num_prompt_logprobs = self.input_batch.num_prompt_logprobs[req_id]
             request = self.requests[req_id]
@@ -882,9 +885,6 @@ class GPUModelRunner:
             # Get the logits corresponding to this req's prompt tokens.
             # If this is a partial request (i.e. chunked prefill),
             # then there is prompt logprob generated for each index.
-            is_partial_req = req_id == scheduler_output.partial_req_id
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_logits = num_tokens if is_partial_req else num_tokens - 1
             offset = self.query_start_loc_np[req_idx].item()
             prompt_hidden_states = hidden_states[offset:offset + num_logits]
             logits = self.model.compute_logits(prompt_hidden_states, None)
