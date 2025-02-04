@@ -34,6 +34,7 @@ class MyLLM(LLM):
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = "0.4"
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(
             map(str, bundle_indices))
+        print(f"creating LLM with bundle_indices={bundle_indices}")
         super().__init__(*args, **kwargs)
 
 
@@ -61,7 +62,6 @@ llms = []
 # instance 2: GPU 2, 3
 # instance 3: GPU 2, 3
 for bundle_indices in [[0, 1], [0, 1], [2, 3], [2, 3]]:
-    print(f"creating LLM with bundle_indices={bundle_indices}")
     llm = ray.remote(
         num_cpus=0,
         num_gpus=0,
