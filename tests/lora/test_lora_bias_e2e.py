@@ -38,6 +38,9 @@ def v1(run_with_both_engines_lora):
     pass
 
 
+# Skipping for V1 for now as we are hitting,
+# "Head size 80 is not supported by FlashAttention." error.
+@pytest.mark.skip_v1
 @pytest.mark.parametrize("lora_bias", [True])
 @pytest.mark.parametrize("fully_sharded", [True, False])
 def test_lora_bias(lora_bias_files: str, lora_bias: bool, fully_sharded: bool):

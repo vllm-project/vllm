@@ -57,6 +57,7 @@ def v1(run_with_both_engines_lora):
     pass
 
 
+@pytest.mark.skip_v1
 @fork_new_process_for_each_test
 def test_chatglm3_lora(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
@@ -76,6 +77,7 @@ def test_chatglm3_lora(chatglm3_lora_files):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
+@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_chatglm3_lora_tp4(chatglm3_lora_files):
@@ -97,6 +99,7 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
+@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):

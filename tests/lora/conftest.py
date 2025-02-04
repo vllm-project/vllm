@@ -308,8 +308,8 @@ def llama_2_7b_model_extra_embeddings(llama_2_7b_engine_extra_embeddings):
            model_runner.model)
 
 
-@pytest.fixture(params=[False, True])
-def run_with_both_engines_lora(request):
+@pytest.fixture(params=[True, False])
+def run_with_both_engines_lora(request, monkeypatch):
     # Automatically runs tests twice, once with V1 and once without
     use_v1 = request.param
     # Tests decorated with `@skip_v1` are only run without v1
@@ -318,8 +318,8 @@ def run_with_both_engines_lora(request):
     if use_v1:
         if skip_v1:
             pytest.skip("Skipping test on vllm V1")
-        with patch('vllm.envs.VLLM_USE_V1', True):
-            yield
+        monkeypatch.setenv('VLLM_USE_V1', '1')
     else:
-        with patch('vllm.envs.VLLM_USE_V1', False):
-            yield
+        monkeypatch.setenv('VLLM_USE_V1', '0')
+
+    yield
