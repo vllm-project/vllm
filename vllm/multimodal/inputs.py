@@ -212,6 +212,9 @@ class MultiModalBatchedField(BaseMultiModalField):
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
             if len(batch) == 1:
+                # An optimization when `batch` contains only one tensor:
+                # - produce exactly same result as `torch.stack(batch)`
+                # - will achieve zero-copy if the tensor is contiguous
                 return batch[0].unsqueeze(0).contiguous()
             first_shape = batch[0].shape
             if all(elem.shape == first_shape for elem in batch):
@@ -237,6 +240,9 @@ class MultiModalFlatField(BaseMultiModalField):
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
             if len(batch) == 1:
+                # An optimization when `batch` contains only one tensor:
+                # - produce exactly same result as `torch.concat(batch)`
+                # - will achieve zero-copy if the tensor is contiguous
                 return batch[0].contiguous()
             first_shape = batch[0].shape
             if all(elem.shape[1:] == first_shape[1:] for elem in batch):
@@ -401,6 +407,9 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
         tensors_ = cast(list[torch.Tensor], stacked)
         if len(tensors_) == 1:
+            # An optimization when `tensors_` contains only one tensor:
+            # - produce exactly same result as `torch.stack(tensors_)`
+            # - will achieve zero-copy if the tensor is contiguous
             return tensors_[0].unsqueeze(0).contiguous()
 
         if any(t.shape != tensors_[0].shape for t in tensors_):
