@@ -194,7 +194,7 @@ def generate_examples():
             path=EXAMPLE_DOC_DIR / "examples_offline_inference_index.md",
             title="Offline Inference",
             description=
-            "Offline inference examples demonstrate how to use vLLM in an offline setting, where the model is queried for predictions in batches.",  # noqa: E501
+            "Offline inference examples demonstrate how to use vLLM in an offline setting, where the model is queried for predictions in batches. We recommend starting with <project:basic.md>.",  # noqa: E501
             caption="Examples",
         ),
     }
