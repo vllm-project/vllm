@@ -38,33 +38,55 @@ class MyLLM(LLM):
         super().__init__(*args, **kwargs)
 
 
+class RayTrainingActor:
+
+    def report_device_id(self) -> str:
+        from vllm.platforms import current_platform
+        return current_platform.get_device_uuid(0)
+
+
 # ray manages 4 GPUs
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 ray.init()
+
+# we want to co-locate vLLM instance and the training actor
+# on the same set of GPUs.
+# the placement plan is as follows:
+# GPU 0 and 1: training actor 0, 1, and vLLM instance 0 (with TP=2)
+# GPU 2 and 3: training actor 2, 3, and vLLM instance 1 (with TP=2)
 
 pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 4)
 ray.get(pg_inference.ready())
 print(f"placement group has bundles {pg_inference.bundle_specs=}")
 
-scheduling_inference = PlacementGroupSchedulingStrategy(
-    placement_group=pg_inference,
-    placement_group_capture_child_tasks=True,
-)
+training_actors = []
+training_actor_device_ids = []
+inference_engines = []
+inference_engine_device_ids = []
 
-llms = []
+for bundle_index in [0, 1, 2, 3]:
+    training_actor = ray.remote(
+        num_cpus=0,
+        num_gpus=0.4,
+        scheduling_strategy=PlacementGroupSchedulingStrategy(
+            placement_group=pg_inference,
+            placement_group_capture_child_tasks=True,
+            placement_group_bundle_index=bundle_index,
+        ),
+    )(RayTrainingActor).remote()
+    training_actors.append(training_actor)
+    device_id = ray.get(training_actor.report_device_id.remote())
+    print(f"training actor {bundle_index} is on {device_id}")
+    training_actor_device_ids.append(device_id)
 
-# here we create 4 LLM instances, 2 of them will be scheduled
-# on the same GPUs.
-# GPUs: 0, 1, 2, 3
-# instance 0: GPU 0, 1
-# instance 1: GPU 0, 1
-# instance 2: GPU 2, 3
-# instance 3: GPU 2, 3
-for bundle_indices in [[0, 1], [0, 1], [2, 3], [2, 3]]:
+for (i, bundle_indices) in enumerate([[0, 1], [2, 3]]):
     llm = ray.remote(
         num_cpus=0,
         num_gpus=0,
-        scheduling_strategy=scheduling_inference,
+        scheduling_strategy=PlacementGroupSchedulingStrategy(
+            placement_group=pg_inference,
+            placement_group_capture_child_tasks=True,
+        ),
     )(MyLLM).remote(
         model="facebook/opt-125m",
         enforce_eager=True,
@@ -74,14 +96,15 @@ for bundle_indices in [[0, 1], [0, 1], [2, 3], [2, 3]]:
         gpu_memory_utilization=0.4,
         bundle_indices=bundle_indices,
     )
-    llms.append(llm)
-
-# check if the device IDs are the same for two instances
-device_ids = []
-for llm in llms:
-    device_ids.append(
+    inference_engines.append(llm)
+    inference_engine_device_ids.append(
         ray.get(llm.collective_rpc.remote("report_device_id", args=tuple())))
-print(f"{device_ids=}")
+    print(f"inference engine {i} is on {inference_engine_device_ids[-1]}")
 
-assert device_ids[0] == device_ids[1]
-assert device_ids[2] == device_ids[3]
+# check the placement
+# the first two training actors should be
+# on the same GPUs as the first inference engine
+assert training_actor_device_ids[:2] == inference_engine_device_ids[0]
+# the last two training actors should be
+# on the same GPUs as the second inference engine
+assert training_actor_device_ids[2:] == inference_engine_device_ids[1]
