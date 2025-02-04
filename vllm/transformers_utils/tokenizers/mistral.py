@@ -61,7 +61,6 @@ def maybe_serialize_tool_calls(request: "ChatCompletionRequest"):
                 try:
                     tool_call = next(tool_calls_validator)  # type: ignore
                     validated_tool_calls.append(tool_call)
-
                 except StopIteration:
                     break
 
