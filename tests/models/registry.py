@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass, field
 from typing import AbstractSet, Any, Literal, Mapping, Optional
 
@@ -276,7 +278,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "MedusaModel": _HfExamplesInfo("JackFram/llama-68m",
                                    speculative_model="abhigoyal/vllm-medusa-llama-68m-random"),  # noqa: E501
     "MLPSpeculatorPreTrainedModel": _HfExamplesInfo("JackFram/llama-160m",
-                                                    speculative_model="ibm-fms/llama-160m-accelerator"),  # noqa: E501
+                                                    speculative_model="ibm-ai-platform/llama-160m-accelerator"),  # noqa: E501
+}
+
+_FALLBACK_MODEL = {
+    "TransformersModel": _HfExamplesInfo("ArthurZ/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
 }
 
 _EXAMPLE_MODELS = {
@@ -285,6 +291,7 @@ _EXAMPLE_MODELS = {
     **_CROSS_ENCODER_EXAMPLE_MODELS,
     **_MULTIMODAL_EXAMPLE_MODELS,
     **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
+    **_FALLBACK_MODEL,
 }
 
 

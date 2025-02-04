@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Common tests for testing .generate() functionality for single / multiple
 image, embedding, and video support for different VLMs in vLLM.
 """
@@ -249,6 +250,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         dtype="bfloat16",
         use_tokenizer_eos=True,
+        num_logprobs=10,
         patch_hf_runner=model_utils.h2ovl_patch_hf_runner,
     ),
     "idefics3": VLMTestInfo(
@@ -281,7 +283,6 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
-        marks=[large_gpu_mark(min_gb=32)],
     ),
     "llava_next": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],

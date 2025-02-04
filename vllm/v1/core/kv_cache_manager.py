@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import defaultdict
 from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
 
@@ -250,29 +252,6 @@ class KVCacheManager:
             if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
 
-    def uncache_blocks(self, request: Request) -> int:
-        """Uncache the blocks that are no longer full based on the
-        num_computed_tokens in the given request. This happens when
-        the blocks were full and cached due to speculative tokens, but the
-        speculative tokens are not accepted.
-
-        Args:
-            request: The request.
-
-        Returns:
-            The number of uncached blocks.
-        """
-        blocks = self.req_to_blocks[request.request_id]
-        num_computed_tokens = request.num_computed_tokens
-        num_full_blocks = num_computed_tokens // self.block_size
-        num_uncached_blocks = 0
-        for block in blocks[num_full_blocks:]:
-            # If the block is not cached, the following blocks are not cached.
-            if not self._maybe_evict_cached_block(block):
-                break
-            num_uncached_blocks += 1
-        return num_uncached_blocks
-
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalid prefix caching after the weights are updated,
@@ -468,8 +447,22 @@ class KVCacheManager:
             assert prev_block.block_hash is not None
             prev_block_hash_value = prev_block.block_hash.hash_value
 
-        for i, blk in enumerate(full_blocks):
-            blk_idx = blk_start_idx + i
+        # Find the first uncached block. This case should only happen when
+        # speculative decoding is used.
+        offset = 0
+        for blk in full_blocks:
+            if blk.block_hash is None:
+                break
+            else:
+                prev_block_hash_value = blk.block_hash.hash_value
+                offset += 1
+        else:
+            # All blocks are cached.
+            return
+
+        for i, blk in enumerate(full_blocks[offset:]):
+            blk_idx = blk_start_idx + offset + i
+            assert blk.block_hash is None
 
             if blk_idx < num_cached_block_hashes:
                 # The block hash may already be computed in

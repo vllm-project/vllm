@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from contextlib import suppress
 from typing import Any, Dict, List, Literal, Optional, Tuple, cast
 
@@ -422,6 +424,11 @@ class CompressedTensorsConfig(QuantizationConfig):
                                          or input_quant is not None,
                                          weight_quant=weight_quant,
                                          input_quant=input_quant)
+        elif weight_quant is None:
+            logger.warning_once("Acceleration for non-quantized schemes is "
+                                "not supported by Compressed Tensors. "
+                                "Falling back to UnquantizedLinearMethod")
+            return None
         else:
             # Find the quant_scheme
             scheme = self._get_scheme_from_parts(  # type: ignore

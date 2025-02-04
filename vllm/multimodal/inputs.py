@@ -1,7 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import accumulate
 from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, TypeVar,
                     Union, cast, final)
 
@@ -255,6 +258,16 @@ class MultiModalFieldConfig:
             modality=modality,
             slices=slices,
         )
+
+    @staticmethod
+    def flat_from_sizes(modality: str, size_per_item: torch.Tensor):
+        slice_idxs = [0, *accumulate(size_per_item)]
+        slices = [
+            slice(slice_idxs[i], slice_idxs[i + 1])
+            for i in range(len(size_per_item))
+        ]
+
+        return MultiModalFieldConfig.flat(modality, slices)
 
     def __init__(
         self,

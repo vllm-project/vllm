@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import ast
 import copy
 import enum
@@ -79,6 +81,12 @@ class SupportsHash(Protocol):
 
     def compute_hash(self) -> str:
         ...
+
+
+class ModelImpl(str, enum.Enum):
+    AUTO = "auto"
+    VLLM = "vllm"
+    TRANSFORMERS = "transformers"
 
 
 class ModelConfig:
@@ -165,6 +173,12 @@ class ModelConfig:
             `logits_processors` extra completion argument. Defaults to None,
             which allows no processors.
         generation_config: Configuration parameter file for generation.
+        model_impl: Which implementation of the model to use:
+            "auto" will try to use the vLLM implementation if it exists and
+                fall back to the Transformers implementation if no vLLM
+                implementation is available.
+            "vllm" will use the vLLM model implementation.
+            "transformers" will use the Transformers model implementation.
         override_generation_config: Override the generation config with the
             given config.
     """
@@ -228,6 +242,7 @@ class ModelConfig:
         generation_config: Optional[str] = None,
         enable_sleep_mode: bool = False,
         override_generation_config: Optional[Dict[str, Any]] = None,
+        model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -239,6 +254,7 @@ class ModelConfig:
         self.code_revision = code_revision
         self.rope_scaling = rope_scaling
         self.rope_theta = rope_theta
+        self.model_impl = model_impl
 
         if hf_overrides is None:
             hf_overrides = {}
@@ -970,6 +986,9 @@ class ModelConfig:
 
     @property
     def use_mla(self) -> bool:
+        if not self.is_deepseek_mla or envs.VLLM_MLA_DISABLE:
+            return False
+
         if self.quantization is not None and self.quantization not in [\
             "fp8", "compressed-tensors"]:
             logger.warning(
@@ -981,8 +1000,9 @@ class ModelConfig:
         # have fp8 for both weights and activations.
         if self.quantization == "compressed-tensors":
             quant_config = self._parse_quant_hf_config()
-            for group_name, cfg in quant_config.get("config_groups",
-                                                    ("", {})).items():
+            for group_name, cfg in quant_config.get("config_groups", {
+                    "": {}
+            }).items():
                 act_cfg = cfg.get("input_activations", {})
                 act_type = None if act_cfg is None else act_cfg.get("type", "")
                 w_cfg = cfg.get("weights", {})
@@ -996,8 +1016,7 @@ class ModelConfig:
                         quant_config)
                     return False
 
-        use_mla = (self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE)
-        return use_mla
+        return True
 
     @property
     def supported_runner_types(self) -> Set[RunnerType]:

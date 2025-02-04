@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the with and without prefix caching."""
 import pytest
 
@@ -628,33 +629,3 @@ def test_reset_prefix_cache():
     assert manager.reset_prefix_cache()
     assert not manager.cached_block_hash_to_block
     assert all([blk.block_hash is None for blk in manager.block_pool])
-
-
-def test_uncache_blocks():
-    manager = KVCacheManager(
-        block_size=16,
-        num_gpu_blocks=10,
-        max_model_len=8192,
-        sliding_window=None,
-        enable_caching=True,
-        num_preallocate_tokens=0,
-    )
-
-    req0 = make_request("0", list(range(30)))
-    blocks = manager.allocate_slots(req0, 30)
-    assert [b.block_id for b in blocks] == [0, 1]
-    assert len(manager.cached_block_hash_to_block) == 1
-
-    req0.num_computed_tokens = 30
-
-    # Simulate speculative tokens.
-    for _ in range(5):
-        req0.append_output_token_ids(8)
-    manager.allocate_slots(req0, 5)
-    assert len(manager.cached_block_hash_to_block) == 2
-
-    # After sampling, assuming only 1 token is accepted.
-    req0.num_computed_tokens = 31
-    num_uncached_blocks = manager.uncache_blocks(req0)
-    assert num_uncached_blocks == 1
-    assert len(manager.cached_block_hash_to_block) == 1

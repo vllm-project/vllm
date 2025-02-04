@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for Idefics3's multimodal preprocessing kwargs."""
 import pytest
 from transformers import Idefics3Config
