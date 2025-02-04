@@ -1151,6 +1151,8 @@ class QWenLMHeadModel(QWenBaseModel, SupportsMultiModal, SupportsLoRA):
         else:
             instance_cls = QWenLLM
 
+        # quant_config references base class members,
+        # so update values before init is called
         cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
         cls.supported_lora_modules += instance_cls.supported_lora_modules
         cls.embedding_modules.update(instance_cls.embedding_modules)
