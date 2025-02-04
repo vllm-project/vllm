@@ -224,8 +224,7 @@ _CROSS_ENCODER_EXAMPLE_MODELS = {
 
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
-    "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria",
-                                                    min_transformers_version="4.48"),
+    "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b"),  # noqa: E501
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),  # noqa: E501
     "ChatGLMModel": _HfExamplesInfo("THUDM/glm-4v-9b",
