@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 
 from ..torch_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
@@ -35,6 +37,7 @@ def sgmv_shrink(
     exploded_indices = torch.repeat_interleave(lora_indices_tensor,
                                                inputs.size(0))
 
+    print("SGMV", lora_indices_tensor, lora_a_weights)
     bgmv_shrink(inputs, lora_a_weights, output_tensor, exploded_indices,
                 scaling)
 

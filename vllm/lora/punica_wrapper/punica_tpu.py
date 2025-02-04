@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Callable, Optional, Tuple, Union
 
 import torch
@@ -222,7 +224,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             add_inputs (bool): Default to True.
         """
 
-        # Embedding layer only need expand op
+        # Embedding layer only needs the expand op
         expand_fun: Callable = (self._expand_prefill
                                 if self.is_prefill else self._expand_decode)
         expand_fun(y, x, lora_b_stacked, add_inputs)
