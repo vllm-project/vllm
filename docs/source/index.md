@@ -158,6 +158,7 @@ design/multiprocessing
 :maxdepth: 2
 
 design/v1/prefix_caching
+design/v1/metrics
 :::
 
 % How to contribute to the vLLM project
