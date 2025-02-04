@@ -11,7 +11,7 @@ import torch.nn as nn
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
@@ -122,9 +122,6 @@ class GPUModelRunner:
             vocab_size=model_config.get_vocab_size(),
         )
 
-        #        self.use_cuda_graph = (self.vllm_config.compilation_config.level
-        #                               == CompilationLevel.PIECEWISE
-        #                               and not self.model_config.enforce_eager)
         self.use_cuda_graph = not self.model_config.enforce_eager
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
@@ -467,7 +464,8 @@ class GPUModelRunner:
         self.input_batch.block_table.get_device_tensor()[num_reqs:].fill_(-1)
 
         # Fill with -1s -- needed for reshape_and_cache
-        self.slot_mapping[total_num_scheduled_tokens:].fill_(-1) # Definitely needed
+        self.slot_mapping[total_num_scheduled_tokens:].fill_(
+            -1)  # Definitely needed
 
         # Prepare for cascade attention if needed.
         common_prefix_len = (scheduler_output.num_common_prefix_blocks *
@@ -550,12 +548,12 @@ class GPUModelRunner:
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
-            query_start_loc=self.query_start_loc,
+            query_start_loc=self.query_start_loc[:num_reqs + 1],
             max_seq_len=max_seq_len,
-            seq_lens=self.seq_lens,
+            seq_lens=self.seq_lens[:num_reqs],
             block_table=(
                 self.input_batch.block_table.get_device_tensor()[:num_reqs]),
-            slot_mapping=self.slot_mapping,
+            slot_mapping=self.slot_mapping[:total_num_scheduled_tokens],
             # Cascade stuff
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
@@ -914,12 +912,12 @@ class GPUModelRunner:
         return FlashAttentionMetadata(
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
-            query_start_loc=self.query_start_loc,
+            query_start_loc=self.query_start_loc[:num_reqs + 1],
             max_seq_len=max_seq_len,
-            seq_lens=self.seq_lens,
+            seq_lens=self.seq_lens[:num_reqs],
             block_table=(
                 self.input_batch.block_table.get_device_tensor()[:num_reqs]),
-            slot_mapping=self.slot_mapping,
+            slot_mapping=self.slot_mapping[:max_seq_len],
             # Cascade stuff. Non-piecewise CUDA graphs NYI
             use_cascade=False,
             common_prefix_len=0,

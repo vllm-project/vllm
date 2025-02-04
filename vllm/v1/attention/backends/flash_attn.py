@@ -179,7 +179,7 @@ class FlashAttentionImpl(AttentionImpl):
         assert output is not None, "Output tensor must be provided."
 
         if attn_metadata is None:
-            # Dynamic shape profiling run.
+            # Profiling run.
             return output
 
         # IMPORTANT!
@@ -193,13 +193,17 @@ class FlashAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         # Reshape the input keys and values and store them in the cache.
+        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+        # not padded. However, we don't need to do key[:num_actual_tokens] and
+        # value[:num_actual_tokens] because the reshape_and_cache_flash op uses
+        # the slot_mapping's shape to determine the number of actual tokens.
         key_cache, value_cache = kv_cache.unbind(0)
         torch.ops._C_cache_ops.reshape_and_cache_flash(
             key,
             value,
             key_cache,
             value_cache,
-            attn_metadata.slot_mapping[:num_actual_tokens],
+            attn_metadata.slot_mapping,
             self.kv_cache_dtype,
             layer._k_scale,
             layer._v_scale,
@@ -208,17 +212,14 @@ class FlashAttentionImpl(AttentionImpl):
         # Compute attention and update output up to `num_actual_tokens`.
         if not attn_metadata.use_cascade:
             # Regular attention (common case).
-            batch_size = attn_metadata.block_table.shape[0]
-            
-            #TODO: Do we need to slice by [:batch_size+1]?
             flash_attn_varlen_func(
                 q=query[:num_actual_tokens],
                 k=key_cache,
                 v=value_cache,
                 out=output[:num_actual_tokens],
-                cu_seqlens_q=attn_metadata.query_start_loc[:batch_size+1],
+                cu_seqlens_q=attn_metadata.query_start_loc,
                 max_seqlen_q=attn_metadata.max_query_len,
-                seqused_k=attn_metadata.seq_lens[:batch_size],
+                seqused_k=attn_metadata.seq_lens,
                 max_seqlen_k=attn_metadata.max_seq_len,
                 softmax_scale=self.scale,
                 causal=True,
