@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import copy
 import hashlib
 import os
@@ -165,6 +166,10 @@ class InductorAdaptor(CompilerInterface):
         from torch._inductor import config
         current_config = config.get_config_copy()
         from torch._inductor.compile_fx import compile_fx
+
+        # disable remote cache
+        current_config["fx_graph_cache"] = True
+        current_config["fx_graph_remote_cache"] = False
 
         if compiler_config is not None:
             current_config.update(compiler_config)
