@@ -39,6 +39,7 @@ class MyLLM(LLM):
 
 # ray manages 4 GPUs
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+os.environ["RAY_DEDUP_LOGS"] = "0"
 ray.init()
 
 pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 4)
@@ -58,6 +59,7 @@ llms = []
 # instance 2: GPU 2, 3
 # instance 3: GPU 2, 3
 for bundle_indices in [[0, 1], [0, 1], [2, 3], [2, 3]]:
+    print(f"creating LLM with bundle_indices={bundle_indices}")
     llm = ray.remote(
         num_cpus=0,
         num_gpus=0,
