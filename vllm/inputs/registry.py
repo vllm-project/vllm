@@ -34,7 +34,9 @@ class HashableDict(dict):
     A dictionary that can be hashed by lru_cache.
     """
 
-    def __hash__(self) -> int:
+    # NOTE: pythonic dict is not hashable,
+    # we override on it directly for simplicity
+    def __hash__(self) -> int:  # type: ignore[override]
         return hash(frozenset(self.items()))
 
 
