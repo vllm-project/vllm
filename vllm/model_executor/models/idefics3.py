@@ -94,7 +94,11 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         hf_processor = self.get_hf_processor()
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
         grid_w, grid_h = self._get_image_feature_grid_size(
