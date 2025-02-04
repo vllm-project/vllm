@@ -40,7 +40,6 @@ class MyLLM(LLM):
 
 # ray manages 4 GPUs
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
-os.environ["RAY_DEDUP_LOGS"] = "0"
 ray.init()
 
 pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 4)
