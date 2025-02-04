@@ -44,6 +44,8 @@ ray.init()
 
 pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 4)
 ray.get(pg_inference.ready())
+print(f"placement group has bundles {pg_inference.bundle_specs=}")
+
 scheduling_inference = PlacementGroupSchedulingStrategy(
     placement_group=pg_inference,
     placement_group_capture_child_tasks=True,
