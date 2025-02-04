@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Define LoRA functionality mixin for model runners.
 """
@@ -96,7 +97,8 @@ class LoRAModelRunnerMixin:
 
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
-            prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) % num_loras) + 1
+            prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) %
+                                   num_loras) + 1
 
             # Make token lora mapping
             token_lora_mapping = np.repeat(prompt_lora_mapping,
