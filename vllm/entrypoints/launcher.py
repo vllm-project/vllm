@@ -97,8 +97,14 @@ async def serve_zmq(arg, zmq_server_port: int, app: FastAPI) -> None:
         # thread safety proxy create socket in the background:
         # https://pyzmq.readthedocs.io/en/latest/api/zmq.devices.html#proxy-devices
         thread_proxy = zmq.devices.ThreadProxy(zmq.ROUTER, zmq.DEALER)
+        # unlimited HWM
+        hwm_limit = 0
         thread_proxy.bind_in(clients_addr)
+        thread_proxy.setsockopt_in(zmq.SNDHWM, hwm_limit)
+        thread_proxy.setsockopt_in(zmq.RCVHWM, hwm_limit)
         thread_proxy.bind_out(workers_addr)
+        thread_proxy.setsockopt_out(zmq.SNDHWM, hwm_limit)
+        thread_proxy.setsockopt_out(zmq.RCVHWM, hwm_limit)
         thread_proxy.start()
         await asyncio.gather(*tasks)
     except KeyboardInterrupt:
