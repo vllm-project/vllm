@@ -191,6 +191,14 @@ def deepseekvl2_trunc_hf_output(hf_output: RunnerOutput,
     return output_ids, output_str, out_logprobs
 
 
+def idefics3_trunc_hf_output(hf_output: RunnerOutput,
+                             model: str) -> RunnerOutput:
+    output_ids, output_str, out_logprobs = hf_output
+    if output_str.endswith("<end_of_utterance>"):
+        output_str = output_str.split("<end_of_utterance>")[0]
+    return output_ids, output_str, out_logprobs
+
+
 def minicpmv_trunc_hf_output(hf_output: RunnerOutput,
                              model: str) -> RunnerOutput:
     output_ids, output_str, out_logprobs = hf_output
