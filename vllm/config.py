@@ -3245,8 +3245,7 @@ class VllmConfig:
             # and avoid any potential issues with the inductor.
             self.compilation_config.custom_ops = ["none"]
             self.compilation_config.use_cudagraph = True
-#            self.compilation_config.use_inductor = True
-            self.compilation_config.use_inductor = False
+            self.compilation_config.use_inductor = True
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_reshape = False

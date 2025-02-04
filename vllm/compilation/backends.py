@@ -633,7 +633,6 @@ class VllmBackend:
 
         if not self.compilation_config.use_cudagraph or \
             not self.compilation_config.cudagraph_copy_inputs:
-#            return self.graph
             return self.split_gm
 
         # if we need to copy input buffers for cudagraph

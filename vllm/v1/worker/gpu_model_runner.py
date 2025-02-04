@@ -460,9 +460,14 @@ class GPUModelRunner:
             self.slot_mapping_cpu[:total_num_scheduled_tokens],
             non_blocking=True)
 
+        # TODO: Which of these are needed?
+        self.seq_lens[num_reqs:].fill_(0)
         self.query_start_loc[num_reqs + 1:].fill_(-1)
         self.positions[total_num_scheduled_tokens:].fill_(0)
-        self.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
+        self.input_batch.block_table.get_device_tensor()[num_reqs:].fill_(-1)
+
+        # Fill with -1s -- needed for reshape_and_cache
+        self.slot_mapping[total_num_scheduled_tokens:].fill_(-1) # Definitely needed
 
         # Prepare for cascade attention if needed.
         common_prefix_len = (scheduler_output.num_common_prefix_blocks *
