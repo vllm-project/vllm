@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 import random
 from typing import List, Optional
@@ -63,8 +65,8 @@ class TestPrefixCachingBlock:
 
         previous_block = MagicMock(spec=PrefixCachingBlock)
         prev_block_hash = random.randint(0, 1000)
-        previous_block.content_hash = (prev_block_hash
-                                       if prev_block_has_hash else None)
+        previous_block.content_hash = (prev_block_hash if prev_block_has_hash
+                                       else hash('None'))
 
         num_to_fill = block_size if is_curr_block_full else random.randint(
             0, block_size - 1)

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for sparse cutlass kernels
 
 Run `pytest tests/kernels/test_semi_structured.py`.
