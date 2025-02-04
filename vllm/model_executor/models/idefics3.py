@@ -222,19 +222,19 @@ class Idefics3MultimodalProcessor(
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
+            processed_outputs = super()._call_hf_processor(
+                prompt, mm_data, mm_kwargs)
             image_grids = [
                 self.info._get_image_feature_grid_size(
                     image_width=img.width,
                     image_height=img.height,
                 ) for img in mm_data["images"]
             ]
-            patches_per_image = list(
-                map(lambda x: math.prod(x) + 1, image_grids))
-            processed_outputs = super()._call_hf_processor(
-                prompt, mm_data, mm_kwargs)
-            processed_outputs["patches_per_image"] = patches_per_image
+            image_patches = list(map(lambda x: math.prod(x) + 1, image_grids))
             for key in ("pixel_values", "pixel_attention_mask"):
-                processed_outputs[key] = processed_outputs[key].flatten(0, 1)
+                data = processed_outputs.pop(key)
+                data = data.flatten(0, 1).split(image_patches)
+                processed_outputs[key] = data
         else:
             tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
@@ -247,19 +247,9 @@ class Idefics3MultimodalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        num_patches = hf_inputs.pop("patches_per_image", [])
-        slices_idxs = [0] + [
-            sum(num_patches[:i]) for i in range(1,
-                                                len(num_patches) + 1)
-        ]
-        slices = [
-            slice(slices_idxs[i], slices_idxs[i + 1])
-            for i in range(len(num_patches))
-        ]
         return dict(
-            pixel_values=MultiModalFieldConfig.flat("image", slices=slices),
-            pixel_attention_mask=MultiModalFieldConfig.flat("image",
-                                                            slices=slices),
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            pixel_attention_mask=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
@@ -462,6 +452,9 @@ class Idefics3Model(nn.Module):
             if isinstance(pixel_values, list):
                 pixel_values = torch.cat(pixel_values, dim=1)
                 pixel_attention_mask = torch.cat(pixel_attention_mask, dim=1)
+            else:
+                pixel_values = flatten_bn(pixel_values)
+                pixel_attention_mask = flatten_bn(pixel_attention_mask)
 
             return Idefics3ImagePixelInputs(
                 type="pixel_values",
