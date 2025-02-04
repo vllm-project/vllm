@@ -41,6 +41,9 @@ class MyLLM(LLM):
 class RayTrainingActor:
 
     def report_device_id(self) -> str:
+        # the argument for get_device_uuid is the index
+        # of the GPU in the visible devices.
+        # ray will set CUDA_VISIBLE_DEVICES to the assigned GPUs
         from vllm.platforms import current_platform
         return current_platform.get_device_uuid(0)
 
