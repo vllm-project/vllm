@@ -95,11 +95,9 @@ class LoRAModelRunnerMixin:
             num_loras = lora_config.max_loras
 
             # Make prompt lora mapping
-            # Assign LoRA IDs to requests arbitrarily
-            prompt_lora_mapping = np.random.randint(low=1,
-                                                    high=num_loras + 1,
-                                                    size=num_reqs,
-                                                    dtype=np.int32)
+            # Assign LoRA IDs cyclically to simulate a worst-case scenario.
+            prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) % num_loras) + 1
+
             # Make token lora mapping
             token_lora_mapping = np.repeat(prompt_lora_mapping,
                                            num_scheduled_tokens)

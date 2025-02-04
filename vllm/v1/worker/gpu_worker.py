@@ -190,6 +190,8 @@ class Worker:
             total_gpu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
 
+        print (f"peak memory allocated ! {peak_memory}")
+
         return int(available_kv_cache_memory)
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
