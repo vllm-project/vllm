@@ -163,7 +163,7 @@ def as_classification_model(cls: _T) -> _T:
     # Lazy import
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.linear import RowParallelLinear
-    from vllm.model_executor.layers.pooler import PoolingType
+    from vllm.model_executor.layers.pooler import PoolingType, Pooler
     from vllm.sequence import IntermediateTensors
 
     from .utils import maybe_prefix
@@ -184,12 +184,19 @@ def as_classification_model(cls: _T) -> _T:
             prefix: str = "",
             **kwargs: Any,
         ) -> None:
-            super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
-
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
 
-            self.step_tag_id = config.step_tag_id
+            # If the model already defines a pooler instance, don't overwrite it
+            if not getattr(self, "_pooler", None):
+                self._pooler = Pooler.from_config_with_defaults(
+                    pooling_type=PoolingType.STEP,
+                    normalize=False,
+                    softmax=False,
+                    step_tag_id=config.step_tag_id,
+                )
+
+            super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
             self.score = RowParallelLinear(config.hidden_size,
                                            config.num_labels,
