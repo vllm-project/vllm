@@ -733,7 +733,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `HuggingFaceM4/Idefics3-8B-Llama3` etc.
   * ✅︎
   *
-  *
+  * ✅︎
 - * `InternVLChatModel`
   * InternVL 2.5, Mono-InternVL, InternVL 2.0
   * T + I<sup>E+</sup>
