@@ -562,6 +562,12 @@ class RayDistributedExecutor(DistributedExecutorBase):
     def __del__(self):
         self.shutdown()
 
+    async def submit_microbatch(self, scheduler_output):
+        if self.forward_dag is None:
+            self.forward_dag = self._compiled_ray_dag(enable_asyncio=True)
+        futures = await self.forward_dag.execute_async(scheduler_output)
+        return futures[0]
+
     async def execute_model_async(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
