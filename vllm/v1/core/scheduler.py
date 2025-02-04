@@ -201,7 +201,14 @@ class Scheduler:
                     req_lora_id = request.lora_request.lora_int_id
                     if len(requested_loras) == self.lora_config.max_loras and (
                             req_lora_id not in requested_loras):
-                        # cannot schedule
+                        # Cannot schedule.
+                        # TODO (varun): This means all the other requests in
+                        # the WAITING queue will be blocked by this request,
+                        # even if,
+                        # 1. these other requests do not use LoRA, or,
+                        # 2. these other requests use the already requested
+                        # LoRAs.
+                        # This is too conservative and could be optimized.
                         break
 
                 # Get already-cached tokens.
