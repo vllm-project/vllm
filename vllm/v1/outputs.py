@@ -32,8 +32,11 @@ class ModelRunnerOutput:
     # req_id -> index
     req_id_to_index: Dict[str, int]
 
-    # num_reqs x [max_num_generated_tokens]
-    sampled_token_ids: torch.Tensor
+    # num_reqs x num_generated_tokens
+    # num_generated_tokens is the number of tokens
+    # generated in the current step. It can be different for
+    # each request.
+    sampled_token_ids: List[List[int]]
 
     # [num_reqs, max_num_logprobs + 1]
     logprob_token_ids_cpu: Optional[torch.Tensor]
