@@ -5,7 +5,6 @@ on:
   push:
     paths:
       - 'examples/online_serving/chart-helm/**'
-  pull_request:
 env:
   CHART_NAME: chart-vllm
 
