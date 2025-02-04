@@ -13,7 +13,7 @@ run_benchmark() {
 
   # Wait for server to start, timeout after 600 seconds
   timeout 180 bash -c 'until curl localhost:8000/v1/models; do sleep 4; done' || exit 1
-  python3 benchmarks/benchmark_serving.py \
+  python3 ../benchmarks/benchmark_serving.py \
       --backend vllm \
       --dataset-name sharegpt \
       --dataset-path ./ShareGPT_V3_unfiltered_cleaned_split.json \
@@ -68,12 +68,14 @@ git checkout -q "$BASE_COMMIT"
 
 # Extra arguments passed to the script are used here to spin up the server.
 run_benchmark $@ && mv benchmark_serving.txt benchmark_base.txt
+cat benchmark_base.txt
 
 # Test PR commit
 echo "--- Testing PR commit ($BUILDKITE_COMMIT)"
 git switch "$CURRENT_BRANCH"
 
 run_benchmark $@ && mv benchmark_serving.txt benchmark_pr.txt
+cat benchmark_pr.txt
 rm ShareGPT_V3_unfiltered_cleaned_split.json
 
 # Compare results. Run the comparison 3 times to avoid jitter of a single run.
