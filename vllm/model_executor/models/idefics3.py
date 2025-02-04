@@ -176,8 +176,8 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         size = image_processor.size['longest_edge']
         assert size % max_image_size == 0, (
             "`longest_edge` in image_processor's `size` must be divisible by "
-            "`longest_edge` in `max_image_size`, this may cause by incorrect "
-            "mm_kwargs override.")
+            "`longest_edge` in `max_image_size`, this may be caused by "
+            "incorrect mm_kwargs override.")
 
         resized_height, resized_width = self._get_resize_output_image_size(
             image_width=image_width,
