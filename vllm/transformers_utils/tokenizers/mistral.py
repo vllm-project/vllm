@@ -63,28 +63,29 @@ def maybe_serialize_tool_calls(request: ChatCompletionRequest):
                     tool_call = next(tool_calls_validator)  # type: ignore
                     validated_tool_calls.append(tool_call)
 
-                    if len(tool_call["id"]) > 9:
-                        logger.warning(
-                            "Truncating tool call ID: %s to %s",
-                            tool_call["id"],
-                            tool_call["id"][-9:],
-                        )
-                        tool_call["id"] = tool_call["id"][-9:]
-
-                    if not re.match(r"^[a-zA-Z0-9]{9}$", tool_call["id"]):
-                        raise ValueError(
-                            "Invalid tool_call ID: %s",
-                            "(must be exactly 9 alphanumeric characters)",
-                            tool_call["id"],
-                        )
-
                 except StopIteration:
                     break
 
             request.messages[i]["tool_calls"] = validated_tool_calls
 
-        elif message.get("role") in {"tool_results", "tool"}:
 
+def truncate_tool_call_ids(request: ChatCompletionRequest):
+    '''Truncates tool call IDs to a length of 9 for Mistral's ID requirements'''
+    for i, message in enumerate(request.messages):
+        if message.get("role") == 'assistant':
+            tool_calls = message.get("tool_calls", [])
+            for tool_call in tool_calls:
+                if len(tool_call["id"]) > 9:
+                    logger.warning(
+                        "Truncating tool call ID: %s to %s",
+                        tool_call["id"],
+                        tool_call["id"][-9:],
+                    )
+                    tool_call["id"] = tool_call["id"][-9:]
+
+            request.messages[i]["tool_calls"] = tool_calls
+
+        elif message.get("role") in {"tool_results", "tool"}:
             if "tool_call_id" in message:
                 tool_call_id = message["tool_call_id"]
 
@@ -95,14 +96,6 @@ def maybe_serialize_tool_calls(request: ChatCompletionRequest):
                         tool_call_id[-9:],
                     )
                     tool_call_id = tool_call_id[-9:]
-
-                if not re.match(r"^[a-zA-Z0-9]{9}$", tool_call_id):
-                    raise ValueError(
-                        "Invalid tool_call_id: %s",
-                        "(must be exactly 9 alphanumeric characters)",
-                        tool_call_id,
-                    )
-
                 request.messages[i]["tool_call_id"] = tool_call_id
 
 

@@ -31,7 +31,8 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
+from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
+                                                truncate_tool_call_ids)
 
 logger = init_logger(__name__)
 
@@ -134,11 +135,12 @@ class OpenAIServingChat(OpenAIServing):
                 return self.create_error_response(
                     "tool_choice = \"required\" is not supported!")
 
-            # because of issues with pydantic we need to potentially
-            # re-serialize the tool_calls field of the request
-            # for more info: see comment in `maybe_serialize_tool_calls`
             if isinstance(tokenizer, MistralTokenizer):
+                # because of issues with pydantic we need to potentially
+                # re-serialize the tool_calls field of the request
+                # for more info: see comment in `maybe_serialize_tool_calls`
                 maybe_serialize_tool_calls(request)
+                truncate_tool_call_ids(request)
 
             if (request.tool_choice == "auto" and
                     not (self.enable_auto_tools and tool_parser is not None)
