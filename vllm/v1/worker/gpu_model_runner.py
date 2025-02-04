@@ -303,7 +303,7 @@ class GPUModelRunner:
 
             req_ids_to_add.append(req_id)
 
-        # Update the states of the running requests.
+        # Update the states of the running/resumed requests.
         for req_data in scheduler_output.scheduled_cached_reqs:
             req_id = req_data.req_id
             req_state = self.requests[req_id]
