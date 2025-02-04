@@ -48,9 +48,8 @@ def create_requests(
 ):
     sampling_params = SamplingParams()
     requests = []
-    is_multimodal = mm_positions is not None
     for i in range(num_requests):
-        if is_multimodal:
+        if mm_positions is not None:
             mm_position = mm_positions[i]
             mm_inputs = [MultiModalKwargs({})] * len(mm_position)
         else:
