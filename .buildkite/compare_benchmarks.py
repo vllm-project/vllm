@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Compare some benchmark results (as outputted by `benchmark_serving.py`)
 against a provided baseline.
