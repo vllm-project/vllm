@@ -67,7 +67,7 @@ def maybe_serialize_tool_calls(request: "ChatCompletionRequest"):
             request.messages[i]["tool_calls"] = validated_tool_calls
 
 
-def truncate_tool_call_ids(request: ChatCompletionRequest):
+def truncate_tool_call_ids(request: "ChatCompletionRequest"):
     """Truncates tool call IDs for Mistral's ID requirements."""
     for i, message in enumerate(request.messages):
         if message.get("role") == 'assistant':
