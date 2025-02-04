@@ -33,7 +33,7 @@ from .conftest import run_equality_correctness_test
 MAIN_MODEL = "JackFram/llama-160m"
 
 # speculative model
-SPEC_MODEL = "ibm-fms/llama-160m-accelerator"
+SPEC_MODEL = "ibm-ai-platform/llama-160m-accelerator"
 
 # max. number of speculative tokens: this corresponds to
 # n_predict in the config.json of the speculator model.
