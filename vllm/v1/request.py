@@ -125,7 +125,7 @@ class Request:
         num_tokens = self.mm_positions[input_id]["length"]
         return num_tokens
 
-    def set_kv_block_hashes(self, value: List["BlockHashType"]) -> None:
+    def set_kv_block_hashes(self, value: List[List["BlockHashType"]]) -> None:
         self._kv_block_hashes = value
         # NOTE: self.kv_block_hashes._x is not self._kv_block_hashes, but
         # self.kv_block_hashes[0]._x is self._kv_block_hashes[0]. This is
