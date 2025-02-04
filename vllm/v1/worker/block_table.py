@@ -52,6 +52,8 @@ class BlockTable:
         row_idx: int,
         block_ids: List[List[int]],
     ) -> None:
+        if max(len(b) for b in block_ids) > 0:
+            return
         for i, (num_blocks, block_ids_of_group) in enumerate(
                 zip(self.num_blocks_per_row[:, row_idx], block_ids)):
             num_new_blocks = len(block_ids_of_group)
