@@ -1,4 +1,7 @@
-from typing import Any, Dict, List, Literal, Optional, cast
+# SPDX-License-Identifier: Apache-2.0
+
+from contextlib import suppress
+from typing import Any, Dict, List, Literal, Optional, Tuple, cast
 
 import torch
 from compressed_tensors.config import (CompressionFormat,
@@ -44,6 +47,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         ignore: List[str],
         quant_format: str,
         sparsity_scheme_map: Dict[str, SparsityCompressionConfig],
+        sparsity_ignore_list: List[str],
         kv_cache_scheme: Optional[Dict[str, Any]] = None,
         config: Optional[Dict[str, Any]] = None,
     ):
@@ -54,6 +58,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.target_scheme_map = target_scheme_map
         self.kv_cache_scheme = kv_cache_scheme
         self.sparsity_scheme_map = sparsity_scheme_map
+        self.sparsity_ignore_list = sparsity_ignore_list
         self.config = config
 
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
@@ -98,7 +103,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         quant_format = cast(str, config.get("format"))
         target_scheme_map = cls._quantization_scheme_map_from_config(
             config=config)
-        sparsity_scheme_map = cls._sparsity_scheme_map_from_config(
+        sparsity_scheme_map, sparsity_ignore_list = cls._parse_sparsity_config(
             config=config)
 
         return cls(
@@ -106,20 +111,23 @@ class CompressedTensorsConfig(QuantizationConfig):
             ignore=ignore,
             quant_format=quant_format,
             sparsity_scheme_map=sparsity_scheme_map,
+            sparsity_ignore_list=sparsity_ignore_list,
             config=config,
         )
 
     @classmethod
-    def _sparsity_scheme_map_from_config(
-            cls, config: Dict[str,
-                              Any]) -> Dict[str, SparsityCompressionConfig]:
+    def _parse_sparsity_config(
+        cls, config: Dict[str, Any]
+    ) -> Tuple[Dict[str, SparsityCompressionConfig], List[str]]:
         """
         :param config: The `quantization_config` dictionary from config.json
-        :return: A dictionary mapping target layer names to their corresponding
-            sparsity compression configurations
+        :return: A tuple with two elements
+            1. A dictionary mapping target layer names to their corresponding
+                sparsity_config
+            2. A list of layer names to ignore for sparsity
         """
         if not (sparsity_config := config.get(SPARSITY_CONFIG_NAME)):
-            return dict()
+            return dict(), []
 
         sparsity_config = SparsityCompressionConfig.model_validate(
             sparsity_config)
@@ -127,7 +135,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             target: sparsity_config
             for target in sparsity_config.targets or list()
         }
-        return sparse_scheme_map
+        sparsity_ignore_list = sparsity_config.ignore or list()
+        return sparse_scheme_map, sparsity_ignore_list
 
     @classmethod
     def _quantization_scheme_map_from_config(
@@ -352,7 +361,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         """
         compressed-tensors supports non uniform in the following way:
 
-        ignore: List of layer_names or nn.Module names to be ignored.
         targets of config_groups: There can be N config_groups which each
             have a quantization scheme. Each config_group has a list of targets
             which can be a full layer_name, a regex for a layer_name, or
@@ -370,6 +378,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         # need to make accelerate optional in ct to do this
 
         # Will be empty for models with only sparsity
+        weight_quant = input_quant = None
+        sparsity_scheme: Optional[SparsityCompressionConfig] = None
         if self.target_scheme_map:
             matched_target = find_matched_target(
                 layer_name=layer_name,
@@ -379,19 +389,24 @@ class CompressedTensorsConfig(QuantizationConfig):
             scheme_dict = self.target_scheme_map[matched_target]
             weight_quant = scheme_dict.get("weights")
             input_quant = scheme_dict.get("input_activations")
-        elif self.sparsity_scheme_map:
-            matched_target = find_matched_target(
-                layer_name=layer_name,
-                module=layer,
-                targets=self.sparsity_scheme_map.keys())
-            weight_quant = None
-            input_quant = None
 
-        # For models with sparsity, assumes that the sparse layers are also
-        # quantized for cutlass 2:4 support
-        sparsity_scheme: Optional[
-            SparsityCompressionConfig] = self.sparsity_scheme_map.get(
-                matched_target)
+        if self.sparsity_scheme_map:
+            is_ignored = False
+            with suppress(ValueError):
+                is_ignored = find_matched_target(
+                    layer_name=layer_name,
+                    module=layer,
+                    targets=self.sparsity_ignore_list)
+
+            # if the layer is in the sparsity ignore list,
+            # we should not apply any sparsity scheme
+
+            if not is_ignored:
+                matched_target = find_matched_target(
+                    layer_name=layer_name,
+                    module=layer,
+                    targets=self.sparsity_scheme_map.keys())
+                sparsity_scheme = self.sparsity_scheme_map.get(matched_target)
 
         if self.supports_cutlass_24(weight_quant=weight_quant,
                                     input_quant=input_quant,
@@ -409,6 +424,11 @@ class CompressedTensorsConfig(QuantizationConfig):
                                          or input_quant is not None,
                                          weight_quant=weight_quant,
                                          input_quant=input_quant)
+        elif weight_quant is None:
+            logger.warning_once("Acceleration for non-quantized schemes is "
+                                "not supported by Compressed Tensors. "
+                                "Falling back to UnquantizedLinearMethod")
+            return None
         else:
             # Find the quant_scheme
             scheme = self._get_scheme_from_parts(  # type: ignore
@@ -419,6 +439,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)
         self._check_scheme_supported(scheme.get_min_capability())
+        logger.debug("Using scheme: %s for %s", scheme.__class__.__name__,
+                     layer_name)
         return scheme
 
     def get_cache_scale(self, name: str) -> Optional[str]:

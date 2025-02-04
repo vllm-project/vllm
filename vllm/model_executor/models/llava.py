@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import abstractmethod
 from functools import cached_property
 from typing import (Final, Iterable, List, Literal, Mapping, Optional,
@@ -73,19 +75,20 @@ class LlavaMultiModalProjector(nn.Module):
                  vision_hidden_size: int,
                  text_hidden_size: int,
                  projector_hidden_act: str,
+                 multimodal_projector_bias: bool,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         super().__init__()
 
         self.linear_1 = ColumnParallelLinear(vision_hidden_size,
                                              text_hidden_size,
-                                             bias=True,
+                                             bias=multimodal_projector_bias,
                                              quant_config=quant_config,
                                              prefix=f"{prefix}.linear_1")
         self.act = get_act_fn(projector_hidden_act)
         self.linear_2 = RowParallelLinear(text_hidden_size,
                                           text_hidden_size,
-                                          bias=True,
+                                          bias=multimodal_projector_bias,
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.linear_2")
 
@@ -122,7 +125,11 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         return {"image": self.get_max_image_tokens()}
 
     def _apply_feature_select_strategy(
@@ -501,6 +508,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act,
+            multimodal_projector_bias=config.multimodal_projector_bias,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "multi_modal_projector"))
 

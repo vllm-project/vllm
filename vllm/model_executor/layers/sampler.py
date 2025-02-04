@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
 import warnings

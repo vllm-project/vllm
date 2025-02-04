@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict, Iterable, List, Optional, Protocol, Tuple

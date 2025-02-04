@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://huggingface.co/Qwen/Qwen-7B/blob/main/modeling_qwen.py
 # Copyright (c) Alibaba Cloud.
@@ -777,7 +779,11 @@ class QWenVLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         return {"image": self.get_num_image_tokens()}
 
     def get_num_image_tokens(self) -> int:
@@ -797,13 +803,13 @@ class QWenVLDummyInputsBuilder(BaseDummyInputsBuilder[QWenVLProcessingInfo]):
 
         vision_config = hf_config.visual
 
-        max_image_size = vision_config["image_size"]
+        target_width = target_height = vision_config["image_size"]
         num_images = mm_counts.get("image", 0)
 
         mm_data = {
             "image":
-            self._get_dummy_images(width=max_image_size,
-                                   height=max_image_size,
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
                                    num_images=num_images)
         }
 
