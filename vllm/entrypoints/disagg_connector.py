@@ -22,10 +22,7 @@ from vllm.utils import FlexibleArgumentParser
 
 # default prefill and decode addr
 time_out = 180
-fastapi_port = 8000
-prefill_addr = "ipc://localhost:7010"
 socket_prefill_num = 100
-decode_addr = "ipc://localhost:7020"
 socket_decode_num = 100
 context_type_json = "application/json"
 context_type_error = "error"
@@ -96,7 +93,7 @@ async def execute_task_async(route: str, headers: dict, request: dict,
             yield (contentType_str, reply_str)
             if context_type_json == contentType_str:
                 logger.debug("Received %s message, return socket",
-                            contentType_str)
+                             contentType_str)
                 break
             if "[DONE]" in reply_str:
                 logger.debug("Received stop signal, return socket")
@@ -159,8 +156,7 @@ async def chat_completions(request: Request):
             logger.info("add X-Request-Id: %s", x_request_id)
             header["X-Request-Id"] = x_request_id
         request_data = await request.json()
-        logger.info("Received request: %s header: %s", request_data,
-                    header)
+        logger.info("Received request: %s header: %s", request_data, header)
         original_max_tokens = request_data['max_tokens']
         # change max_tokens = 1 to let it only do prefill
         request_data['max_tokens'] = 1
@@ -193,11 +189,9 @@ async def run_disagg_connector(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM Disaggregate Connector start %s %s", args,
                 uvicorn_kwargs)
     logger.info(args.prefill_addr)
-    app.state.port = args.port if args.port is not None else fastapi_port
-    app.state.prefill_addr = (f"ipc://{args.prefill_addr}" if args.prefill_addr
-                              is not None else decode_addr)
-    app.state.decode_addr = (f"ipc://{args.decode_addr}"
-                             if args.decode_addr is not None else decode_addr)
+    app.state.port = args.port
+    app.state.prefill_addr = f"ipc://{args.prefill_addr}"
+    app.state.decode_addr = f"ipc://{args.decode_addr}"
     logger.info(
         "start connect prefill_addr: %s decode_addr: %s zmq server port: %s",
         app.state.prefill_addr, app.state.decode_addr, app.state.port)
