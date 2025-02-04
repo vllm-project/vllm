@@ -242,7 +242,7 @@ class TransformersModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        loaded_params = set[str]()
         for name, loaded_weight in weights:
             if name not in params_dict:
                 name = f"{self.model.base_model_prefix}.{name}"
