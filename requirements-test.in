@@ -20,8 +20,8 @@ ray[adag]==2.40.0
 sentence-transformers # required for embedding tests
 soundfile # required for audio tests
 timm # required for internvl test
-torch==2.5.1
-torchaudio==2.5.1
+torch==2.6.0
+torchaudio==2.6.0
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 mistral_common[opencv] >= 1.5.0 # required for pixtral test
