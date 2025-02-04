@@ -70,7 +70,7 @@ def maybe_serialize_tool_calls(request: ChatCompletionRequest):
 
 
 def truncate_tool_call_ids(request: ChatCompletionRequest):
-    """Truncates tool call IDs to a length of 9 for Mistral's ID requirements"""
+    """Truncates tool call IDs for Mistral's ID requirements."""
     for i, message in enumerate(request.messages):
         if message.get("role") == 'assistant':
             tool_calls = message.get("tool_calls", [])
