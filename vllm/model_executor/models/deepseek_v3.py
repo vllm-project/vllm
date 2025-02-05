@@ -24,6 +24,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
+import os
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
@@ -98,6 +99,7 @@ class DeepseekV3MoE(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        self.ep_size = int(os.environ.get("VLLM_EP_SIZE", 1))
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
@@ -133,6 +135,8 @@ class DeepseekV3MoE(nn.Module):
             use_grouped_topk=True,
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
+            tp_size=self.tp_size // self.ep_size,
+            ep_size=self.ep_size,
             prefix=f"{prefix}.experts",
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.gate.e_score_correction_bias)
