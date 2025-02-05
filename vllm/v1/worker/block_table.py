@@ -19,71 +19,55 @@ class BlockTable:
         max_num_blocks_per_req: int,
         pin_memory: bool,
         device: torch.device,
-        # NOTE: See KVCacheConfig class for the meaning of "KV cache group".
-        num_kv_cache_groups: int,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.pin_memory = pin_memory
         self.device = device
-        self.num_kv_cache_groups = num_kv_cache_groups
 
-        # NOTE: Pad the block table to the max possible number of blocks among
-        # all KV cache groups.
         self.block_table = torch.zeros(
-            (num_kv_cache_groups, max_num_reqs, max_num_blocks_per_req),
+            (max_num_reqs, max_num_blocks_per_req),
             device=self.device,
             dtype=torch.int32,
         )
         self.block_table_cpu = torch.zeros(
-            (num_kv_cache_groups, max_num_reqs, max_num_blocks_per_req),
+            (max_num_reqs, max_num_blocks_per_req),
             device="cpu",
             dtype=torch.int32,
             pin_memory=pin_memory,
         )
         self.block_table_np = self.block_table_cpu.numpy()
-        self.num_blocks_per_row = np.zeros((num_kv_cache_groups, max_num_reqs),
-                                           dtype=np.int32)
+        self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
 
     def append_row(
         self,
+        block_ids: List[int],
         row_idx: int,
-        block_ids: List[List[int]],
     ) -> None:
-        if max(len(b) for b in block_ids) > 0:
+        if not block_ids:
             return
-        for i, (num_blocks, block_ids_of_group) in enumerate(
-                zip(self.num_blocks_per_row[:, row_idx], block_ids)):
-            num_new_blocks = len(block_ids_of_group)
-            self.block_table_np[i, row_idx, num_blocks:num_blocks +
-                                num_new_blocks] = block_ids_of_group
-            self.num_blocks_per_row[i, row_idx] = num_blocks + num_new_blocks
+        num_blocks = len(block_ids)
+        start = self.num_blocks_per_row[row_idx]
+        self.block_table_np[row_idx, start:start + num_blocks] = block_ids
+        self.num_blocks_per_row[row_idx] = start + num_blocks
 
-    def add_row(self, row_idx: int, block_ids: List[List[int]]) -> None:
-        self.num_blocks_per_row[:, row_idx] = 0
-        self.append_row(row_idx, block_ids)
+    def add_row(self, block_ids: List[int], row_idx: int) -> None:
+        self.num_blocks_per_row[row_idx] = 0
+        self.append_row(block_ids, row_idx)
 
     def move_row(self, src: int, tgt: int) -> None:
-        num_blocks = self.num_blocks_per_row[:, src]
-        self.block_table_np[:, tgt, :max(num_blocks)] = \
-            self.block_table_np[:, src, :max(num_blocks)]
-        self.num_blocks_per_row[:, tgt] = num_blocks
+        num_blocks = self.num_blocks_per_row[src]
+        self.block_table_np[tgt, :num_blocks] = self.block_table_np[
+            src, :num_blocks]
+        self.num_blocks_per_row[tgt] = num_blocks
 
     def commit(self, num_reqs: int) -> None:
-        # NOTE: an alternative is
-        # self.block_table[:, :num_reqs].copy_(
-        #   self.block_table_cpu[:, :num_reqs], non_blocking=True)
-        # but it will be a blocking copy when num_kv_cache_groups > 1.
-        # Can be verified by the following code:
-        # https://gist.github.com/heheda12345/74c7f7a68e45c242a5c901b5fb77d000
-        for i in range(self.num_kv_cache_groups):
-            self.block_table[i, :num_reqs].copy_(
-                self.block_table_cpu[i, :num_reqs], non_blocking=True)
+        self.block_table[:num_reqs].copy_(self.block_table_cpu[:num_reqs],
+                                          non_blocking=True)
 
     def clear(self) -> None:
         self.block_table.fill_(0)
-        self.block_table_cpu.fill_(0)
 
     def get_device_tensor(self) -> torch.Tensor:
         """Ruturns the device tensor of the block table."""
@@ -96,3 +80,45 @@ class BlockTable:
     def get_numpy_array(self) -> np.ndarray:
         """Returns the numpy array of the block table."""
         return self.block_table_np
+
+
+class GroupedBlockTable:
+
+    def __init__(self, max_num_reqs: int, max_model_len: int,
+                 max_num_blocks_per_req: int, pin_memory: bool,
+                 device: torch.device, num_kv_cache_groups: int):
+        self.block_tables = [
+            BlockTable(
+                max_num_reqs,
+                max_model_len,
+                max_num_blocks_per_req,
+                pin_memory,
+                device,
+            ) for _ in range(num_kv_cache_groups)
+        ]
+        for f_name in ('move_row', 'commit', 'clear'):
+            setattr(self, f_name, self._make_grouped_func(f_name))
+
+        for f_name in ('append_row', 'add_row'):
+            # NOTE: requires to pass block_ids as the first argument
+            setattr(self, f_name,
+                    self._make_grouped_func_with_block_ids(f_name))
+
+    def _make_grouped_func(self, f_name):
+
+        def grouped_func(*args, **kwargs):
+            for block_table in self.block_tables:
+                getattr(block_table, f_name)(*args, **kwargs)
+
+        return grouped_func
+
+    def _make_grouped_func_with_block_ids(self, f_name):
+
+        def grouped_func(block_ids: List[List[int]], *args, **kwargs):
+            for i, block_table in enumerate(self.block_tables):
+                getattr(block_table, f_name)(block_ids[i], *args, **kwargs)
+
+        return grouped_func
+
+    def __getitem__(self, idx):
+        return self.block_tables[idx]

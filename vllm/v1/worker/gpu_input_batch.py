@@ -11,7 +11,7 @@ import torch
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.block_table import BlockTable
+from vllm.v1.worker.block_table import BlockTable, GroupedBlockTable
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import PlaceholderRange
@@ -79,14 +79,13 @@ class InputBatch:
         self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
 
         # Block table.
-        self.block_table = BlockTable(
+        self.block_table = GroupedBlockTable(
             max_num_reqs=max_num_reqs,
             max_model_len=max_model_len,
             max_num_blocks_per_req=max_num_blocks_per_req,
             pin_memory=pin_memory,
             device=device,
-            num_kv_cache_groups=num_kv_cache_groups,
-        )
+            num_kv_cache_groups=num_kv_cache_groups)
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ),
@@ -197,7 +196,7 @@ class InputBatch:
         self.num_tokens[req_index] = request.num_tokens
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
-        self.block_table.add_row(req_index, request.block_ids)
+        self.block_table.add_row(request.block_ids, req_index)
 
         sampling_params = request.sampling_params
         self.temperature_cpu[req_index] = sampling_params.temperature

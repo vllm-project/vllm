@@ -337,8 +337,8 @@ class GPUModelRunner:
                 req_data.num_computed_tokens)
 
             # Update the block table.
-            self.input_batch.block_table.append_row(req_index,
-                                                    req_data.new_block_ids)
+            self.input_batch.block_table.append_row(req_data.new_block_ids,
+                                                    req_index)
             for group_id, new_block_ids in enumerate(req_data.new_block_ids):
                 req_state.block_ids[group_id].extend(new_block_ids)
 
@@ -439,9 +439,9 @@ class GPUModelRunner:
             # NOTE(woosuk): We use torch.index_select instead of np.take here
             # because torch.index_select is much faster than np.take for large
             # tensors.
-            block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
-            block_numbers = block_table_cpu[i].flatten()[block_table_indices]\
-                                              .numpy()
+            block_table_cpu = self.input_batch.block_table[i].get_cpu_tensor()
+            block_numbers = block_table_cpu.flatten(
+            )[block_table_indices].numpy()
             block_offsets = positions_np % block_size
             np.add(block_numbers * block_size,
                    block_offsets,
@@ -567,8 +567,8 @@ class GPUModelRunner:
                 query_start_loc=query_start_loc,
                 max_seq_len=max_seq_len,
                 seq_lens=seq_lens,
-                block_table=(self.input_batch.block_table.get_device_tensor()[
-                    group_id, :num_reqs]),
+                block_table=(self.input_batch.block_table[group_id].
+                             get_device_tensor()[:num_reqs]),
                 slot_mapping=slot_mapping,
                 use_cascade=use_cascade,
                 common_prefix_len=common_prefix_len,
