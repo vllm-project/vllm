@@ -28,13 +28,13 @@ steps:
       - "amd-build"
     agents:
 {% if step.amd_gpus and step.amd_gpus==8%}
-      queue: amd_gpu_8
+      queue: mi250_8xGPU
 {% elif step.amd_gpus and step.amd_gpus==4%}
-      queue: amd_gpu_4
+      queue: mi250_8xGPU
 {% elif step.amd_gpus and step.amd_gpus==2%}
-      queue: amd_gpu_4
+      queue: mi250_8xGPU
 {% else%}
-      queue: amd_gpu_1
+      queue: mi250_8xGPU
 {% endif%}
     commands: 
       - bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
