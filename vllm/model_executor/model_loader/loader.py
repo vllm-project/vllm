@@ -43,6 +43,7 @@ from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
 from vllm.model_executor.model_loader.utils import (ParamMapping,
+                                                    configure_quant_config,
                                                     get_model_architecture,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -112,6 +113,9 @@ def _initialize_model(
     """Initialize a model with the given configurations."""
     model_config = vllm_config.model_config
     model_class, _ = get_model_architecture(model_config)
+
+    if vllm_config.quant_config is not None:
+        configure_quant_config(vllm_config.quant_config, model_class)
 
     signatures = inspect.signature(model_class.__init__)
     all_params = [param.name for param in signatures.parameters.values()]

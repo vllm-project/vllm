@@ -7,8 +7,7 @@ from typing import Dict, List, Optional
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.v1.engine import (EngineCoreOutput, EngineCoreRequest,
-                            RequestFinishedReason)
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.output_processor_utils import RequestState
 from vllm.v1.metrics.stats import IterationStats
 
@@ -130,7 +129,7 @@ class OutputProcessor:
             #    strings.
             stop_reason = req_state.detokenizer.update(new_token_ids)
             if stop_reason:
-                finish_reason = RequestFinishedReason.STOP
+                finish_reason = FinishReason.STOP
 
             # 3) Compute sample and prompt logprobs for request,
             #    if required.
@@ -169,7 +168,7 @@ class OutputProcessor:
     def _make_request_output(
         request_state: RequestState,
         new_token_ids: List[int],
-        finish_reason: Optional[RequestFinishedReason],
+        finish_reason: Optional[FinishReason],
         stop_reason: Optional[str],
     ) -> Optional[RequestOutput]:
 
