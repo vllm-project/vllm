@@ -204,10 +204,10 @@ def _decode_att_m_fwd(
         Req_to_tokens.stride(0),
         q.stride(0),
         q.stride(1),
-        k_buffer.stride(-2),
-        k_buffer.stride(-1),
-        v_buffer.stride(-2),
-        v_buffer.stride(-1),
+        k_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        k_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        v_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        v_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
         att_out.stride(0),
         att_out.stride(1),
         att_out.stride(2),
@@ -438,10 +438,10 @@ def _decode_grouped_att_m_fwd(
         Req_to_tokens.stride(0),
         q.stride(0),
         q.stride(1),
-        k_buffer.stride(-2),
-        k_buffer.stride(-1),
-        v_buffer.stride(-2),
-        v_buffer.stride(-1),
+        k_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        k_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        v_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        v_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
         att_out.stride(0),
         att_out.stride(1),
         att_out.stride(2),

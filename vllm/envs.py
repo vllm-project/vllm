@@ -82,6 +82,7 @@ if TYPE_CHECKING:
     VLLM_MLA_DISABLE: bool = False
     VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
     VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
+    VLLM_MLA_CUDA_MEM_ALIGN_KV_CACHE: bool = True
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
 
 
@@ -539,6 +540,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON":
     lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
                  ),
+
+    # When on a Nvidia GPU aligns single entries (within a page) so they are 256
+    # byte aligned for better performance, this increases the memory usage of
+    # the cache. Currently this only affects MLA that results in non-256
+    # byte aligned entries. This matches the alignment the CUDA runtime uses
+    # for all allocations. Currently this primarily affects MLA, for most other
+    # models the alignment is already naturally aligned to 256 bytes.
+    "VLLM_CUDA_MEM_ALIGN_KV_CACHE":
+    lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
 }
 
 # end-env-vars-definition
