@@ -7,7 +7,8 @@ from typing import Dict, List, Optional
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
+from vllm.v1.engine import (EngineCoreOutput, EngineCoreRequest,
+                            RequestFinishedReason)
 from vllm.v1.engine.output_processor_utils import RequestState
 from vllm.v1.metrics.stats import IterationStats
 
@@ -128,6 +129,8 @@ class OutputProcessor:
             # 2) Detokenize the token ids into text and check for stop
             #    strings.
             stop_reason = req_state.detokenizer.update(new_token_ids)
+            if stop_reason:
+                finish_reason = RequestFinishedReason.STOP
 
             # 3) Compute sample and prompt logprobs for request,
             #    if required.
@@ -151,9 +154,10 @@ class OutputProcessor:
                         # detected stop string, abort needed in EngineCore.
                         reqs_to_abort.append(req_id)
 
-                    # Track per-request stats
+                    # Track per-request stats.
+                    assert finish_reason is not None
                     iteration_stats.update_from_finished_request(
-                        request_output, req_state.stats)
+                        finish_reason, request_output, req_state.stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
@@ -165,13 +169,11 @@ class OutputProcessor:
     def _make_request_output(
         request_state: RequestState,
         new_token_ids: List[int],
-        finish_reason: Optional[str],
+        finish_reason: Optional[RequestFinishedReason],
         stop_reason: Optional[str],
     ) -> Optional[RequestOutput]:
 
-        if stop_reason:
-            finish_reason = "stop"
-        finished = bool(finish_reason)
+        finished = finish_reason is not None
         output_kind = request_state.output_kind
         # In follow up, we will switch to invariant where EngineCore
         # does not stream partial prefills.
@@ -206,7 +208,7 @@ class OutputProcessor:
         )
         if finished:
             completion_output = request_output.outputs[0]
-            completion_output.finish_reason = finish_reason
+            completion_output.finish_reason = str(finish_reason)
             completion_output.stop_reason = stop_reason
 
         return request_output
