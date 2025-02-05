@@ -124,16 +124,21 @@ __global__ void batched_rotary_embedding_kernel(
 void rotary_embedding(
     torch::Tensor& positions,  // [batch_size, seq_len] or [num_tokens]
     torch::Tensor& query,  // [batch_size, seq_len, num_heads * head_size] or
-                           // [num_tokens, num_heads * head_size]
+                           // [num_tokens, num_heads * head_size] or
+                           // [batch_size, seq_len, num_heads, head_size] or
+                           // [num_tokens, num_heads, head_size]
     torch::Tensor& key,    // [batch_size, seq_len, num_kv_heads * head_size] or
-                           // [num_tokens, num_kv_heads * head_size]
+                           // [num_tokens, num_kv_heads * head_size] or
+                           // [batch_size, seq_len, num_heads, head_size] or
+                           // [num_tokens, num_heads, head_size]
     int64_t head_size,
     torch::Tensor& cos_sin_cache,  // [max_position, rot_dim]
     bool is_neox) {
-  int64_t num_tokens = query.numel() / query.size(-1);
+  // num_tokens = batch_size * seq_len
+  int64_t num_tokens = positions.numel();
   int rot_dim = cos_sin_cache.size(1);
-  int num_heads = query.size(-1) / head_size;
-  int num_kv_heads = key.size(-1) / head_size;
+  int num_heads = query.numel() / num_tokens / head_size;
+  int num_kv_heads = key.numel() / num_tokens / head_size;
   int64_t query_stride = query.stride(-2);
   int64_t key_stride = key.stride(-2);
 
@@ -165,17 +170,22 @@ and process in batched manner.
 void batched_rotary_embedding(
     torch::Tensor& positions,  // [batch_size, seq_len] or [num_tokens]
     torch::Tensor& query,  // [batch_size, seq_len, num_heads * head_size] or
-                           // [num_tokens, num_heads * head_size]
+                           // [num_tokens, num_heads * head_size] or
+                           // [batch_size, seq_len, num_heads, head_size] or
+                           // [num_tokens, num_heads, head_size]
     torch::Tensor& key,    // [batch_size, seq_len, num_kv_heads * head_size] or
-                           // [num_tokens, num_kv_heads * head_size]
+                           // [num_tokens, num_kv_heads * head_size] or
+                           // [batch_size, seq_len, num_heads, head_size] or
+                           // [num_tokens, num_heads, head_size]
     int64_t head_size,
     torch::Tensor& cos_sin_cache,  // [max_position, rot_dim]
     bool is_neox, int64_t rot_dim,
     torch::Tensor& cos_sin_cache_offsets  // [num_tokens]
 ) {
+  // num_tokens = batch_size * seq_len
   int64_t num_tokens = cos_sin_cache_offsets.size(0);
-  int num_heads = query.size(-1) / head_size;
-  int num_kv_heads = key.size(-1) / head_size;
+  int num_heads = query.numel() / num_tokens / head_size;
+  int num_kv_heads = key.numel() / num_tokens / head_size;
   int64_t query_stride = query.stride(-2);
   int64_t key_stride = key.stride(-2);
 
