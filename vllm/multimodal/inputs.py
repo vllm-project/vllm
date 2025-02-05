@@ -164,30 +164,62 @@ A dictionary containing nested tensors which have been batched via
 
 @dataclass(frozen=True)
 class MultiModalFieldElem:
-    """Contains metadata and data of an item in :class:`MultiModalKwargs`."""
-    field: "BaseMultiModalField"
+    """Represents an item in :class:`MultiModalKwargs`."""
+
+    key: str
+    """The key of this item in :class:`MultiModalKwargs`."""
+
+    modality: str
+    """The modality of this item in :class:`MultiModalKwargs`."""
+
     data: NestedTensors
+    """The data corresponding to this item in :class:`MultiModalKwargs`."""
+
+    field: "BaseMultiModalField"
+    """
+    Defines how to process the data of this item in :class:`MultiModalKwargs`.
+    """
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):
             return False
 
-        return (self.field == other.field
-                and nested_tensors_equal(self.data, other.data))
+        return ((self.key, self.modality) == (other.key, other.modality)
+                and nested_tensors_equal(self.data, other.data)
+                and self.field == other.field)
 
 
 @dataclass(frozen=True)
 class BaseMultiModalField(ABC):
-    """Abstract base class for a field in :class:`MultiModalKwargs`."""
-    key: str
-    modality: str
+    """
+    Defines the mapping between multi-modal item and tensor data of a
+    keyword argument in :class:`MultiModalKwargs`.
 
-    def _build_elem(self, data: NestedTensors) -> MultiModalFieldElem:
-        return MultiModalFieldElem(self, data)
+    The mapping from multi-modal item to tensor data is given by
+    :meth:`reduce_data`, while the mapping from tensor data to
+    multi-modal item is given by :meth:`build_elems`.
+    """
+
+    def _build_elem(
+        self,
+        key: str,
+        modality: str,
+        data: NestedTensors,
+    ) -> MultiModalFieldElem:
+        return MultiModalFieldElem(
+            key=key,
+            modality=modality,
+            data=data,
+            field=self,
+        )
 
     @abstractmethod
-    def build_elems(self,
-                    data: NestedTensors) -> Sequence[MultiModalFieldElem]:
+    def build_elems(
+        self,
+        key: str,
+        modality: str,
+        data: NestedTensors,
+    ) -> Sequence[MultiModalFieldElem]:
         """
         Construct :class:`MultiModalFieldElem` instances to represent
         the provided data.
@@ -234,9 +266,13 @@ class MultiModalBatchedField(BaseMultiModalField):
             Element 3: [CCCC]
     """
 
-    def build_elems(self,
-                    data: NestedTensors) -> Sequence[MultiModalFieldElem]:
-        return [self._build_elem(item) for item in data]
+    def build_elems(
+        self,
+        key: str,
+        modality: str,
+        data: NestedTensors,
+    ) -> Sequence[MultiModalFieldElem]:
+        return [self._build_elem(key, modality, item) for item in data]
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
@@ -273,9 +309,13 @@ class MultiModalFlatField(BaseMultiModalField):
     """
     slices: Sequence[slice]
 
-    def build_elems(self,
-                    data: NestedTensors) -> Sequence[MultiModalFieldElem]:
-        return [self._build_elem(data[slice_]) for slice_ in self.slices]
+    def build_elems(
+        self,
+        key: str,
+        modality: str,
+        data: NestedTensors,
+    ) -> Sequence[MultiModalFieldElem]:
+        return [self._build_elem(key, modality, data[s]) for s in self.slices]
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
@@ -314,9 +354,13 @@ class MultiModalSharedField(BaseMultiModalField):
     """
     batch_size: int
 
-    def build_elems(self,
-                    data: NestedTensors) -> Sequence[MultiModalFieldElem]:
-        return [self._build_elem(data)] * self.batch_size
+    def build_elems(
+        self,
+        key: str,
+        modality: str,
+        data: NestedTensors,
+    ) -> Sequence[MultiModalFieldElem]:
+        return [self._build_elem(key, modality, data)] * self.batch_size
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         return batch[0]
@@ -327,16 +371,15 @@ class MultiModalFieldConfig:
     @staticmethod
     def batched(modality: str):
         return MultiModalFieldConfig(
-            field_cls=MultiModalBatchedField,
+            field=MultiModalBatchedField(),
             modality=modality,
         )
 
     @staticmethod
     def flat(modality: str, slices: Sequence[slice]):
         return MultiModalFieldConfig(
-            field_cls=MultiModalFlatField,
+            field=MultiModalFlatField(slices=slices),
             modality=modality,
-            slices=slices,
         )
 
     @staticmethod
@@ -352,20 +395,19 @@ class MultiModalFieldConfig:
     @staticmethod
     def shared(modality: str, batch_size: int):
         return MultiModalFieldConfig(
-            field_cls=MultiModalSharedField,
+            field=MultiModalSharedField(batch_size),
             modality=modality,
-            batch_size=batch_size,
         )
 
     def __init__(
         self,
-        field_cls: type[BaseMultiModalField],
+        field: BaseMultiModalField,
         modality: str,
         **field_config: Any,
     ) -> None:
         super().__init__()
 
-        self.field_cls = field_cls
+        self.field = field
         self.modality = modality
         self.field_config = field_config
 
@@ -374,13 +416,7 @@ class MultiModalFieldConfig:
         key: str,
         batch: NestedTensors,
     ) -> Sequence[MultiModalFieldElem]:
-        field = self.field_cls(
-            key=key,
-            modality=self.modality,
-            **self.field_config,
-        )
-
-        return field.build_elems(batch)
+        return self.field.build_elems(key, self.modality, batch)
 
 
 class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
@@ -391,11 +427,11 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
 
     @staticmethod
     def from_elems(elems: Sequence[MultiModalFieldElem]):
-        return MultiModalKwargsItem({elem.field.key: elem for elem in elems})
+        return MultiModalKwargsItem({elem.key: elem for elem in elems})
 
     @property
     def modality(self) -> str:
-        modalities = {elem.field.modality for elem in self.data.values()}
+        modalities = {elem.modality for elem in self.data.values()}
         assert len(modalities) == 1, f"Found different modalities={modalities}"
         return next(iter(modalities))
 
