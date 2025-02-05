@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from itertools import accumulate
 from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, TypeVar,
                     Union, cast, final)
@@ -209,16 +210,11 @@ class BaseMultiModalField(ABC):
     :class:`MultiModalKwargs` for multiple multi-modal items, and vice versa.
     """
 
-    def _build_elem(
-        self,
-        modality: str,
-        key: str,
-        data: NestedTensors,
-    ) -> MultiModalFieldElem:
-        return MultiModalFieldElem(
+    def _field_factory(self, *, modality: str, key: str):
+        return partial(
+            MultiModalFieldElem,
             modality=modality,
             key=key,
-            data=data,
             field=self,
         )
 
@@ -281,7 +277,8 @@ class MultiModalBatchedField(BaseMultiModalField):
         key: str,
         data: NestedTensors,
     ) -> Sequence[MultiModalFieldElem]:
-        return [self._build_elem(modality, key, item) for item in data]
+        field_factory = self._field_factory(modality=modality, key=key)
+        return [field_factory(item) for item in data]
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
@@ -324,7 +321,8 @@ class MultiModalFlatField(BaseMultiModalField):
         key: str,
         data: NestedTensors,
     ) -> Sequence[MultiModalFieldElem]:
-        return [self._build_elem(modality, key, data[s]) for s in self.slices]
+        field_factory = self._field_factory(modality=modality, key=key)
+        return [field_factory(data[s]) for s in self.slices]
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
@@ -369,7 +367,8 @@ class MultiModalSharedField(BaseMultiModalField):
         key: str,
         data: NestedTensors,
     ) -> Sequence[MultiModalFieldElem]:
-        return [self._build_elem(modality, key, data)] * self.batch_size
+        field_factory = self._field_factory(modality=modality, key=key)
+        return [field_factory(data)] * self.batch_size
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         return batch[0]
