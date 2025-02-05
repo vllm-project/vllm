@@ -1448,7 +1448,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """ID of the model to use.
     """
 
-    language: str
+    language: Optional[str] = None
     """The language of the input audio.
 
     Supplying the input language in

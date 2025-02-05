@@ -19,6 +19,120 @@ from vllm.outputs import RequestOutput
 
 logger = init_logger(__name__)
 
+# From https://platform.openai.com/docs/guides/speech-to-text/supported-languages#supported-languages
+# TODO these configs should live somewhere with the model so we can support
+# additional ones
+ISO639_1_SUPPORTED_LANGS = {
+    "af": "Afrikaans",
+"ar": "Arabic",
+"hy": "Armenian",
+"az": "Azerbaijani",
+"be": "Belarusian",
+"bs": "Bosnian",
+"bg": "Bulgarian",
+"ca": "Catalan",
+"zh": "Chinese",
+"hr": "Croatian",
+"cs": "Czech",
+"da": "Danish",
+"nl": "Dutch",
+"en": "English",
+"et": "Estonian",
+"fi": "Finnish",
+"fr": "French",
+"gl": "Galician",
+"de": "German",
+"el": "Greek",
+"he": "Hebrew",
+"hi": "Hindi",
+"hu": "Hungarian",
+"is": "Icelandic",
+"id": "Indonesian",
+"it": "Italian",
+"ja": "Japanese",
+"kn": "Kannada",
+"kk": "Kazakh",
+"ko": "Korean",
+"lv": "Latvian",
+"lt": "Lithuanian",
+"mk": "Macedonian",
+"ms": "Malay",
+"mr": "Marathi",
+"mi": "Maori",
+"ne": "Nepali",
+"no": "Norwegian",
+"fa": "Persian",
+"pl": "Polish",
+"pt": "Portuguese",
+"ro": "Romanian",
+"ru": "Russian",
+"sr": "Serbian",
+"sk": "Slovak",
+"sl": "Slovenian",
+"es": "Spanish",
+"sw": "Swahili",
+"sv": "Swedish",
+"tl": "Tagalog",
+"ta": "Tamil",
+"th": "Thai",
+"tr": "Turkish",
+"uk": "Ukrainian",
+"ur": "Urdu",
+"vi": "Vietnamese",
+"cy": "Welsh"
+}
+ISO639_1_OTHER_LANGS = {
+    "lo": "Lao",
+    "jw": "Javanese",
+    "tk": "Turkmen",
+    "yi": "Yiddish",
+    "so": "Somali",
+    "bn": "Bengali",
+    "nn": "Norwegian Nynorsk",
+    "si": "Sinhala",
+    "yo": "Yoruba",
+    "sa": "Sanskrit",
+    "mi": "Māori",
+    "fo": "Faroese",
+    "mt": "Maltese",
+    "tg": "Tajik",
+    "mg": "Malagasy",
+    "haw": "Hawaiian",
+    "km": "Khmer",
+    "br": "Breton",
+    "ps": "Pashto",
+    "ln": "Lingala",
+    "la": "Latin",
+    "ml": "Malayalam",
+    "sq": "Albanian",
+    "su": "Sundanese",
+    "eu": "Basque",
+    "ka": "Georgian",
+    "uz": "Uzbek",
+    "sn": "Shona",
+    "ht": "Haitian",
+    "as": "Assamese",
+    "mn": "Mongolian",
+    "te": "Telugu",
+    "pa": "Panjabi",
+    "tt": "Tatar",
+    "gu": "Gujarati",
+    "oc": "Occitan",
+    "ha": "Hausa",
+    "ba": "Bashkir",
+    "my": "Burmese",
+    "sd": "Sindhi",
+    "am": "Amharic",
+    "lb": "Luxembourgish",
+    "bo": "Tibetan"
+}
+
+# As per https://platform.openai.com/docs/guides/speech-to-text#overview.
+# TODO configurable
+MAX_AUDIO_CLIP_FILESIZE_MB = 25 
+# TODO get from processor.feature_extractor.chunk_length
+MAX_AUDIO_CLIP_DURATION_S = 30 
+
 
 class OpenAIServingTranscription(OpenAIServing):
 
@@ -48,17 +162,39 @@ class OpenAIServingTranscription(OpenAIServing):
         request: TranscriptionRequest,
         audio_data: bytes,
     ) -> Dict[Any, Any]:
+        # Validate request
+        # TODO language should be optional and can be guessed. 
+        # For now we default to en. See
+        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
+        lang_token = f"<|{request.language}|>" if request.language else "" #"<|en|>"
+        if request.language:
+            if request.language in ISO639_1_SUPPORTED_LANGS:
+                pass
+            elif request.language in ISO639_1_OTHER_LANGS:
+                logger.warning(f"The selected language {request.language} has"+
+                               " limited accuracy with reported WER>=0.5."+
+                               " Results may be less accurate for this choice.")
+            else:
+                raise ValueError(f"Unsupported language: {request.language}."
+                                 f"Language should be one of:" +
+                                 f" {list(ISO639_1_SUPPORTED_LANGS.values())} or {list(ISO639_1_OTHER_LANGS.values())}")
+
+        if len(audio_data)/1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
+            raise ValueError("")
+        
+        y, sr = librosa.load(io.BytesIO(audio_data))
+        if librosa.get_duration(y=y, sr=sr) > MAX_AUDIO_CLIP_DURATION_S:
+            raise ValueError("")
+
         return {
             "encoder_prompt": {
                 "prompt": "",
                 "multi_modal_data": {
-                    "audio": librosa.load(io.BytesIO(audio_data)),
+                    "audio": (y, sr),
                 },
             },
-            # TODO(rob): tokenize here.
             "decoder_prompt":
-            "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
-            # "decoder_prompt": f"{request.prompt}",
+            f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}"
         }
 
     # TODO (varun) : Make verbose response work !
@@ -66,10 +202,10 @@ class OpenAIServingTranscription(OpenAIServing):
         self, audio_data: bytes, request: TranscriptionRequest,
         raw_request: Request
     ) -> Union[TranscriptionResponse, TranscriptionResponseVerbose]:
-        """Completion API similar to OpenAI's API.
+        """Transcription API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/audio/createTranscription
-        for the API specification. This API mimics the OpenAI completion API.
+        for the API specification. This API mimics the OpenAI transcription API.
         """
 
         error_check_ret = await self._check_model(request)
@@ -86,6 +222,7 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(
                 "Currently only support response_format `text` or `json`")
 
+        # TODO cmpl->transcription?
         request_id = f"cmpl-{self._base_request_id(raw_request)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
