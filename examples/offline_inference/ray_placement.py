@@ -58,9 +58,9 @@ ray.init()
 # GPU 0 and 1: training actor 0, 1, and vLLM instance 0 (with TP=2)
 # GPU 2 and 3: training actor 2, 3, and vLLM instance 1 (with TP=2)
 
-pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 4)
-ray.get(pg_inference.ready())
-print(f"placement group has bundles {pg_inference.bundle_specs=}")
+pg = placement_group([{"GPU": 1, "CPU": 0}] * 4)
+ray.get(pg.ready())
+print(f"placement group has bundles {pg.bundle_specs=}")
 
 training_actors = []
 training_actor_device_ids = []
@@ -72,7 +72,7 @@ for bundle_index in [0, 1, 2, 3]:
         num_cpus=0,
         num_gpus=0.4,
         scheduling_strategy=PlacementGroupSchedulingStrategy(
-            placement_group=pg_inference,
+            placement_group=pg,
             placement_group_capture_child_tasks=True,
             placement_group_bundle_index=bundle_index,
         ),
@@ -91,7 +91,7 @@ for (i, bundle_indices) in enumerate([[0, 1], [2, 3]]):
         num_cpus=0,
         num_gpus=0,
         scheduling_strategy=PlacementGroupSchedulingStrategy(
-            placement_group=pg_inference,
+            placement_group=pg,
             placement_group_capture_child_tasks=True,
         ),
     )(MyLLM).remote(
