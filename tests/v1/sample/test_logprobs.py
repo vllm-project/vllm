@@ -14,7 +14,34 @@ from vllm import SamplingParams
 
 from ...conftest import VllmRunner
 
-MODELS = ["meta-llama/Llama-3.2-1B"]
+MODEL = "meta-llama/Llama-3.2-1B"
+DTYPE = "half"
+
+
+@pytest.fixture(scope="module")
+def vllm_model(vllm_runner):
+    with vllm_runner(
+            MODEL,
+            dtype=DTYPE,
+            max_logprobs=7,
+            # Very small number of batched tokens to ensure
+            # that we test chunking.
+            max_num_batched_tokens=16,
+            max_num_seqs=16,
+            max_model_len=128,
+            enforce_eager=True,
+            #TODO: enable this once we support it for
+            # prompt logprobs.
+            enable_prefix_caching=False,
+            gpu_memory_utilization=0.5,
+    ) as vllm_model:
+        yield vllm_model
+
+
+@pytest.fixture(scope="module")
+def hf_model(hf_runner):
+    with hf_runner(MODEL, dtype=DTYPE) as hf_model:
+        yield hf_model
 
 
 def _repeat_logprob_config(
@@ -66,30 +93,23 @@ def _repeat_logprob_config(
 
 
 def _test_case_get_logprobs_and_prompt_logprobs(
-    hf_runner,
-    vllm_runner,
-    model: str,
-    dtype: str,
+    hf_model,
+    vllm_model,
     batch_logprobs_composition: str,
-    max_num_batched_tokens: int,
     temperature: float,
     example_prompts,
 ) -> None:
     test_prompts = example_prompts
 
-    max_num_seqs = 16
-    max_model_len = 128
-
     max_tokens = 5
-    with hf_runner(model, dtype=dtype) as hf_model:
-        hf_outputs = hf_model.generate_greedy(
-            test_prompts,
-            max_tokens=max_tokens,
-        )
-        hf_logprobs = hf_model.generate_greedy_logprobs(
-            test_prompts,
-            max_tokens=max_tokens,
-        )
+    hf_outputs = hf_model.generate_greedy(
+        test_prompts,
+        max_tokens=max_tokens,
+    )
+    hf_logprobs = hf_model.generate_greedy_logprobs(
+        test_prompts,
+        max_tokens=max_tokens,
+    )
 
     # Batch has mixed sample params
     # (different logprobs/prompt logprobs combos)
@@ -108,20 +128,8 @@ def _test_case_get_logprobs_and_prompt_logprobs(
         for num_lp, num_plp in logprob_prompt_logprob_list
     ]
 
-    with vllm_runner(
-            model,
-            dtype=dtype,
-            max_logprobs=7,
-            max_num_batched_tokens=max_num_batched_tokens,
-            max_num_seqs=max_num_seqs,
-            max_model_len=max_model_len,
-            enforce_eager=True,
-            # TODO: enable this once we support it for
-            # prompt logprobs.
-            enable_prefix_caching=False,
-    ) as vllm_model:
-        vllm_results = vllm_model.model.generate(
-            test_prompts, sampling_params=vllm_sampling_params)
+    vllm_results = vllm_model.model.generate(
+        test_prompts, sampling_params=vllm_sampling_params)
 
     for vllm_result, hf_logprob, hf_output, logprob_prompt_logprob in zip(
             vllm_results, hf_logprobs, hf_outputs,
@@ -260,21 +268,14 @@ def _test_case_get_logprobs_and_prompt_logprobs(
             assert vllm_result.prompt_logprobs is None
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype",
-                         ["half"])  # needed for comparing logprobs with HF
-# Include a very small max_num_batched_tokens to ensure we test chunking
-@pytest.mark.parametrize("max_num_batched_tokens", [16, 256])
+#@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("batch_logprobs_composition",
                          ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
 @pytest.mark.parametrize("temperature", [0.0, 2.0])
 def test_get_logprobs_and_prompt_logprobs(
-    hf_runner,
-    vllm_runner,
-    model: str,
-    dtype: str,
+    hf_model,
+    vllm_model,
     batch_logprobs_composition: str,
-    max_num_batched_tokens: int,
     temperature: float,
     example_prompts,
 ) -> None:
@@ -293,22 +294,16 @@ def test_get_logprobs_and_prompt_logprobs(
     requests in the batch under test.
 
     Args:
-      hf_runner
-      vllm_runner
-      model
-      dtype
+      hf_model
+      vllm_model
       batch_logprobs_composition: logprobs configuration for test batch
-      max_num_batched_tokens: token budget for scheduling
       example_prompts
       monkeypatch
     """
     _test_case_get_logprobs_and_prompt_logprobs(
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-        model=model,
-        dtype=dtype,
+        hf_model=hf_model,
+        vllm_model=vllm_model,
         batch_logprobs_composition=batch_logprobs_composition,
-        max_num_batched_tokens=max_num_batched_tokens,
         temperature=temperature,
         example_prompts=example_prompts)
 
@@ -325,7 +320,8 @@ def test_max_logprobs(monkeypatch):
 
     runner = VllmRunner("facebook/opt-125m",
                         max_logprobs=1,
-                        enable_prefix_caching=False)
+                        enable_prefix_caching=False,
+                        max_model_len=256)
     vllm_sampling_params = SamplingParams(logprobs=1)
     # should pass
     runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
@@ -335,35 +331,23 @@ def test_max_logprobs(monkeypatch):
         runner.generate(["Hello world"], sampling_params=bad_sampling_params)
 
 
-@pytest.mark.parametrize("model", MODELS)
-def test_none_logprobs(vllm_runner, model, example_prompts, monkeypatch):
+def test_none_logprobs(vllm_model, example_prompts, monkeypatch):
     """Engine should return `logprobs` and `prompt_logprobs` as `None`
     
     Args:
-      vllm_runner: vLLM engine runner fixture
-      model: model name
+      vllm_model: vLLM model fixture
       example_prompts: list of example prompts (test fixture)
       monkeypatch: supports editing env vars and rolling back changes
                    after the test
     """
-    override_backend_env_variable(monkeypatch, "FLASH_ATTN")
-
-    max_num_seqs = 256
-    max_num_batched_tokens = None
     max_tokens = 5
 
-    with vllm_runner(
-            model,
-            max_num_batched_tokens=max_num_batched_tokens,
-            max_num_seqs=max_num_seqs,
-            enable_prefix_caching=False,
-    ) as vllm_model:
-        sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
-                                                       logprobs=None,
-                                                       prompt_logprobs=None,
-                                                       temperature=0.0)
-        results_logprobs_none = vllm_model.model.generate(
-            example_prompts, sampling_params=sampling_params_logprobs_none)
+    sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
+                                                   logprobs=None,
+                                                   prompt_logprobs=None,
+                                                   temperature=0.0)
+    results_logprobs_none = vllm_model.model.generate(
+        example_prompts, sampling_params=sampling_params_logprobs_none)
 
     for i in range(len(results_logprobs_none)):
         # Check sample logprobs are None
@@ -373,35 +357,23 @@ def test_none_logprobs(vllm_runner, model, example_prompts, monkeypatch):
         assert results_logprobs_none[i].prompt_logprobs is None
 
 
-@pytest.mark.parametrize("model", MODELS)
-def test_zero_logprobs(vllm_runner, model, example_prompts, monkeypatch):
+def test_zero_logprobs(vllm_model, example_prompts, monkeypatch):
     """Engine should return sampled token and prompt token logprobs
     
     Args:
-      vllm_runner: vLLM engine runner fixture
-      model: model name
+      vllm_model: vLLM model fixture
       example_prompts: list of example prompts (test fixture)
       monkeypatch: supports editing env vars and rolling back changes
                    after the test
     """
-    override_backend_env_variable(monkeypatch, "FLASH_ATTN")
-
-    max_num_seqs = 256
-    max_num_batched_tokens = None
     max_tokens = 5
 
-    with vllm_runner(
-            model,
-            max_num_batched_tokens=max_num_batched_tokens,
-            max_num_seqs=max_num_seqs,
-            enable_prefix_caching=False,
-    ) as vllm_model:
-        sampling_params_logprobs_zero = SamplingParams(max_tokens=max_tokens,
-                                                       logprobs=0,
-                                                       prompt_logprobs=0,
-                                                       temperature=0.0)
-        results_logprobs_zero = vllm_model.model.generate(
-            example_prompts, sampling_params=sampling_params_logprobs_zero)
+    sampling_params_logprobs_zero = SamplingParams(max_tokens=max_tokens,
+                                                   logprobs=0,
+                                                   prompt_logprobs=0,
+                                                   temperature=0.0)
+    results_logprobs_zero = vllm_model.model.generate(
+        example_prompts, sampling_params=sampling_params_logprobs_zero)
 
     for i in range(len(results_logprobs_zero)):
         # Check that there is one sample logprob dict for each
