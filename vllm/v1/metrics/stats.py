@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
     from vllm.outputs import RequestOutput
-    from vllm.v1.engine import EngineCoreOutput
+    from vllm.v1.engine import EngineCoreOutput, RequestFinishedReason
 
 
 @dataclass
@@ -32,6 +32,7 @@ class RequestStateStats:
 class FinishedRequestStats:
     """Stats associated with a finished request."""
 
+    finish_reason: "RequestFinishedReason"
     num_prompt_tokens: int = 0
     num_generation_tokens: int = 0
 
@@ -73,8 +74,11 @@ class IterationStats:
         request_state_stats.num_generation_tokens += num_new_generation_tokens
         request_state_stats.last_token_time = now
 
-    def update_from_finished_request(self, request_output: "RequestOutput",
+    def update_from_finished_request(self,
+                                     finish_reason: "RequestFinishedReason",
+                                     request_output: "RequestOutput",
                                      request_state_stats: RequestStateStats):
         self.finished_requests.append(
-            FinishedRequestStats(len(request_output.prompt_token_ids),
+            FinishedRequestStats(finish_reason,
+                                 len(request_output.prompt_token_ids),
                                  request_state_stats.num_generation_tokens))

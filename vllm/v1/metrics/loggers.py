@@ -2,13 +2,14 @@
 
 import time
 from abc import ABC, abstractmethod
-from typing import List
+from typing import Dict, List
 
 import numpy as np
 import prometheus_client
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
+from vllm.v1.engine import RequestFinishedReason
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
@@ -116,6 +117,17 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation="Number of generation tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
 
+        self.counter_request_success: Dict[RequestFinishedReason,
+                                           prometheus_client.Counter] = {}
+        counter_request_success_base = prometheus_client.Counter(
+            name="vllm:request_success_total",
+            documentation="Count of successfully processed requests.",
+            labelnames=labelnames + ["finished_reason"])
+        for reason in RequestFinishedReason:
+            self.counter_request_success[
+                reason] = counter_request_success_base.labels(*(labelvalues +
+                                                                [str(reason)]))
+
         self.histogram_num_prompt_tokens_request = \
             prometheus_client.Histogram(
                 name="vllm:request_prompt_tokens",
@@ -163,6 +175,7 @@ class PrometheusStatLogger(StatLoggerBase):
             iteration_stats.num_generation_tokens)
 
         for finished_request in iteration_stats.finished_requests:
+            self.counter_request_success[finished_request.finish_reason].inc()
             self.histogram_num_prompt_tokens_request.observe(
                 finished_request.num_prompt_tokens)
             self.histogram_num_generation_tokens_request.observe(
