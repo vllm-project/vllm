@@ -6,7 +6,7 @@
 from argparse import Namespace
 from array import array
 from typing import (Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple,
-                    TypedDict,Union)
+                    TypedDict, Union)
 
 import torch
 from PIL import Image
@@ -242,7 +242,11 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
 
         return {"image": self.image_token_num}
 
@@ -250,7 +254,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         self.image_token_num = (vision_config["image_size"] //
-                             vision_config["patch_size"] // 2)**2
+                                vision_config["patch_size"] // 2)**2
         self.image_szie = vision_config["image_size"]
 
     def get_num_image_tokens(
@@ -268,6 +272,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
 
 
 class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
+
     def get_dummy_processor_inputs(
         self,
         seq_len: int,
@@ -277,11 +282,12 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         target_width, target_height = self.info.get_image_size()
 
         mm_data = {
-            "image": self._get_dummy_images(
-                width=target_width, height=target_height, num_images=num_images
-            )
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
         }
-        text="<|endoftext|>"
+        text = ""
         return ProcessorInputs(
             prompt_text=text,
             mm_data=mm_data,
@@ -295,73 +301,45 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
-            images=MultiModalFieldConfig.batched("image"),
+        return dict(pixel_values=MultiModalFieldConfig.batched("image"), )
 
+    def _apply_hf_processor_text_only(self, prompt_text: str) -> list[int]:
+        """
+        Apply the HF processor on the prompt text only.
+
+        Since HF processor requires that text and multi-modal items
+        correspond to each other, we create dummy multi-modal items
+        to go along with the text.
+        """
+        mm_counts = self.info.get_supported_mm_limits()
+        dummy_inputs = self.dummy_inputs.get_dummy_processor_inputs(
+            self.info.ctx.model_config.max_model_len,
+            mm_counts,
+        )
+        prompt_ids, _ = self._apply_hf_processor_text_mm(
+            prompt_text=prompt_text,
+            mm_items=self._to_mm_items(dummy_inputs.mm_data),
+            hf_processor_mm_kwargs={},
         )
 
-    
-    
-    def _apply_hf_processor_main(
-        self,
-        prompt: Union[str, list[int]],
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        *,
-        enable_hf_prompt_replacement: bool,
-    ) -> tuple[list[int], MultiModalKwargs]:
-        """
-        Apply the HF processor on the prompt text and multi-modal data.
+        return prompt_ids
 
-        Note:
-            If :code:`enable_hf_prompt_replacement=False`, the prompt should
-            correspond to the multi-modal items.
-        """
-        if isinstance(prompt, str):
-            if enable_hf_prompt_replacement:
-                return self._apply_hf_processor_text_mm(
-                    prompt_text=prompt,
-                    mm_items=mm_items,
-                    hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                )
-
-            prompt_ids = self._apply_hf_processor_text_only(prompt)
-        else:
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt)
-
-        mm_missing_kwargs = self._apply_hf_processor_mm_only(
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-        )
-
-        return prompt_ids, mm_missing_kwargs
-
-    
     def _call_hf_processor(
         self,
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if not mm_data:
-            tokenizer = self.info.get_tokenizer()
-            prefix = "<|begin_of_image|><|endoftext|><|end_of_image|>"
-            prompt_ids = tokenizer.encode(prompt + prefix)
-
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         try:
-            
             tokenizer = self.info.get_tokenizer()
-            img=mm_data.get("images",None)[0]
+            img = mm_data.get("images", None)[0] if mm_data else None
             raw_batch_data = tokenizer.apply_chat_template(
-                conversation=[
-                    {
-                        "role": "user",
-                        "image":img,
-                        "content": prompt,
-                    }
-                ],
+                conversation=[{
+                    "role": "user",
+                    "image": img,
+                    "content": prompt,
+                }],
                 add_generation_prompt=True,
                 tokenize=True,
                 return_tensors="pt",
@@ -373,15 +351,9 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         return BatchFeature(
             dict(
                 input_ids=raw_batch_data["input_ids"],
-                images=[raw_batch_data["images"][0]] if mm_data else None,
-            )
-        )
-
-        # return token_inputs(
-        #     prompt_token_ids=new_input_ids,
-        #     prompt=prompt,
-        #     multi_modal_data=mm_data,
-        # )
+                pixel_values=[raw_batch_data["images"][0]]
+                if mm_data else None,
+            ))
 
     def _get_prompt_replacements(
         self,
@@ -389,11 +361,11 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        tokenizer=self.info.get_tokenizer()
-        image_token_str = "<|endoftext|>"
-        image_token_id = tokenizer.convert_tokens_to_ids(image_token_str)
+        image_token_id = [151329]
+
         def get_replacement(item_idx: int):
-            num_image_tokens=self.info.get_num_image_tokens(image_height=1120,image_width=1120,processor=None)
+            num_image_tokens = self.info.get_num_image_tokens(
+                image_height=1120, image_width=1120, processor=None)
             return [image_token_id] * num_image_tokens
 
         return [
@@ -403,7 +375,6 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
                 replacement=get_replacement,
             ),
         ]
-            
 
 
 class GLMAttention(nn.Module):
@@ -446,12 +417,14 @@ class GLMAttention(nn.Module):
             self.total_num_kv_heads,
             bias=config.add_bias_linear or config.add_qkv_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.query_key_value",
         )
         self.dense = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=config.add_bias_linear,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense",
         )
 
         # https://huggingface.co/THUDM/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
@@ -508,6 +481,7 @@ class GLMMLP(nn.Module):
         self,
         config: ChatGLMConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -519,6 +493,7 @@ class GLMMLP(nn.Module):
             [config.ffn_hidden_size] * 2,
             bias=config.add_bias_linear,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_h_to_4h",
         )
 
         self.activation_func = SiluAndMul()
@@ -529,6 +504,7 @@ class GLMMLP(nn.Module):
             config.hidden_size,
             bias=config.add_bias_linear,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_4h_to_h",
         )
 
     def forward(self, hidden_states):
@@ -577,7 +553,7 @@ class GLMBlock(nn.Module):
             config.hidden_size, eps=config.layernorm_epsilon)
 
         # MLP
-        self.mlp = GLMMLP(config, quant_config)
+        self.mlp = GLMMLP(config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -688,7 +664,8 @@ class ChatGLMModel(nn.Module):
 
         self.embedding = VocabParallelEmbedding(config.padded_vocab_size,
                                                 config.hidden_size,
-                                                quant_config=quant_config)
+                                                quant_config=quant_config,
+                                                prefix=f"{prefix}.embedding")
 
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
@@ -952,6 +929,7 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
                          SupportsMultiModal):
     # Ensure that the LoRA support check passes when the class is not
     # initialized, but set all these attributes to empty.
+    # These will be updated when an instance class is selected
     packed_modules_mapping = {}
     supported_lora_modules = []
     embedding_modules = {}
@@ -963,9 +941,18 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         prefix: str = "",
     ) -> None:
         config = vllm_config.model_config.hf_config
+
         # Initialize VL
-        if hasattr(config, "vision_config"):
-            return ChatGLMV(vllm_config=vllm_config, prefix=prefix)
+        if hasattr(config, "vision_config"):  # noqa: SIM108
+            instance_cls = ChatGLMV
         # Initialize LLM
         else:
-            return ChatGLM(vllm_config=vllm_config, prefix=prefix)
+            instance_cls = ChatGLM
+
+        # quant_config references base class members,
+        # so update values before init is called
+        cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
+        cls.supported_lora_modules += instance_cls.supported_lora_modules
+        cls.embedding_modules.update(instance_cls.embedding_modules)
+        cls.embedding_padding_modules += instance_cls.embedding_padding_modules
+        return instance_cls(vllm_config=vllm_config, prefix=prefix)
