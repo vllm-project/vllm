@@ -149,10 +149,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
         logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
 
         # Create the workers.
-        driver_ip = get_ip()
-        rank = 0
-        bundle_indices: Optional[List[int]] = None
+        bundle_indices: List[int]
         if envs.VLLM_RAY_BUNDLE_INDICES:
+            # Use the bundle indices specified by the user.
             bundle_indices = list(
                 map(int, envs.VLLM_RAY_BUNDLE_INDICES.split(",")))
             assert len(bundle_indices) == self.parallel_config.world_size, \
@@ -162,15 +161,17 @@ class RayDistributedExecutor(DistributedExecutorBase):
             assert len(set(bundle_indices)) == len(bundle_indices), \
             ("VLLM_RAY_BUNDLE_INDICES cannot have duplicate values,"
             f" but got {bundle_indices=}")
+        else:
+            # use the first N bundles that have GPU resources.
+            bundle_indices = []
+            for bundle_id, bundle in enumerate(placement_group.bundle_specs):
+                if bundle.get(current_platform.ray_device_key, 0):
+                    bundle_indices.append(bundle_id)
+            bundle_indices = bundle_indices[:self.parallel_config.world_size]
+
         worker_metadata: List[RayWorkerMetaData] = []
-        for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-            if not bundle.get(current_platform.ray_device_key, 0):
-                continue
-            if rank >= self.parallel_config.world_size:
-                # We have created enough workers.
-                break
-            if bundle_indices is not None:
-                bundle_id = bundle_indices[rank]
+        driver_ip = get_ip()
+        for rank, bundle_id in enumerate(bundle_indices):
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
                 placement_group_capture_child_tasks=True,
@@ -197,7 +198,6 @@ class RayDistributedExecutor(DistributedExecutorBase):
                                            rpc_rank=rank)
             worker_metadata.append(
                 RayWorkerMetaData(worker=worker, created_rank=rank))
-            rank += 1
 
         worker_ips = ray.get([
             each.worker.get_node_ip.remote()  # type: ignore[attr-defined]
