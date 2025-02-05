@@ -1473,6 +1473,7 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
     """
     # Ensure that the LoRA support check passes when the class is not
     # initialized, but set all these attributes to empty.
+    # These will be updated when an instance class is selected
     packed_modules_mapping = {}
     supported_lora_modules = []
     embedding_modules = {}
@@ -1489,8 +1490,15 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
             version = str(config.version).split(".")
             version = tuple([int(x) for x in version])
         # Dispatch class based on version
-        instance_class = _SUPPORT_VERSION.get(version)
-        if instance_class is None:
+        instance_cls = _SUPPORT_VERSION.get(version)
+        if instance_cls is None:
             raise ValueError(
                 "Currently, MiniCPMV only supports versions 2.0, 2.5, and 2.6")
-        return instance_class(vllm_config=vllm_config, prefix=prefix)
+
+        # quant_config references base class members,
+        # so update values before init is called
+        cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
+        cls.supported_lora_modules += instance_cls.supported_lora_modules
+        cls.embedding_modules.update(instance_cls.embedding_modules)
+        cls.embedding_padding_modules += instance_cls.embedding_padding_modules
+        return instance_cls(vllm_config=vllm_config, prefix=prefix)
