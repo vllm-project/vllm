@@ -378,7 +378,10 @@ class PoolingRequestOutput(Generic[_O]):
         assert pooled_data is not None
 
         if isinstance(pooled_data, list):
-            data = [pooled_data_item.to(dtype=torch.float32, device="cpu") for pooled_data_item in pooled_data]
+            data = [
+                pooled_data_item.to(dtype=torch.float32, device="cpu")
+                for pooled_data_item in pooled_data
+            ]
         else:
             data = pooled_data.to(dtype=torch.float32, device="cpu")
         output = PoolingOutput(data)
