@@ -24,6 +24,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
+import os
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
@@ -98,6 +99,7 @@ class DeepseekV3MoE(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        self.ep_size = int(os.environ.get("VLLM_EP_SIZE", 1))
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
@@ -127,12 +129,14 @@ class DeepseekV3MoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
+            reduce_results=True if self.ep_size > 1 else False,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
+            tp_size=self.tp_size // self.ep_size,
+            ep_size=self.ep_size,
             prefix=f"{prefix}.experts",
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.gate.e_score_correction_bias)
@@ -145,7 +149,7 @@ class DeepseekV3MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=False,
+                reduce_results=False if self.ep_size == 1 else True,
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -161,7 +165,7 @@ class DeepseekV3MoE(nn.Module):
             router_logits=router_logits) * self.routed_scaling_factor
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
-        if self.tp_size > 1:
+        if self.ep_size == 1 and self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
