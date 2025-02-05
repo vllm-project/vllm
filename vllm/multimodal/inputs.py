@@ -211,12 +211,18 @@ class BaseMultiModalField(ABC):
     """
 
     def _field_factory(self, *, modality: str, key: str):
-        return partial(
+        f = partial(
             MultiModalFieldElem,
             modality=modality,
             key=key,
             field=self,
         )
+
+        # Allow passing data as positional argument
+        def factory(data: NestedTensors) -> MultiModalFieldElem:
+            return f(data=data)
+
+        return factory
 
     @abstractmethod
     def build_elems(
@@ -407,17 +413,11 @@ class MultiModalFieldConfig:
             modality=modality,
         )
 
-    def __init__(
-        self,
-        field: BaseMultiModalField,
-        modality: str,
-        **field_config: Any,
-    ) -> None:
+    def __init__(self, field: BaseMultiModalField, modality: str) -> None:
         super().__init__()
 
         self.field = field
         self.modality = modality
-        self.field_config = field_config
 
     def build_elems(
         self,
