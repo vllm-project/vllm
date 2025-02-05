@@ -108,8 +108,7 @@ ARG COMMON_WORKDIR
 # Copy over the benchmark scripts as well
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
 COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
-#COPY --from=export_vllm /tests ${COMMON_WORKDIR}/vllm/tests 
-#COPY --from=export_vllm /.buildkite ${COMMON_WORKDIR}/vllm/.buildkite 
+
 
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 ENV TOKENIZERS_PARALLELISM=false
