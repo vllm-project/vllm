@@ -553,7 +553,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
                  ),
 
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
-    # it allows ray to schedule multiple actors on a single GPU.
+    # it allows ray to schedule multiple actors on a single GPU,
+    # so that users can colocate other actors on the same GPUs as vLLM.
     "VLLM_RAY_PER_WORKER_GPUS":
     lambda: float(os.getenv("VLLM_RAY_PER_WORKER_GPUS", "1.0")),
 
