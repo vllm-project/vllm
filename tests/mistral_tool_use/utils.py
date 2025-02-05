@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from copy import deepcopy
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from typing_extensions import TypedDict
 
@@ -12,6 +11,7 @@ class ServerConfig(TypedDict, total=False):
     system_prompt: Optional[str]
     supports_parallel: Optional[bool]
     supports_rocm: Optional[bool]
+
 
 ARGS: List[str] = ["--max-model-len", "1024"]
 
