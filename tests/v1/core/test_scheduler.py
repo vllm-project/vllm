@@ -226,14 +226,18 @@ def test_multiple_stop_tokens():
     """Test with stop when generating multiple tokens"""
     scheduler = create_scheduler()
     # Nonstop case
-    request = create_requests(max_tokens=100, stop_token_ids=[42, 43, 44])
+    request = create_requests(num_request=1,
+                              max_tokens=100,
+                              stop_token_ids=[42, 43, 44])
     scheduler.requests[request.request_id] = request
     request.append_output_token_ids([4, 5, 6, 7, 8])
     result = scheduler._check_stop(request)
     assert result is False
 
     # EOS token is generated in the beginning of the output tokens
-    request = create_requests(max_tokens=100, stop_token_ids=[42, 43, 44])
+    request = create_requests(num_requests=1,
+                              max_tokens=100,
+                              stop_token_ids=[42, 43, 44])
     scheduler.requests[request.request_id] = request
     request.append_output_token_ids([EOS_TOKEN_ID, 5, EOS_TOKEN_ID, 7, 43, 5])
     result = scheduler._check_stop(request)
@@ -244,7 +248,9 @@ def test_multiple_stop_tokens():
     assert list(request.output_token_ids) == [EOS_TOKEN_ID]
 
     # EOS token is generated in the middle of the output tokens
-    request = create_requests(max_tokens=100, stop_token_ids=[42, 43, 44])
+    request = create_requests(num_requests=1,
+                              max_tokens=100,
+                              stop_token_ids=[42, 43, 44])
     scheduler.requests[request.request_id] = request
     request.append_output_token_ids([1, 2, 3, 4, 5, EOS_TOKEN_ID, 7, 43, 5])
     result = scheduler._check_stop(request)
@@ -255,7 +261,9 @@ def test_multiple_stop_tokens():
     assert list(request.output_token_ids) == [1, 2, 3, 4, 5, EOS_TOKEN_ID]
 
     # Stop token, 43 is one of the stop tokens
-    request = create_requests(max_tokens=100, stop_token_ids=[42, 43, 44])
+    request = create_requests(num_requests=1,
+                              max_tokens=100,
+                              stop_token_ids=[42, 43, 44])
     scheduler.requests[request.request_id] = request
     request.append_output_token_ids([4, 5, 43, 7, 43, 5])
     result = scheduler._check_stop(request)
@@ -269,7 +277,8 @@ def test_multiple_stop_tokens():
 
     # Max tokens, should be cropped when reaching the max tokens
     max_tokens = 2
-    request = create_requests(max_tokens=max_tokens,
+    request = create_requests(num_requests=1,
+                              max_tokens=max_tokens,
                               stop_token_ids=[42, 43, 44])
     scheduler.requests[request.request_id] = request
     output_token_ids = [4, 5, 43, 7, 43, 5]
