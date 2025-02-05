@@ -27,6 +27,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
 from vllm.logger import init_logger
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -70,6 +71,42 @@ def vllm_flash_attention_forward(
 
 
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
+
+
+def replace_rms_norm_class(rms_norm: nn.Module) -> RMSNorm:
+    """
+    Replace Transformers RMS norm class with vLLM's RMSNorm class.
+
+    Args:
+        rms_norm (nn.Module): RMS norm module to be replaced.
+
+    Returns:
+        RMSNorm: The new RMSNorm.
+    """
+    # Get hidden size
+    parameters = dict(rms_norm.named_parameters())
+    if len(parameters) != 1:
+        class_name = rms_norm.__class__.__name__
+        raise ValueError(
+            f"Expected {class_name} to have exactly one parameter, "
+            f"but got: {parameters}.")
+    hidden_size = next(iter(parameters.values())).numel()
+
+    # Get eps
+    attrs = vars(rms_norm)
+    attrs = {k: v for k, v in attrs.items() if not k.startswith("_")}
+    attrs = {k: v for k, v in attrs.items() if isinstance(v, float)}
+    if len(attrs) != 1:
+        class_name = rms_norm.__class__.__name__
+        raise ValueError(
+            f"Expected {class_name} to have exactly one float attribute, "
+            f"but got: {attrs}.")
+    eps = next(iter(attrs.values()))
+
+    return RMSNorm(
+        hidden_size=hidden_size,
+        eps=eps,
+    )
 
 
 def replace_linear_class(
@@ -165,6 +202,7 @@ class TransformersModel(nn.Module):
         ]
 
         # Model modifications
+        self.replace_rms_norm_class(self.model)
         self.replace_vocab_embed_class(self.model)
 
         # ForCausalLM modifications
@@ -183,6 +221,16 @@ class TransformersModel(nn.Module):
     def log_replacement(self, name: str, old_module: nn.Module,
                         new_module: nn.Module):
         logger.debug("%s: %s -> %s", name, old_module, new_module)
+
+    def replace_rms_norm_class(self, module: nn.Module, prefix: str = ""):
+        for child_name, child_module in module.named_children():
+            qual_name = maybe_prefix(prefix, child_name)
+            if "RMSNorm" in child_module.__class__.__name__:
+                new_module = replace_rms_norm_class(child_module)
+                setattr(module, child_name, new_module)
+                self.log_replacement(qual_name, child_module, new_module)
+            else:
+                self.replace_rms_norm_class(child_module, prefix=qual_name)
 
     def apply_base_model_tp_plan(self, module: nn.Module, prefix: str = ""):
         """
