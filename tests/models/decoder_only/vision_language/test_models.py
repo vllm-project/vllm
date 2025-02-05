@@ -202,7 +202,7 @@ VLM_TEST_SETTINGS = {
         marks=[
             pytest.mark.skipif(
                 Version(TRANSFORMERS_VERSION) >= Version("4.48"),
-                reason="HF model is not compatible with transformers>=4.48.0",
+                reason="HF model is not compatible with transformers>=4.48",
             )
         ],
     ),
@@ -337,7 +337,7 @@ VLM_TEST_SETTINGS = {
         marks=[
             pytest.mark.skipif(
                 Version(TRANSFORMERS_VERSION) >= Version("4.48"),
-                reason="HF model is not compatible with transformers>=4.48.0",
+                reason="HF model is not compatible with transformers>=4.48",
             )
         ],
     ),
