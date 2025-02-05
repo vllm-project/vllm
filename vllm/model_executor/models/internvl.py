@@ -564,8 +564,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         # Since there may be extra tokens in the feature placeholders,
         # we need to pass the image token ID to the model to select the
         # tokens to merge from the vision encoder outputs
-        processed_outputs["image_token_id"] = [image_token_id
-                                               ] * len(image_data)
+        processed_outputs["image_token_id"] = torch.tensor(image_token_id)
 
         return processed_outputs
 
@@ -575,13 +574,14 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
+        num_images = len(image_num_patches)
 
         return dict(
             pixel_values_flat=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_num_patches),
             image_num_patches=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
-            image_token_id=MultiModalFieldConfig.batched("image"),
+            image_token_id=MultiModalFieldConfig.shared("image", num_images),
         )
 
     def _get_prompt_replacements(
