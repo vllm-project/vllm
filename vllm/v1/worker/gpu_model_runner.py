@@ -285,6 +285,7 @@ class GPUModelRunner:
             if self.model_config.uses_mrope:
                 image_grid_thw = []
                 video_grid_thw = []
+                second_per_grid_ts = []
                 for mm_input in self.requests[req_id].mm_inputs:
                     if mm_input.get("image_grid_thw") is not None:
                         image_grid_thw.extend(
@@ -292,6 +293,9 @@ class GPUModelRunner:
                     if mm_input.get("video_grid_thw") is not None:
                         video_grid_thw.extend(
                             mm_input["video_grid_thw"].tolist())
+                    if mm_input.get("second_per_grid_ts") is not None:
+                        second_per_grid_ts.extend(
+                            mm_input["second_per_grid_ts"])
 
                 hf_config = self.model_config.hf_config
 
@@ -299,14 +303,10 @@ class GPUModelRunner:
                     self.requests[req_id].mrope_position_delta = \
                     MRotaryEmbedding.get_input_positions_tensor(
                         self.requests[req_id].prompt_token_ids,
+                        hf_config=hf_config,
                         image_grid_thw=image_grid_thw,
                         video_grid_thw=video_grid_thw,
-                        image_token_id=hf_config.image_token_id,
-                        video_token_id=hf_config.video_token_id,
-                        vision_start_token_id=hf_config.vision_start_token_id,
-                        vision_end_token_id=hf_config.vision_end_token_id,
-                        spatial_merge_size=hf_config.vision_config.
-                        spatial_merge_size,
+                        second_per_grid_ts=second_per_grid_ts,
                     )
 
             req_ids_to_add.append(req_id)
