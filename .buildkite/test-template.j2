@@ -7,7 +7,7 @@ steps:
   - label: ":docker: build image"
     depends_on: ~
     commands:
-      - "docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f Dockerfile.rocm --progress plain ."
+      - "docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f Dockerfile.rocm  --target test --progress plain ."
       - "docker push {{ docker_image_amd }}"
     key: "amd-build"
     env:
@@ -28,13 +28,13 @@ steps:
       - "amd-build"
     agents:
 {% if step.amd_gpus and step.amd_gpus==8%}
-      queue: mi250_8xGPU
+      queue: amd_gpu_8
 {% elif step.amd_gpus and step.amd_gpus==4%}
-      queue: mi250_8xGPU
+      queue: amd_gpu_4
 {% elif step.amd_gpus and step.amd_gpus==2%}
-      queue: mi250_8xGPU
+      queue: amd_gpu_4
 {% else%}
-      queue: mi250_8xGPU
+      queue: amd_gpu_1
 {% endif%}
     commands: 
       - bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" && ")) | safe }}"
