@@ -6,12 +6,12 @@ from typing import List, Optional, Tuple
 
 import pytest
 
+from tests.v1.engine.utils import PLP_APC_UNSUPPORTED_MSG
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.utils import STR_ASYNC_LLM_PROMPT_LP_APC_UNSUPPORTED
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -22,37 +22,19 @@ ENGINE_ARGS = AsyncEngineArgs(model="meta-llama/Llama-3.2-1B",
                               disable_log_requests=True)
 
 
-async def generate(
-    engine: AsyncLLM,
-    request_id: str,
-    output_kind: RequestOutputKind,
-    max_tokens: int,
-    sampling_params: Optional[SamplingParams] = None,
-) -> Tuple[int, str]:
-    """Wrapper for `AsyncLLM` generation.
+async def generate(engine: AsyncLLM,
+                   request_id: str,
+                   output_kind: RequestOutputKind,
+                   max_tokens: int,
+                   prompt_logprobs: Optional[int] = None) -> Tuple[int, str]:
+    # Ensure generate doesn't complete too fast for cancellation test.
+    await asyncio.sleep(0.2)
 
-    At least one of `max_tokens` and `sampling_params` must
-    not be `None`. If `sampling_params` is `None`, `max_tokens`
-    is used to create a `SamplingParams` instance. If
-    `sampling_params` is provided, `max_tokens` is not used.
-    
-    Args:
-      engine: AsyncLLM instance
-      request_id: AsyncLLM request ID
-      output_kind: request output strategy (i.e. delta vs final-only)
-      max_tokens: (optional) max number of tokens to generate
-      sampling_params: (optional) request sampling params
-
-    Returns:
-      count: number of returns from engine.generate()
-      request_id
-    """
-    assert not (max_tokens is None and sampling_params is None), (
-        "At least one of max_tokens and sampling_params"
-        " must not be None.")
-    if sampling_params is None:
-        sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0)
     count = 0
+    sampling_params = SamplingParams(max_tokens=max_tokens,
+                                     output_kind=output_kind,
+                                     temperature=0,
+                                     prompt_logprobs=prompt_logprobs)
     async for out in engine.generate(request_id=request_id,
                                      prompt="Hello my name is Robert and",
                                      sampling_params=sampling_params):
@@ -94,16 +76,16 @@ async def test_async_llm_refuses_prompt_logprobs_with_apc(
                          "request-0",
                          output_kind,
                          10,
-                         sampling_params=SamplingParams(max_tokens=10,
-                                                        temperature=0,
-                                                        prompt_logprobs=5)))
+                         prompt_logprobs=5))
         # Validate exception string is correct
-        assert str(excinfo.value) == STR_ASYNC_LLM_PROMPT_LP_APC_UNSUPPORTED
+        assert str(excinfo.value) == PLP_APC_UNSUPPORTED_MSG
     finally:
         # Shut down engine
         engine.shutdown()
 
 
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
 @pytest.mark.asyncio
 async def test_load(monkeypatch, output_kind: RequestOutputKind):
     # TODO(rickyx): Remove monkeypatch once we have a better way to test V1

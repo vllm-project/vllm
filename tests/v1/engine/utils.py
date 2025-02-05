@@ -10,7 +10,8 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from vllm.engine.arg_utils import EngineArgs
 from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
-from vllm.v1.engine import EngineCoreOutput
+from vllm.v1.engine import EngineCoreOutput, FinishReason
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 GeneralTokenizerType = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
@@ -28,6 +29,9 @@ FULL_STRINGS = [
 ]
 STOP_STRINGS = ["I love working on", "company by far", "brother in"]
 PROMPT_LEN = 5
+
+PLP_APC_UNSUPPORTED_MSG = ("Prefix caching with prompt logprobs not yet "
+                           "supported on VLLM V1.")
 
 random.seed(42)
 
@@ -205,7 +209,7 @@ def generate_dummy_sample_logprobs(
     sampled_tokens_list: List,
     num_logprobs: int,
     tokenizer: PreTrainedTokenizer,
-) -> List[Tuple[List[float], List[int], int]]:
+) -> List[Tuple[List[int], List[float], int]]:
     """Generate dummy sample logprobs
 
     Generate a test data structure which imitates the list of sample logprobs
@@ -217,7 +221,7 @@ def generate_dummy_sample_logprobs(
       tokenizer: model tokenizer to use for detokenization
 
     Returns
-      List of (logprobs vector, top token ids vector, sampled token rank)
+      List of (top token ids vector, logprobs vector, sampled token rank)
       Python lists tuples; in each tuple the logprobs and top token ids
       vectors have the same length which is either `num_logprobs` or
       `num_logprobs+1`. Sampled token rank is the rank (index+1) of the
@@ -234,8 +238,9 @@ def generate_dummy_sample_logprobs(
                                                  sampled_token_id)
 
         res.append(
-            (_create_random_top_logprob_test_vector(num_logprobs + 1, -100, 0),
-             token_vector, sampled_token_rank))
+            (token_vector,
+             _create_random_top_logprob_test_vector(num_logprobs + 1, -100,
+                                                    0), sampled_token_rank))
 
     # Convert tensors in the list tuples to Python lists
     res_list_format = [
@@ -251,7 +256,7 @@ def generate_dummy_prompt_logprobs_tensors(
     prompt_tokens_list: List,
     num_logprobs: int,
     tokenizer: PreTrainedTokenizer,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> LogprobsTensors:
     """Generate dummy prompt logprobs tensors
 
     Generate a test data structure which imitates the torch Tensors of prompt
@@ -283,9 +288,11 @@ def generate_dummy_prompt_logprobs_tensors(
     ) = _create_random_top_token_test_matrix(
         (num_prompt_logprobs, num_logprobs), 0,
         len(tokenizer.vocab) - 1, prompt_tokens_list[1:])
-    return (_create_random_top_logprob_test_matrix(
-        (num_prompt_logprobs, num_logprobs + 1), -100,
-        0), token_vector, prompt_token_ranks)
+    return LogprobsTensors(
+        token_vector,
+        _create_random_top_logprob_test_matrix(
+            (num_prompt_logprobs, num_logprobs + 1), -100, 0),
+        prompt_token_ranks)
 
 
 @dataclass
@@ -297,13 +304,13 @@ class DummyOutputProcessorTestVectors:
     full_tokens: List[List[int]]  # Prompt + generated tokens
     prompt_tokens: List[List[int]]
     generation_tokens: List[List[int]]
-    # Each request is associated with a tuple of (top logprobs,top tokens)
-    # prompt logprobs tensors
-    prompt_logprobs: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+    # Each request is associated with a tuple of
+    # (top tokens, top logprobs, ranks) prompt logprobs tensors
+    prompt_logprobs: List[LogprobsTensors]
     # Each request is associated with a sample logprobs; a request's
-    # sample logprobs are a list of (top logprobs,top tokens)
+    # sample logprobs are a list of (top tokens, top logprobs, ranks)
     # sample logprobs tensors at each sequence position
-    generation_logprobs: List[List[Tuple[List[float], List[int], int]]]
+    generation_logprobs: List[List[Tuple[List[int], List[float], int]]]
     prompt_strings: List[str]
     prompt_strings_len: List[int]
     generation_strings: List[str]
@@ -317,16 +324,15 @@ class MockEngineCore:
         tokens_list: List[List[int]],
         # For each request, for each sampled token offset,
         # a tuple of
-        # (list of sample logprob vals,list of topk token ids)
-        generated_logprobs_raw: Optional[List[List[Tuple[List[float],
-                                                         List[int],
+        # (list of topk token ids, list of sample logprob vals, rank)
+        generated_logprobs_raw: Optional[List[List[Tuple[List[int],
+                                                         List[float],
                                                          int]]]] = None,
         # For each request, a tuple of
-        # ( prompt logprob val matrix, prompt logprob tok id matrix );
+        # (prompt logprob val matrix, prompt logprob tok id matrix);
         # each matrix has dimensions
         # (num prompt toks) x (num prompt logprobs+1)
-        prompt_logprobs_raw: Optional[List[Tuple[torch.Tensor, torch.Tensor,
-                                                 torch.Tensor]]] = None,
+        prompt_logprobs_raw: Optional[List[LogprobsTensors]] = None,
     ) -> None:
         self.tokens_list = tokens_list
         self.current_idx = 0
@@ -345,46 +351,31 @@ class MockEngineCore:
             if len(token_ids) > token_idx:
                 if do_logprobs:
                     assert self.generated_logprobs_raw is not None
-                    (logprobs_, logprobs_token_ids_, sampled_token_ranks_) = (
+                    (logprobs_token_ids_, logprobs_, sampled_token_ranks_) = (
                         self.generated_logprobs_raw[req_idx][token_idx])
-                    logprobs = [logprobs_]
-                    logprobs_token_ids = [logprobs_token_ids_]
-                    sampled_token_ranks = [sampled_token_ranks_]
+                    logprobs = LogprobsLists(
+                        [logprobs_token_ids_],
+                        [logprobs_],
+                        [sampled_token_ranks_],
+                    )
                 else:
                     logprobs = None
-                    logprobs_token_ids = None
-                    sampled_token_ranks = None
                 if do_prompt_logprobs:
                     if self.current_idx == 0:
                         assert self.prompt_logprobs_raw is not None
-                        pos_prompt_logprobs = self.prompt_logprobs_raw[req_idx]
-                        prompt_logprobs = pos_prompt_logprobs[0]
-                        prompt_logprobs_token_ids = pos_prompt_logprobs[1]
-                        prompt_token_ranks = pos_prompt_logprobs[2]
+                        prompt_logprobs = self.prompt_logprobs_raw[req_idx]
                     else:
-                        (
-                            prompt_logprobs,
-                            prompt_logprobs_token_ids,
-                            prompt_token_ranks,
-                        ) = (torch.empty(0, 0), torch.empty(0,
-                                                            0), torch.empty(0))
+                        prompt_logprobs = None
                 else:
-                    (
-                        prompt_logprobs,
-                        prompt_logprobs_token_ids,
-                        prompt_token_ranks,
-                    ) = (None, None, None)
+                    prompt_logprobs = None
                 output = EngineCoreOutput(
                     request_id=f"request-{req_idx}",
                     new_token_ids=[token_ids[token_idx]],
                     new_logprobs=logprobs,
-                    new_logprobs_token_ids=logprobs_token_ids,
-                    new_sampled_token_ranks=sampled_token_ranks,
-                    new_prompt_logprobs=prompt_logprobs,
-                    new_prompt_logprobs_token_ids=prompt_logprobs_token_ids,
-                    new_prompt_token_ranks=prompt_token_ranks)
+                    new_prompt_logprobs_tensors=prompt_logprobs,
+                )
                 if token_idx == len(token_ids) - 1:
-                    output.finish_reason = "stopped"
+                    output.finish_reason = FinishReason.STOP
                 outputs.append(output)
 
         self.current_idx += 1

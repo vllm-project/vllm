@@ -151,7 +151,7 @@ def _validate_logprobs(
                 # logprob token id tensors associated with this
                 # position in the completion. Also break out the
                 # sampled token ranks
-                (ref_pos_logprob_vals, ref_pos_logprob_toks,
+                (ref_pos_logprob_toks, ref_pos_logprob_vals,
                  ref_sampled_token_rank) = ref_logprobs[idx]
                 # For each position in the completion sequence,
                 # ensure the actual sampled token is among the
@@ -267,7 +267,7 @@ def _validate_logprobs(
             # Break out the reference prompt log prob value &
             # logprob token id matrices for the whole prompt.
             # Also break out the prompt token rank vector
-            (ref_prompt_logprob_vals, ref_prompt_logprob_toks,
+            (ref_prompt_logprob_toks, ref_prompt_logprob_vals,
              ref_prompt_token_ranks) = ref_prompt_logprobs
             for idx, (prompt_token, pos_logprob_dict) in enumerate(
                     zip(prompt_token_ids[1:], prompt_logprobs[1:])):
@@ -275,9 +275,9 @@ def _validate_logprobs(
                 # Break out the reference prompt log prob value
                 # vector, prompt logprob token id vector, and
                 # prompt token rank at the current position.
-                (ref_pos_prompt_logprob_vals, ref_pos_prompt_logprob_toks,
-                 ref_pos_prompt_token_rank) = (ref_prompt_logprob_vals[idx, :],
-                                               ref_prompt_logprob_toks[idx, :],
+                (ref_pos_prompt_logprob_toks, ref_pos_prompt_logprob_vals,
+                 ref_pos_prompt_token_rank) = (ref_prompt_logprob_toks[idx, :],
+                                               ref_prompt_logprob_vals[idx, :],
                                                ref_prompt_token_ranks[idx])
 
                 # For each position in the prompt sequence,
