@@ -15,6 +15,7 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 import re
+from math import prod
 from typing import Iterable, Literal, Optional, Union
 
 import torch
@@ -91,7 +92,11 @@ def replace_rms_norm_class(rms_norm: nn.Module) -> RMSNorm:
             "Unable to determine `hidden_size` of %s. "
             "This layer will not benefit from vLLM's custom ops.", class_name)
         return rms_norm
-    hidden_size = next(iter(parameters.values())).numel()
+    weight = next(iter(parameters.values()))
+    if weight is None and isinstance(rms_norm, nn.RMSNorm):
+        hidden_size = prod(rms_norm.normalized_shape)
+    else:
+        hidden_size = weight.numel()
 
     # Get eps
     attrs = vars(rms_norm)
