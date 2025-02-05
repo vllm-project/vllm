@@ -95,8 +95,8 @@ def replace_rms_norm_class(rms_norm: nn.Module) -> RMSNorm:
 
     # Get eps
     attrs = vars(rms_norm)
-    attrs = {k: v for k, v in attrs.items() if not k.startswith("_")}
-    attrs = {k: v for k, v in attrs.items() if isinstance(v, float)}
+    condition = lambda k, v: not k.startswith("_") and isinstance(v, float)
+    attrs = {k: v for k, v in attrs.items() if condition(k, v)}
     if len(attrs) != 1:
         class_name = rms_norm.__class__.__name__
         logger.warning(
