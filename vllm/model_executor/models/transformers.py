@@ -87,9 +87,10 @@ def replace_rms_norm_class(rms_norm: nn.Module) -> RMSNorm:
     parameters = dict(rms_norm.named_parameters())
     if len(parameters) != 1:
         class_name = rms_norm.__class__.__name__
-        raise ValueError(
-            f"Expected {class_name} to have exactly one parameter, "
-            f"but got: {parameters}.")
+        logger.warning(
+            "Unable to determine `hidden_size` of %s. "
+            "This layer will not benefit from vLLM's custom ops.", class_name)
+        return rms_norm
     hidden_size = next(iter(parameters.values())).numel()
 
     # Get eps
@@ -98,9 +99,10 @@ def replace_rms_norm_class(rms_norm: nn.Module) -> RMSNorm:
     attrs = {k: v for k, v in attrs.items() if isinstance(v, float)}
     if len(attrs) != 1:
         class_name = rms_norm.__class__.__name__
-        raise ValueError(
-            f"Expected {class_name} to have exactly one float attribute, "
-            f"but got: {attrs}.")
+        logger.warning(
+            "Unable to determine `eps` of %s. "
+            "This layer will not benefit from vLLM's custom ops.", class_name)
+        return rms_norm
     eps = next(iter(attrs.values()))
 
     return RMSNorm(
