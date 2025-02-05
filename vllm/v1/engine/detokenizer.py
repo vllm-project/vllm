@@ -8,8 +8,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
-from vllm.v1.engine import (EngineCoreOutput, EngineCoreRequest,
-                            RequestFinishedReason)
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 
 logger = init_logger(__name__)
 
@@ -19,7 +18,7 @@ class DetokenizerOutput:
     output_text: str
     token_ids: List[int]
     finished: bool
-    finish_reason: Optional[RequestFinishedReason] = None
+    finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
 
 
@@ -148,7 +147,7 @@ class IncrementalDetokenizer:
                 stop_str, truncate_to = stop
                 if truncate_to != -1:
                     self.output_text = self.output_text[:truncate_to]
-                finish_reason = RequestFinishedReason.STOP
+                finish_reason = FinishReason.STOP
                 stop_reason = stop_str
 
         # TODO: handle stop_token_ids here too?
