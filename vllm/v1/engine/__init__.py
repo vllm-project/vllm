@@ -15,6 +15,23 @@ if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
 
 
+class RequestFinishedReason(enum.IntEnum):
+    """
+    Reason a request finished - stop, length, or abort.
+
+    stop - a stop string was emitted
+    length - max_tokens was consumed, or max_model_len was reached
+    abort - aborted for another reason
+
+    """
+    STOP = 0
+    LENGTH = 1
+    ABORT = 2
+
+    def __str__(self):
+        return self.name.lower()
+
+
 @dataclass
 class EngineCoreRequest:
 
@@ -45,7 +62,7 @@ class EngineCoreOutput(
     request_id: str
     new_token_ids: List[int]
     finished: bool
-    finish_reason: Optional[str] = None
+    finish_reason: Optional[RequestFinishedReason] = None
     stop_reason: Union[int, str, None] = None
 
 
@@ -56,7 +73,7 @@ class EngineCoreOutputs(
         gc=False):  # type: ignore[call-arg]
 
     #NOTE(Nick): We could consider ways to make this more compact,
-    # e.g. columnwise layout and using an int enum for finish/stop reason
+    # e.g. columnwise layout
 
     # [num_reqs]
     outputs: List[EngineCoreOutput]
