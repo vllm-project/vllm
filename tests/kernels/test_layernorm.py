@@ -1,54 +1,136 @@
+# SPDX-License-Identifier: Apache-2.0
+
+import pytest
 import torch
-import torch.nn as nn
 
-from vllm import layernorm_ops
+from tests.kernels.quant_utils import FP8_DTYPE
+from tests.kernels.utils import opcheck
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.platforms import current_platform
 
-
-class RefRMSNorm(nn.Module):
-
-    def __init__(self, hidden_size, eps=1e-6):
-        super().__init__()
-        weight = torch.empty(hidden_size)
-        weight.uniform_(-1e-3, 1e-3)
-        self.weight = nn.Parameter(weight)
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        if self.weight.dtype in [torch.half, torch.float16, torch.bfloat16]:
-            hidden_states = hidden_states.to(self.weight.dtype)
-        return self.weight * hidden_states
+DTYPES = [torch.half, torch.bfloat16, torch.float]
+NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
+HIDDEN_SIZES = [8, 768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192,
+                8199]  # Arbitrary values for testing
+ADD_RESIDUAL = [False, True]
+SEEDS = [0]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
 
 
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def run_rms_norm(
+def test_rms_norm(
     num_tokens: int,
     hidden_size: int,
+    add_residual: bool,
     dtype: torch.dtype,
+    seed: int,
+    device: str,
 ) -> None:
-    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device='cuda')
-    ref = RefRMSNorm(hidden_size).to(dtype).cuda()
+    current_platform.seed_everything(seed)
+    torch.set_default_device(device)
+    layer = RMSNorm(hidden_size).to(dtype=dtype)
+    layer.weight.data.normal_(mean=1.0, std=0.1)
+    scale = 1 / (2 * hidden_size)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    x *= scale
+    residual = torch.randn_like(x) * scale if add_residual else None
 
-    out = torch.empty_like(x)
-    layernorm_ops.rms_norm(
-        out,
-        x,
-        ref.weight.data,
-        ref.variance_epsilon,
-    )
-    ref_out = ref(x)
-    assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-5)
+    # NOTE(woosuk): The reference implementation should be executed first
+    # because the custom kernel is in-place.
+    ref_out = layer.forward_native(x, residual)
+    out = layer(x, residual)
+    # NOTE(woosuk): LayerNorm operators (including RMS) typically have larger
+    # numerical errors than other operators because they involve reductions.
+    # Therefore, we use a larger tolerance.
+    if add_residual:
+        torch.testing.assert_close(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
+    else:
+        torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+    if residual is not None:
+        opcheck(torch.ops._C.fused_add_rms_norm,
+                (x, residual, layer.weight.data, layer.variance_epsilon))
+    else:
+        opcheck(torch.ops._C.rms_norm,
+                (out, x, layer.weight.data, layer.variance_epsilon))
 
 
-def test_rms_norm() -> None:
-    for dtype in [torch.half, torch.bfloat16, torch.float]:
-        for num_tokens in [7, 128, 2048]:
-            for hidden_size in [13, 64, 1024, 5120]:
-                print(f'Testing RMS kernel with dtype={dtype}, num_tokens='
-                      f'{num_tokens}, hidden_size={hidden_size}')
-                run_rms_norm(
-                    num_tokens=num_tokens,
-                    hidden_size=hidden_size,
-                    dtype=dtype,
-                )
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("quant_scale", [1.0, 0.01, 10.0])
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_fused_rms_norm_quant(
+    num_tokens: int,
+    hidden_size: int,
+    add_residual: bool,
+    dtype: torch.dtype,
+    quant_scale: float,
+    seed: int,
+    device: str,
+) -> None:
+    current_platform.seed_everything(seed)
+    torch.set_default_device(device)
+
+    weight = torch.empty(hidden_size, dtype=dtype).normal_(mean=1.0, std=0.1)
+    scale = 1 / (2 * hidden_size)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    x *= scale
+    if add_residual:
+        residual = torch.randn_like(x) * scale
+        residual_fused = residual.clone()
+    else:
+        residual = residual_fused = None
+
+    out_norm = torch.empty_like(x)
+    out_quant = torch.empty_like(x, dtype=FP8_DTYPE)
+    out_quant_fused = torch.empty_like(out_quant)
+
+    quant_scale_t = torch.tensor(quant_scale, dtype=torch.float32)
+
+    if add_residual:
+        torch.ops._C.fused_add_rms_norm_static_fp8_quant(
+            out_quant_fused, x, residual_fused, weight, quant_scale_t, 1e-6)
+
+        # Unfused kernel is in-place so it goes second
+        # Also use a separate clone of x to avoid modifying the input
+        x_unfused = x.clone()
+        torch.ops._C.fused_add_rms_norm(x_unfused, residual, weight, 1e-6)
+        torch.ops._C.static_scaled_fp8_quant(out_quant, x_unfused,
+                                             quant_scale_t)
+
+        torch.cuda.synchronize()
+        torch.testing.assert_close(residual_fused,
+                                   residual,
+                                   atol=1e-2,
+                                   rtol=1e-2)
+
+        opcheck(
+            torch.ops._C.fused_add_rms_norm_static_fp8_quant,
+            (out_quant_fused, x, residual_fused, weight, quant_scale_t, 1e-6))
+    else:
+        torch.ops._C.rms_norm_static_fp8_quant(out_quant_fused, x, weight,
+                                               quant_scale_t, 1e-6)
+
+        torch.ops._C.rms_norm(out_norm, x, weight, 1e-6)
+        torch.ops._C.static_scaled_fp8_quant(out_quant, out_norm,
+                                             quant_scale_t)
+
+        opcheck(torch.ops._C.rms_norm_static_fp8_quant,
+                (out_quant_fused, x, weight, quant_scale_t, 1e-6))
+
+    torch.testing.assert_close(out_quant_fused.to(dtype=torch.float32),
+                               out_quant.to(dtype=torch.float32),
+                               atol=1e-3,
+                               rtol=1e-3)

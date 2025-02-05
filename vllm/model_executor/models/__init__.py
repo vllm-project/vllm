@@ -1,12 +1,24 @@
-from vllm.model_executor.models.gpt_neox import GPTNeoXForCausalLM
-from vllm.model_executor.models.gpt2 import GPT2LMHeadModel
-from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.models.opt import OPTForCausalLM
+# SPDX-License-Identifier: Apache-2.0
 
+from .interfaces import (HasInnerState, SupportsLoRA, SupportsMultiModal,
+                         SupportsPP, has_inner_state, supports_lora,
+                         supports_multimodal, supports_pp)
+from .interfaces_base import (VllmModelForPooling, VllmModelForTextGeneration,
+                              is_pooling_model, is_text_generation_model)
+from .registry import ModelRegistry
 
 __all__ = [
-    "GPT2LMHeadModel",
-    "GPTNeoXForCausalLM",
-    "LlamaForCausalLM",
-    "OPTForCausalLM",
+    "ModelRegistry",
+    "VllmModelForPooling",
+    "is_pooling_model",
+    "VllmModelForTextGeneration",
+    "is_text_generation_model",
+    "HasInnerState",
+    "has_inner_state",
+    "SupportsLoRA",
+    "supports_lora",
+    "SupportsMultiModal",
+    "supports_multimodal",
+    "SupportsPP",
+    "supports_pp",
 ]

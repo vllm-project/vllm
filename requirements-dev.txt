@@ -1,2 +1,5 @@
-mypy
-pytest
+-r requirements-lint.txt
+-r requirements-test.txt
+
+# Avoid adding requirements directly to this file.
+# Instead, modify the two files referenced above.
