@@ -164,27 +164,40 @@ A dictionary containing nested tensors which have been batched via
 
 @dataclass(frozen=True)
 class MultiModalFieldElem:
-    """Represents an item in :class:`MultiModalKwargs`."""
-
-    key: str
-    """The key of this item in :class:`MultiModalKwargs`."""
+    """
+    Represents a keyword argument corresponding to a multi-modal item
+    in :class:`MultiModalKwargs`.
+    """
 
     modality: str
-    """The modality of this item in :class:`MultiModalKwargs`."""
+    """
+    The modality of the corresponding multi-modal item.
+    Each multi-modal item can consist of multiple keyword arguments.
+    """
+
+    key: str
+    """
+    The key of this field in :class:`MultiModalKwargs`,
+    i.e. the name of the keyword argument to be passed to the model.
+    """
 
     data: NestedTensors
-    """The data corresponding to this item in :class:`MultiModalKwargs`."""
+    """
+    The tensor data of this field in :class:`MultiModalKwargs`,
+    i.e. the value of the keyword argument to be passed to the model.
+    """
 
     field: "BaseMultiModalField"
     """
-    Defines how to process the data of this item in :class:`MultiModalKwargs`.
+    Defines how to combine the tensor data of this field with others
+    in order to batch multi-modal items together for model inference.
     """
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):
             return False
 
-        return ((self.key, self.modality) == (other.key, other.modality)
+        return ((self.modality, self.key) == (other.modality, other.key)
                 and nested_tensors_equal(self.data, other.data)
                 and self.field == other.field)
 
@@ -192,12 +205,8 @@ class MultiModalFieldElem:
 @dataclass(frozen=True)
 class BaseMultiModalField(ABC):
     """
-    Defines the mapping between multi-modal item and tensor data of a
-    keyword argument in :class:`MultiModalKwargs`.
-
-    The mapping from multi-modal item to tensor data is given by
-    :meth:`reduce_data`, while the mapping from tensor data to
-    multi-modal item is given by :meth:`build_elems`.
+    Defines how to interpret tensor data belonging to a keyword argument in
+    :class:`MultiModalKwargs` for multiple multi-modal items, and vice versa.
     """
 
     def _build_elem(
@@ -416,7 +425,7 @@ class MultiModalFieldConfig:
         key: str,
         batch: NestedTensors,
     ) -> Sequence[MultiModalFieldElem]:
-        return self.field.build_elems(key, self.modality, batch)
+        return self.field.build_elems(self.modality, key, batch)
 
 
 class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
