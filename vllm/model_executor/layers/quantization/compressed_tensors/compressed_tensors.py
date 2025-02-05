@@ -83,7 +83,9 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Check if the layer is skipped for quantization.
         # TODO (@robertgshaw2): support module names
-        if should_ignore_layer(prefix, ignore=self.ignore):
+        if should_ignore_layer(prefix,
+                               ignore=self.ignore,
+                               fused_mapping=self.packed_modules_mapping):
             return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
@@ -379,34 +381,29 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Will be empty for models with only sparsity
         weight_quant = input_quant = None
-        sparsity_scheme: Optional[SparsityCompressionConfig] = None
         if self.target_scheme_map:
             matched_target = find_matched_target(
                 layer_name=layer_name,
                 module=layer,
-                targets=self.target_scheme_map.keys())
+                targets=self.target_scheme_map.keys(),
+                fused_mapping=self.packed_modules_mapping)
 
             scheme_dict = self.target_scheme_map[matched_target]
             weight_quant = scheme_dict.get("weights")
             input_quant = scheme_dict.get("input_activations")
 
-        if self.sparsity_scheme_map:
-            is_ignored = False
-            with suppress(ValueError):
-                is_ignored = find_matched_target(
-                    layer_name=layer_name,
-                    module=layer,
-                    targets=self.sparsity_ignore_list)
-
-            # if the layer is in the sparsity ignore list,
-            # we should not apply any sparsity scheme
-
-            if not is_ignored:
-                matched_target = find_matched_target(
-                    layer_name=layer_name,
-                    module=layer,
-                    targets=self.sparsity_scheme_map.keys())
-                sparsity_scheme = self.sparsity_scheme_map.get(matched_target)
+        # Find the sparsity scheme of the layer
+        # assume that fused layers inerhit first component's sparsity scheme
+        sparsity_targets = (self.sparsity_scheme_map.keys() -
+                            set(self.sparsity_ignore_list))
+        sparsity_scheme: Optional[SparsityCompressionConfig] = None
+        with suppress(ValueError):
+            matched_target = find_matched_target(
+                layer_name=layer_name,
+                module=layer,
+                targets=sparsity_targets,
+                fused_mapping=self.packed_modules_mapping)
+            sparsity_scheme = self.sparsity_scheme_map[matched_target]
 
         if self.supports_cutlass_24(weight_quant=weight_quant,
                                     input_quant=input_quant,

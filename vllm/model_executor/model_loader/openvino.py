@@ -13,7 +13,7 @@ from torch import nn
 
 import vllm.envs as envs
 from vllm.attention.backends.openvino import OpenVINOAttentionMetadata
-from vllm.config import DeviceConfig, ModelConfig
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import (LogitsProcessor,
                                                          _prune_hidden_states)
@@ -103,7 +103,6 @@ class OpenVINOCausalLM(nn.Module):
         self,
         ov_core: ov.Core,
         model_config: ModelConfig,
-        device_config: DeviceConfig,
         kv_cache_dtype: ov.Type,
     ) -> None:
         super().__init__()
@@ -187,8 +186,7 @@ class OpenVINOCausalLM(nn.Module):
 
 
 def get_model(
-    model_config: ModelConfig,
-    device_config: DeviceConfig,
+    vllm_config: VllmConfig,
     kv_cache_dtype: ov.Type,
     **kwargs,
 ) -> torch.nn.Module:
@@ -201,5 +199,6 @@ def get_model(
             "be added in the future. If this is important to you, "
             "please open an issue on github.")
 
-    return OpenVINOCausalLM(ov_core, model_config, device_config,
-                            kv_cache_dtype)
+    with set_current_vllm_config(vllm_config):
+        return OpenVINOCausalLM(ov_core, vllm_config.model_config,
+                                kv_cache_dtype)
