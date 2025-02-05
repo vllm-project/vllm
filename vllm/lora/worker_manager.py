@@ -94,8 +94,8 @@ class WorkerLoRAManager(AbstractWorkerManager):
                         packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
-
             expected_lora_modules = list(set(expected_lora_modules))
+            expected_modules_to_save: List[str] = model.modules_to_save
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
             peft_helper = PEFTHelper.from_local_dir(
@@ -115,9 +115,12 @@ class WorkerLoRAManager(AbstractWorkerManager):
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_path,
                 expected_lora_modules,
+                expected_modules_to_save,
                 peft_helper=peft_helper,
                 lora_model_id=lora_request.lora_int_id,
                 device="cpu",
+                enable_lora_modules_to_save=self._adapter_manager.lora_config.
+                enable_lora_modules_to_save,
                 dtype=self.lora_config.lora_dtype,
                 target_embedding_padding=self.vocab_size +
                 self.lora_config.lora_extra_vocab_size,

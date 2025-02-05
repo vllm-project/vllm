@@ -432,11 +432,8 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     # LoRA specific attributes
     supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
+        "qkv_proj", "o_proj", "gate_up_proj", "down_proj"
+    ] + SupportsLoRA.modules_to_save
     embedding_modules = {}
     embedding_padding_modules = []
 

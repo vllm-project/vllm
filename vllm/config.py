@@ -2097,6 +2097,7 @@ class LoRAConfig:
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
+    enable_lora_modules_to_save: bool = False
     bias_enabled: bool = False
 
     def compute_hash(self) -> str:
