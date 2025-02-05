@@ -226,7 +226,7 @@ def test_multiple_stop_tokens():
     """Test with stop when generating multiple tokens"""
     scheduler = create_scheduler()
     # Nonstop case
-    request = create_requests(num_request=1,
+    request = create_requests(num_requests=1,
                               max_tokens=100,
                               stop_token_ids=[42, 43, 44])
     scheduler.requests[request.request_id] = request
