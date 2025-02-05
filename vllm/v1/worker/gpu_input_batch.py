@@ -504,4 +504,6 @@ def ensure_decodes_first(b: InputBatch):
             break
 
         # Swap
+        print("Swapping first_prompt_index = {} with last_decode_index = {}".
+              format(first_prompt_index, last_decode_index))
         swap_positions(b, first_prompt_index, last_decode_index)
