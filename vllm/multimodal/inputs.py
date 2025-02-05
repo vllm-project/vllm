@@ -182,22 +182,35 @@ class BaseMultiModalField(ABC):
     key: str
     modality: str
 
+    def _build_elem(self, data: NestedTensors) -> MultiModalFieldElem:
+        return MultiModalFieldElem(self, data)
+
+    @abstractmethod
+    def build_elems(self,
+                    data: NestedTensors) -> Sequence[MultiModalFieldElem]:
+        """
+        Construct :class:`MultiModalFieldElem` instances to represent
+        the provided data.
+        
+        This is the inverse of :meth:`reduce_data`.
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         raise NotImplementedError
 
-    def _build_elem(self, data: NestedTensors) -> MultiModalFieldElem:
-        return MultiModalFieldElem(self, data)
+    def reduce_data(self, elems: list[MultiModalFieldElem]) -> NestedTensors:
+        """
+        Merge the data from multiple instances of :class:`MultiModalFieldElem`.
 
-    def reduce(self, batch: list[MultiModalFieldElem]) -> MultiModalFieldElem:
-        """Merge multiple instances of :class:`MultiModalFieldElem` together."""
-        fields = [item.field for item in batch]
-        if len(set(fields)) > 1:
-            raise ValueError(f"Cannot merge different {fields=}")
+        This is the inverse of :meth:`build_elems`.
+        """
+        field_types = [type(item.field) for item in elems]
+        if len(set(field_types)) > 1:
+            raise ValueError(f"Cannot merge different {field_types=}")
 
-        data = self._reduce_data([item.data for item in batch])
-
-        return self._build_elem(data)
+        return self._reduce_data([item.data for item in elems])
 
 
 @dataclass(frozen=True)
@@ -205,10 +218,25 @@ class MultiModalBatchedField(BaseMultiModalField):
     """
     A :class:`BaseMultiModalField` implementation where an element in the batch
     is obtained by indexing into the first dimension of the underlying data.
+
+    Example:
+
+    .. code-block::
+
+        Input:
+            Data: [[AAAA]
+                   [BBBB]
+                   [CCCC]]
+
+        Output:
+            Element 1: [AAAA]
+            Element 2: [BBBB]
+            Element 3: [CCCC]
     """
 
-    def build_elems(self, batch: NestedTensors) -> list[MultiModalFieldElem]:
-        return [self._build_elem(item) for item in batch]
+    def build_elems(self,
+                    data: NestedTensors) -> Sequence[MultiModalFieldElem]:
+        return [self._build_elem(item) for item in data]
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
@@ -229,14 +257,25 @@ class MultiModalFlatField(BaseMultiModalField):
     """
     A :class:`BaseMultiModalField` implementation where an element in the batch
     is obtained by slicing along the first dimension of the underlying data.
-    """
 
-    def build_elems(
-        self,
-        batch: NestedTensors,
-        slices: Sequence[slice],
-    ) -> list[MultiModalFieldElem]:
-        return [self._build_elem(batch[slice_]) for slice_ in slices]
+    Example:
+
+    .. code-block::
+
+        Input:
+            Slices: [slice(0, 3), slice(3, 7), slice(7, 9)]
+            Data: [AAABBBBCC]
+
+        Output:
+            Element 1: [AAA]
+            Element 2: [BBBB]
+            Element 3: [CC]
+    """
+    slices: Sequence[slice]
+
+    def build_elems(self,
+                    data: NestedTensors) -> Sequence[MultiModalFieldElem]:
+        return [self._build_elem(data[slice_]) for slice_ in self.slices]
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
@@ -250,6 +289,37 @@ class MultiModalFlatField(BaseMultiModalField):
                 return torch.concat(batch)
 
         return [e for elem in batch for e in elem]
+
+
+@dataclass(frozen=True)
+class MultiModalSharedField(BaseMultiModalField):
+    """
+    A :class:`BaseMultiModalField` implementation where an element in the batch
+    is obtained by taking the entirety of the underlying data. This means that
+    the data is the same for each element in the batch.
+
+    Example:
+
+    .. code-block::
+
+        Input:
+            Batch size: 4
+            Data: [XYZ]
+
+        Output:
+            Element 1: [XYZ]
+            Element 2: [XYZ]
+            Element 3: [XYZ]
+            Element 4: [XYZ]
+    """
+    batch_size: int
+
+    def build_elems(self,
+                    data: NestedTensors) -> Sequence[MultiModalFieldElem]:
+        return [self._build_elem(data)] * self.batch_size
+
+    def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
+        return batch[0]
 
 
 class MultiModalFieldConfig:
@@ -279,6 +349,14 @@ class MultiModalFieldConfig:
 
         return MultiModalFieldConfig.flat(modality, slices)
 
+    @staticmethod
+    def shared(modality: str, batch_size: int):
+        return MultiModalFieldConfig(
+            field_cls=MultiModalSharedField,
+            modality=modality,
+            batch_size=batch_size,
+        )
+
     def __init__(
         self,
         field_cls: type[BaseMultiModalField],
@@ -296,8 +374,13 @@ class MultiModalFieldConfig:
         key: str,
         batch: NestedTensors,
     ) -> Sequence[MultiModalFieldElem]:
-        field = self.field_cls(key=key, modality=self.modality)
-        return field.build_elems(batch, **self.field_config)  # type: ignore
+        field = self.field_cls(
+            key=key,
+            modality=self.modality,
+            **self.field_config,
+        )
+
+        return field.build_elems(batch)
 
 
 class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
@@ -372,7 +455,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
                 elems_by_key[key].append(elem)
 
         data = {
-            key: elems[0].field.reduce(elems).data
+            key: elems[0].field.reduce_data(elems)
             for key, elems in elems_by_key.items() if len(elems) > 0
         }
 
