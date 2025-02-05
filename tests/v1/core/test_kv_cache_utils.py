@@ -9,6 +9,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens)
+from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
 
@@ -283,28 +284,33 @@ def test_metrics():
     """
     Test the prefix caching metrics.
     """
+
+    def stats(requests, queries, hits):
+        return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
+
     metrics = PrefixCachingMetrics(interval=5)
     assert metrics.hit_rate == 0.0
 
-    metrics.add_request_query(20, 9)
+    metrics.observe(stats(1, 20, 9))
     # 9 / 20 = 0.45
     assert metrics.hit_rate == 0.45
 
-    for _ in range(4):
-        metrics.add_request_query(20, 4)
+    metrics.observe(stats(4, 80, 16))
 
     # 25 / 100 = 0.25
     assert metrics.hit_rate == 0.25
 
-    metrics.add_request_query(10, 2)
+    metrics.observe(stats(1, 10, 2))
 
     # Remove (20, 9) and add (10, 2): 18 / 90 = 0.2
+    assert metrics.aggregated_requests == 5
     assert metrics.aggregated_query_total == 90
     assert metrics.aggregated_query_hit == 18
     assert metrics.hit_rate == 0.2
 
     metrics.reset()
     assert metrics.hit_rate == 0.0
+    assert metrics.aggregated_requests == 0
     assert metrics.aggregated_query_total == 0
     assert metrics.aggregated_query_hit == 0
     assert not metrics.query_queue

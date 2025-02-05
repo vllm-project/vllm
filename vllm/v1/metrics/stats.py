@@ -1,12 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
     from vllm.outputs import RequestOutput
     from vllm.v1.engine import EngineCoreOutput, FinishReason
+
+
+@dataclass
+class PrefixCacheStats:
+    """Stores prefix cache hit statistics."""
+    reset: bool = False
+    requests: int = 0
+    hits: int = 0
+    queries: int = 0
 
 
 @dataclass
@@ -17,7 +26,9 @@ class SchedulerStats:
     num_waiting_reqs: int = 0
 
     gpu_cache_usage: float = 0.0
-    gpu_prefix_cache_hit_rate: float = 0.0
+
+    prefix_cache_stats: PrefixCacheStats = field(
+        default_factory=PrefixCacheStats)
 
 
 @dataclass

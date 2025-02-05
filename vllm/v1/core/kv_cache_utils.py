@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheSpec,
                                         KVCacheTensor)
+from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -40,33 +41,44 @@ class PrefixCachingMetrics:
     def __init__(self, interval: int = 1000):
         self.interval = interval
         # The current aggregated query total and hit.
+        self.aggregated_requests = 0
         self.aggregated_query_total = 0
         self.aggregated_query_hit = 0
-        # A deque of (num_queries, num_hits) for the most recent requests.
-        self.query_queue: deque[Tuple[int, int]] = deque()
+        # A deque of (requests, queries, hits) for the most recent requests.
+        self.query_queue: deque[Tuple[int, int, int]] = deque()
 
-    def add_request_query(self, num_queries: int, num_hits: int):
-        """Add a request to the metrics. This function is called when
-        a new request is being scheduled and is looking for computed blocks.
-        When there are more than `interval` requests, the oldest request
-        is removed from the metrics.
+    def observe(self, stats: PrefixCacheStats):
+        """Observe the prefix caching for a set of requests.
 
-        Args:
-            num_queries: The number of queries in the request.
-            num_hits: The number of hits in the request.
+        This function is called with information gathered when new requests
+        are being scheduled and are looking for computed blocks.
+
+        When there are more than `interval` requests, the oldest set of
+        requestsare removed from the metrics.
+
+        Stats:
+            reset: Whether reset_prefix_cache was invoked.
+            requests: The number of requests in this update.
+            queries: The number of queries in these requests.
+            hits: The number of hits in these requests.
         """
+        if stats.reset:
+            self.reset()
 
-        self.query_queue.append((num_queries, num_hits))
-        if len(self.query_queue) > self.interval:
-            old_num_queries, old_num_hits = self.query_queue.popleft()
-            self.aggregated_query_total -= old_num_queries
-            self.aggregated_query_hit -= old_num_hits
+        self.query_queue.append((stats.requests, stats.queries, stats.hits))
+        self.aggregated_requests += stats.requests
+        self.aggregated_query_total += stats.queries
+        self.aggregated_query_hit += stats.hits
 
-        self.aggregated_query_total += num_queries
-        self.aggregated_query_hit += num_hits
+        if self.aggregated_requests > self.interval:
+            old_requests, old_queries, old_hits = self.query_queue.popleft()
+            self.aggregated_requests -= old_requests
+            self.aggregated_query_total -= old_queries
+            self.aggregated_query_hit -= old_hits
 
     def reset(self):
         """Reset the metrics."""
+        self.aggregated_requests = 0
         self.aggregated_query_total = 0
         self.aggregated_query_hit = 0
         self.query_queue.clear()
