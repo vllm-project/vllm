@@ -184,12 +184,15 @@ def as_classification_model(cls: _T) -> _T:
             prefix: str = "",
             **kwargs: Any,
         ) -> None:
+            super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
+
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
 
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
+            # override pooler
             self._pooler = Pooler.from_config_with_defaults(
                 pooler_config,
                 pooling_type=PoolingType.STEP,
@@ -197,8 +200,6 @@ def as_classification_model(cls: _T) -> _T:
                 softmax=False,
                 step_tag_id=config.step_tag_id,
             )
-
-            super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
             self.score = RowParallelLinear(config.hidden_size,
                                            config.num_labels,
