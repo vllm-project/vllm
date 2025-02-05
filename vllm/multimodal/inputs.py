@@ -200,7 +200,7 @@ class MultiModalFieldElem:
 
         return ((self.modality, self.key) == (other.modality, other.key)
                 and nested_tensors_equal(self.data, other.data)
-                and self.field == other.field)
+                and type(self.field) == type(other.field))  # noqa: E721
 
 
 @dataclass(frozen=True)
