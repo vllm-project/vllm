@@ -726,14 +726,14 @@ See [this page](#generative-models) for more information on how to use generativ
   * `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc.
   *
   * ✅︎
-  *
+  * \*
 - * `Idefics3ForConditionalGeneration`
   * Idefics3
   * T + I
   * `HuggingFaceM4/Idefics3-8B-Llama3` etc.
   * ✅︎
   *
-  *
+  * ✅︎
 - * `InternVLChatModel`
   * InternVL 2.5, Mono-InternVL, InternVL 2.0
   * T + I<sup>E+</sup>
@@ -799,7 +799,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `NVLM_D_Model`
   * NVLM-D 1.0
-  * T + I<sup>E+</sup>
+  * T + I<sup>+</sup>
   * `nvidia/NVLM-D-72B`, etc.
   *
   * ✅︎
@@ -859,7 +859,11 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 :::{note}
-To use `DeepSeek-VL2` series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
+To use DeepSeek-VL2 series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
+:::
+
+:::{note}
+H2O-VL series models will be available in V1 once we support backends other than FlashAttention.
 :::
 
 :::{note}

@@ -250,7 +250,11 @@ def get_max_image_tokens(self) -> int:
 And thus, we can override the method as:
 
 ```python
-def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+def get_mm_max_tokens_per_item(
+    self,
+    seq_len: int,
+    mm_counts: Mapping[str, int],
+) -> Mapping[str, int]:
     return {"image": self.get_max_image_tokens()}
 ```
 

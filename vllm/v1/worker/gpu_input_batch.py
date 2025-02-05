@@ -325,10 +325,9 @@ class InputBatch:
     def make_sampling_metadata(
         self,
         req_id_output_token_ids: Dict[str, List[int]],
-        skip_copy: bool = False,
-        rejection_sampling: bool = False,
         req_id_to_spec_token_ids: Optional[Dict[str,
                                                 ConstantList[int]]] = None,
+        skip_copy: bool = False,
     ) -> SamplingMetadata:
         if not skip_copy:
             self.temperature[:self.num_reqs].copy_(
@@ -357,6 +356,8 @@ class InputBatch:
 
         output_token_ids: List[List[int]] = []
         spec_token_ids: List[ConstantList[int]] = []
+        rejection_sampling = False
+        req_id_to_spec_token_ids = req_id_to_spec_token_ids or {}
         for req_id in self.req_ids[:self.num_reqs]:
             assert req_id is not None
             # Currently we create a tensor for output_token_ids from scratch
@@ -367,9 +368,12 @@ class InputBatch:
             # TODO - Replace this with incremental update to output token
             # statistics.
             output_token_ids.append(req_id_output_token_ids[req_id])
-            if rejection_sampling:
-                assert req_id_to_spec_token_ids is not None
-                spec_token_ids.append(req_id_to_spec_token_ids[req_id])
+            req_spec_token_ids = req_id_to_spec_token_ids.get(req_id, None)
+            if req_spec_token_ids is not None:
+                spec_token_ids.append(req_spec_token_ids)
+                # If any of the requests require speculative decoding, set the
+                # flag to True.
+                rejection_sampling = True
 
         return SamplingMetadata(
             temperature=self.temperature[:self.num_reqs],

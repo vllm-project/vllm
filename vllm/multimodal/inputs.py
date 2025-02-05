@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import accumulate
 from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, TypeVar,
                     Union, cast, final)
 
@@ -211,6 +212,11 @@ class MultiModalBatchedField(BaseMultiModalField):
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
+            if len(batch) == 1:
+                # An optimization when `batch` contains only one tensor:
+                # - produce exactly same result as `torch.stack(batch)`
+                # - will achieve zero-copy if the tensor is contiguous
+                return batch[0].unsqueeze(0).contiguous()
             first_shape = batch[0].shape
             if all(elem.shape == first_shape for elem in batch):
                 return torch.stack(batch)
@@ -234,6 +240,11 @@ class MultiModalFlatField(BaseMultiModalField):
 
     def _reduce_data(self, batch: list[NestedTensors]) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
+            if len(batch) == 1:
+                # An optimization when `batch` contains only one tensor:
+                # - produce exactly same result as `torch.concat(batch)`
+                # - will achieve zero-copy if the tensor is contiguous
+                return batch[0].contiguous()
             first_shape = batch[0].shape
             if all(elem.shape[1:] == first_shape[1:] for elem in batch):
                 return torch.concat(batch)
@@ -257,6 +268,16 @@ class MultiModalFieldConfig:
             modality=modality,
             slices=slices,
         )
+
+    @staticmethod
+    def flat_from_sizes(modality: str, size_per_item: torch.Tensor):
+        slice_idxs = [0, *accumulate(size_per_item)]
+        slices = [
+            slice(slice_idxs[i], slice_idxs[i + 1])
+            for i in range(len(size_per_item))
+        ]
+
+        return MultiModalFieldConfig.flat(modality, slices)
 
     def __init__(
         self,
@@ -396,6 +417,12 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
             return stacked
 
         tensors_ = cast(list[torch.Tensor], stacked)
+        if len(tensors_) == 1:
+            # An optimization when `tensors_` contains only one tensor:
+            # - produce exactly same result as `torch.stack(tensors_)`
+            # - will achieve zero-copy if the tensor is contiguous
+            return tensors_[0].unsqueeze(0).contiguous()
+
         if any(t.shape != tensors_[0].shape for t in tensors_):
             # The tensors have incompatible shapes and can't be stacked.
             return tensors_
