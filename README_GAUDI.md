@@ -12,7 +12,7 @@ To achieve the best performance, please follow the methods outlined in the
 
 - Ubuntu 22.04 LTS OS
 - Python 3.10
-- Intel Gaudi accelerator
+- Intel Gaudi 2 and 3 AI accelerators
 - Intel Gaudi software version 1.19.0 and above
 
 ## Quick Start Using Dockerfile
