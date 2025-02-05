@@ -39,3 +39,7 @@ void concat_and_cache_mla(torch::Tensor& kv_c, torch::Tensor& k_pe,
 // Just for unittest
 void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
                  const double scale, const std::string& kv_cache_dtype);
+
+void gather_cache(torch::Tensor const& src_cache, torch::Tensor const& dst,
+                  torch::Tensor const& block_table,
+                  torch::Tensor const& cu_seq_lens, int64_t batch_size);

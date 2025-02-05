@@ -1111,6 +1111,13 @@ def convert_fp8(output: torch.Tensor,
     torch.ops._C_cache_ops.convert_fp8(output, input, scale, kv_dtype)
 
 
+def gather_cache(src_cache: torch.Tensor, dst: torch.Tensor,
+                 block_table: torch.Tensor, cu_seq_lens: torch.Tensor,
+                 batch_size: int) -> None:
+    torch.ops._C_cache_ops.gather_cache(src_cache, dst, block_table,
+                                        cu_seq_lens, batch_size)
+
+
 def get_device_attribute(attribute: int, device: int) -> int:
     return torch.ops._C_cuda_utils.get_device_attribute(attribute, device)
 
