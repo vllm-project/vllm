@@ -329,9 +329,17 @@ class GroupCoordinator:
             return input_
 
         if input_.is_cpu:
-            import intel_extension_for_pytorch as ipex
-            ipex.distributed.all_reduce(input_, group=self.device_group)
-            return input_
+            try:
+                import intel_extension_for_pytorch as ipex
+                ipex.distributed.all_reduce(input_, group=self.device_group)
+                return input_
+            except ImportError:
+                """
+                Intel IPEX not found. Falling back to PyTorch native 
+                all_reduce for CPU
+                """
+                torch.distributed.all_reduce(input_, group=self.device_group)
+                return input_
 
         if self.tpu_communicator is not None and \
             not self.tpu_communicator.disabled:
