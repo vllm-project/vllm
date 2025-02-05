@@ -45,10 +45,7 @@ class LogprobsProcessor:
             num_logprobs=num_logprobs,
         )
 
-    def _update_sample_logprobs(
-        self,
-        logprobs_lists: Optional[LogprobsLists],
-    ) -> None:
+    def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
         """Update with sample logprobs from EngineCore.
 
         Outer lists are only of len > 1 if EngineCore made
@@ -57,10 +54,7 @@ class LogprobsProcessor:
         Args:
           logprobs_lists: the lists of logprob tokens, logprobs, and ranks.
 
-        None if logprobs are not enabled for this req.
         """
-        if logprobs_lists is None:
-            return
 
         assert self.num_logprobs is not None
         assert self.logprobs is not None
@@ -91,22 +85,15 @@ class LogprobsProcessor:
 
     def _update_prompt_logprobs(
         self,
-        prompt_logprobs_tensors: Optional[LogprobsTensors],
+        prompt_logprobs_tensors: LogprobsTensors,
     ) -> None:
         """Update with prompt logprobs from EngineCore.
-
-        prompt_logprobs_tensors will be None if if prompt logprobs are
-        disabled or prefill is completed.
 
         Args:
           prompt_logprobs_tensors: tuple containing the prompt logprobs
                                    tensors.
 
-        Return:
-          Prompt logprobs, if required for this request
         """
-        if prompt_logprobs_tensors is None:
-            return
 
         # Prompt logprobs are enabled.
         assert self.num_prompt_logprobs is not None
@@ -201,5 +188,7 @@ class LogprobsProcessor:
         }
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
-        self._update_sample_logprobs(output.new_logprobs)
-        self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)
+        if output.new_logprobs is not None:
+            self._update_sample_logprobs(output.new_logprobs)
+        if output.new_prompt_logprobs_tensors is not None:
+            self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)
