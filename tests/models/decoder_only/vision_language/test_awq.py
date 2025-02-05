@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional, Type
 
 import pytest
 import torch
 
-from vllm.multimodal.utils import rescale_image_size
+from vllm.multimodal.image import rescale_image_size
 
 from ....conftest import IMAGE_ASSETS, VllmRunner, _ImageAssets
 from ...utils import check_logprobs_close

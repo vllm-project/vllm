@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -105,27 +107,28 @@ class TeleChat2Model(LlamaModel):
 
 class TeleChat2ForCausalLM(LlamaForCausalLM):
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "transformer.": "model.",
+        },
+        orig_to_new_substr={
+            ".h.": ".layers.",
+            ".self_attention.": ".self_attn.",
+            ".word_embeddings.": ".embed_tokens.",
+            ".dense.": ".o_proj.",
+            ".ln_f.": ".norm.",
+        },
+    )
+
     def _init_model(self, vllm_config: VllmConfig, prefix: str = ""):
         return TeleChat2Model(vllm_config=vllm_config, prefix=prefix)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
 
-        hf_to_vllm_mapper = WeightsMapper(
-            orig_to_new_prefix={
-                "transformer.": "model.",
-            },
-            orig_to_new_substr={
-                ".h.": ".layers.",
-                ".self_attention.": ".self_attn.",
-                ".word_embeddings.": ".embed_tokens.",
-                ".dense.": ".o_proj.",
-                ".ln_f.": ".norm.",
-            },
-        )
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights, mapper=hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

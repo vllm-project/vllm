@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Union
 
 import torch.fx
@@ -5,7 +7,8 @@ from torch import SymInt
 
 from vllm.logger import init_logger
 
-from .vllm_inductor_pass import VllmInductorPass, is_func
+from .fx_utils import is_func
+from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 

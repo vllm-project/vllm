@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import glob
 
 requires_files = glob.glob('requirements*.txt')

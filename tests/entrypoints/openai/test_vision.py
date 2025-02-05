@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, List
 
 import openai
@@ -83,6 +85,7 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
         messages=messages,
         max_completion_tokens=10,
         logprobs=True,
+        temperature=0.0,
         top_logprobs=5)
     assert len(chat_completion.choices) == 1
 
@@ -175,6 +178,7 @@ async def test_single_chat_session_image_base64encoded(
         messages=messages,
         max_completion_tokens=10,
         logprobs=True,
+        temperature=0.0,
         top_logprobs=5)
     assert len(chat_completion.choices) == 1
 
@@ -195,6 +199,7 @@ async def test_single_chat_session_image_base64encoded(
         model=model_name,
         messages=messages,
         max_completion_tokens=10,
+        temperature=0.0,
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0

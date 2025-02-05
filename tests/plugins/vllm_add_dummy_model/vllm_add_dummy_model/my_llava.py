@@ -1,16 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Optional
 
 import torch
 
-from vllm.model_executor.models.llava import (LlavaForConditionalGeneration,
-                                              LlavaProcessor,
-                                              get_max_llava_image_tokens)
+from vllm.model_executor.models.llava import (LlavaDummyInputsBuilder,
+                                              LlavaForConditionalGeneration,
+                                              LlavaMultiModalProcessor,
+                                              LlavaProcessingInfo)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
-@MULTIMODAL_REGISTRY.register_processor(LlavaProcessor)
+@MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
+                                        info=LlavaProcessingInfo,
+                                        dummy_inputs=LlavaDummyInputsBuilder)
 class MyLlava(LlavaForConditionalGeneration):
 
     def compute_logits(

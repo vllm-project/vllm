@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
@@ -13,6 +15,7 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 
 
 class MyGemma2Embedding(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -62,8 +65,8 @@ class MyGemma2Embedding(nn.Module):
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
-        weights = hf_to_vllm_mapper.apply(weights)
+
+        weights = self.hf_to_vllm_mapper.apply(weights)
         weights = ((name, data) for name, data in weights
                    if not name.startswith("lm_head."))
         return self.model.load_weights(weights)

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import importlib.util
 import math
 from array import array
@@ -35,7 +37,7 @@ def test_find_array(monkeypatch):
     from vllm.model_executor.models.gritlm import GritLMPooler
 
     # Create an LLM object to get the model config.
-    llm = vllm.LLM(MODEL_NAME, task="embedding", max_model_len=MAX_MODEL_LEN)
+    llm = vllm.LLM(MODEL_NAME, task="embed", max_model_len=MAX_MODEL_LEN)
     pooler = GritLMPooler(model_config=llm.llm_engine.model_config)
 
     arr = _arr([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
@@ -55,7 +57,7 @@ def server_embedding():
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("VLLM_ATTENTION_BACKEND", "XFORMERS")
 
-        args = ["--task", "embedding", "--max_model_len", str(MAX_MODEL_LEN)]
+        args = ["--task", "embed", "--max_model_len", str(MAX_MODEL_LEN)]
         with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
             yield remote_server
 
@@ -141,7 +143,7 @@ def test_gritlm_offline_embedding(monkeypatch):
 
     queries, q_instruction, documents, d_instruction = get_test_data()
 
-    llm = vllm.LLM(MODEL_NAME, task="embedding", max_model_len=MAX_MODEL_LEN)
+    llm = vllm.LLM(MODEL_NAME, task="embed", max_model_len=MAX_MODEL_LEN)
 
     d_rep = run_llm_encode(
         llm,

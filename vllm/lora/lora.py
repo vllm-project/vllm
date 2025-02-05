@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional
 from typing import Sequence as GenericSequence
 
@@ -67,15 +69,9 @@ class LoRALayerWeights:
         peft_helper: PEFTHelper,
         embeddings_tensor: Optional[torch.Tensor] = None,
     ) -> "LoRALayerWeights":
-        return cls(
-            module_name,
-            peft_helper.r,
-            peft_helper.lora_alpha,
-            None,
-            None,
-            None,
-            embeddings_tensor,
-        )
+        return cls(module_name, peft_helper.r, peft_helper.lora_alpha, None,
+                   None, None, embeddings_tensor,
+                   peft_helper.vllm_lora_scaling_factor)
 
     @classmethod
     def create_dummy_lora_weights(

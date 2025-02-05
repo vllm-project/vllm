@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 from typing import Dict, List, Optional
 
@@ -58,7 +60,7 @@ test_settings = [
         model_args=["--task", "embed"],
         pp_size=1,
         tp_size=1,
-        attn_backend="FLASHINFER",
+        attn_backend="FLASH_ATTN",
         method="encode",
         fullgraph=True,
     ),

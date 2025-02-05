@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # ruff: noqa: SIM117
 from pathlib import Path
 from typing import List, Optional, Tuple

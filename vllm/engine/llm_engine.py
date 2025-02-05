@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 import time
 from collections import Counter as collectionsCounter
@@ -5,8 +7,8 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
-                    Iterable, List, Mapping, NamedTuple, Optional)
+from typing import (TYPE_CHECKING, Callable, ClassVar, Deque, Dict, Iterable,
+                    List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
@@ -28,8 +30,6 @@ from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
-from vllm.executor.gpu_executor import GPUExecutor
-from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
@@ -46,14 +46,12 @@ from vllm.outputs import (PoolingRequestOutput, RequestOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
-                           ParallelSampleSequenceGroup, Sequence,
-                           SequenceGroup, SequenceGroupBase,
-                           SequenceGroupMetadata, SequenceGroupOutput,
-                           SequenceStatus)
+from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
+                           PoolingSequenceGroupOutput, Sequence, SequenceGroup,
+                           SequenceGroupBase, SequenceGroupMetadata,
+                           SequenceGroupOutput, SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
-from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import (
@@ -65,20 +63,6 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
-
-
-def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
-    config = try_get_generation_config(
-        model_config.model,
-        trust_remote_code=model_config.trust_remote_code,
-        revision=model_config.revision,
-    )
-
-    if config is None:
-        return {}
-
-    return config.to_diff_dict()
-
 
 _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 _O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
@@ -149,7 +133,7 @@ class LLMEngine:
     and the :class:`AsyncLLMEngine` class wraps this class for online serving.
 
     The config arguments are derived from :class:`~vllm.EngineArgs`. (See
-    :ref:`engine_args`)
+    :ref:`engine-args`)
 
     Args:
         model_config: The configuration related to the LLM model.
@@ -248,7 +232,7 @@ class LLMEngine:
         )
 
         logger.info(
-            "Initializing an LLM engine (v%s) with config: %r,"
+            "Initializing a V0 LLM engine (v%s) with config: %s, "
             "use_cached_outputs=%s, ",
             VLLM_VERSION,
             vllm_config,
@@ -275,8 +259,8 @@ class LLMEngine:
             return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
         self.seq_counter = Counter()
-        self.generation_config_fields = _load_generation_config_dict(
-            self.model_config)
+        self.generation_config_fields = (
+            self.model_config.try_get_generation_config())
 
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
@@ -458,64 +442,31 @@ class LLMEngine:
                 raise TypeError(
                     "distributed_executor_backend must be a subclass of "
                     f"ExecutorBase. Got {distributed_executor_backend}.")
-            if distributed_executor_backend.uses_ray:  # type: ignore
-                initialize_ray_cluster(engine_config.parallel_config)
             executor_class = distributed_executor_backend
-        elif engine_config.device_config.device_type == "neuron":
-            from vllm.executor.neuron_executor import NeuronExecutor
-            executor_class = NeuronExecutor
-        elif engine_config.device_config.device_type == "tpu":
+        elif engine_config.parallel_config.world_size > 1:
             if distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
-                from vllm.executor.ray_tpu_executor import RayTPUExecutor
-                executor_class = RayTPUExecutor
-            else:
-                assert distributed_executor_backend is None
-                from vllm.executor.tpu_executor import TPUExecutor
-                executor_class = TPUExecutor
-        elif engine_config.device_config.device_type == "cpu":
-            from vllm.executor.cpu_executor import CPUExecutor
-            executor_class = CPUExecutor
-        elif engine_config.device_config.device_type == "hpu":
-            if distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
-                from vllm.executor.ray_hpu_executor import RayHPUExecutor
-                executor_class = RayHPUExecutor
-            else:
-                from vllm.executor.hpu_executor import HPUExecutor
-                executor_class = HPUExecutor
-        elif engine_config.device_config.device_type == "openvino":
-            from vllm.executor.openvino_executor import OpenVINOExecutor
-            executor_class = OpenVINOExecutor
-        elif engine_config.device_config.device_type == "xpu":
-            if distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
-                from vllm.executor.ray_xpu_executor import RayXPUExecutor
-                executor_class = RayXPUExecutor
+                from vllm.executor.ray_distributed_executor import (
+                    RayDistributedExecutor)
+                executor_class = RayDistributedExecutor
             elif distributed_executor_backend == "mp":
-                # FIXME(kunshang):
-                # spawn needs calling `if __name__ == '__main__':``
-                # fork is not supported for xpu start new process.
-                logger.error(
-                    "Both start methods (spawn and fork) have issue "
-                    "on XPU if you use mp backend, Please try ray instead.")
-            else:
-                from vllm.executor.xpu_executor import XPUExecutor
-                executor_class = XPUExecutor
-        elif distributed_executor_backend == "ray":
-            initialize_ray_cluster(engine_config.parallel_config)
-            from vllm.executor.ray_gpu_executor import RayGPUExecutor
-            executor_class = RayGPUExecutor
-        elif distributed_executor_backend == "mp":
-            from vllm.executor.multiproc_gpu_executor import (
-                MultiprocessingGPUExecutor)
-            assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
-                "multiprocessing distributed executor backend does not "
-                "support VLLM_USE_RAY_SPMD_WORKER=1")
-            executor_class = MultiprocessingGPUExecutor
+                from vllm.executor.mp_distributed_executor import (
+                    MultiprocessingDistributedExecutor)
+                assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
+                    "multiprocessing distributed executor backend does not "
+                    "support VLLM_USE_RAY_SPMD_WORKER=1")
+                executor_class = MultiprocessingDistributedExecutor
+            elif distributed_executor_backend == "uni":
+                # JAX-style, single-process, multi-device executor.
+                from vllm.executor.uniproc_executor import UniProcExecutor
+                executor_class = UniProcExecutor
+            elif distributed_executor_backend == "external_launcher":
+                # executor with external launcher
+                from vllm.executor.uniproc_executor import (  # noqa
+                    ExecutorWithExternalLauncher)
+                executor_class = ExecutorWithExternalLauncher
         else:
-            from vllm.executor.gpu_executor import GPUExecutor
-            executor_class = GPUExecutor
+            from vllm.executor.uniproc_executor import UniProcExecutor
+            executor_class = UniProcExecutor
         return executor_class
 
     @classmethod
@@ -740,7 +691,9 @@ class LLMEngine:
                 :class:`~vllm.PoolingParams` for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+            lora_request: The LoRA request to add.
             trace_headers: OpenTelemetry trace headers.
+            prompt_adapter_request: The prompt adapter request to add.
             priority: The priority of the request.
                 Only applicable with priority scheduling.
 
@@ -963,12 +916,20 @@ class LLMEngine:
         """
         return self.scheduler[virtual_engine].has_unfinished_seqs()
 
+    def reset_prefix_cache(self) -> bool:
+        """Reset prefix cache for all devices."""
+
+        success = True
+        for scheduler in self.scheduler:
+            success = success and scheduler.reset_prefix_cache()
+        return success
+
     @staticmethod
     def _process_sequence_group_outputs(
         seq_group: SequenceGroup,
-        outputs: List[EmbeddingSequenceGroupOutput],
+        outputs: List[PoolingSequenceGroupOutput],
     ) -> None:
-        seq_group.embeddings = outputs[0].embeddings
+        seq_group.pooled_data = outputs[0].data
 
         for seq in seq_group.get_seqs():
             seq.status = SequenceStatus.FINISHED_STOPPED
@@ -1051,8 +1012,23 @@ class LLMEngine:
                      self.speculative_config
             # Organize outputs by [step][sequence group] instead of
             # [sequence group][step].
-            outputs_by_sequence_group = create_output_by_sequence_group(
-                outputs, num_seq_groups=len(seq_group_metadata_list))
+            if self.scheduler_config.is_multi_step:
+                outputs_by_sequence_group = create_output_by_sequence_group(
+                    outputs, len(seq_group_metadata_list))
+            elif self.speculative_config:
+                # Decodes are multi-steps while prefills are not, outputting at
+                # most 1 token. Separate them so that we can trigger chunk
+                # processing without having to pad or copy over prompts K times
+                # to match decodes structure (costly with prompt_logprobs).
+                num_prefills = sum(sg.is_prompt
+                                   for sg in seq_group_metadata_list)
+                prefills, decodes = outputs[:num_prefills], outputs[
+                    num_prefills:]
+                outputs_by_sequence_group = create_output_by_sequence_group(
+                    decodes,
+                    num_seq_groups=len(seq_group_metadata_list) - num_prefills)
+                outputs_by_sequence_group = [p.outputs for p in prefills
+                                             ] + outputs_by_sequence_group
             # We have outputs for multiple steps submitted in a single burst,
             # so invalidate is_first_step_output.
             is_first_step_output = None
@@ -1140,6 +1116,8 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
+            if not seq_group.is_prefill():
+                seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
@@ -1182,6 +1160,8 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
+            if not seq_group.is_prefill():
+                seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
@@ -1702,7 +1682,7 @@ class LLMEngine:
                     # If the seq_group just finished the prefill state
                     # get TTFT.
                     if not seq_group.is_prefill():
-                        latency = seq_group.get_last_latency(now)
+                        latency = seq_group.get_last_token_latency()
                         time_to_first_tokens_iter.append(latency)
 
                         # One generation token per finished prefill.
@@ -1710,7 +1690,7 @@ class LLMEngine:
                             seq_group.num_seqs())
                 else:
                     # TPOTs.
-                    latency = seq_group.get_last_latency(now)
+                    latency = seq_group.get_last_token_latency()
                     time_per_output_tokens_iter.append(latency)
                     if seq_group.state.current_step == 0:
                         # For async_output_proc, the do_log_stats()
@@ -1784,8 +1764,8 @@ class LLMEngine:
                                num_prompt_tokens_iter)
         # Spec decode, if enabled, emits specialized metrics from the worker in
         # sampler output.
-        if model_output and (model_output[0].spec_decode_worker_metrics
-                             is not None):
+        if model_output and isinstance(model_output[0], SamplerOutput) and (
+                model_output[0].spec_decode_worker_metrics is not None):
             spec_decode_metrics = model_output[0].spec_decode_worker_metrics
         else:
             spec_decode_metrics = None
@@ -1857,26 +1837,26 @@ class LLMEngine:
     def list_prompt_adapters(self) -> List[int]:
         return self.model_executor.list_prompt_adapters()
 
+    def start_profile(self) -> None:
+        self.model_executor.start_profile()
+
+    def stop_profile(self) -> None:
+        self.model_executor.stop_profile()
+
+    def sleep(self, level: int = 1) -> None:
+        assert self.vllm_config.model_config.enable_sleep_mode, (
+            "Sleep mode is not enabled in the model config")
+        self.model_executor.sleep(level=level)
+
+    def wake_up(self) -> None:
+        assert self.vllm_config.model_config.enable_sleep_mode, (
+            "Sleep mode is not enabled in the model config")
+        self.model_executor.wake_up()
+
     def check_health(self) -> None:
         if self.tokenizer:
             self.tokenizer.check_health()
         self.model_executor.check_health()
-
-    def start_profile(self) -> None:
-        # using type instead of isinstance to check to avoid capturing
-        # inherited classes (MultiprocessingGPUExecutor)
-        if type(self.model_executor) == GPUExecutor:  # noqa: E721
-            self.model_executor.start_profile()
-        else:
-            self.model_executor._run_workers("start_profile")
-
-    def stop_profile(self) -> None:
-        # using type instead of isinstance to check to avoid capturing
-        # inherited classes (MultiprocessingGPUExecutor)
-        if type(self.model_executor) == GPUExecutor:  # noqa: E721
-            self.model_executor.stop_profile()
-        else:
-            self.model_executor._run_workers("stop_profile")
 
     def is_tracing_enabled(self) -> bool:
         return self.tracer is not None
@@ -1912,46 +1892,44 @@ class LLMEngine:
             metrics = seq_group.metrics
             ttft = metrics.first_token_time - metrics.arrival_time
             e2e_time = metrics.finished_time - metrics.arrival_time
-            # attribute names are based on
-            # https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/llm-spans.md
-            seq_span.set_attribute(SpanAttributes.LLM_RESPONSE_MODEL,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_RESPONSE_MODEL,
                                    self.model_config.model)
-            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_ID,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID,
                                    seq_group.request_id)
-            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_TEMPERATURE,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TEMPERATURE,
                                    seq_group.sampling_params.temperature)
-            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_TOP_P,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P,
                                    seq_group.sampling_params.top_p)
-            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_MAX_TOKENS,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS,
                                    seq_group.sampling_params.max_tokens)
-            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_N,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N,
                                    seq_group.sampling_params.n)
-            seq_span.set_attribute(SpanAttributes.LLM_USAGE_NUM_SEQUENCES,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_USAGE_NUM_SEQUENCES,
                                    seq_group.num_seqs())
-            seq_span.set_attribute(SpanAttributes.LLM_USAGE_PROMPT_TOKENS,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS,
                                    len(seq_group.prompt_token_ids))
             seq_span.set_attribute(
-                SpanAttributes.LLM_USAGE_COMPLETION_TOKENS,
+                SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
                 sum([
                     seq.get_output_len()
                     for seq in seq_group.get_finished_seqs()
                 ]))
-            seq_span.set_attribute(SpanAttributes.LLM_LATENCY_TIME_IN_QUEUE,
+            seq_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
                                    metrics.time_in_queue)
             seq_span.set_attribute(
-                SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
-            seq_span.set_attribute(SpanAttributes.LLM_LATENCY_E2E, e2e_time)
+                SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
+            seq_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E, e2e_time)
             if metrics.scheduler_time is not None:
                 seq_span.set_attribute(
-                    SpanAttributes.LLM_LATENCY_TIME_IN_SCHEDULER,
+                    SpanAttributes.GEN_AI_LATENCY_TIME_IN_SCHEDULER,
                     metrics.scheduler_time)
             if metrics.model_forward_time is not None:
                 seq_span.set_attribute(
-                    SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_FORWARD,
+                    SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD,
                     metrics.model_forward_time / 1000.0)
             if metrics.model_execute_time is not None:
                 seq_span.set_attribute(
-                    SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_EXECUTE,
+                    SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE,
                     metrics.model_execute_time)
 
     def _validate_model_inputs(self, inputs: ProcessorInputs,

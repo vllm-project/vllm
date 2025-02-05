@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
 
@@ -97,6 +99,45 @@ def sample_complex_json_schema():
             }
         },
         "required": ["score", "grade", "email", "tags"]
+    }
+
+
+@pytest.fixture
+def sample_definition_json_schema():
+    return {
+        '$defs': {
+            'Step': {
+                'properties': {
+                    'explanation': {
+                        'title': 'Explanation',
+                        'type': 'string'
+                    },
+                    'output': {
+                        'title': 'Output',
+                        'type': 'string'
+                    }
+                },
+                'required': ['explanation', 'output'],
+                'title': 'Step',
+                'type': 'object'
+            }
+        },
+        'properties': {
+            'steps': {
+                'items': {
+                    '$ref': '#/$defs/Step'
+                },
+                'title': 'Steps',
+                'type': 'array'
+            },
+            'final_answer': {
+                'title': 'Final Answer',
+                'type': 'string'
+            }
+        },
+        'required': ['steps', 'final_answer'],
+        'title': 'MathReasoning',
+        'type': 'object'
     }
 
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Verify that seeded random sampling is deterministic.
 
 Run `pytest tests/samplers/test_seeded_generate.py`.
@@ -31,7 +32,7 @@ def test_random_sample_with_seed(
 
     sampling_params = SamplingParams(
         # Parameters to ensure sufficient randomness
-        temperature=2.0,
+        temperature=3.0,
         top_p=min(random.random() + 0.3, 1),
         top_k=random.randint(5, 20),
         n=random.randint(1, 10),
@@ -75,3 +76,8 @@ def test_random_sample_with_seed(
         # verify requests with the same seed match
         assert outputs[1] == outputs[4]
         assert outputs[2] == outputs[5]
+
+        # verify generations within the same parallel sampling group differ
+        for output in outputs:
+            for sub_output_a, sub_output_b in combinations(output, 2):
+                assert sub_output_a != sub_output_b

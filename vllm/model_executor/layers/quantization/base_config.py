@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import inspect
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Type
@@ -133,3 +135,6 @@ class QuantizationConfig(ABC):
             method.
         """
         raise NotImplementedError
+
+    def get_cache_scale(self, name: str) -> Optional[str]:
+        return None

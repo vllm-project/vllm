@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 
 import torch
@@ -14,10 +16,6 @@ from vllm.logger import init_logger
 from .inductor_pass import InductorPass
 
 logger = init_logger(__name__)
-
-
-def is_func(node: torch.fx.Node, target) -> bool:
-    return node.op == "call_function" and node.target == target
 
 
 class VllmInductorPass(InductorPass):

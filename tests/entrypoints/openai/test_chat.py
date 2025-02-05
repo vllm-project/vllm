@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # imports for guided decoding tests
 import json
 import re
@@ -16,6 +18,8 @@ from .test_completion import zephyr_lora_files  # noqa: F401
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+
+GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
 
 
 @pytest.fixture(scope="module")
@@ -464,8 +468,7 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
 # will fail on the second `guided_decoding_backend` even when I swap their order
 # (ref: https://github.com/vllm-project/vllm/pull/5526#issuecomment-2173772256)
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_choice_chat(client: openai.AsyncOpenAI,
                                   guided_decoding_backend: str,
                                   sample_guided_choice):
@@ -482,6 +485,7 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=10,
+        temperature=0.7,
         extra_body=dict(guided_choice=sample_guided_choice,
                         guided_decoding_backend=guided_decoding_backend))
     choice1 = chat_completion.choices[0].message.content
@@ -496,6 +500,7 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=10,
+        temperature=0.7,
         extra_body=dict(guided_choice=sample_guided_choice,
                         guided_decoding_backend=guided_decoding_backend))
     choice2 = chat_completion.choices[0].message.content
@@ -504,8 +509,7 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_json_chat(client: openai.AsyncOpenAI,
                                 guided_decoding_backend: str,
                                 sample_json_schema):
@@ -552,8 +556,7 @@ async def test_guided_json_chat(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_regex_chat(client: openai.AsyncOpenAI,
                                  guided_decoding_backend: str, sample_regex):
     messages = [{
@@ -611,8 +614,7 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
                                            guided_decoding_backend: str,
                                            sample_guided_choice):
@@ -644,8 +646,7 @@ async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_named_tool_use(client: openai.AsyncOpenAI,
                               guided_decoding_backend: str,
                               sample_json_schema):
@@ -679,7 +680,8 @@ async def test_named_tool_use(client: openai.AsyncOpenAI,
             "function": {
                 "name": "dummy_function_name"
             }
-        })
+        },
+        extra_body=dict(guided_decoding_backend=guided_decoding_backend))
     message = chat_completion.choices[0].message
     assert len(message.content) == 0
     json_string = message.tool_calls[0].function.arguments
@@ -714,6 +716,7 @@ async def test_named_tool_use(client: openai.AsyncOpenAI,
                 "name": "dummy_function_name"
             }
         },
+        extra_body=dict(guided_decoding_backend=guided_decoding_backend),
         stream=True)
 
     output = []
@@ -736,10 +739,8 @@ async def test_named_tool_use(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", ["outlines"])
-async def test_required_tool_use_not_yet_supported(
-        client: openai.AsyncOpenAI, guided_decoding_backend: str,
-        sample_json_schema):
+async def test_required_tool_use_not_yet_supported(client: openai.AsyncOpenAI,
+                                                   sample_json_schema):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -783,9 +784,7 @@ async def test_required_tool_use_not_yet_supported(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend", ["outlines"])
 async def test_inconsistent_tool_choice_and_tools(client: openai.AsyncOpenAI,
-                                                  guided_decoding_backend: str,
                                                   sample_json_schema):
     messages = [{
         "role": "system",

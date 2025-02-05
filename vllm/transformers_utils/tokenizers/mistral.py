@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import re
 from dataclasses import dataclass
@@ -6,20 +8,18 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
-from mistral_common.tokens.tokenizers.base import SpecialTokens
-# yapf: disable
-from mistral_common.tokens.tokenizers.mistral import (
-    MistralTokenizer as PublicMistralTokenizer)
-# yapf: enable
-from mistral_common.tokens.tokenizers.sentencepiece import (
-    SentencePieceTokenizer)
-from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
-                                                     Tekkenizer)
 
 from vllm.logger import init_logger
+from vllm.utils import is_list_of
 
 if TYPE_CHECKING:
+    # make sure `mistral_common` is lazy imported,
+    # so that users who only use non-mistral models
+    # will not be bothered by the dependency.
+    from mistral_common.protocol.instruct.request import ChatCompletionRequest
+    from mistral_common.tokens.tokenizers.mistral import (
+        MistralTokenizer as PublicMistralTokenizer)
+
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 logger = init_logger(__name__)
@@ -27,10 +27,10 @@ logger = init_logger(__name__)
 
 @dataclass
 class Encoding:
-    input_ids: List[int]
+    input_ids: Union[List[int], List[List[int]]]
 
 
-def maybe_serialize_tool_calls(request: ChatCompletionRequest):
+def maybe_serialize_tool_calls(request: "ChatCompletionRequest"):
     # SEE: https://github.com/vllm-project/vllm/pull/9951
     # Credits go to: @gcalmettes
     # NOTE: There is currently a bug in pydantic where attributes
@@ -105,12 +105,16 @@ def find_tokenizer_file(files: List[str]):
 
 class MistralTokenizer:
 
-    def __init__(self, tokenizer: PublicMistralTokenizer) -> None:
+    def __init__(self, tokenizer: "PublicMistralTokenizer") -> None:
         self.mistral = tokenizer
         self.instruct = tokenizer.instruct_tokenizer
 
         tokenizer_ = tokenizer.instruct_tokenizer.tokenizer
+        from mistral_common.tokens.tokenizers.tekken import (
+            SpecialTokenPolicy, Tekkenizer)
         self.is_tekken = isinstance(tokenizer_, Tekkenizer)
+        from mistral_common.tokens.tokenizers.sentencepiece import (
+            SentencePieceTokenizer)
         self.is_spm = isinstance(tokenizer_, SentencePieceTokenizer)
         if self.is_tekken:
             # Make sure special tokens will not raise
@@ -150,6 +154,8 @@ class MistralTokenizer:
             assert Path(
                 path_or_repo_id).is_file(), f"Invalid path: {path_or_repo_id}"
 
+        from mistral_common.tokens.tokenizers.mistral import (
+            MistralTokenizer as PublicMistralTokenizer)
         mistral_tokenizer = PublicMistralTokenizer.from_file(tokenizer_file)
         return cls(mistral_tokenizer)
 
@@ -178,6 +184,8 @@ class MistralTokenizer:
     # by the guided structured output backends.
     @property
     def all_special_tokens_extended(self) -> List[str]:
+        from mistral_common.tokens.tokenizers.base import SpecialTokens
+
         # tekken defines its own extended special tokens list
         if hasattr(self.tokenizer, "SPECIAL_TOKENS"):
             special_tokens = self.tokenizer.SPECIAL_TOKENS
@@ -223,17 +231,25 @@ class MistralTokenizer:
 
     def __call__(
         self,
-        prompt: str,
+        prompt: Union[str, List[str], List[int]],
         add_special_tokens: bool = False,
         truncation: bool = False,
         max_length: Optional[int] = None,
     ):
-        # Mistral Tokenizers should not add special tokens
-        input_ids = self.encode(prompt)
-
-        if truncation:
-            input_ids = input_ids[:max_length]
-
+        input_ids: Union[List[int], List[List[int]]]
+        # For List[str], original prompt text
+        if is_list_of(prompt, str):
+            input_ids_: List[List[int]] = []
+            for p in prompt:
+                each_input_ids = self.encode_one(p, truncation, max_length)
+                input_ids_.append(each_input_ids)
+            input_ids = input_ids_
+        # For List[int], apply chat template output, already tokens.
+        elif is_list_of(prompt, int):
+            input_ids = prompt
+        # For str, single prompt text
+        else:
+            input_ids = self.encode_one(prompt, truncation, max_length)
         return Encoding(input_ids=input_ids)
 
     def get_vocab(self) -> Dict[str, int]:
@@ -244,6 +260,19 @@ class MistralTokenizer:
     def get_added_vocab(self) -> Dict[str, int]:
         # Mistral tokenizers have no added vocabulary
         return {}
+
+    def encode_one(
+        self,
+        prompt: str,
+        truncation: bool = False,
+        max_length: Optional[int] = None,
+    ) -> List[int]:
+        # Mistral Tokenizers should not add special tokens
+        input_ids = self.encode(prompt)
+
+        if truncation:
+            input_ids = input_ids[:max_length]
+        return input_ids
 
     def encode(self, prompt: str) -> List[int]:
         # `encode` should only be used for prompt completion
@@ -260,6 +289,8 @@ class MistralTokenizer:
         if last_message["role"] == "assistant":
             last_message["prefix"] = True
 
+        from mistral_common.protocol.instruct.request import (
+            ChatCompletionRequest)
         request = ChatCompletionRequest(messages=messages,
                                         tools=tools)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
@@ -268,6 +299,7 @@ class MistralTokenizer:
         return encoded.tokens
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
+        from mistral_common.tokens.tokenizers.base import SpecialTokens
         if self.is_tekken:
             tokens = [
                 t for t in tokens
@@ -314,12 +346,15 @@ class MistralTokenizer:
 
             if regular_tokens:
                 decoded_list.append(
-                    self.decode(regular_tokens))  # type: ignore
+                    self.tokenizer.decode(regular_tokens))  # type: ignore
 
             decoded = ''.join(decoded_list)
 
         return decoded
 
+    # WARN: Outlines logits processors can overwrite this method.
+    # See: guided_decoding/outlines_logits_processors.py::_adapt_tokenizer
+    # for more.
     def decode(self,
                ids: Union[List[int], int],
                skip_special_tokens: bool = True) -> str:
@@ -336,6 +371,8 @@ class MistralTokenizer:
         ids: List[int],
         skip_special_tokens: bool = True,
     ) -> List[str]:
+        from mistral_common.tokens.tokenizers.base import SpecialTokens
+
         # TODO(Patrick) - potentially allow special tokens to not be skipped
         assert (
             skip_special_tokens
