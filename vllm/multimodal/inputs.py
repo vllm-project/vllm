@@ -259,22 +259,8 @@ class BaseMultiModalField(ABC):
 @dataclass(frozen=True)
 class MultiModalBatchedField(BaseMultiModalField):
     """
-    A :class:`BaseMultiModalField` implementation where an element in the batch
-    is obtained by indexing into the first dimension of the underlying data.
-
-    Example:
-
-    .. code-block::
-
-        Input:
-            Data: [[AAAA]
-                   [BBBB]
-                   [CCCC]]
-
-        Output:
-            Element 1: [AAAA]
-            Element 2: [BBBB]
-            Element 3: [CCCC]
+    See also:
+        :func:`MultiModalFieldConfig.batched`
     """
 
     def build_elems(
@@ -303,21 +289,9 @@ class MultiModalBatchedField(BaseMultiModalField):
 @dataclass(frozen=True)
 class MultiModalFlatField(BaseMultiModalField):
     """
-    A :class:`BaseMultiModalField` implementation where an element in the batch
-    is obtained by slicing along the first dimension of the underlying data.
-
-    Example:
-
-    .. code-block::
-
-        Input:
-            Slices: [slice(0, 3), slice(3, 7), slice(7, 9)]
-            Data: [AAABBBBCC]
-
-        Output:
-            Element 1: [AAA]
-            Element 2: [BBBB]
-            Element 3: [CC]
+    See also:
+        :func:`MultiModalFieldConfig.flat`
+        :func:`MultiModalFieldConfig.flat_from_sizes`
     """
     slices: Sequence[slice]
 
@@ -347,23 +321,8 @@ class MultiModalFlatField(BaseMultiModalField):
 @dataclass(frozen=True)
 class MultiModalSharedField(BaseMultiModalField):
     """
-    A :class:`BaseMultiModalField` implementation where an element in the batch
-    is obtained by taking the entirety of the underlying data. This means that
-    the data is the same for each element in the batch.
-
-    Example:
-
-    .. code-block::
-
-        Input:
-            Batch size: 4
-            Data: [XYZ]
-
-        Output:
-            Element 1: [XYZ]
-            Element 2: [XYZ]
-            Element 3: [XYZ]
-            Element 4: [XYZ]
+    See also:
+        :func:`MultiModalFieldConfig.shared`
     """
     batch_size: int
 
@@ -384,6 +343,28 @@ class MultiModalFieldConfig:
 
     @staticmethod
     def batched(modality: str):
+        """
+        Defines a field where an element in the batch is obtained by
+        indexing into the first dimension of the underlying data.
+
+        Args:
+            modality: The modality of the multi-modal item that uses this
+                keyword argument.
+
+        Example:
+
+        .. code-block::
+
+            Input:
+                Data: [[AAAA]
+                       [BBBB]
+                       [CCCC]]
+
+            Output:
+                Element 1: [AAAA]
+                Element 2: [BBBB]
+                Element 3: [CCCC]
+        """
         return MultiModalFieldConfig(
             field=MultiModalBatchedField(),
             modality=modality,
@@ -391,6 +372,31 @@ class MultiModalFieldConfig:
 
     @staticmethod
     def flat(modality: str, slices: Sequence[slice]):
+        """
+        Defines a field where an element in the batch is obtained by
+        slicing along the first dimension of the underlying data.
+
+        Args:
+            modality: The modality of the multi-modal item that uses this
+                keyword argument.
+            slices: For each multi-modal item, a slice that is used to extract
+                the data corresponding to it.
+
+        Example:
+
+        .. code-block::
+    
+            Given:
+                slices: [slice(0, 3), slice(3, 7), slice(7, 9)]
+
+            Input:
+                Data: [AAABBBBCC]
+
+            Output:
+                Element 1: [AAA]
+                Element 2: [BBBB]
+                Element 3: [CC]
+        """
         return MultiModalFieldConfig(
             field=MultiModalFlatField(slices=slices),
             modality=modality,
@@ -398,6 +404,35 @@ class MultiModalFieldConfig:
 
     @staticmethod
     def flat_from_sizes(modality: str, size_per_item: torch.Tensor):
+        """
+        Defines a field where an element in the batch is obtained by
+        slicing along the first dimension of the underlying data.
+
+        Args:
+            modality: The modality of the multi-modal item that uses this
+                keyword argument.
+            slices: For each multi-modal item, the size of the slice that
+                is used to extract the data corresponding to it.
+
+        Example:
+
+        .. code-block::
+    
+            Given:
+                size_per_item: [3, 4, 2]
+
+            Input:
+                Data: [AAABBBBCC]
+
+            Output:
+                Element 1: [AAA]
+                Element 2: [BBBB]
+                Element 3: [CC]
+    
+        See also:
+            :func:`MultiModalFieldConfig.flat`
+        """
+
         slice_idxs = [0, *accumulate(size_per_item)]
         slices = [
             slice(slice_idxs[i], slice_idxs[i + 1])
@@ -408,6 +443,33 @@ class MultiModalFieldConfig:
 
     @staticmethod
     def shared(modality: str, batch_size: int):
+        """
+        Defines a field where an element in the batch is obtained by
+        taking the entirety of the underlying data.
+
+        This means that the data is the same for each element in the batch.
+
+        Args:
+            modality: The modality of the multi-modal item that uses this
+                keyword argument.
+            batch_size: The number of multi-modal items which share this data.
+
+        Example:
+
+        .. code-block::
+    
+            Given:
+                batch_size: 4
+
+            Input:
+                Data: [XYZ]
+
+            Output:
+                Element 1: [XYZ]
+                Element 2: [XYZ]
+                Element 3: [XYZ]
+                Element 4: [XYZ]
+        """
         return MultiModalFieldConfig(
             field=MultiModalSharedField(batch_size),
             modality=modality,
