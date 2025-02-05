@@ -92,6 +92,7 @@ steps:
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
 
 - label: Core Test # 10min
+  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amd]
   amd_gpus: 4   # Just for the sake of queue testing
   fast_check: true
@@ -178,6 +179,7 @@ steps:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
+  working_dir: "/vllm-workspace/tests" # optional
 
 - label: V1 Test
   #mirror_hardwares: [amd]
@@ -219,6 +221,7 @@ steps:
     - python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Prefix Caching Test # 9min
+  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -237,6 +240,7 @@ steps:
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
 - label: LogitsProcessor Test # 5min
+  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/model_executor/layers
@@ -258,6 +262,7 @@ steps:
     - pytest -v -s spec_decode/e2e/test_eagle_correctness.py
 
 - label: LoRA Test %N # 15min each
+  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amd]
   amd_gpus: 8
   source_file_dependencies:
@@ -285,6 +290,7 @@ steps:
   - pytest -v -s compile/test_full_graph.py
 
 - label: Kernels Test %N # 1h each
+  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amd]
   amd_gpus: 8
   source_file_dependencies:
@@ -296,6 +302,7 @@ steps:
   parallelism: 4
 
 - label: Tensorizer Test # 11min
+  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amd]
   soft_fail: true
   source_file_dependencies:
@@ -338,6 +345,7 @@ steps:
     - pytest -v -s encoder_decoder
 
 - label: OpenAI-Compatible Tool Use # 20 min
+  working_dir: "/vllm-workspace/tests" 
   fast_check: false
   mirror_hardwares: [ amd ]
   source_file_dependencies:
