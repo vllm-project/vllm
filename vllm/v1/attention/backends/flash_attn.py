@@ -13,10 +13,12 @@ from vllm.envs import VLLM_FLASH_ATTN_VERSION
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
-                                  flash_attn_varlen_func,
-                                  is_fa_version_supported)
-
+# from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
+#                                   flash_attn_varlen_func,
+#                                   is_fa_version_supported)
+from vllm.attention.ops.prefix_prefill import context_attention_fwd
+from vllm.attention.ops.paged_attn import PagedAttention
+# from flash_attn import flash_attn_varlen_func
 logger = init_logger(__name__)
 
 
@@ -139,7 +141,8 @@ class FlashAttentionImpl(AttentionImpl):
         # TODO(lucas): profile FA3 on ampere to see if it makes sense to
         #  use FA3 as default for both
         if current_platform.get_device_capability()[0] >= 9:
-            self.fa_version = 3 if is_fa_version_supported(3) else 2
+            # self.fa_version = 3 if is_fa_version_supported(3) else 2
+            self.fa_version = 2
         else:
             self.fa_version = 2
 
@@ -147,12 +150,12 @@ class FlashAttentionImpl(AttentionImpl):
             assert VLLM_FLASH_ATTN_VERSION in [2, 3]
             self.fa_version = VLLM_FLASH_ATTN_VERSION
 
-        if not is_fa_version_supported(self.fa_version):
-            logger.error("Cannot use FA version %d is not supported due to %s",
-                         self.fa_version,
-                         fa_version_unsupported_reason(self.fa_version))
+        # if not is_fa_version_supported(self.fa_version):
+        #     logger.error("Cannot use FA version %d is not supported due to %s",
+        #                  self.fa_version,
+        #                  fa_version_unsupported_reason(self.fa_version))
 
-        assert is_fa_version_supported(self.fa_version)
+        # assert is_fa_version_supported(self.fa_version)
 
     def forward(
         self,
@@ -196,40 +199,85 @@ class FlashAttentionImpl(AttentionImpl):
         # not padded. However, we don't need to do key[:num_actual_tokens] and
         # value[:num_actual_tokens] because the reshape_and_cache_flash op uses
         # the slot_mapping's shape to determine the number of actual tokens.
-        key_cache, value_cache = kv_cache.unbind(0)
-        torch.ops._C_cache_ops.reshape_and_cache_flash(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            attn_metadata.slot_mapping,
-            self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
-        )
+        # key_cache, value_cache = kv_cache.unbind(0)
+        # torch.ops._C_cache_ops.reshape_and_cache_flash(
+        #     key,
+        #     value,
+        #     key_cache,
+        #     value_cache,
+        #     attn_metadata.slot_mapping,
+        #     self.kv_cache_dtype,
+        #     layer._k_scale,
+        #     layer._v_scale,
+        # )
+        key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, self.num_kv_heads, self.head_size)
+
+        # Reshape the input keys and values and store them in the cache.
+        # If kv_cache is not provided, the new key and value tensors are
+        # not cached. This happens during the initial memory profiling run.
+        PagedAttention.write_to_paged_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
 
         # Compute attention and update output up to `num_actual_tokens`.
         if not attn_metadata.use_cascade:
             # Regular attention (common case).
-            flash_attn_varlen_func(
+            # flash_attn_varlen_func(
+            #     q=query[:num_actual_tokens],
+            #     k=key_cache,
+            #     v=value_cache,
+            #     out=output[:num_actual_tokens],
+            #     cu_seqlens_q=attn_metadata.query_start_loc,
+            #     max_seqlen_q=attn_metadata.max_query_len,
+            #     seqused_k=attn_metadata.seq_lens,
+            #     max_seqlen_k=attn_metadata.max_seq_len,
+            #     softmax_scale=self.scale,
+            #     causal=True,
+            #     alibi_slopes=self.alibi_slopes,
+            #     window_size=self.sliding_window,
+            #     block_table=attn_metadata.block_table,
+            #     softcap=self.logits_soft_cap,
+            #     fa_version=self.fa_version,
+            # )
+            context_lens = torch.empty_like(attn_metadata.seq_lens)
+            batch_size = len(attn_metadata.query_start_loc) - 1
+            assert len(context_lens) == batch_size
+            for i in range(batch_size):
+                query_start = attn_metadata.query_start_loc[i] 
+                query_end = attn_metadata.query_start_loc[i + 1]
+                context_lens[i] = attn_metadata.seq_lens[i] - (query_end - query_start)
+
+            # print(f"context: {context_lens} seqs: {attn_metadata.seq_lens} query: {attn_metadata.query_start_loc}")
+
+            context_attention_fwd(
                 q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=attn_metadata.query_start_loc,
-                max_seqlen_q=attn_metadata.max_query_len,
-                seqused_k=attn_metadata.seq_lens,
-                max_seqlen_k=attn_metadata.max_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
+                k=key[:num_actual_tokens],
+                v=value[:num_actual_tokens],
+                o=output[:num_actual_tokens],
+                kv_cache_dtype=self.kv_cache_dtype,
+                k_cache=key_cache,
+                v_cache=value_cache,
+                b_loc=attn_metadata.block_table,
+                b_start_loc=attn_metadata.query_start_loc,
+                b_seq_len=attn_metadata.seq_lens,
+                b_ctx_len=context_lens,
+                max_input_len=attn_metadata.max_query_len,
+                k_scale=layer._k_scale,
+                v_scale=layer._v_scale,
                 alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=attn_metadata.block_table,
-                softcap=self.logits_soft_cap,
-                fa_version=self.fa_version,
+                sliding_window=self.sliding_window[0]
             )
             return output
 
+        assert False
         # Cascade attention (rare case).
         cascade_attention(
             output[:num_actual_tokens],
@@ -243,9 +291,9 @@ class FlashAttentionImpl(AttentionImpl):
             suffix_kv_lens=attn_metadata.suffix_kv_lens,
             max_kv_len=attn_metadata.max_seq_len,
             softmax_scale=self.scale,
+            causal=True,
             alibi_slopes=self.alibi_slopes,
-            sliding_window=self.sliding_window,
-            logits_soft_cap=self.logits_soft_cap,
+            window_size=self.sliding_window,
             block_table=attn_metadata.block_table,
             common_prefix_len=attn_metadata.common_prefix_len,
             fa_version=self.fa_version,
