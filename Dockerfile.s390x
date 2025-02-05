@@ -1,8 +1,6 @@
 # Dockerfile for vLLM on s390x architecture with dependencies, PyTorch, torchvision, and Apache Arrow
-
 FROM ubuntu:22.04
 USER root
-
 
 RUN apt-get update -y && apt-get install -y \
     git wget curl vim libnuma-dev libsndfile-dev libprotobuf-dev protobuf-compiler \
@@ -12,13 +10,10 @@ RUN apt-get update -y && apt-get install -y \
     python3-distutils python3-setuptools libbz2-dev liblz4-dev libzstd-dev \
     libsnappy-dev rapidjson-dev libboost-dev liborc-dev pkg-config libopenblas-dev
 
-
 RUN python3 -m pip install --upgrade pip setuptools
-
 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
     . "$HOME/.cargo/env"
-
 
 WORKDIR /tmp/arrow
 RUN git clone https://github.com/apache/arrow.git && \
@@ -37,47 +32,36 @@ RUN git clone https://github.com/apache/arrow.git && \
           -DARROW_CSV=ON \
           -DPROTOBUF_PROTOC_EXECUTABLE=/usr/bin/protoc \
           -DARROW_DEPENDENCY_SOURCE=BUNDLED \
+          -DARROW_DATASET=libarrow_dataset.so \
           .. && \
     make -j$(nproc) && make install
-
 
 ENV CMAKE_PREFIX_PATH=/usr/local/lib/cmake:$CMAKE_PREFIX_PATH
 ENV LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 
-
-RUN pip install --no-cache-dir https://download.pytorch.org/whl/nightly/cpu/torch-2.6.0.dev20241201%2Bcpu-cp310-cp310-linux_s390x.whl
-
-
-RUN git clone https://github.com/pytorch/vision.git && \
-    cd vision && \
-    git checkout 48b1edf && \
-    python3 setup.py bdist_wheel && \
-    pip install --no-cache-dir dist/*.whl && \
-    rm -rf dist
-
-
 COPY . /workspace/vllm
 WORKDIR /workspace/vllm
-
-
-RUN git config --global --add safe.directory /workspace/vllm && \
-    git rev-parse --is-inside-work-tree || git init && \
-    git config --global user.email "docker@build.local" && \
-    git config --global user.name "Docker Builder" && \
-    git add . && git commit -m "Initial commit" --allow-empty
-
 
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
 
-
 RUN mkdir -p /root/.cache/pip && chmod -R 777 /root/.cache/pip
 
-RUN pip install --no-cache-dir -v \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/ccache \
+    pip install --no-cache-dir -v \
         'cmake>=3.26' ninja packaging 'setuptools-scm>=8' wheel jinja2 \
-        -r requirements-cpu.txt \
-        xformers uvloop==0.21.0
+        --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
+        -r requirements-cpu.txt
+
+ARG TORCH_VISION_VERSION=v0.20.1
+RUN git clone https://github.com/pytorch/vision.git && \
+    cd vision && \
+    git checkout $TORCH_VISION_VERSION && \
+    python3 setup.py bdist_wheel && \
+    pip install --no-cache-dir dist/*.whl && \
+    rm -rf dist
 
 RUN python3 -m pip install --upgrade setuptools
 

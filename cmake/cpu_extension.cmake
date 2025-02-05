@@ -130,7 +130,7 @@ elseif (ASIMD_FOUND)
 elseif(APPLE_SILICON_FOUND)
     message(STATUS "Apple Silicon Detected")
     set(ENABLE_NUMA OFF)
-    elseif (S390_FOUND)
+elseif (S390_FOUND)
     message(STATUS "S390 detected")
     # Check for S390 VXE support
     list(APPEND CXX_COMPILE_FLAGS
