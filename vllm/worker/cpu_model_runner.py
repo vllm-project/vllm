@@ -167,6 +167,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.input_data = ModelInputForCPUBuilder.ModelInputData(
             self.runner.model_config.uses_mrope)
         self.att_metadata_builder.prepare()
+        self.inter_data_list = []
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         self.seq_group_metadata_list.append(seq_group_metadata)
