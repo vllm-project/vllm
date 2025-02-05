@@ -448,8 +448,8 @@ def swap_positions(b: InputBatch, id_1, id_2):
     assert id_2 == b.req_id_to_index[req_id_2]
 
     b.req_ids[id_1], b.req_ids[id_2] = b.req_ids[id_2], b.req_ids[id_1]
-    b.req_id_to_index[id_1], b.req_id_to_index[id_2] = b.req_id_to_index[
-        id_2], b.req_id_to_index[id_1]
+    b.req_id_to_index[req_id_1], b.req_id_to_index[
+        req_id_2] = b.req_id_to_index[req_id_2], b.req_id_to_index[req_id_1]
 
     ids = [id_1, id_2]
     rev_ids = [id_2, id_1]
@@ -471,8 +471,13 @@ def swap_positions(b: InputBatch, id_1, id_2):
         id_1]
     b.stop_token_ids[id_1], b.stop_token_ids[id_2] = b.stop_token_ids[
         id_2], b.stop_token_ids[id_1]
-    b.generators[id_1], b.generators[id_2] = b.generators[id_2], b.generators[
-        id_1]
+
+    gen_1 = b.generators.pop(id_1, None)
+    gen_2 = b.generators.pop(id_2, None)
+    if gen_1 is not None:
+        b.generators[id_2] = gen_1
+    if gen_2 is not None:
+        b.generators[id_1] = gen_2
 
 
 def ensure_decodes_first(b: InputBatch):
@@ -504,6 +509,4 @@ def ensure_decodes_first(b: InputBatch):
             break
 
         # Swap
-        print("Swapping first_prompt_index = {} with last_decode_index = {}".
-              format(first_prompt_index, last_decode_index))
         swap_positions(b, first_prompt_index, last_decode_index)
