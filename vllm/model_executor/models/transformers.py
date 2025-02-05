@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+
 # Copyright 2024 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,7 +15,7 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 import re
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, Optional, Union
 
 import torch
 from torch import nn
@@ -71,23 +72,10 @@ def vllm_flash_attention_forward(
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
 
 
-# Linear Layer that is compatible with transformers internal forward
-# TODO: This is a temporary solution, we should find a better way to integrate
-class HFColumnParallelLinear(ColumnParallelLinear):
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return super().forward(input)[0]
-
-
-class HFRowParallelLinear(RowParallelLinear):
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return super().forward(input)[0]
-
-
-def replace_tp_linear_class(orig_module: nn.Linear,
-                            style: str,
-                            quant_config=None):
+def replace_linear_class(
+        linear: nn.Linear,
+        style: str,
+        quant_config=None) -> Union[ColumnParallelLinear, RowParallelLinear]:
     """
     In model configurations, we use a neutral type (string) to specify parallel
     styles, here we use it to translate nn.Linear into vllm-style tp Linear.
@@ -99,25 +87,27 @@ def replace_tp_linear_class(orig_module: nn.Linear,
         raise ValueError(
             f"Unsupported parallel style type {type(style)}, expected str")
 
-    input_size = orig_module.in_features
-    output_size = orig_module.out_features
-    bias = orig_module.bias is not None
+    vllm_linear_cls = {
+        "colwise": ColumnParallelLinear,
+        "rowwise": RowParallelLinear,
+    }.get(style)
 
-    if style == "colwise":
-        return HFColumnParallelLinear(
-            input_size,
-            output_size,
-            bias,
-        )
-    elif style == "rowwise":
-        return HFRowParallelLinear(
-            input_size,
-            output_size,
-            bias,
-        )
-    # We don't consider colwise_rep since it's used in lm_head
-    else:
+    if vllm_linear_cls is None:
         raise ValueError(f"Unsupported parallel style value: {style}")
+
+    class HFCompatibleLinear(vllm_linear_cls):
+        """
+        Wrapper class that removes `output_bias` from returned output.
+        """
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            return super().forward(input)[0]
+
+    return HFCompatibleLinear(
+        input_size=linear.in_features,
+        output_size=linear.out_features,
+        bias=linear.bias is not None,
+    )
 
 
 class TransformersModel(nn.Module):
@@ -192,16 +182,16 @@ class TransformersModel(nn.Module):
                 "support it yet!")
 
         for child_name, child_module in module.named_children():
-            qual_name = prefix + child_name
+            qual_name = maybe_prefix(prefix, child_name)
             for pattern, style in self.config.base_model_tp_plan.items():
                 if re.match(pattern, qual_name) and isinstance(
                         child_module, nn.Linear):
-                    new_module = replace_tp_linear_class(
-                        child_module, style, self.quant_config)
+                    new_module = replace_linear_class(child_module, style,
+                                                      self.quant_config)
                     setattr(module, child_name, new_module)
                     self.log_replacement(qual_name, child_module, new_module)
             else:
-                self.tensor_parallelize(child_module, prefix=f"{qual_name}.")
+                self.tensor_parallelize(child_module, prefix=qual_name)
 
     def replace_vocab_embed_class(self, module: nn.Module):
         # Use native set input embeddings
@@ -219,7 +209,7 @@ class TransformersModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],  # argument not used
+        kv_caches: list[torch.Tensor],  # argument not used
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
@@ -249,10 +239,10 @@ class TransformersModel(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params = set[str]()
         for name, loaded_weight in weights:
             if name not in params_dict:
                 name = f"{self.model.base_model_prefix}.{name}"
