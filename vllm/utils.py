@@ -563,6 +563,10 @@ def cdiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
+def round_up(x: int, y: int) -> int:
+    return ((x + y - 1) // y) * y
+
+
 def _generate_random_fp8(
     tensor: torch.Tensor,
     low: float,
@@ -792,6 +796,12 @@ def async_tensor_h2d(
 def get_dtype_size(dtype: torch.dtype) -> int:
     """Get the size of the data type in bytes."""
     return torch.tensor([], dtype=dtype).element_size()
+
+
+def align_to_256bytes(extent: int, dtype: torch.dtype) -> int:
+    dtype_size = get_dtype_size(dtype)
+    eles_per_256bytes = 256 // dtype_size
+    return round_up(extent, eles_per_256bytes)
 
 
 # `collections` helpers

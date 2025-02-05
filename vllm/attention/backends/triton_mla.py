@@ -26,7 +26,6 @@ from vllm.attention.backends.mla.utils import MLACommonImpl, MLACommonMetadata
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
@@ -72,14 +71,14 @@ class TritonMLABackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: torch.Tensor,
     ) -> None:
-        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
+        ops.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
-        PagedAttention.copy_blocks(kv_caches, src_to_dists)
+        ops.copy_blocks_mla(kv_caches, src_to_dists)
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
