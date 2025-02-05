@@ -14,10 +14,16 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.sampling_params import SamplingParams
 
+# These are possible values of RequestOutput.finish_reason,
+# so form part of the external API.
+FINISH_REASON_STRINGS = ("stop", "length", "abort")
 
-class RequestFinishedReason(enum.IntEnum):
+
+class FinishReason(enum.IntEnum):
     """
     Reason a request finished - stop, length, or abort.
+
+    Int rather than Str for more compact serialization.
 
     stop - a stop string was emitted
     length - max_tokens was consumed, or max_model_len was reached
@@ -29,7 +35,7 @@ class RequestFinishedReason(enum.IntEnum):
     ABORT = 2
 
     def __str__(self):
-        return self.name.lower()
+        return FINISH_REASON_STRINGS[self.value]
 
 
 @dataclass
@@ -62,7 +68,7 @@ class EngineCoreOutput(
     request_id: str
     new_token_ids: List[int]
     finished: bool
-    finish_reason: Optional[RequestFinishedReason] = None
+    finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
 
 
