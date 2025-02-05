@@ -254,14 +254,17 @@ class InputPreprocessor:
         Apply the model's multi-modal processor to a multi-modal prompt,
         returning the corresponding token IDs and metadata.
         """
-        tokenizer_group = self.get_tokenizer_group()
-        tokenizer = tokenizer_group.get_lora_tokenizer(lora_request)
+        if not self.tokenizer:
+            tokenizer = None
+        else:
+            tokenizer_group = self.get_tokenizer_group()
+            tokenizer = tokenizer_group.get_lora_tokenizer(lora_request)
+            if isinstance(prompt, list):
+                prompt = tokenizer.decode(prompt)
 
         mm_processor = self.mm_registry.create_processor(
             self.model_config, tokenizer)
 
-        if isinstance(prompt, list):
-            prompt = tokenizer.decode(prompt)
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
