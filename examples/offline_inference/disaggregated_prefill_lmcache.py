@@ -2,7 +2,9 @@
 """
 This file demonstrates the example usage of disaggregated prefilling
 We will launch 2 vllm instances (GPU 0 for prefill and GPU 1 for decode),
-and then transfer the KV cache between them.
+and launch an additional LMCache server.
+KV cache is transferred in the following manner: 
+VLLM prefill node -> LMCache server -> VLLM decode node.
 
 Learn more about Ray Data in https://docs.ray.io/en/latest/data/data.html
 """

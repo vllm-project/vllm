@@ -16,7 +16,7 @@ from vllm.config import KVTransferConfig
 # LMCache-related environment variables
 # Use experimental features in LMCache
 os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
-#
+# LMCache is set to use 256 tokens per chunk
 os.environ["LMCACHE_CHUNK_SIZE"] = "256"
 # Enable local CPU backend in LMCache
 os.environ["LMCACHE_LOCAL_CPU"] = "True"
@@ -37,7 +37,7 @@ sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
 ktc = KVTransferConfig.from_cli(
     '{"kv_connector":"LMCacheConnector", "kv_role":"kv_both"}')
-# Example: Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
+# Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
 # memory. Reduce the value if your GPU has less memory.
 # Note that LMCache is not compatible with chunked prefill for now.
 llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.2",
