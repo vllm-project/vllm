@@ -9,7 +9,7 @@ import prometheus_client
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.v1.engine import RequestFinishedReason
+from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
@@ -117,13 +117,13 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation="Number of generation tokens processed.",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.counter_request_success: Dict[RequestFinishedReason,
+        self.counter_request_success: Dict[FinishReason,
                                            prometheus_client.Counter] = {}
         counter_request_success_base = prometheus_client.Counter(
             name="vllm:request_success_total",
             documentation="Count of successfully processed requests.",
             labelnames=labelnames + ["finished_reason"])
-        for reason in RequestFinishedReason:
+        for reason in FinishReason:
             self.counter_request_success[
                 reason] = counter_request_success_base.labels(*(labelvalues +
                                                                 [str(reason)]))
