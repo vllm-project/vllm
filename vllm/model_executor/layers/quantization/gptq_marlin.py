@@ -323,13 +323,18 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        # Currently assuming is_k_full is always True
-        # (input size per partition is the same as full input size)
-        # Supports only sym for now (no zp)
+        intermediate_size_full = extra_weight_attrs.pop(
+            "intermediate_size_full")
+
+        self.is_k_full = (not self.quant_config.desc_act) or (
+            intermediate_size_per_partition == intermediate_size_full)
+
         if self.quant_config.group_size != -1:
             scales_size13 = hidden_size // self.quant_config.group_size
-            scales_size2 = (intermediate_size_per_partition //
-                            self.quant_config.group_size)
+            w2_scales_size = (intermediate_size_full
+                              if self.quant_config.desc_act else
+                              intermediate_size_per_partition)
+            scales_size2 = (w2_scales_size // self.quant_config.group_size)
             strategy = FusedMoeWeightScaleSupported.GROUP.value
         else:
             scales_size13 = 1
@@ -575,4 +580,4 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             sort_indices1=layer.w13_g_idx_sort_indices,
             sort_indices2=layer.w2_g_idx_sort_indices,
             num_bits=self.quant_config.quant_type.size_bits,
-        ).to(orig_dtype)
+            is_k_full=self.is_k_full).to(orig_dtype)
