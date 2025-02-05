@@ -734,6 +734,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert req_id in self.encoder_cache
                 assert i in self.encoder_cache[req_id]
                 encoder_output = self.encoder_cache[req_id][i]
+                assert end_idx <= encoder_output.shape[0], f"{end_idx=} {encoder_output.shape=}"
                 encoder_outputs.append(encoder_output[start_idx:end_idx])
         return encoder_outputs
 
