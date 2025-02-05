@@ -139,8 +139,9 @@ void rotary_embedding(
   int rot_dim = cos_sin_cache.size(1);
   int num_heads = query.numel() / num_tokens / head_size;
   int num_kv_heads = key.numel() / num_tokens / head_size;
-  int64_t query_stride = query.stride(-2);
-  int64_t key_stride = key.stride(-2);
+  int seq_dim_idx = positions.dim() - 1;
+  int64_t query_stride = query.stride(seq_dim_idx);
+  int64_t key_stride = key.stride(seq_dim_idx);
 
   dim3 grid(num_tokens);
   dim3 block(std::min<int64_t>(num_heads * rot_dim / 2, 512));
@@ -186,8 +187,9 @@ void batched_rotary_embedding(
   int64_t num_tokens = cos_sin_cache_offsets.size(0);
   int num_heads = query.numel() / num_tokens / head_size;
   int num_kv_heads = key.numel() / num_tokens / head_size;
-  int64_t query_stride = query.stride(-2);
-  int64_t key_stride = key.stride(-2);
+  int seq_dim_idx = positions.dim() - 1;
+  int64_t query_stride = query.stride(seq_dim_idx);
+  int64_t key_stride = key.stride(seq_dim_idx);
 
   dim3 grid(num_tokens);
   dim3 block(std::min<int64_t>(num_heads * rot_dim / 2, 512));
