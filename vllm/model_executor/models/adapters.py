@@ -187,14 +187,13 @@ def as_classification_model(cls: _T) -> _T:
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
 
-            # If the model already defines a pooler instance, don't overwrite it
-            if not getattr(self, "_pooler", None):
-                self._pooler = Pooler.from_config_with_defaults(
-                    pooling_type=PoolingType.STEP,
-                    normalize=False,
-                    softmax=False,
-                    step_tag_id=config.step_tag_id,
-                )
+            pooler_config = vllm_config.model_config.pooler_config
+            assert pooler_config is not None
+
+            self._pooler = Pooler.from_config_with_defaults(
+                pooler_config,
+                step_tag_id=config.step_tag_id,
+            )
 
             super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
