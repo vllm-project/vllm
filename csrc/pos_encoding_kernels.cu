@@ -136,10 +136,40 @@ void rotary_embedding(
     bool is_neox) {
   // num_tokens = batch_size * seq_len
   int64_t num_tokens = positions.numel();
+  int positions_ndim = positions.dim();
+
+  // Make sure num_tokens dim is consistent across positions, query, and key.
+  TORCH_CHECK(
+      positions_ndim == 1 || positions_ndim == 2,
+      "positions must have shape [num_tokens] or [batch_size, seq_len]");
+  if (positions_ndim == 1) {
+    TORCH_CHECK(
+        query.size(0) == positions.size(0) && key.size(0) == positions.size(0),
+        "query, key and positions must have the same number of tokens");
+  }
+  if (positions_ndim == 2) {
+    TORCH_CHECK(
+        query.size(0) == positions.size(0) &&
+            key.size(0) == positions.size(0) &&
+            query.size(1) == positions.size(1) &&
+            key.size(1) == positions.size(1),
+        "query, key and positions must have the same batch_size and seq_len");
+  }
+
+  // Make sure head_size is valid for query and key
+  // hidden_size = num_heads * head_size
+  int query_hidden_size = query.numel() / num_tokens;
+  int key_hidden_size = key.numel() / num_tokens;
+  TORCH_CHECK(query_hidden_size % head_size == 0);
+  TORCH_CHECK(key_hidden_size % head_size == 0);
+
+  // Make sure query and key have consistent number of heads
+  int num_heads = query_hidden_size / head_size;
+  int num_kv_heads = key_hidden_size / head_size;
+  TORCH_CHECK(num_heads % num_kv_heads == 0);
+
   int rot_dim = cos_sin_cache.size(1);
-  int num_heads = query.numel() / num_tokens / head_size;
-  int num_kv_heads = key.numel() / num_tokens / head_size;
-  int seq_dim_idx = positions.dim() - 1;
+  int seq_dim_idx = positions_ndim - 1;
   int64_t query_stride = query.stride(seq_dim_idx);
   int64_t key_stride = key.stride(seq_dim_idx);
 
@@ -185,9 +215,40 @@ void batched_rotary_embedding(
 ) {
   // num_tokens = batch_size * seq_len
   int64_t num_tokens = cos_sin_cache_offsets.size(0);
-  int num_heads = query.numel() / num_tokens / head_size;
-  int num_kv_heads = key.numel() / num_tokens / head_size;
-  int seq_dim_idx = positions.dim() - 1;
+  TORCH_CHECK(positions.numel() == num_tokens,
+              "positions must have same num_tokens as cos_sin_cache_offsets");
+
+  int positions_ndim = positions.dim();
+  // Make sure num_tokens dim is consistent across positions, query, and key.
+  TORCH_CHECK(
+      positions_ndim == 1 || positions_ndim == 2,
+      "positions must have shape [num_tokens] or [batch_size, seq_len]");
+  if (positions_ndim == 1) {
+    TORCH_CHECK(
+        query.size(0) == positions.size(0) && key.size(0) == positions.size(0),
+        "query, key and positions must have the same number of tokens");
+  }
+  if (positions_ndim == 2) {
+    TORCH_CHECK(
+        query.size(0) == positions.size(0) &&
+            key.size(0) == positions.size(0) &&
+            query.size(1) == positions.size(1) &&
+            key.size(1) == positions.size(1),
+        "query, key and positions must have the same batch_size and seq_len");
+  }
+
+  // Make sure head_size is valid for query and key
+  int query_hidden_size = query.numel() / num_tokens;
+  int key_hidden_size = key.numel() / num_tokens;
+  TORCH_CHECK(query_hidden_size % head_size == 0);
+  TORCH_CHECK(key_hidden_size % head_size == 0);
+
+  // Make sure query and key have concistent number of heads
+  int num_heads = query_hidden_size / head_size;
+  int num_kv_heads = key_hidden_size / head_size;
+  TORCH_CHECK(num_heads % num_kv_heads == 0);
+
+  int seq_dim_idx = positions_ndim - 1;
   int64_t query_stride = query.stride(seq_dim_idx);
   int64_t key_stride = key.stride(seq_dim_idx);
 
