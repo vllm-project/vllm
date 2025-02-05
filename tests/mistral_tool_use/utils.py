@@ -13,28 +13,6 @@ class ServerConfig(TypedDict, total=False):
     supports_parallel: Optional[bool]
     supports_rocm: Optional[bool]
 
-
-def patch_system_prompt(messages: List[Dict[str, Any]],
-                        system_prompt: str) -> List[Dict[str, Any]]:
-    new_messages = deepcopy(messages)
-    if new_messages[0]["role"] == "system":
-        new_messages[0]["content"] = system_prompt
-    else:
-        new_messages.insert(0, {"role": "system", "content": system_prompt})
-    return new_messages
-
-
-def ensure_system_prompt(messages: List[Dict[str, Any]],
-                         config: ServerConfig) -> List[Dict[str, Any]]:
-    prompt = config.get("system_prompt")
-    if prompt:
-        return patch_system_prompt(messages, prompt)
-    else:
-        return messages
-
-
-# universal args for all models go here. also good if you need to test locally
-# and change type or KV cache quantization or something.
 ARGS: List[str] = ["--max-model-len", "1024"]
 
 CONFIGS: Dict[str, ServerConfig] = {
