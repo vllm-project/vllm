@@ -133,6 +133,9 @@ class KVCacheManager:
                 not include the tokens that have already been computed.
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
+            max_speculative_tokens: The maximum number of speculative tokens,
+                used to calculate the minimum number of full blocks that are 
+                cached.
 
         Blocks layout:
         -----------------------------------------------------------------------

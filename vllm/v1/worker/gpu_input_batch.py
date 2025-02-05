@@ -369,7 +369,7 @@ class InputBatch:
             # statistics.
             output_token_ids.append(req_id_output_token_ids[req_id])
             req_spec_token_ids = req_id_to_spec_token_ids.get(req_id, None)
-            if req_spec_token_ids is not None:
+            if req_spec_token_ids is not None and len(req_spec_token_ids) > 0:
                 spec_token_ids.append(req_spec_token_ids)
                 # If any of the requests require speculative decoding, set the
                 # flag to True.

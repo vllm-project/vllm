@@ -851,8 +851,8 @@ class GPUModelRunner:
                 break
             assert req_id is not None
             req_state = self.requests[req_id]
-            seq_len = req_state.num_computed_tokens + \
-                scheduler_output.num_scheduled_tokens[req_id]
+            seq_len = (req_state.num_computed_tokens +
+                       scheduler_output.num_scheduled_tokens[req_id])
             if seq_len >= req_state.num_tokens:
                 # We don't rewind the generator state for requests now
                 # because spec decode only supports greedy decoding for now.

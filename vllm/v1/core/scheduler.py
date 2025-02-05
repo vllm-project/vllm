@@ -493,7 +493,7 @@ class Scheduler:
 
                 # Check for stop and update request state.
                 # This must be called before we make the EngineCoreOutput.
-                stopped = self._check_stop(request)
+                stopped = self._maybe_stop_and_crop(request)
                 num_new_tokens = request.num_tokens - num_tokens_before_step
                 if stopped:
                     self._free_request(request)
@@ -518,12 +518,13 @@ class Scheduler:
             scheduler_stats=self.make_stats(),
         )
 
-    def _check_stop(self, request: Request) -> bool:
+    def _maybe_stop_and_crop(self, request: Request) -> bool:
         """Check if the request should be stopped.
         The function should handle both single token generation or
         multiple token generation (e.g., spec decode) per step.
         
-        This function will crop requests to the given number of tokens.
+        This function will crop requests because the request is stopped
+        in the middle of the generation.
         When cropping, we do not need to update the input batch because
         it will be updated in the next execute_model call's
         _update_states method, where the request data is aligned
