@@ -192,6 +192,9 @@ def as_classification_model(cls: _T) -> _T:
 
             self._pooler = Pooler.from_config_with_defaults(
                 pooler_config,
+                pooling_type=PoolingType.STEP,
+                normalize=False,
+                softmax=False,
                 step_tag_id=config.step_tag_id,
             )
 
