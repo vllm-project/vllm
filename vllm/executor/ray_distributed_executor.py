@@ -157,7 +157,11 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 map(int, envs.VLLM_RAY_BUNDLE_INDICES.split(",")))
             assert len(bundle_indices) == self.parallel_config.world_size, \
             ("VLLM_RAY_BUNDLE_INDICES must have the same length"
-            " as the world size.")
+            f" as the world size, but got {bundle_indices=} "
+            f"and {self.parallel_config.world_size=}")
+            assert len(set(bundle_indices)) == len(bundle_indices), \
+            ("VLLM_RAY_BUNDLE_INDICES cannot have duplicate values,"
+            f" but got {bundle_indices=}")
         worker_metadata: List[RayWorkerMetaData] = []
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
             if not bundle.get(current_platform.ray_device_key, 0):
