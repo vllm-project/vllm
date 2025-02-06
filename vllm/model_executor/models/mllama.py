@@ -28,6 +28,8 @@ from torch import nn
 from transformers import BatchFeature, MllamaConfig
 from transformers.modeling_outputs import (BaseModelOutput,
                                            CausalLMOutputWithPast)
+from transformers.models.mllama.image_processing_mllama import (
+    get_optimal_tiled_canvas)
 from transformers.models.mllama.processing_mllama import (
     MllamaProcessor, get_cross_attention_token_mask)
 
@@ -51,10 +53,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
-                                        MultiModalDataItems,
-                                        MultiModalFieldConfig,
                                         PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
@@ -103,6 +105,21 @@ class MllamaProcessingInfo(BaseProcessingInfo):
         mm_max_tokens = hf_config.vision_config.max_num_tiles * token_per_chunk
         return {"image": mm_max_tokens}
 
+    def get_num_tiles_per_image(self, image_height: int,
+                                image_width: int) -> int:
+        vision_config = self.get_hf_config().vision_config
+        max_num_tiles = vision_config.max_num_tiles
+        image_size = vision_config.image_size
+        tiled_height, tiled_width = get_optimal_tiled_canvas(
+            image_height,
+            image_width,
+            max_num_tiles=max_num_tiles,
+            tile_size=image_size,
+        )
+        num_tiles_height = tiled_height // image_size
+        num_tiles_width = tiled_width // image_size
+        return num_tiles_height * num_tiles_width
+
 
 class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
 
@@ -134,25 +151,20 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # The MllamaProcessor calling drop `num_tiles` from image_processor,
-        # while `num_tiles` is essential for forwarding in vLLM implementation.
-        # Therefore, we use image_processor calling to keep `num_tiles`.
-        # TODO(Isotr0py):
-        # Refactor to use hf_processor and infer `num_tiles` from image
-        hf_processor = self.info.get_hf_processor()
         if mm_data:
-            image_processor = hf_processor.image_processor
-            image_features = image_processor(**mm_data)
+            num_tiles = [[
+                self.info.get_num_tiles_per_image(img.height, img.width)
+                for img in mm_data["image"]
+            ]]
+            processed_outputs = super()._call_hf_processor(
+                prompt, mm_data, mm_kwargs)
+            processed_outputs["num_tiles"] = num_tiles
         else:
-            image_features = {}
-
-        tokenizer = self.info.get_tokenizer()
-        encoding = tokenizer(prompt,
-                             add_special_tokens=False,
-                             return_tensors="pt")
-        data = dict(**encoding, **image_features)
-
-        return BatchFeature(data=data, tensor_type="pt")
+            tokenizer = self.info.get_tokenizer()
+            processed_outputs = tokenizer(prompt,
+                                          add_special_tokens=True,
+                                          return_tensors="pt")
+        return processed_outputs
 
     def _get_mm_fields_config(
         self,
@@ -174,8 +186,8 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
     def _get_prompt_replacements(
         self,
         mm_items: MultiModalDataItems,
-        hf_inputs: BatchFeature,
-        mm_processor_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
         vision_config = self.info.get_hf_config().vision_config
         assert vision_config.image_size % 14 == 0, (
@@ -185,7 +197,12 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         image_token_id = hf_processor.image_token_id
 
         def get_replacement_mllama(item_idx):
-            num_tile = hf_inputs["num_tiles"][0][item_idx]
+            images = mm_items.get_items("image", ImageProcessorItems)
+            image_size = images.get_image_size(item_idx)
+            num_tile = self.info.get_num_tiles_per_image(
+                image_height=image_size.height,
+                image_width=image_size.width,
+            )
             num_tokens = num_tile * token_per_chunk
             return [image_token_id] * num_tokens
 

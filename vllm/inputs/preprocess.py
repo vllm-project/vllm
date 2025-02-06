@@ -9,7 +9,8 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.inputs import MultiModalDataDict, MultiModalInputs
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
+                                    MultiModalInputs)
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
@@ -504,7 +505,7 @@ class InputPreprocessor:
                 prompt=inputs["encoder_prompt"],
                 prompt_token_ids=inputs["encoder_prompt_token_ids"],
             )
-            decoder_inputs = MultiModalInputsV2(
+            decoder_inputs = MultiModalInputs(
                 type="multimodal",
                 prompt=inputs["prompt"],
                 prompt_token_ids=inputs["prompt_token_ids"],
