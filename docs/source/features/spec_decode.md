@@ -190,14 +190,8 @@ for output in outputs:
 
 A few important things to consider when using the EAGLE based draft models:
 
-1. The EAGLE draft models available in the [HF repository for EAGLE models](https://huggingface.co/yuhuili) cannot be
-   used directly with vLLM due to differences in the expected layer names and model definition.
-   To use these models with vLLM, use the [following script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d)
-   to convert them. Note that this script does not modify the model's weights.
-
-   In the above example, use the script to first convert
-   the [yuhuili/EAGLE-LLaMA3-Instruct-8B](https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-8B) model
-   and then use the converted checkpoint as the draft model in vLLM.
+1. The EAGLE draft models available in the [HF repository for EAGLE models](https://huggingface.co/yuhuili) should be
+   able to be loaded and used directly by vLLM after [PR 12304](https://github.com/vllm-project/vllm/pull/12304). If weight-loading problems still occur when using the latest version of vLLM, please leave a comment or raise an issue.
 
 2. The EAGLE based draft models need to be run without tensor parallelism
    (i.e. speculative_draft_tensor_parallel_size is set to 1), although
