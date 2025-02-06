@@ -257,9 +257,7 @@ class DeepseekV2Attention(nn.Module):
                                         prefix=f"{prefix}.o_proj")
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
-            self.use_normal_rope = False
-        else:
-            self.use_normal_rope = True
+
         self.rotary_emb = get_rope(qk_rope_head_dim,
                                    rotary_dim=qk_rope_head_dim,
                                    max_position=max_position_embeddings,
@@ -309,16 +307,7 @@ class DeepseekV2Attention(nn.Module):
         k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k_pe = latent_cache[:, :, self.kv_lora_rank:]
 
-        if self.use_normal_rope:
-            seq_len = positions.size(0)
-            ori_q_pe_shape, ori_k_pe_shape = q_pe.shape, k_pe.shape
-            q_pe = q_pe.reshape(seq_len, -1)
-            k_pe = k_pe.reshape(seq_len, -1)
-
         q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-
-        if self.use_normal_rope:
-            q_pe, k_pe = q_pe.view(ori_q_pe_shape), k_pe.view(ori_k_pe_shape)
 
         q[..., self.qk_nope_head_dim:] = q_pe
         k = torch.empty_like(q)
