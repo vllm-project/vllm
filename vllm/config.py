@@ -754,7 +754,6 @@ class ModelConfig:
 
     @property
     def is_deepseek_mla(self) -> bool:
-        # TODO add deepseek_v3
         return (hasattr(self.hf_text_config, "model_type")) \
                 and (self.hf_text_config.model_type in \
                     ('deepseek_v2', 'deepseek_v3'))\
@@ -986,6 +985,9 @@ class ModelConfig:
 
     @property
     def use_mla(self) -> bool:
+        if not self.is_deepseek_mla or envs.VLLM_MLA_DISABLE:
+            return False
+
         if self.quantization is not None and self.quantization not in [\
             "fp8", "compressed-tensors"]:
             logger.warning(
@@ -997,8 +999,9 @@ class ModelConfig:
         # have fp8 for both weights and activations.
         if self.quantization == "compressed-tensors":
             quant_config = self._parse_quant_hf_config()
-            for group_name, cfg in quant_config.get("config_groups",
-                                                    ("", {})).items():
+            for group_name, cfg in quant_config.get("config_groups", {
+                    "": {}
+            }).items():
                 act_cfg = cfg.get("input_activations", {})
                 act_type = None if act_cfg is None else act_cfg.get("type", "")
                 w_cfg = cfg.get("weights", {})
@@ -1012,8 +1015,7 @@ class ModelConfig:
                         quant_config)
                     return False
 
-        use_mla = (self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE)
-        return use_mla
+        return True
 
     @property
     def supported_runner_types(self) -> Set[RunnerType]:
@@ -3070,15 +3072,6 @@ class VllmConfig:
         the final hidden states.
         """
         factors: List[Any] = []
-        # summarize system state
-        from torch._inductor.codecache import CacheBase
-        system_factors = CacheBase.get_system()
-        factors.append(system_factors)
-
-        # summarize pytorch state
-        from torch._inductor.codecache import torch_key
-        torch_factors = torch_key()
-        factors.append(torch_factors)
 
         # summarize vllm config
         vllm_factors: List[Any] = []

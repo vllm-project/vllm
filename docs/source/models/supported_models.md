@@ -726,14 +726,14 @@ See [this page](#generative-models) for more information on how to use generativ
   * `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc.
   *
   * ✅︎
-  *
+  * \*
 - * `Idefics3ForConditionalGeneration`
   * Idefics3
   * T + I
   * `HuggingFaceM4/Idefics3-8B-Llama3` etc.
   * ✅︎
   *
-  *
+  * ✅︎
 - * `InternVLChatModel`
   * InternVL 2.5, Mono-InternVL, InternVL 2.0
   * T + I<sup>E+</sup>
@@ -799,7 +799,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `NVLM_D_Model`
   * NVLM-D 1.0
-  * T + I<sup>E+</sup>
+  * T + I<sup>+</sup>
   * `nvidia/NVLM-D-72B`, etc.
   *
   * ✅︎
@@ -846,11 +846,18 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `Qwen2_5_VLForConditionalGeneration`
+  * Qwen2.5-VL
+  * T + I<sup>E+</sup> + V<sup>E+</sup>
+  * `Qwen/Qwen2.5-VL-3B-Instruct`, `Qwen/Qwen2.5-VL-72B-Instruct`, etc.
+  *
+  * ✅︎
+  * ✅︎
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
   * `fixie-ai/ultravox-v0_3`
-  *
+  * ✅︎
   * ✅︎
   * ✅︎
 :::
@@ -859,7 +866,11 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 :::{note}
-To use `DeepSeek-VL2` series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
+To use DeepSeek-VL2 series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
+:::
+
+:::{note}
+H2O-VL series models will be available in V1 once we support backends other than FlashAttention.
 :::
 
 :::{note}
@@ -872,8 +883,11 @@ For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 :::
 
 :::{note}
-The chat template for Pixtral-HF is incorrect (see [discussion](https://huggingface.co/mistral-community/pixtral-12b/discussions/22)).
-A corrected version is available at <gh-file:examples/template_pixtral_hf.jinja>.
+`mistral-community/pixtral-12b` does not support V1 yet.
+:::
+
+:::{note}
+To use Qwen2.5-VL series models, you have to install Huggingface `transformers` library from source via `pip install git+https://github.com/huggingface/transformers`.
 :::
 
 ### Pooling Models
