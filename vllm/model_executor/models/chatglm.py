@@ -4,20 +4,16 @@
 # https://github.com/THUDM/CogAgent
 """Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
-from array import array
-from typing import (Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Iterable, List, Mapping, Optional, Sequence, Set, Tuple,
+                    TypedDict)
 
 import torch
-from PIL import Image
 from torch import nn
 from torch.nn import LayerNorm
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -35,25 +31,24 @@ from vllm.model_executor.models.glm4_vision_encoder import EVA2CLIPModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (ModalityData, MultiModalKwargs,
-                                    NestedTensors)
-from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
-                                   ImageSize, MultiModalDataItems)
+from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, BatchFeature,
-                                        MultiModalFieldConfig, ProcessorMixin,
-                                        PromptReplacement)
+                                        BoundPromptReplacement,
+                                        MultiModalFieldConfig,
+                                        PlaceholderFeaturesInfo,
+                                        ProcessorMixin, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
-from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
+from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+                    maybe_prefix, merge_multimodal_embeddings)
 
+IMAGE_TOKEN_ID = 151329
 logger = init_logger(__name__)
 
 
@@ -61,179 +56,12 @@ def calculate_image_placeholder(vision_config):
     return (vision_config["image_size"] // vision_config["patch_size"] // 2)**2
 
 
-def mm_input_mapper_for_glmv(
-    ctx: InputContext,
-    data: ModalityData[object],
-) -> Dict:
-    model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(
-        model_config.tokenizer,
-        trust_remote_code=model_config.trust_remote_code)
-    if tokenizer is None:
-        raise RuntimeError("No HuggingFace processor is available "
-                           "to process the image object")
-    try:
-        raw_batch_data = tokenizer.apply_chat_template(
-            conversation=[{
-                "role": "user",
-                "image": data
-            }],
-            add_generation_prompt=True,
-            tokenize=True,
-            return_tensors="pt",
-            return_dict=True).data
-    except Exception:
-        logger.error("Failed to process image (%s)", data)
-        raise
-    pixel_values = raw_batch_data['images']
-
-    return MultiModalKwargs({'pixel_values': pixel_values})
-
-
-def merge_glm_vision_embeddings(
-    input_ids: torch.Tensor,
-    inputs_embeds: torch.Tensor,
-    vision_embeddings: torch.Tensor,
-    boi_token_id: int,
-    eoi_token_id: int,
-) -> torch.Tensor:
-
-    boi_positions = (input_ids == boi_token_id).nonzero(as_tuple=True)[0]
-    eoi_positions = (input_ids == eoi_token_id).nonzero(as_tuple=True)[0]
-
-    mask = torch.zeros_like(input_ids, dtype=torch.bool)
-
-    for boi_pos, eoi_pos in zip(boi_positions, eoi_positions):
-        assert boi_pos < eoi_pos
-        mask[boi_pos:eoi_pos + 1] = True
-    inputs_embeds[mask] = vision_embeddings.view(-1,
-                                                 vision_embeddings.shape[-1])
-    return inputs_embeds
-
-
 class GLMImagePixelInputs(TypedDict):
     pixel_values: torch.Tensor
     """Shape: `(batch_size, num_channels, height, width)`"""
 
 
-def get_max_glmv_image_tokens(ctx: InputContext):
-    hf_config = ctx.get_hf_config(ChatGLMConfig)
-
-    vision_config = getattr(hf_config, 'vision_config', None)
-    if vision_config is None:
-        return 1
-    elif isinstance(vision_config, dict):
-        return calculate_image_placeholder(vision_config)
-
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
-
-
-def dummy_data_for_glmv(ctx: InputContext, seq_len: int,
-                        mm_counts: Mapping[str, int]) -> DummyData:
-    hf_config = ctx.get_hf_config(ChatGLMConfig)
-    vision_config = getattr(hf_config, 'vision_config', None)
-
-    if vision_config is None:
-        token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, [0] * seq_len)
-        seq_data = SequenceData(token_ids)
-        return DummyData(seq_data, None)
-    elif isinstance(vision_config, dict):
-        image_size = vision_config["image_size"]
-        image_placeholder_length = calculate_image_placeholder(vision_config)
-        token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, [hf_config.boi_token_id] +
-                          [0] * image_placeholder_length +
-                          [hf_config.eoi_token_id])
-        token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                           [0] * (seq_len - image_placeholder_length - 2))
-        seq_data = SequenceData(token_ids)
-
-        mm_data = {
-            "image": Image.new("RGB", (image_size, image_size), color=0)
-        }
-
-        return DummyData(seq_data, mm_data)
-
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
-
-
-def find_all_positions(input_ids: List[int], target: int) -> List[int]:
-    return [index for index, value in enumerate(input_ids) if value == target]
-
-
-def input_processor_for_glmv(ctx: InputContext, inputs: DecoderOnlyInputs):
-    multi_modal_data = inputs.get("multi_modal_data")
-    if multi_modal_data is None or "image" not in multi_modal_data:
-        return inputs
-
-    hf_config = ctx.get_hf_config(ChatGLMConfig)
-    vision_config = getattr(hf_config, 'vision_config', None)
-
-    if vision_config is None:
-        return inputs
-    elif isinstance(vision_config, dict):
-        image_placeholder_length = calculate_image_placeholder(vision_config)
-    else:
-        msg = f"Unsupported vision config: {type(vision_config)}"
-        raise NotImplementedError(msg)
-
-    input_ids = inputs["prompt_token_ids"]
-
-    tokenizer = cached_get_tokenizer(
-        ctx.model_config.model,
-        trust_remote_code=ctx.model_config.trust_remote_code)
-
-    try:
-        raw_batch_data = tokenizer.apply_chat_template(
-            conversation=[{
-                "role": "user",
-                "image": multi_modal_data["image"],
-                "content": inputs['prompt'],
-            }],
-            add_generation_prompt=True,
-            tokenize=True,
-            return_tensors="pt",
-            return_dict=True,
-        ).data
-    except Exception:
-        logger.error("Failed to process content (%s)", inputs['prompt'])
-        raise
-    input_ids = raw_batch_data['input_ids'][0].tolist()
-
-    boi_token_id = hf_config.boi_token_id
-    eoi_token_id = hf_config.eoi_token_id
-    boi_positions = find_all_positions(input_ids, boi_token_id)
-    eoi_positions = find_all_positions(input_ids, eoi_token_id)
-
-    assert len(boi_positions) == len(eoi_positions)
-
-    new_input_ids = []
-    final_processed_position = 0
-
-    for boi_position, eoi_position in zip(boi_positions, eoi_positions):
-        assert boi_position < eoi_position
-        new_input_ids.extend(input_ids[final_processed_position:boi_position +
-                                       1])
-        new_input_ids.extend([input_ids[boi_position + 1]] *
-                             image_placeholder_length)
-        final_processed_position = eoi_position
-
-    new_input_ids.extend(input_ids[final_processed_position:])
-
-    prompt = inputs.get("prompt")
-    if prompt is None:
-        prompt = tokenizer.decode(new_input_ids)
-
-    return token_inputs(
-        prompt_token_ids=new_input_ids,
-        prompt=prompt,
-        multi_modal_data=multi_modal_data,
-    )
-
-
 class GLM4VProcessingInfo(BaseProcessingInfo):
-    pass
 
     def __init__(self, ctx):
         super().__init__(ctx)
@@ -248,7 +76,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
 
-        return {"image": self.image_token_num}
+        return {"image": self.image_token_num + 2}
 
     def _pre_calculate(self):
         hf_config = self.get_hf_config()
@@ -361,20 +189,47 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        image_token_id = [151329]
 
         def get_replacement(item_idx: int):
             num_image_tokens = self.info.get_num_image_tokens(
                 image_height=1120, image_width=1120, processor=None)
-            return [image_token_id] * num_image_tokens
+            return [IMAGE_TOKEN_ID] * num_image_tokens
 
         return [
             PromptReplacement(
                 modality="image",
-                target=[image_token_id],
+                target=[IMAGE_TOKEN_ID],
                 replacement=get_replacement,
             ),
         ]
+
+    def _apply_prompt_replacements(
+        self,
+        token_ids: list[int],
+        mm_prompt_repls: Mapping[str, Sequence[BoundPromptReplacement]],
+        mm_item_counts: Mapping[str, int],
+    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        token_ids, text, placeholders = super()._apply_prompt_replacements(
+            token_ids=token_ids,
+            mm_prompt_repls=mm_prompt_repls,
+            mm_item_counts=mm_item_counts,
+        )
+        hf_config = self.info.get_hf_config()
+        boi_token_id = hf_config.boi_token_id
+        eoi_token_id = hf_config.eoi_token_id
+        placeholders = {
+            modality: [
+                PlaceholderFeaturesInfo(
+                    modality=p.modality,
+                    item_idx=p.item_idx,
+                    start_idx=p.start_idx - 1,
+                    tokens=[boi_token_id] + p.tokens + [eoi_token_id],
+                ) for p in ps
+            ]
+            for modality, ps in placeholders.items()
+        }
+
+        return token_ids, text, placeholders
 
 
 class GLMAttention(nn.Module):
@@ -724,12 +579,16 @@ class ChatGLMModel(nn.Module):
     ) -> torch.Tensor:
         inputs_embeds = self.embedding(input_ids)
         if multimodal_embeddings is not None:
-            inputs_embeds = merge_glm_vision_embeddings(
+            inputs_embeds = merge_multimodal_embeddings(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
-                vision_embeddings=multimodal_embeddings,
-                boi_token_id=self.config.boi_token_id,
-                eoi_token_id=self.config.eoi_token_id)
+                multimodal_embeddings=multimodal_embeddings,
+                placeholder_token_id=[
+                    self.config.boi_token_id,
+                    IMAGE_TOKEN_ID,
+                    self.config.eoi_token_id,
+                ],
+            )
         return inputs_embeds
 
     def forward(
@@ -745,14 +604,12 @@ class ChatGLMModel(nn.Module):
 
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
-        if intermediate_tensors is None and inputs_embeds is None:
+        if intermediate_tensors is not None:
+            inputs_embeds = intermediate_tensors["hidden_states"]
+        elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
-            input_ids = None
-        else:
-            inputs_embeds = intermediate_tensors["hidden_states"]
-
         # Run encoder.
         hidden_states = self.encoder(
             hidden_states=inputs_embeds,
@@ -915,11 +772,16 @@ class ChatGLMV(ChatGLMBaseModel, SupportsMultiModal):
             connector="transformer.vision.linear_proj",
             tower_model="transformer.vision.transformer")
 
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        return self.transformer.get_multimodal_embeddings(**kwargs)
 
-# @MULTIMODAL_REGISTRY.register_image_input_mapper(mm_input_mapper_for_glmv)
-# @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_glmv_image_tokens)
-# @INPUT_REGISTRY.register_dummy_data(dummy_data_for_glmv)
-# @INPUT_REGISTRY.register_input_processor(input_processor_for_glmv)
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+        return self.transformer.get_input_embeddings(input_ids,
+                                                     multimodal_embeddings)
 
 
 @MULTIMODAL_REGISTRY.register_processor(GLM4VMultiModalProcessor,
