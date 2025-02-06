@@ -16,29 +16,59 @@ def create_tensors(T, D, L, N):
     
     Outputs:
         inputs:     jax.Array - shape (T, D)
-        lora:       jax.Array - shape (L, D)
+        loras:      jax.Array - shape (N, 1, L, D)
+        idxs:       jax.Array - shape (T, ) - all values must be in [0, N)
         
         ref_output: jax.Array - shape (T, L) - inputs @ loras[idxs].T
-        
-    Ignored:
-        idxs:       jax.Array - shape (T, ) - all values must be in [0, N)
-        loras:      jax.Array - shape (N, 1, L, D)
     """
     inputs = jax.random.normal(jax.random.PRNGKey(0), (T, D))
-    lora = jax.random.normal(jax.random.PRNGKey(1), (L, D))
-    ref_output = inputs @ lora.T
+    loras = jax.random.normal(jax.random.PRNGKey(1), (N, 1, L, D))
+    idxs = jax.random.randint(jax.random.PRNGKey(2),
+                              shape=(T, ),
+                              minval=0,
+                              maxval=N)
 
-    return inputs, lora, ref_output
+    ref_output = jnp.einsum("td,__ld->tl", inputs, loras[idxs])
+
+    return inputs, loras, idxs, ref_output
 
 
-def bgmv_kernel(inp_ref, lora_ref, out_ref, acc_ref):
+def create_debug_tensors(T, D, L, N):
+    """
+    Inputs: (All integers)
+        T: Total number of tokens
+        D: Input dim
+        L: LoRA Dim
+        N: N LoRAs
+    
+    Outputs:
+        inputs:     jax.Array - shape (T, D)
+        loras:      jax.Array - shape (N, 1, L, D)
+        idxs:       jax.Array - shape (T, ) - all values must be in [0, N)
+        
+        ref_output: jax.Array - shape (T, L) - inputs @ loras[idxs].T
+    """
+    inputs = jnp.ones((T, D))
+    loras = jnp.ones((N, 1, L, D)) * jnp.arange(0, N)[:, None, None, None]
+    idxs = jax.random.randint(jax.random.PRNGKey(2),
+                              shape=(T, ),
+                              minval=0,
+                              maxval=N)
+
+    ref_output = jnp.einsum("td,t_ld->tl", inputs, loras[idxs])
+
+    return inputs, loras, idxs, ref_output
+
+
+def bgmv_kernel(idx_ref, inp_ref, lora_ref, out_ref, acc_ref):
+    del idx_ref
 
     @pl.when(pl.program_id(2) == 0)
     def _():
         acc_ref[...] = jnp.zeros_like(acc_ref[...], dtype=jnp.float32)
 
     acc_ref[...] += jax.lax.dot_general(inp_ref[...],
-                                        lora_ref[...],
+                                        lora_ref[0, 0, ...],
                                         (((1, ), (1, )), ((), ())),
                                         preferred_element_type=jnp.float32)
 
@@ -48,9 +78,9 @@ def bgmv_kernel(inp_ref, lora_ref, out_ref, acc_ref):
 
 
 @jax.jit
-def bgmv(inputs: jax.Array, lora: jax.Array):
+def bgmv(inputs: jax.Array, lora: jax.Array, idxs: jax.Array):
     T, D = inputs.shape
-    L, _ = lora.shape
+    N, _, L, _ = lora.shape
 
     # TODO: Tune
     # Also figure out how to make bT % 128 instead of bL,
@@ -63,28 +93,38 @@ def bgmv(inputs: jax.Array, lora: jax.Array):
         kernel=bgmv_kernel,
         out_shape=jax.ShapeDtypeStruct((T, L), dtype=inputs.dtype),
         grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=0,
+            num_scalar_prefetch=1,
             grid=(T // bT, L // bL, D // bD),
             in_specs=[
-                pl.BlockSpec((bT, bD), lambda i, j, k: (i, k)),
-                pl.BlockSpec((bL, bD), lambda i, j, k: (j, k)),
+                pl.BlockSpec((bT, bD), lambda i, j, k, block_idx: (i, k)),
+                pl.BlockSpec((1, 1, bL, bD), lambda i, j, k, block_idx:
+                             (block_idx[i * bT], 0, j, k)),
             ],
-            out_specs=pl.BlockSpec((bT, bL), lambda i, j, k: (i, j)),
+            out_specs=pl.BlockSpec((bT, bL), lambda i, j, k, block_idx:
+                                   (i, j)),
             scratch_shapes=[pltpu.VMEM((bT, bL), jnp.float32)]),
         compiler_params=pltpu.TPUCompilerParams(
             dimension_semantics=("parallel", "parallel", "arbitrary")),
-        interpret=True)(inputs, lora)
+        interpret=True)(idxs, inputs, lora)
 
 
 if __name__ == "__main__":
     T, D, L, N = 128, 3072, 128, 8
-    inputs, lora, ref_output = create_tensors(T, D, L, N)
+    inputs, lora, idxs, ref_output = create_debug_tensors(T, D, L, N)
+    print(idxs)
+    # breakpoint()
 
     print(lora.shape, inputs.shape, ref_output.shape)
 
-    output1 = bgmv(inputs, lora)
+    output = bgmv(inputs, lora, idxs)
 
-    print(jnp.isnan(output1).sum(), "NaN values")
+    print(jnp.isnan(output).sum(), "NaN values")
 
-    # np.testing.assert_allclose(ref_output, output1)
-    # print("Success")
+    print("Err", jnp.max(jnp.abs(ref_output - output)))
+
+    output_idxs = (output / D)[:, 0]
+    print(output_idxs)
+    print(output_idxs == idxs)
+
+    breakpoint()
+    # np.testing.assert_allclose(ref_output, output1, rtol=1e-2)
