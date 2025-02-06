@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 from dataclasses import dataclass
-from typing import Dict, Generic, List, Optional
+from typing import Dict, Generic, List, MutableSequence, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
@@ -162,6 +164,26 @@ class RequestOutput:
             finished=finished,
         )
 
+    def add(self, next_output: "RequestOutput") -> None:
+        """Merge subsequent RequestOutput into this one"""
+
+        self.prompt = next_output.prompt
+        self.prompt_token_ids = next_output.prompt_token_ids
+        self.prompt_logprobs = next_output.prompt_logprobs
+        self.finished |= next_output.finished
+
+        #TODO assuming n == 1 for now
+        completion = self.outputs[0]
+        next_completion = next_output.outputs[0]
+        completion.text += next_completion.text
+        if not isinstance(completion.token_ids, MutableSequence):
+            completion.token_ids = list(completion.token_ids)
+        completion.token_ids.extend(next_completion.token_ids)
+        if next_completion.logprobs:
+            assert completion.logprobs is not None
+            completion.logprobs.extend(next_completion.logprobs)
+        completion.cumulative_logprob = next_completion.cumulative_logprob
+
     @classmethod
     def from_seq_group(
         cls, seq_group: SequenceGroup, use_cache: bool,
@@ -172,9 +194,9 @@ class RequestOutput:
         if seq_group.request_id in seq_id_to_seq_group:
             group: SequenceGroupBase = seq_id_to_seq_group[
                 seq_group.request_id]
+            assembled_seq_group = group.maybe_assemble_group(seq_group)
             if finished:
                 group.finish_seq(seq_group)
-            assembled_seq_group = group.maybe_assemble_group(seq_group)
             if assembled_seq_group is None:
                 return None
             return cls.from_seq_group(assembled_seq_group, use_cache,

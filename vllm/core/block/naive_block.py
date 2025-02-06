@@ -1,5 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import deque
-from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple, Union
 
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
@@ -136,15 +138,17 @@ class NaiveBlockAllocator(BlockAllocator):
         self._refcounter.incr(block_id)
         return block_id
 
-    def _free_block_id(self, block: Block) -> None:
-        block_id = block.block_id
+    def _free_block_id(self, block: Union[Block, BlockId]) -> None:
+        if isinstance(block, Block):
+            block_id = block.block_id
+            block.block_id = None
+        else:
+            block_id = block
         assert block_id is not None
 
         refcount = self._refcounter.decr(block_id)
         if refcount == 0:
             self._free_block_indices.appendleft(block_id)
-
-        block.block_id = None
 
     def free(self, block: Block, keep_block_object: bool = False) -> None:
         # Release the physical block id
@@ -153,6 +157,9 @@ class NaiveBlockAllocator(BlockAllocator):
         # Release the block object
         if not keep_block_object:
             self._block_pool.free_block(block)
+
+    def free_block_id(self, block_id: BlockId) -> None:
+        self._free_block_id(block_id)
 
     def fork(self, last_block: Block) -> List[Block]:
         """Creates a new sequence of blocks that shares the same underlying
@@ -324,6 +331,10 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def get_prefix_cache_hit_rate(self) -> float:
         return -1
+
+    def reset_prefix_cache(self) -> bool:
+        """No prefix cache for naive block allocator."""
+        return True
 
     def find_cached_blocks_prefix(self, block_hashes: List[int]) -> List[int]:
         # Not applicable for naive block allocator.

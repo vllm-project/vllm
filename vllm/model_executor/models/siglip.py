@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Implementation of SiglipVisionModel intended to be only used
 within a vision language model."""
 
@@ -24,11 +25,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges,
-                                   repeat_and_pad_placeholder_tokens,
-                                   resolve_visual_encoder_outputs)
+                                   repeat_and_pad_placeholder_tokens)
 from vllm.sequence import SequenceData
 
-from .vision import VisionEncoderInfo
+from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
 
 def get_siglip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -345,10 +345,14 @@ class SiglipMLP(nn.Module):
 
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
-
-        # For quantization, we require the hidden size to be a multiple of 64
-        quantizable = (config.hidden_size % 64 == 0
-                       and config.intermediate_size % 64 == 0)
+        # Special handling for BNB quantization
+        if quant_config and quant_config.get_name() == "bitsandbytes":
+            quantizable = True
+        else:
+            # For other quantization, we require the hidden size to be a
+            # multiple of 64
+            quantizable = (config.hidden_size % 64 == 0
+                           and config.intermediate_size % 64 == 0)
         self.fc1 = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,

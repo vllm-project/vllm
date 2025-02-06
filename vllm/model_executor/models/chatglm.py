@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
-# https://github.com/THUDM/GLM-4
-"""Inference-only ChatGLM model compatible with THUDM weights."""
+# https://github.com/THUDM/CogAgent
+"""Inference-only CogAgent model compatible with THUDM weights."""
 from argparse import Namespace
 from array import array
 from typing import (Dict, Iterable, List, Mapping, Optional, Set, Tuple,
@@ -41,7 +43,7 @@ from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
 from vllm.transformers_utils.configs import ChatGLMConfig
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -201,7 +203,6 @@ def input_processor_for_glmv(ctx: InputContext, inputs: DecoderOnlyInputs):
 
     new_input_ids = []
     final_processed_position = 0
-    final_processed_position = 0
 
     for boi_position, eoi_position in zip(boi_positions, eoi_positions):
         assert boi_position < eoi_position
@@ -264,23 +265,28 @@ class GLMAttention(nn.Module):
             self.total_num_kv_heads,
             bias=config.add_bias_linear or config.add_qkv_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.query_key_value",
         )
         self.dense = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=config.add_bias_linear,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense",
         )
 
         # https://huggingface.co/THUDM/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
         rope_ratio = getattr(config, "rope_ratio", 1.0)
         max_positions = getattr(config, "seq_length", 8192)
+        # NOTE: THUDM/cogagent-9b-20241220 uses original_rope=False,
+        # which is equivalent to is_neox_style=True
+        is_neox_style = not config.original_rope
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim // 2,
             max_position=max_positions,
             base=10000 * rope_ratio,
-            is_neox_style=False,
+            is_neox_style=is_neox_style,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -323,6 +329,7 @@ class GLMMLP(nn.Module):
         self,
         config: ChatGLMConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -334,6 +341,7 @@ class GLMMLP(nn.Module):
             [config.ffn_hidden_size] * 2,
             bias=config.add_bias_linear,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_h_to_4h",
         )
 
         self.activation_func = SiluAndMul()
@@ -344,6 +352,7 @@ class GLMMLP(nn.Module):
             config.hidden_size,
             bias=config.add_bias_linear,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_4h_to_h",
         )
 
     def forward(self, hidden_states):
@@ -392,7 +401,7 @@ class GLMBlock(nn.Module):
             config.hidden_size, eps=config.layernorm_epsilon)
 
         # MLP
-        self.mlp = GLMMLP(config, quant_config)
+        self.mlp = GLMMLP(config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -503,7 +512,8 @@ class ChatGLMModel(nn.Module):
 
         self.embedding = VocabParallelEmbedding(config.padded_vocab_size,
                                                 config.hidden_size,
-                                                quant_config=quant_config)
+                                                quant_config=quant_config,
+                                                prefix=f"{prefix}.embedding")
 
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
@@ -603,8 +613,49 @@ class ChatGLMModel(nn.Module):
             return IntermediateTensors({"hidden_states": hidden_states})
         return hidden_states
 
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("linear_proj.merged_proj", "linear_proj.gate_proj", 0),
+            ("linear_proj.merged_proj", "linear_proj.dense_h_to_4h", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+
+        for name, loaded_weight in weights:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                if "rotary_pos_emb.inv_freq" in name:
+                    continue
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
 
 class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP):
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".word_embeddings": ""}, )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -658,52 +709,9 @@ class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        # Merge two ColumnParallelLinear into one MergedColumnParallelLinear
-        merged_weights_dict: Dict[str, Dict[str, Optional[torch.Tensor]]] = {
-            "transformer.vision.linear_proj.merged_proj.weight": {
-                "transformer.vision.linear_proj.gate_proj.weight": None,
-                "transformer.vision.linear_proj.dense_h_to_4h.weight": None,
-            }
-        }
-
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            is_weight_to_be_merge = False
-            for _, merged_weight_dict in merged_weights_dict.items():
-                if name in merged_weight_dict:
-                    assert merged_weight_dict[name] is None
-                    merged_weight_dict[name] = loaded_weight
-                    is_weight_to_be_merge = True
-            if is_weight_to_be_merge:
-                continue
-            if "rotary_pos_emb.inv_freq" in name:
-                continue
-            if "word_embeddings" in name:
-                name = name.replace(".word_embeddings", "")
-            # Skip loading extra bias for GPTQ models.
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        for combined_name, merged_weight_dict in merged_weights_dict.items():
-            if combined_name in params_dict:
-                param = params_dict[combined_name]
-                combined_weight = torch.cat(list(merged_weight_dict.values()),
-                                            dim=0)
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, combined_weight)
-                loaded_params.add(combined_name)
-        return loaded_params
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class ChatGLM(ChatGLMBaseModel):
@@ -724,6 +732,7 @@ class ChatGLM(ChatGLMBaseModel):
 
 
 class ChatGLMV(ChatGLMBaseModel, SupportsMultiModal):
+
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],
@@ -763,6 +772,7 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
                          SupportsMultiModal):
     # Ensure that the LoRA support check passes when the class is not
     # initialized, but set all these attributes to empty.
+    # These will be updated when an instance class is selected
     packed_modules_mapping = {}
     supported_lora_modules = []
     embedding_modules = {}
@@ -774,9 +784,18 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         prefix: str = "",
     ) -> None:
         config = vllm_config.model_config.hf_config
+
         # Initialize VL
-        if hasattr(config, "visual"):
-            return ChatGLMV(vllm_config=vllm_config, prefix=prefix)
+        if hasattr(config, "vision_config"):  # noqa: SIM108
+            instance_cls = ChatGLMV
         # Initialize LLM
         else:
-            return ChatGLM(vllm_config=vllm_config, prefix=prefix)
+            instance_cls = ChatGLM
+
+        # quant_config references base class members,
+        # so update values before init is called
+        cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
+        cls.supported_lora_modules += instance_cls.supported_lora_modules
+        cls.embedding_modules.update(instance_cls.embedding_modules)
+        cls.embedding_padding_modules += instance_cls.embedding_padding_modules
+        return instance_cls(vllm_config=vllm_config, prefix=prefix)

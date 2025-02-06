@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
 import math
@@ -16,23 +18,23 @@ from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from vllm import envs
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
+from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
-from vllm.multimodal.parse import MultiModalDataParser
+from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataItems, ProcessingMixin,
-                                        PromptReplacement)
-from vllm.multimodal.profiling import BaseProfilingInfo, ProcessorInputs
+                                        BaseProcessingInfo, PromptReplacement)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings,
@@ -59,9 +61,9 @@ UltravoxAudioInputs = Union[UltravoxAudioFeatureInputs,
                             UltravoxAudioEmbeddingInputs]
 
 
-class UltravoxProcessingMixin(ProcessingMixin):
+class UltravoxProcessingInfo(BaseProcessingInfo):
 
-    def _get_hf_processor(
+    def get_hf_processor(
         self,
         *,
         # Ignored in initialization
@@ -76,37 +78,42 @@ class UltravoxProcessingMixin(ProcessingMixin):
         hf_processor.audio_token_replacement = _AUDIO_PLACEHOLDER_OVERRIDE
         return hf_processor
 
-    def _get_feature_extractor(
+    def get_feature_extractor(
         self,
         *,
         # Ignored in initialization
         sampling_rate: Optional[int] = None,
     ) -> WhisperFeatureExtractor:
-        hf_processor = self._get_hf_processor(sampling_rate=sampling_rate)
+        hf_processor = self.get_hf_processor(sampling_rate=sampling_rate)
         audio_processor = hf_processor.audio_processor  # type: ignore
         feature_extractor = audio_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
-
-class UltravoxProfilingInfo(UltravoxProcessingMixin, BaseProfilingInfo):
-
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        feature_extractor = self._get_feature_extractor()
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        feature_extractor = self.get_feature_extractor()
         max_audio_tokens = math.ceil(feature_extractor.chunk_length *
                                      _AUDIO_TOKENS_PER_SECOND)
 
         return {"audio": max_audio_tokens}
+
+
+class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo]
+                                 ):
 
     def get_dummy_processor_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        feature_extractor = self._get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor()
 
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
@@ -123,14 +130,11 @@ class UltravoxProfilingInfo(UltravoxProcessingMixin, BaseProfilingInfo):
         )
 
 
-class UltravoxMultiModalProcessor(UltravoxProcessingMixin,
-                                  BaseMultiModalProcessor):
-
-    def _get_profiling_info(self) -> BaseProfilingInfo:
-        return UltravoxProfilingInfo(self.ctx)
+class UltravoxMultiModalProcessor(
+        BaseMultiModalProcessor[UltravoxProcessingInfo]):
 
     def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self._get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor()
         return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
 
     def _call_hf_processor(
@@ -140,27 +144,16 @@ class UltravoxMultiModalProcessor(UltravoxProcessingMixin,
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
-        if not mm_data:
-            tokenizer = self._get_tokenizer()
-
-            prompt_ids = tokenizer.encode(
-                prompt,
-                add_special_tokens=False,  # type: ignore
-            )
+        if not mm_data or not mm_data.get("audios", []):
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
         assert isinstance(audios, list)
 
-        if not audios:
-            return super()._call_hf_processor(
-                prompt=prompt,
-                mm_data=mm_data,
-                mm_kwargs=mm_kwargs,
-            )
-
-        feature_extractor = self._get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor()
         mm_kwargs = dict(
             **mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,
@@ -191,6 +184,16 @@ class UltravoxMultiModalProcessor(UltravoxProcessingMixin,
         )
         return BatchFeature(combined_outputs)
 
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        # HF processor omits bos_token_id by setting add_special_tokens=False
+        tokenizer = self.info.get_tokenizer()
+        assert prompt_tokens[0] == tokenizer.bos_token_id
+
+        return prompt_tokens[1:]
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -208,12 +211,16 @@ class UltravoxMultiModalProcessor(UltravoxProcessingMixin,
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        hf_processor = self._get_hf_processor(**hf_processor_mm_kwargs)
-        placeholder = hf_processor.audio_token_replacement  # type: ignore
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        replacement_id = vocab[
+            hf_processor.audio_token_replacement]  # type: ignore
 
         def get_replacement_ultravox(item_idx: int):
             audio_token_len = out_mm_kwargs["audio_token_len"][item_idx]
-            return placeholder * audio_token_len
+            return [replacement_id] * int(audio_token_len)  # type: ignore
 
         return [
             PromptReplacement(
@@ -245,15 +252,6 @@ class StackAudioFrames(nn.Module):
         return audio_embeds
 
 
-class FlippedSiluAndMul(SiluAndMul):
-    """Ultravox is trained with SwiGLU with flipped halves."""
-
-    def forward(self, x: torch.Tensor):
-        a, b = x.chunk(2, dim=-1)
-        flipped = torch.cat((b, a), dim=-1)
-        return super().forward(flipped)
-
-
 class UltravoxProjector(nn.Module):
 
     def __init__(self, config: UltravoxConfig):
@@ -266,7 +264,7 @@ class UltravoxProjector(nn.Module):
         dim = self.hidden_dim
 
         if config.projector_act == "swiglu":
-            self.act = FlippedSiluAndMul()
+            self.act = MulAndSilu()
             dim = dim // 2
         else:
             self.act = get_act_fn(config.projector_act)
@@ -342,8 +340,24 @@ class ModifiedWhisperEncoder(WhisperEncoder):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(UltravoxMultiModalProcessor)
-class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
+@MULTIMODAL_REGISTRY.register_processor(
+    UltravoxMultiModalProcessor,
+    info=UltravoxProcessingInfo,
+    dummy_inputs=UltravoxDummyInputsBuilder)
+class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
+
+    # LoRA specific attributes
+    # TODO : Add LoRA to the audio tower and projector.
+    supported_lora_modules = [
+        "qkv_proj", "o_proj", "gate_up_proj", "down_proj"
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
@@ -390,6 +404,16 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
             return self.language_model.sampler
 
         return get_sampler()
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model.",
+            connector="multi_modal_projector.",
+            tower_model="audio_tower.",
+        )
 
     def _audio_features_to_embeddings(
             self, input_features: torch.Tensor) -> torch.Tensor:

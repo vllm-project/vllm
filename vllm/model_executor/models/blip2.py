@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
@@ -14,13 +16,13 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputsV2, MultiModalKwargs,
-                                    NestedTensors, PlaceholderRange)
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
+from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        MultiModalDataItems, ProcessingMixin,
-                                        PromptReplacement)
-from vllm.multimodal.profiling import BaseProfilingInfo, ProcessorInputs
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptReplacementDetails)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .blip import BlipVisionModel
@@ -397,30 +399,34 @@ class Blip2QFormerModel(nn.Module):
         return sequence_output
 
 
-class Blip2ProcessingMixin(ProcessingMixin):
+class Blip2ProcessingInfo(BaseProcessingInfo):
 
-    def _get_hf_config(self):
+    def get_hf_config(self):
         return self.ctx.get_hf_config(Blip2Config)
-
-    def _get_num_image_tokens(self) -> int:
-        hf_config = self._get_hf_config()
-        return hf_config.num_query_tokens
-
-
-class Blip2ProfilingInfo(Blip2ProcessingMixin, BaseProfilingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        return {"image": self._get_num_image_tokens()}
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {"image": self.get_num_image_tokens()}
+
+    def get_num_image_tokens(self) -> int:
+        hf_config = self.get_hf_config()
+        return hf_config.num_query_tokens
+
+
+class Blip2DummyInputsBuilder(BaseDummyInputsBuilder[Blip2ProcessingInfo]):
 
     def get_dummy_processor_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        hf_config = self._get_hf_config()
+        hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
 
         max_image_size = vision_config.image_size
@@ -439,10 +445,25 @@ class Blip2ProfilingInfo(Blip2ProcessingMixin, BaseProfilingInfo):
         )
 
 
-class Blip2MultiModalProcessor(Blip2ProcessingMixin, BaseMultiModalProcessor):
+class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
 
-    def _get_profiling_info(self) -> BaseProfilingInfo:
-        return Blip2ProfilingInfo(self.ctx)
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if not mm_data:
+            # HF processor always adds placeholders even when there's no image
+            tokenizer = self.info.get_tokenizer()
+            prompt_ids = tokenizer.encode(prompt)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+        )
 
     def _get_mm_fields_config(
         self,
@@ -460,38 +481,31 @@ class Blip2MultiModalProcessor(Blip2ProcessingMixin, BaseMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        num_image_tokens = self._get_num_image_tokens()
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        bos_token_id = tokenizer.bos_token_id
+        assert isinstance(bos_token_id, int)
+
+        image_token_id = vocab["<image>"]
+        num_image_tokens = self.info.get_num_image_tokens()
+        image_tokens = [image_token_id] * num_image_tokens
 
         return [
             PromptReplacement(
                 modality="image",
-                target="</s>",
-                replacement="<image>" * num_image_tokens + "</s>",
+                target=[bos_token_id],
+                replacement=PromptReplacementDetails(
+                    full=image_tokens + [bos_token_id],
+                    features=image_tokens,
+                ),
             )
         ]
 
-    def apply(
-        self,
-        prompt_text: str,
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> MultiModalInputsV2:
-        result = super().apply(prompt_text, mm_data, hf_processor_mm_kwargs)
 
-        # Only <image> tokens should be considered as placeholders,
-        # so we ignore the trailing bos_token
-        result["mm_placeholders"] = {
-            modality: [
-                PlaceholderRange(offset=p["offset"], length=p["length"] - 1)
-                for p in ps
-            ]
-            for modality, ps in result["mm_placeholders"].items()
-        }
-
-        return result
-
-
-@MULTIMODAL_REGISTRY.register_processor(Blip2MultiModalProcessor)
+@MULTIMODAL_REGISTRY.register_processor(Blip2MultiModalProcessor,
+                                        info=Blip2ProcessingInfo,
+                                        dummy_inputs=Blip2DummyInputsBuilder)
 class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

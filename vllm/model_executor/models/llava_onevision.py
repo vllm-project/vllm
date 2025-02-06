@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import math
 from functools import cached_property
 from typing import (Final, Iterable, List, Literal, Mapping, Optional,
@@ -17,19 +19,20 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
+                                    NestedTensors)
 from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
                                    VideoEmbeddingItems, VideoProcessorItems)
-from vllm.multimodal.processing import MultiModalFieldConfig, PromptReplacement
-from vllm.multimodal.profiling import BaseProfilingInfo, ProcessorInputs
+from vllm.multimodal.processing import PromptReplacement
+from vllm.multimodal.profiling import ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .clip import CLIPVisionModel
 from .interfaces import SupportsMultiModal, SupportsPP
-from .llava import BaseLlavaProfilingInfo, init_vision_tower_for_llava
-from .llava_next import (LlavaNextLikeConfig, LlavaNextMultiModalProcessor,
-                         LlavaNextProcessingMixin)
+from .llava import LlavaDummyInputsBuilder, init_vision_tower_for_llava
+from .llava_next import (BaseLlavaNextMultiModalProcessor, LlavaNextLikeConfig,
+                         LlavaNextProcessingInfo)
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -89,13 +92,26 @@ class LlavaOnevisionLikeConfig(LlavaNextLikeConfig, Protocol):
     video_token_index: Final[int]
 
 
-class LlavaOnevisionProcessingMixin(LlavaNextProcessingMixin):
+class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
 
-    def _get_hf_config(self) -> LlavaOnevisionLikeConfig:
+    def get_hf_config(self) -> LlavaOnevisionLikeConfig:
         return self.ctx.get_hf_config(LlavaOnevisionConfig)
 
-    def _get_hf_processor(self):
+    def get_hf_processor(self):
         return self.ctx.get_hf_processor(LlavaOnevisionProcessor)
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None, "video": None}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {
+            "image": self.get_max_image_tokens(),
+            "video": self.get_max_video_tokens(seq_len),
+        }
 
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L86
     # with additional logic afterwards taken from LlavaOnevisionProcessor
@@ -135,22 +151,26 @@ class LlavaOnevisionProcessingMixin(LlavaNextProcessingMixin):
 
         return (unpadded_features, newline_features)
 
+    def get_image_size_with_most_features(self) -> ImageSize:
+        # NOTE: This hardcoded value is found via processor tests
+        return ImageSize(width=1153, height=944)
+
     def _get_num_frame_tokens(
         self,
         *,
         image_width: int,
         image_height: int,
     ) -> int:
-        hf_config = self._get_hf_config()
+        hf_config = self.get_hf_config()
         spatial_pool_stride = getattr(hf_config, "spatial_pool_stride", 2)
 
-        vision_encoder_info = self._get_vision_encoder_info()
+        vision_encoder_info = self.get_vision_encoder_info()
         patch_grid_length = vision_encoder_info.get_patch_grid_length()
         pooled_grid_length = math.ceil(patch_grid_length / spatial_pool_stride)
 
         return pooled_grid_length * pooled_grid_length
 
-    def _get_num_video_tokens(
+    def get_num_video_tokens(
         self,
         *,
         image_width: int,
@@ -164,43 +184,14 @@ class LlavaOnevisionProcessingMixin(LlavaNextProcessingMixin):
 
         return num_frame_tokens * num_frames + 1  # Newline token
 
-
-class LlavaOnevisionProfilingInfo(LlavaOnevisionProcessingMixin,
-                                  BaseLlavaProfilingInfo):
-
-    def _get_image_size_with_most_features(self) -> ImageSize:
-        hf_config = self._get_hf_config()
-        largest_feature_size, largest_feature_pinpoint = 0, None
-        for (height, width) in hf_config.image_grid_pinpoints:
-            feat_size = self._get_num_image_tokens(image_width=width,
-                                                   image_height=height)
-            if feat_size > largest_feature_size:
-                largest_feature_size = feat_size
-                largest_feature_pinpoint = ImageSize(width=width,
-                                                     height=height)
-
-        if largest_feature_size == 0 or largest_feature_pinpoint is None:
-            raise ValueError("Cannot have a largest feature size of 0!")
-
-        return largest_feature_pinpoint
-
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None, "video": None}
-
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        return {
-            "image": self._get_max_image_tokens(),
-            "video": self._get_max_video_tokens(seq_len),
-        }
-
     def _get_max_video_frames(self, max_tokens: int) -> int:
-        target_width, target_height = self._get_image_size_with_most_features()
+        target_width, target_height = self.get_image_size_with_most_features()
 
         num_frames = 0
 
         while True:
             next_num_frames = num_frames + 1
-            next_max_tokens = self._get_num_video_tokens(
+            next_max_tokens = self.get_num_video_tokens(
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
@@ -213,12 +204,12 @@ class LlavaOnevisionProfilingInfo(LlavaOnevisionProcessingMixin,
 
         return num_frames
 
-    def _get_dummy_num_frames(self, seq_len: int) -> int:
+    def get_num_frames_with_most_features(self, seq_len: int) -> int:
         mm_config = self.ctx.get_mm_config()
         max_images = mm_config.limit_per_prompt.get("image", 1)
         max_videos = mm_config.limit_per_prompt.get("video", 1)
 
-        max_image_tokens = self._get_max_image_tokens() * max_images
+        max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = self._get_max_video_frames(seq_len -
                                                       max_image_tokens)
         max_frames_per_video = min(max_total_frames // max(max_videos, 1),
@@ -226,14 +217,18 @@ class LlavaOnevisionProfilingInfo(LlavaOnevisionProcessingMixin,
 
         return max(max_frames_per_video, 1)
 
-    def _get_max_video_tokens(self, seq_len: int) -> int:
-        target_width, target_height = self._get_image_size_with_most_features()
+    def get_max_video_tokens(self, seq_len: int) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
 
-        return self._get_num_video_tokens(
+        return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
-            num_frames=self._get_dummy_num_frames(seq_len),
+            num_frames=self.get_num_frames_with_most_features(seq_len),
         )
+
+
+class LlavaOnevisionDummyInputsBuilder(
+        LlavaDummyInputsBuilder[LlavaOnevisionProcessingInfo]):
 
     def get_dummy_processor_inputs(
         self,
@@ -243,10 +238,14 @@ class LlavaOnevisionProfilingInfo(LlavaOnevisionProcessingMixin,
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        processor = self._get_hf_processor()
+        processor = self.info.get_hf_processor()
         image_token = processor.image_token
         video_token = processor.video_token
-        target_width, target_height = self._get_image_size_with_most_features()
+
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+        target_num_frames = \
+            self.info.get_num_frames_with_most_features(seq_len)
 
         mm_data = {
             "image":
@@ -257,7 +256,7 @@ class LlavaOnevisionProfilingInfo(LlavaOnevisionProcessingMixin,
             self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
-                num_frames=self._get_dummy_num_frames(seq_len),
+                num_frames=target_num_frames,
                 num_videos=num_videos,
             )
         }
@@ -268,11 +267,8 @@ class LlavaOnevisionProfilingInfo(LlavaOnevisionProcessingMixin,
         )
 
 
-class LlavaOnevisionMultiModalProcessor(LlavaOnevisionProcessingMixin,
-                                        LlavaNextMultiModalProcessor):
-
-    def _get_profiling_info(self) -> BaseProfilingInfo:
-        return LlavaOnevisionProfilingInfo(self.ctx)
+class LlavaOnevisionMultiModalProcessor(
+        BaseLlavaNextMultiModalProcessor[LlavaOnevisionProcessingInfo]):
 
     def _get_mm_fields_config(
         self,
@@ -303,7 +299,7 @@ class LlavaOnevisionMultiModalProcessor(LlavaOnevisionProcessingMixin,
                 mm_kwargs=mm_kwargs,
             )
 
-        processor = self._get_hf_processor()
+        processor = self.info.get_hf_processor()
         video_token = processor.video_token
 
         # LLaVA-OneVision processor doesn't support multiple videos
@@ -345,7 +341,7 @@ class LlavaOnevisionMultiModalProcessor(LlavaOnevisionProcessingMixin,
             out_mm_kwargs=out_mm_kwargs,
         )
 
-        hf_config = self._get_hf_config()
+        hf_config = self.info.get_hf_config()
         video_token_id = hf_config.video_token_index
 
         def get_video_replacement(item_idx: int):
@@ -356,7 +352,7 @@ class LlavaOnevisionMultiModalProcessor(LlavaOnevisionProcessingMixin,
                 num_video_tokens = videos.get_feature_size(item_idx)
             else:
                 image_size = videos.get_frame_size(item_idx)
-                num_video_tokens = self._get_num_video_tokens(
+                num_video_tokens = self.info.get_num_video_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     num_frames=videos.get_num_frames(item_idx),
@@ -380,11 +376,11 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
 
         self.linear_1 = nn.Linear(config.vision_config.hidden_size,
                                   config.text_config.hidden_size,
-                                  bias=True)
+                                  bias=config.multimodal_projector_bias)
         self.act = get_act_fn(config.projector_hidden_act)
         self.linear_2 = nn.Linear(config.text_config.hidden_size,
                                   config.text_config.hidden_size,
-                                  bias=True)
+                                  bias=config.multimodal_projector_bias)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear_1(image_features)
@@ -393,7 +389,10 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(LlavaOnevisionMultiModalProcessor)
+@MULTIMODAL_REGISTRY.register_processor(
+    LlavaOnevisionMultiModalProcessor,
+    info=LlavaOnevisionProcessingInfo,
+    dummy_inputs=LlavaOnevisionDummyInputsBuilder)
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              SupportsPP):
 
@@ -561,10 +560,12 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
         for input_key in kwargs:
-            if input_key == "pixel_values" and "images" not in modalities:
+            if input_key in ("pixel_values",
+                             "image_embeds") and "images" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(
                     **kwargs)
-            if input_key == "pixel_values_videos" and "videos" not in modalities:  # noqa E501
+            if input_key in ("pixel_values_videos",
+                             "video_embeds") and "videos" not in modalities:
                 modalities["videos"] = self._parse_and_validate_video_input(
                     **kwargs)
 
@@ -821,7 +822,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         return image_feature
 
     def get_multimodal_embeddings(
-            self, **kwargs) -> Optional[List[Tuple[NestedTensors, str]]]:
+            self, **kwargs) -> Optional[tuple[torch.Tensor, ...]]:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return None
@@ -847,14 +848,41 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[List[Tuple[NestedTensors,
-                                                   str]]] = None,
+        multimodal_embeddings: Optional[tuple[torch.Tensor, ...]] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [self.config.image_token_index, self.config.video_token_index])
+        return inputs_embeds
+
+    def get_input_embeddings_v0(
+        self,
+        input_ids: torch.Tensor,
+        image_input: Optional[NestedTensors] = None,
+        video_input: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+
+        inputs_embeds = self.get_input_embeddings(input_ids)
+        if image_input is not None:
+            image_embeds = self._process_image_input(image_input)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                image_embeds,
+                placeholder_token_id=self.config.image_token_index,
+            )
+
+        if video_input is not None:
+            video_embeds = self._process_video_pixels(video_input)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                video_embeds,
+                placeholder_token_id=self.config.video_token_index,
+            )
+
         return inputs_embeds
 
     def forward(
@@ -876,13 +904,21 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
+        # NOTE: In v1, inputs_embeds is always generated at model runner from
+        # `get_multimodal_embeddings` and `get_input_embeddings`, this
+        # condition is only for v0 compatibility.
         elif inputs_embeds is None:
-            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      multimodal_embeddings)
-            input_ids = None
+            image_input = self._parse_and_validate_image_input(**kwargs)
+            video_input = self._parse_and_validate_video_input(**kwargs)
+
+            if image_input is None and video_input is None:
+                inputs_embeds = None
+            else:
+                inputs_embeds = self.get_input_embeddings_v0(
+                    input_ids,
+                    image_input=image_input,
+                    video_input=video_input)
+                input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,

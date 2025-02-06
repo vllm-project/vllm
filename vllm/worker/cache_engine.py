@@ -1,13 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
 """CacheEngine class for managing the KV cache."""
 from typing import List
 
+import numpy as np
 import torch
 
+from vllm import envs
 from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
-                        get_dtype_size, is_pin_memory_available)
+                        align_to_256bytes, get_dtype_size,
+                        is_pin_memory_available)
 
 logger = init_logger(__name__)
 
@@ -37,6 +42,7 @@ class CacheEngine:
         self.num_attention_layers = model_config.get_num_layers_by_block_type(
             parallel_config, LayerBlockType.attention)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        self.align_cache = self._align_cache(model_config)
 
         self.block_size = cache_config.block_size
         self.num_gpu_blocks = cache_config.num_gpu_blocks
@@ -56,7 +62,8 @@ class CacheEngine:
                                              model_config.dtype,
                                              cache_config.cache_dtype,
                                              self.block_size,
-                                             model_config.is_attention_free)
+                                             model_config.is_attention_free,
+                                             use_mla=model_config.use_mla)
 
         # Initialize the cache.
         self.gpu_cache = self._allocate_kv_cache(
@@ -73,15 +80,39 @@ class CacheEngine:
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
+
+        # Align entries so they are 256 byte aligned for better performance
+        # Primarily targets MLA as this typically only ends up having entries
+        # be 128 byte aligned.
+        if self.align_cache:
+            # We assume the cache shape is:
+            #    (TOTAL_PAGES, PAGE_SIZE, entry_shape...)
+            # NOTE this assumption currently only holds for MLA so we only apply
+            # this optimization when `use_mla` is true
+            entry_shape = kv_cache_shape[2:]
+            entry_size = np.prod(entry_shape)
+            alloc_entry_size = align_to_256bytes(entry_size, self.dtype)
+            alloc_shape = (*kv_cache_shape[:2], alloc_entry_size)
+        else:
+            alloc_shape = kv_cache_shape
+
         for _ in range(self.num_attention_layers):
             # null block in CpuGpuBlockAllocator requires at least that
             # block to be zeroed-out.
             # We zero-out everything for simplicity.
-            kv_cache.append(
-                torch.zeros(kv_cache_shape,
-                            dtype=self.dtype,
-                            pin_memory=pin_memory,
-                            device=device))
+            layer_kv_cache = torch.zeros(alloc_shape,
+                                         dtype=self.dtype,
+                                         pin_memory=pin_memory,
+                                         device=device)
+
+            # If we allocated with padding for alignment reasons truncate the
+            # shape while preserving the aligned stride
+            if self.align_cache:
+                layer_kv_cache = layer_kv_cache[..., :entry_size]
+
+            # view back to (TOTAL_PAGES, PAGE_SIZE, entry_shape...) for cases
+            # when entry_shape is higher than 1D
+            kv_cache.append(layer_kv_cache.view(kv_cache_shape))
         return kv_cache
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
@@ -98,6 +129,14 @@ class CacheEngine:
         self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
 
     @staticmethod
+    def _align_cache(model_config: ModelConfig):
+        # Currently align_cache only applies to MLA models since the other
+        # cache kernels haven't been updated yet to support non-continguous
+        # tensors
+        return model_config.use_mla and current_platform.is_cuda() \
+            and envs.VLLM_CUDA_MEM_ALIGN_KV_CACHE
+
+    @staticmethod
     def get_cache_block_size(
         cache_config: CacheConfig,
         model_config: ModelConfig,
@@ -108,12 +147,21 @@ class CacheEngine:
         num_attention_layers = model_config.get_num_layers_by_block_type(
             parallel_config, LayerBlockType.attention)
 
-        key_cache_block = cache_config.block_size * num_heads * head_size
-        value_cache_block = key_cache_block
-        total = num_attention_layers * (key_cache_block + value_cache_block)
         if cache_config.cache_dtype == "auto":
             dtype = model_config.dtype
         else:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+
+        key_cache_entry = num_heads * head_size
+        if CacheEngine._align_cache(model_config):
+            key_cache_entry = align_to_256bytes(key_cache_entry,
+                                                model_config.dtype)
+
+        # For MLA there is no value cache, since the latent vector
+        # is joint keys and values.
+        value_cache_entry = key_cache_entry if not model_config.use_mla else 0
+        total = num_attention_layers * cache_config.block_size * \
+            (key_cache_entry + value_cache_entry)
+
         dtype_size = get_dtype_size(dtype)
         return dtype_size * total

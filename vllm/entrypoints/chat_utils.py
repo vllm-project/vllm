@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import codecs
 import json
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
-from functools import lru_cache, partial
+from functools import cache, lru_cache, partial
 from pathlib import Path
 from typing import (Any, Awaitable, Callable, Dict, Generic, Iterable, List,
                     Literal, Optional, Tuple, TypeVar, Union, cast)
@@ -35,7 +37,6 @@ from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -378,7 +379,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return self._model_config.allowed_local_media_path
 
     @staticmethod
-    @lru_cache(maxsize=None)
+    @cache
     def _cached_token_str(tokenizer: AnyTokenizer, token_index: int) -> str:
         return tokenizer.decode(token_index)
 
@@ -393,7 +394,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type == "phi3_v":
                 # Workaround since this token is not defined in the tokenizer
                 return f"<|image_{current_count}|>"
-            if model_type == "minicpmv":
+            if model_type in ("minicpmo", "minicpmv"):
                 return "(<image>./</image>)"
             if model_type in ("blip-2", "chatglm", "fuyu", "paligemma",
                               "pixtral"):
@@ -404,12 +405,12 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
-            if model_type in ("chameleon", "internvl_chat", "NVLM_D",
-                              "h2ovl_chat"):
+            if model_type in ("chameleon", "deepseek_vl_v2", "internvl_chat",
+                              "NVLM_D", "h2ovl_chat"):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
-            if model_type == "qwen2_vl":
+            if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
             if model_type == "molmo":
                 return ""
@@ -425,10 +426,14 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type == "qwen2_audio":
                 return (f"Audio {current_count}: "
                         f"<|audio_bos|><|AUDIO|><|audio_eos|>")
+            if model_type == "minicpmo":
+                return "(<audio>./</audio>)"
             raise TypeError(f"Unknown model type: {model_type}")
         elif modality == "video":
-            if model_type == "qwen2_vl":
+            if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
+            if model_type in ("minicpmo", "minicpmv"):
+                return "(<video>./</video>)"
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.video_token_index)
@@ -985,14 +990,14 @@ def apply_mistral_chat_template(
     **kwargs: Any,
 ) -> List[int]:
     if chat_template is not None:
-        print_warning_once(
+        logger.warning_once(
             "'chat_template' cannot be overridden for mistral tokenizer.")
     if "add_generation_prompt" in kwargs:
-        print_warning_once(
+        logger.warning_once(
             "'add_generation_prompt' is not supported for mistral tokenizer, "
             "so it will be ignored.")
     if "continue_final_message" in kwargs:
-        print_warning_once(
+        logger.warning_once(
             "'continue_final_message' is not supported for mistral tokenizer, "
             "so it will be ignored.")
 

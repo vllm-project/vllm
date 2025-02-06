@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, List, Optional
 
 import torch
@@ -102,33 +104,6 @@ def assert_close(a, b):
         torch.float32: (1e-2, 1e-2),
     }[a.dtype]
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
-
-
-def ref_torch_groupgemm(
-    out_tensor,
-    inputs,
-    lora_weights,
-    lora_indices_tensor,
-    seq_len_tensor,
-    batches,
-    scaling,
-    op_type,
-) -> torch.Tensor:
-    out_list = []
-    current_offset = 0
-    for lora_index, b_length in zip(range(batches), seq_len_tensor):
-        input_weight = inputs[current_offset:b_length + current_offset, :]
-        current_offset += b_length
-        lora_weight = lora_weights[lora_indices_tensor[lora_index]]
-        result = torch.nn.functional.linear(input_weight, lora_weight)
-        result *= scaling
-        out_list.append(result)
-    cat_result = torch.cat(out_list, dim=0)
-    if op_type == "expand":
-        out_tensor += cat_result
-    else:
-        out_tensor.copy_(cat_result)
-    return
 
 
 def generate_data(

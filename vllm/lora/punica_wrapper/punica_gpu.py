@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
@@ -12,11 +13,11 @@ import torch
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
-    from vllm.lora.ops.bgmv_expand import bgmv_expand
-    from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
-    from vllm.lora.ops.bgmv_shrink import bgmv_shrink
-    from vllm.lora.ops.sgmv_expand import sgmv_expand
-    from vllm.lora.ops.sgmv_shrink import sgmv_shrink
+    from vllm.lora.ops.triton_ops import bgmv_expand
+    from vllm.lora.ops.triton_ops import bgmv_expand_slice
+    from vllm.lora.ops.triton_ops import bgmv_shrink
+    from vllm.lora.ops.triton_ops import sgmv_expand
+    from vllm.lora.ops.triton_ops import sgmv_shrink
 
 from .punica_base import PunicaWrapperBase
 

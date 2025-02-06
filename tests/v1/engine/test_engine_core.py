@@ -1,9 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import time
 import uuid
 
 import pytest
 from transformers import AutoTokenizer
 
+from tests.utils import fork_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
@@ -36,6 +39,7 @@ def make_request() -> EngineCoreRequest:
     )
 
 
+@fork_new_process_for_each_test
 def test_engine_core(monkeypatch):
 
     with monkeypatch.context() as m:
@@ -78,7 +82,7 @@ def test_engine_core(monkeypatch):
         assert len(engine_core.scheduler.running) == 4
 
         # Loop through until they are all done.
-        while len(engine_core.step()) > 0:
+        while len(engine_core.step().outputs) > 0:
             pass
 
         assert len(engine_core.scheduler.waiting) == 0
@@ -138,10 +142,11 @@ def test_engine_core(monkeypatch):
         assert len(engine_core.scheduler.running) == 0
 
 
+@fork_new_process_for_each_test
 def test_engine_core_advanced_sampling(monkeypatch):
     """
     A basic end-to-end test to verify that the engine functions correctly 
-    when additional sampling parameters, such as min_tokens and 
+    when additional sampling parameters, such as top_p, min_tokens, and 
     presence_penalty, are set.
     """
     with monkeypatch.context() as m:
@@ -164,11 +169,23 @@ def test_engine_core_advanced_sampling(monkeypatch):
             stop_token_ids=[1001, 1002],
         )
         engine_core.add_request(request)
-        assert len(engine_core.scheduler.waiting) == 1
-        assert len(engine_core.scheduler.running) == 0
-        # Loop through until they are all done.
-        while len(engine_core.step()) > 0:
-            pass
 
-        assert len(engine_core.scheduler.waiting) == 0
-        assert len(engine_core.scheduler.running) == 0
+        def _check_engine_state():
+            assert len(engine_core.scheduler.waiting) == 1
+            assert len(engine_core.scheduler.running) == 0
+            # Loop through until they are all done.
+            while len(engine_core.step().outputs) > 0:
+                pass
+            assert len(engine_core.scheduler.waiting) == 0
+            assert len(engine_core.scheduler.running) == 0
+
+        _check_engine_state()
+
+        # Second request.
+        request2 = make_request()
+        request2.sampling_params = SamplingParams(
+            top_p=0.99,
+            top_k=50,
+        )
+        engine_core.add_request(request2)
+        _check_engine_state()

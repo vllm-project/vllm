@@ -4,17 +4,17 @@
 
 This page teaches you how to pass multi-modal inputs to [multi-modal models](#supported-mm-models) in vLLM.
 
-```{note}
+:::{note}
 We are actively iterating on multi-modal support. See [this RFC](gh-issue:4194) for upcoming changes,
 and [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) if you have any feedback or feature requests.
-```
+:::
 
 ## Offline Inference
 
 To input multi-modal data, follow this schema in {class}`vllm.inputs.PromptType`:
 
 - `prompt`: The prompt should follow the format that is documented on HuggingFace.
-- `multi_modal_data`: This is a dictionary that follows the schema defined in {class}`vllm.multimodal.MultiModalDataDict`.
+- `multi_modal_data`: This is a dictionary that follows the schema defined in {class}`vllm.multimodal.inputs.MultiModalDataDict`.
 
 ### Image
 
@@ -60,7 +60,7 @@ for o in outputs:
     print(generated_text)
 ```
 
-Full example: <gh-file:examples/offline_inference_vision_language.py>
+Full example: <gh-file:examples/offline_inference/vision_language.py>
 
 To substitute multiple images inside the same text prompt, you can pass in a list of images instead:
 
@@ -91,7 +91,7 @@ for o in outputs:
     print(generated_text)
 ```
 
-Full example: <gh-file:examples/offline_inference_vision_language_multi_image.py>
+Full example: <gh-file:examples/offline_inference/vision_language_multi_image.py>
 
 Multi-image input can be extended to perform video captioning. We show this with [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos:
 
@@ -125,13 +125,13 @@ for o in outputs:
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
 instead of using multi-image input.
 
-Full example: <gh-file:examples/offline_inference_vision_language.py>
+Full example: <gh-file:examples/offline_inference/vision_language.py>
 
 ### Audio
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
 
-Full example: <gh-file:examples/offline_inference_audio_language.py>
+Full example: <gh-file:examples/offline_inference/audio_language.py>
 
 ### Embedding
 
@@ -199,17 +199,17 @@ for o in outputs:
     print(generated_text)
 ```
 
-## Online Inference
+## Online Serving
 
 Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
 
-```{important}
+:::{important}
 A chat template is **required** to use Chat Completions API.
 
 Although most models come with a chat template, for others you have to define one yourself.
 The chat template can be inferred based on the documentation on the model's HuggingFace repo.
 For example, LLaVA-1.5 (`llava-hf/llava-1.5-7b-hf`) requires a chat template that can be found here: <gh-file:examples/template_llava.jinja>
-```
+:::
 
 ### Image
 
@@ -271,26 +271,27 @@ chat_response = client.chat.completions.create(
 print("Chat completion output:", chat_response.choices[0].message.content)
 ```
 
-Full example: <gh-file:examples/openai_chat_completion_client_for_multimodal.py>
+Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for_multimodal.py>
 
-```{tip}
+:::{tip}
 Loading from local file paths is also supported on vLLM: You can specify the allowed local media path via `--allowed-local-media-path` when launching the API server/engine,
 and pass the file path as `url` in the API request.
-```
+:::
 
-```{tip}
+:::{tip}
 There is no need to place image placeholders in the text content of the API request - they are already represented by the image content.
 In fact, you can place image placeholders in the middle of the text by interleaving text and image content.
-```
+:::
 
-````{note}
+:::{note}
 By default, the timeout for fetching images through HTTP URL is `5` seconds.
 You can override this by setting the environment variable:
 
 ```console
-$ export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
+export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 ```
-````
+
+:::
 
 ### Video
 
@@ -303,6 +304,7 @@ vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --task generate --max-model
 ```
 
 Then, you can use the OpenAI client as follows:
+
 ```python
 from openai import OpenAI
 
@@ -342,16 +344,17 @@ result = chat_completion_from_url.choices[0].message.content
 print("Chat completion output from image url:", result)
 ```
 
-Full example: <gh-file:examples/openai_chat_completion_client_for_multimodal.py>
+Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for_multimodal.py>
 
-````{note}
+:::{note}
 By default, the timeout for fetching videos through HTTP URL is `30` seconds.
 You can override this by setting the environment variable:
 
 ```console
-$ export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
+export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
 ```
-````
+
+:::
 
 ### Audio
 
@@ -445,26 +448,27 @@ result = chat_completion_from_url.choices[0].message.content
 print("Chat completion output from audio url:", result)
 ```
 
-Full example: <gh-file:examples/openai_chat_completion_client_for_multimodal.py>
+Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for_multimodal.py>
 
-````{note}
+:::{note}
 By default, the timeout for fetching audios through HTTP URL is `10` seconds.
 You can override this by setting the environment variable:
 
 ```console
-$ export VLLM_AUDIO_FETCH_TIMEOUT=<timeout>
+export VLLM_AUDIO_FETCH_TIMEOUT=<timeout>
 ```
-````
+
+:::
 
 ### Embedding
 
 vLLM's Embeddings API is a superset of OpenAI's [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings),
 where a list of chat `messages` can be passed instead of batched `inputs`. This enables multi-modal inputs to be passed to embedding models.
 
-```{tip}
+:::{tip}
 The schema of `messages` is exactly the same as in Chat Completions API.
 You can refer to the above tutorials for more details on how to pass each type of multi-modal data.
-```
+:::
 
 Usually, embedding models do not expect chat-based input, so we need to use a custom chat template to format the text and images.
 Refer to the examples below for illustration.
@@ -476,13 +480,13 @@ vllm serve TIGER-Lab/VLM2Vec-Full --task embed \
   --trust-remote-code --max-model-len 4096 --chat-template examples/template_vlm2vec.jinja
 ```
 
-```{important}
+:::{important}
 Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--task embed`
 to run this model in embedding mode instead of text generation mode.
 
 The custom chat template is completely different from the original one for this model,
 and can be found here: <gh-file:examples/template_vlm2vec.jinja>
-```
+:::
 
 Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
 
@@ -517,16 +521,16 @@ vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
   --trust-remote-code --max-model-len 8192 --chat-template examples/template_dse_qwen2_vl.jinja
 ```
 
-```{important}
+:::{important}
 Like with VLM2Vec, we have to explicitly pass `--task embed`.
 
 Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
 by a custom chat template: <gh-file:examples/template_dse_qwen2_vl.jinja>
-```
+:::
 
-```{important}
+:::{important}
 Also important, `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
 example below for details.
-```
+:::
 
-Full example: <gh-file:examples/openai_chat_embedding_client_for_multimodal.py>
+Full example: <gh-file:examples/online_serving/openai_chat_embedding_client_for_multimodal.py>

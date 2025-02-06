@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -5,6 +7,7 @@ import torch
 import torch_xla.experimental.custom_kernel  # Required to register custom ops.
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 
@@ -109,6 +112,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.logits_soft_cap = logits_soft_cap
         if head_size % 128 != 0:
             raise NotImplementedError("Head size must be a multiple of 128.")
         if alibi_slopes is not None:
@@ -119,9 +123,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("FP8 KV cache dtype is not supported.")
         if blocksparse_params is not None:
             raise NotImplementedError("Blocksparse is not supported.")
-        if logits_soft_cap is not None:
-            raise NotImplementedError(
-                "Attention logits soft-capping is not supported.")
 
         if torch_xla.tpu.version() < 4:
             raise NotImplementedError("TPU version must be 4 or higher.")
@@ -150,13 +151,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Tuple[torch.Tensor, torch.Tensor],
         attn_metadata: PallasMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
@@ -173,7 +173,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
         """
-        assert k_scale == 1.0 and v_scale == 1.0
+        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         batch_size, seq_len, hidden_size = query.shape
         query = query.view(batch_size, seq_len, self.num_heads, self.head_size)
         key = key.view(batch_size, seq_len, self.num_kv_heads, self.head_size)
@@ -230,6 +230,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
                     num_kv_pages_per_compute_block,
                     num_queries_per_compute_block,
                     use_kernel=True,
+                    attn_logits_soft_cap=self.logits_soft_cap,
                 )
         else:
             # Decoding run.
@@ -257,6 +258,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
                     attn_metadata.block_tables,
                     pages_per_compute_block,
                     self.megacore_mode,
+                    attn_logits_soft_cap=self.logits_soft_cap,
                 )
             else:
                 chunk_size = max_num_seq
@@ -280,6 +282,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
                         attn_metadata.block_tables[chunk_start:chunk_end],
                         pages_per_compute_block,
                         self.megacore_mode,
+                        attn_logits_soft_cap=self.logits_soft_cap,
                     )
                     output[chunk_start:chunk_end] = chunk_output
 
@@ -313,6 +316,8 @@ def paged_attention(
     block_tables: torch.Tensor,
     pages_per_compute_block: int,
     megacore_mode: Optional[str],
+    *,
+    attn_logits_soft_cap: Optional[float],
 ) -> torch.Tensor:
     batch_size = query.shape[0]
     if megacore_mode == "batch" and batch_size % 2 != 0:
@@ -320,26 +325,13 @@ def paged_attention(
     else:
         megacore_mode = megacore_mode
 
-    # NOTE(woosuk): A temporary workaround to avoid the error:
-    # "xla::paged_attention() Expected a value of type 'str' for
-    # argument 'megacore_mode' but instead found type 'NoneType'."
-    if megacore_mode is not None:
-        output = torch.ops.xla.paged_attention(
-            query,
-            key_cache,
-            value_cache,
-            context_lens,
-            block_tables,
-            pages_per_compute_block,
-            megacore_mode=megacore_mode,
-        )
-    else:
-        output = torch.ops.xla.paged_attention(
-            query,
-            key_cache,
-            value_cache,
-            context_lens,
-            block_tables,
-            pages_per_compute_block,
-        )
-    return output
+    return torch.ops.xla.paged_attention(
+        query,
+        key_cache,
+        value_cache,
+        context_lens,
+        block_tables,
+        pages_per_compute_block,
+        megacore_mode=megacore_mode,
+        attn_logits_soft_cap=attn_logits_soft_cap,
+    )

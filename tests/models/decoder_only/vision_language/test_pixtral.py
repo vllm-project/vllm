@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM for Mistral models using greedy sampling.
 
 Run `pytest tests/models/test_mistral.py`.
@@ -135,10 +136,10 @@ def _dump_outputs_w_logprobs(
     outputs: OutputsLogprobs,
     filename: "StrPath",
 ) -> None:
-    json_data = [(tokens, text,
-                  [{k: asdict(v)
-                    for k, v in token_logprobs.items()}
-                   for token_logprobs in (logprobs or [])])
+    json_data = [(tokens, text, [{
+        k: asdict(v)
+        for k, v in token_logprobs.items()
+    } for token_logprobs in (logprobs or [])])
                  for tokens, text, logprobs in outputs]
 
     with open(filename, "w") as f:
@@ -149,11 +150,10 @@ def load_outputs_w_logprobs(filename: "StrPath") -> OutputsLogprobs:
     with open(filename, "rb") as f:
         json_data = json.load(f)
 
-    return [(tokens, text,
-             [{int(k): Logprob(**v)
-               for k, v in token_logprobs.items()}
-              for token_logprobs in logprobs])
-            for tokens, text, logprobs in json_data]
+    return [(tokens, text, [{
+        int(k): Logprob(**v)
+        for k, v in token_logprobs.items()
+    } for token_logprobs in logprobs]) for tokens, text, logprobs in json_data]
 
 
 @large_gpu_test(min_gb=80)

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Token blocks."""
 import sys
 from bisect import bisect_left
@@ -12,6 +13,7 @@ from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId, Device,
 from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
+from vllm.logger import init_logger
 from vllm.sequence import Sequence
 
 PrefixHash = int
@@ -20,6 +22,8 @@ PrefixHash = int
 # so that if we find one block is still hold _DEFAULT_LAST_ACCESSED_TIME,
 # then we know this block hasn't been accessed yet.
 _DEFAULT_LAST_ACCESSED_TIME = -1
+
+logger = init_logger(__name__)
 
 
 class BlockTracker:
@@ -61,6 +65,15 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             from 0 to num_blocks - 1.
     """
 
+    # Note that we use 'None' as a string here instead of None because
+    # as of Python 3.12, hash(None) returns a constant predictable value.
+    # This could possibly make it easier to find and exploit hash
+    # collisions. 'None' as a string will be hashed differently per process,
+    # but consistently within the same process. This is the same as the
+    # behavior of None prior to Python 3.12.
+    _none_hash: int = hash('None')
+
+    # Implements Block.Factory.
     def __init__(
         self,
         num_blocks: int,
@@ -105,7 +118,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # Evitor used to maintain how we want to handle those computed blocks
         # if we find memory pressure is high.
-        self.evictor: Evictor = make_evictor(eviction_policy)
+        self.eviction_policy = eviction_policy
+        self.evictor: Evictor = make_evictor(self.eviction_policy)
 
         # We share the refcounter between allocators. This allows us to promote
         # blocks originally allocated in the hashless allocator to immutable
@@ -117,7 +131,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         self.metric_data = CacheMetricData()
 
-    # Implements Block.Factory.
     def _create_block(
         self,
         prev_block: Optional[Block],
@@ -428,6 +441,44 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def get_prefix_cache_hit_rate(self) -> float:
         return self.metric_data.get_hit_rate()
 
+    def reset_prefix_cache(self) -> bool:
+        """Reset prefix cache. This function may be used in RLHF
+        flows to invalid prefix caching after the weights are updated,
+        or used for resetting prefix caching status for benchmarking.
+
+        Returns:
+            bool: True if the prefix cache is successfully reset,
+            False otherwise.
+        """
+        num_used_blocks = (self.get_num_total_blocks() -
+                           self.get_num_free_blocks())
+        if num_used_blocks > 0:
+            logger.warning(
+                "Failed to reset prefix cache because some "
+                "blocks (%d) are not freed yet", num_used_blocks)
+            return False
+
+        # Free all blocks in the evictor.
+        while (block_id :=
+               self._maybe_allocate_evicted_block_id()) is not None:
+            self._hashless_allocator.free_block_id(block_id)
+
+        # Should not have any cached blocks because all blocks are evicted.
+        assert not self._cached_blocks
+
+        # Reset the evictor.
+        self.evictor = make_evictor(self.eviction_policy)
+
+        # Reset the block tracker.
+        for block_id in self._block_tracker:
+            self._block_tracker[block_id] = BlockTracker()
+
+        # Reset the metrics.
+        self.metric_data = CacheMetricData()
+
+        logger.info("Successfully reset prefix cache")
+        return True
+
     def is_block_cached(self, block: Block) -> bool:
         assert block.content_hash is not None
         return block.content_hash in self._cached_blocks
@@ -694,6 +745,14 @@ class PrefixCachingBlock(Block):
             such as adapters that influence the block, apart from the token_ids.
     """
 
+    # Note that we use 'None' as a string here instead of None because
+    # as of Python 3.12, hash(None) returns a constant predictable value.
+    # This could possibly make it easier to find and exploit hash
+    # collisions. 'None' as a string will be hashed differently per process,
+    # but consistently within the same process. This is the same as the
+    # behavior of None prior to Python 3.12.
+    _none_hash: int = hash('None')
+
     def __init__(
         self,
         prev_block: Optional[Block],
@@ -848,13 +907,13 @@ class PrefixCachingBlock(Block):
 
         is_first_block = self._prev_block is None
         prev_block_hash = (
-            None if is_first_block else
+            self._none_hash if is_first_block else
             self._prev_block.content_hash  # type: ignore
         )
 
         # Previous block exists but does not yet have a hash.
         # Return no hash in this case.
-        if prev_block_hash is None and not is_first_block:
+        if prev_block_hash == self._none_hash and not is_first_block:
             return None
 
         self._cached_content_hash = PrefixCachingBlock.hash_block_tokens(
@@ -864,8 +923,9 @@ class PrefixCachingBlock(Block):
             extra_hash=self._extra_hash)
         return self._cached_content_hash
 
-    @staticmethod
-    def hash_block_tokens(is_first_block: bool,
+    @classmethod
+    def hash_block_tokens(cls,
+                          is_first_block: bool,
                           prev_block_hash: Optional[int],
                           cur_block_token_ids: List[int],
                           extra_hash: Optional[int] = None) -> int:
@@ -886,7 +946,8 @@ class PrefixCachingBlock(Block):
         Returns:
         - int: The computed hash value for the block.
         """
-        assert (prev_block_hash is None) == is_first_block
+        if is_first_block and prev_block_hash is None:
+            prev_block_hash = cls._none_hash
         return hash((is_first_block, prev_block_hash, *cur_block_token_ids,
                      extra_hash))
 
@@ -905,6 +966,14 @@ class ComputedBlocksTracker:
     the number of cached tokens for the sequence by looking up the number of
     cached block hashes in the allocator.
     """
+
+    # Note that we use 'None' as a string here instead of None because
+    # as of Python 3.12, hash(None) returns a constant predictable value.
+    # This could possibly make it easier to find and exploit hash
+    # collisions. 'None' as a string will be hashed differently per process,
+    # but consistently within the same process. This is the same as the
+    # behavior of None prior to Python 3.12.
+    _none_hash: int = hash('None')
 
     def __init__(
         self,
@@ -951,7 +1020,7 @@ class ComputedBlocksTracker:
         # We need to know the hash of the previous block to compute the hash of
         # the current block so that blocks could be uniquely identified across
         # sequences of prefixes.
-        prev_block_hash = (None if cur_num_blocks_recorded == 0 else
+        prev_block_hash = (self._none_hash if cur_num_blocks_recorded == 0 else
                            block_hashes_recorded[-1])
         # Only update the computed block hashes for the new blocks
         for i in range(cur_num_blocks_recorded, num_computed_blocks):
@@ -966,7 +1035,7 @@ class ComputedBlocksTracker:
             # This has to be kept in sync with the allocator's hash
             # calculation.
             block_hash = PrefixCachingBlock.hash_block_tokens(
-                is_first_block=prev_block_hash is None,
+                is_first_block=prev_block_hash == self._none_hash,
                 prev_block_hash=prev_block_hash,
                 cur_block_token_ids=block_token_ids,
                 extra_hash=extra_hash,

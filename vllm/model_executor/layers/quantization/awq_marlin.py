@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
@@ -303,7 +305,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                       hidden_size: int, intermediate_size: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
         extra_weight_attrs.update({
             "is_transposed":
@@ -312,17 +314,18 @@ class AWQMoEMethod(FusedMoEMethodBase):
             FusedMoeWeightScaleSupported.GROUP.value,
         })
 
-        w13_qweight = Parameter(torch.empty(num_experts,
-                                            hidden_size,
-                                            2 * intermediate_size //
-                                            self.quant_config.pack_factor,
-                                            dtype=torch.int32),
-                                requires_grad=False)
+        w13_qweight = Parameter(
+            torch.empty(num_experts,
+                        hidden_size,
+                        2 * intermediate_size_per_partition //
+                        self.quant_config.pack_factor,
+                        dtype=torch.int32),
+            requires_grad=False)
         layer.register_parameter("w13_qweight", w13_qweight)
         set_weight_attrs(w13_qweight, extra_weight_attrs)
 
         w2_qweight = Parameter(torch.empty(num_experts,
-                                           intermediate_size,
+                                           intermediate_size_per_partition,
                                            hidden_size //
                                            self.quant_config.pack_factor,
                                            dtype=torch.int32),
@@ -331,13 +334,14 @@ class AWQMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_qweight, extra_weight_attrs)
 
         num_groups_w13 = hidden_size // self.quant_config.group_size
-        num_groups_w2 = intermediate_size // self.quant_config.group_size
+        num_groups_w2 = (intermediate_size_per_partition //
+                         self.quant_config.group_size)
 
         # WEIGHT_SCALES
         # Allocate 2 scales for w1 and w3 respectively.
         w13_scales = Parameter(torch.empty(num_experts,
                                            num_groups_w13,
-                                           intermediate_size * 2,
+                                           intermediate_size_per_partition * 2,
                                            dtype=params_dtype),
                                requires_grad=False)
         layer.register_parameter("w13_scales", w13_scales)
@@ -353,12 +357,13 @@ class AWQMoEMethod(FusedMoEMethodBase):
 
         # WEIGHT_ZERO_POINT
         # Allocate 2 zero points for w1 and w3 respectively.
-        w13_qzeros = Parameter(torch.empty(num_experts,
-                                           num_groups_w13,
-                                           2 * intermediate_size //
-                                           self.quant_config.pack_factor,
-                                           dtype=torch.int32),
-                               requires_grad=False)
+        w13_qzeros = Parameter(
+            torch.empty(num_experts,
+                        num_groups_w13,
+                        2 * intermediate_size_per_partition //
+                        self.quant_config.pack_factor,
+                        dtype=torch.int32),
+            requires_grad=False)
         layer.register_parameter("w13_qzeros", w13_qzeros)
         set_weight_attrs(w13_qzeros, extra_weight_attrs)
 

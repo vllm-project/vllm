@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -28,6 +30,20 @@ def cutlass_fp8_supported() -> bool:
     capability = -1 if capability_tuple is None else capability_tuple.to_int()
 
     return ops.cutlass_scaled_mm_supports_fp8(capability)
+
+
+def cutlass_block_fp8_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+
+    return ops.cutlass_scaled_mm_supports_block_fp8(capability)
+
+
+CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
+CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
 
 
 def per_tensor_dequantize(
@@ -73,8 +89,8 @@ def requantize_with_max_scale(
     # from disk in this case. Skip requantization in this case (since)
     # we already are quantized with the single scale.
     # * Sample Model: nm-testing/Phi-3-mini-128k-instruct-FP8
-    unfused_module_in_checkpoint = (weight_scale[-1] > torch.finfo(
-        torch.float8_e4m3fn).min)
+    unfused_module_in_checkpoint = (weight_scale[-1]
+                                    > torch.finfo(torch.float8_e4m3fn).min)
 
     # If unfused checkpoint, need requanize with the single scale.
     if unfused_module_in_checkpoint:
@@ -97,7 +113,7 @@ def apply_fp8_linear(
     input_scale: Optional[torch.Tensor] = None,
     input_scale_ub: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
-    cutlass_fp8_supported: bool = True,
+    cutlass_fp8_supported: bool = CUTLASS_FP8_SUPPORTED,
     use_per_token_if_dynamic: bool = False,
 ) -> torch.Tensor:
     # ops.scaled_fp8_quant supports both dynamic and static quant.
@@ -199,44 +215,6 @@ def apply_fp8_linear(
             if bias is not None:
                 output = output + bias
             return output.to(dtype=input.dtype).view(*output_shape)
-
-
-def apply_int8_linear(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    input_scale: Optional[torch.Tensor] = None,
-    input_zero_point: Optional[torch.Tensor] = None,
-    azp_adj: Optional[torch.Tensor] = None,
-    bias: Optional[torch.Tensor] = None,
-):
-    # ops.scaled_int8_quant supports both dynamic and static quant.
-    # * dynamic, layer.input_scale is None and x_scale computed from x.
-    # * static, layer.input_scale is scalar and x_scale is input_scale.
-    symmetric = azp_adj is None
-    x_q, x_scale, x_zp = ops.scaled_int8_quant(input,
-                                               input_scale,
-                                               input_zero_point,
-                                               symmetric=symmetric)
-
-    if x_zp is not None:
-        # Currently, static is always per-tensor and dynamic is per-token
-        static = input_zero_point is not None
-        azp = None if static else x_zp
-        return ops.cutlass_scaled_mm_azp(x_q,
-                                         weight,
-                                         scale_a=x_scale,
-                                         scale_b=weight_scale,
-                                         out_dtype=input.dtype,
-                                         azp_adj=azp_adj,
-                                         azp=azp,
-                                         bias=bias)
-    return ops.cutlass_scaled_mm(x_q,
-                                 weight,
-                                 scale_a=x_scale,
-                                 scale_b=weight_scale,
-                                 out_dtype=input.dtype,
-                                 bias=bias)
 
 
 def normalize_e4m3fn_to_e4m3fnuz(

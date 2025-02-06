@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """This docstring details important information on the testing methodology.
 
 Most of the tests rely on "greedy equality", where we expect the output of
@@ -25,13 +26,14 @@ import pytest
 
 from vllm.model_executor.layers.vocab_parallel_embedding import pad_vocab_size
 
+from ..utils import maybe_enable_chunked_prefill
 from .conftest import run_equality_correctness_test
 
 # main model
 MAIN_MODEL = "JackFram/llama-160m"
 
 # speculative model
-SPEC_MODEL = "ibm-fms/llama-160m-accelerator"
+SPEC_MODEL = "ibm-ai-platform/llama-160m-accelerator"
 
 # max. number of speculative tokens: this corresponds to
 # n_predict in the config.json of the speculator model.
@@ -66,14 +68,16 @@ PRECISION = "float32"
 @pytest.mark.parametrize("output_len", [
     128,
 ])
-@pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("batch_size", [4, 32])
 @pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 32])
 def test_mlp_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
                                     per_test_common_llm_kwargs,
                                     baseline_llm_kwargs, test_llm_kwargs,
                                     batch_size: int, output_len: int,
-                                    seed: int):
+                                    seed: int, prefill_chunk_size: int):
     """Verify greedy equality with different batch size."""
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
@@ -116,12 +120,19 @@ def test_mlp_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seed", [1])
 @pytest.mark.parametrize("logprobs", [1, 6])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 def test_mlp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
                                  per_test_common_llm_kwargs,
                                  baseline_llm_kwargs, test_llm_kwargs,
                                  batch_size: int, output_len: int, seed: int,
-                                 logprobs: int):
+                                 logprobs: int, prefill_chunk_size: int):
     """Verify greedy equality with different batch size."""
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
+    # NOTE Test is sensitive enough st if we don't enable chunked prefill
+    # scheduling on baseline too, we get slightly different logprobs, ending
+    # up sampling different tokens at the tail (ie top tokens don't change).
+    # TL;DR: sd+cp == org+cp but sd+cp != org..is this expected?
+    maybe_enable_chunked_prefill(prefill_chunk_size, baseline_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
@@ -162,12 +173,15 @@ def test_mlp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("output_len", [2048])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 def test_mlp_e2e_acceptance_rate(vllm_runner, common_llm_kwargs,
                                  per_test_common_llm_kwargs,
                                  baseline_llm_kwargs, test_llm_kwargs,
-                                 batch_size: int, output_len: int, seed: int):
+                                 batch_size: int, output_len: int,
+                                 prefill_chunk_size: int, seed: int):
     """Verify acceptance rate with different batch size and large output 
     length."""
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
@@ -204,13 +218,17 @@ def test_mlp_e2e_acceptance_rate(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("output_len", [64])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("temperature", [1.0])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 @pytest.mark.parametrize("seed", [1])
 def test_mlp_e2e_seeded_correctness(vllm_runner, common_llm_kwargs,
                                     per_test_common_llm_kwargs,
                                     baseline_llm_kwargs, test_llm_kwargs,
                                     batch_size: int, output_len: int,
-                                    temperature: float, seed: int):
+                                    temperature: float,
+                                    prefill_chunk_size: int, seed: int):
     """Verify seeded runs produce the same output."""
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
+    maybe_enable_chunked_prefill(prefill_chunk_size, baseline_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
@@ -266,14 +284,16 @@ def test_mlp_e2e_seeded_correctness(vllm_runner, common_llm_kwargs,
         128,
     ])
 @pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 @pytest.mark.parametrize("seed", [1])
 def test_mlp_e2e_greedy_correctness_with_preemption(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-        seed: int):
+        prefill_chunk_size: int, seed: int):
     """Verify greedy equality, even when some sequences are preempted mid-
     generation.
     """
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
@@ -317,12 +337,14 @@ def test_mlp_e2e_greedy_correctness_with_preemption(
     ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 def test_mlp_e2e_greedy_correctness_with_padding(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-        seed: int):
+        prefill_chunk_size: int, seed: int):
     """Verify greedy equality when the vocab dimension is padded
     """
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
 
     # Default pad_to is 64, test model has vocab_size of 32000
     def patched_pad_vocab_size(vocab_size, pad_to=None):
@@ -373,14 +395,16 @@ def test_mlp_e2e_greedy_correctness_with_padding(
         # Use smaller output len for fast test.
         32,
     ])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 @pytest.mark.parametrize("seed", [1])
 def test_mlp_different_k(vllm_runner, common_llm_kwargs,
                          per_test_common_llm_kwargs, baseline_llm_kwargs,
-                         test_llm_kwargs, batch_size: int, seed: int,
-                         output_len: int):
+                         test_llm_kwargs, batch_size: int,
+                         prefill_chunk_size: int, seed: int, output_len: int):
     """Verify that mlp speculative decoding produces exact equality
     to without spec decode with different values of num_speculative_tokens.
     """
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
@@ -418,15 +442,21 @@ def test_mlp_different_k(vllm_runner, common_llm_kwargs,
         # Use smaller output len for fast test.
         32,
     ])
+# Speculative decoding is disabled when sequences reach decoding and the batch
+# consists of single-token requests. Hence we set `max_num_seqs`
+# >= `speculative_disable_by_batch_size` to test feature interaction.
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 @pytest.mark.parametrize("seed", [1])
 def test_mlp_disable_queue(vllm_runner, common_llm_kwargs,
                            per_test_common_llm_kwargs, baseline_llm_kwargs,
-                           test_llm_kwargs, batch_size: int, seed: int,
+                           test_llm_kwargs, batch_size: int,
+                           prefill_chunk_size: int, seed: int,
                            output_len: int):
     """Verify that mlp speculative decoding produces exact equality
     to without spec decode when speculation is disabled for large
     batch sizes.
     """
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
@@ -460,13 +490,15 @@ def test_mlp_disable_queue(vllm_runner, common_llm_kwargs,
         # Use smaller output len for fast test.
         32,
     ])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 @pytest.mark.parametrize("seed", [1])
 def test_mqa_scorer(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
                     baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
-                    output_len: int, seed: int):
+                    output_len: int, prefill_chunk_size: int, seed: int):
     """Verify that speculative decoding generates the same output 
     with batch expansion scorer and mqa scorer.
     """
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,

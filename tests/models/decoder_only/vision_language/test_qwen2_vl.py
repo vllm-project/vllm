@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, List, Optional, Tuple, Type, TypedDict, Union
 
 import numpy.typing as npt
@@ -5,7 +7,6 @@ import pytest
 import torch
 from PIL import Image
 
-from vllm.entrypoints.llm import LLM
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import rescale_video_size, sample_frames_from_video
 
@@ -69,7 +70,7 @@ class Qwen2VLPromptVideoEmbeddingInput(TypedDict):
 
 def batch_make_image_embeddings(
         image_batches: List[Union[Image.Image, List[Image.Image]]], processor,
-        llm: LLM) -> List[Qwen2VLPromptImageEmbeddingInput]:
+        llm: VllmRunner) -> List[Qwen2VLPromptImageEmbeddingInput]:
     """batched image embeddings for Qwen2-VL
 
     This will infer all images' embeddings in a single batch, 
@@ -105,17 +106,19 @@ def batch_make_image_embeddings(
     pixel_values = preprocess_result["pixel_values"]
     image_grid_thw = preprocess_result["image_grid_thw"]
 
-    # pixel values to embeddinds & grid_thws
-    with torch.no_grad():
-        visual = llm.llm_engine.model_executor.driver_worker. \
-            model_runner.model.visual
+    # pixel values to embeddings & grid_thws
+    def get_image_embeds(model):
+        with torch.no_grad():
+            visual = model.visual
 
-        pixel_values_on_device = pixel_values.to(visual.device,
-                                                 dtype=visual.dtype)
-        image_grid_thw_on_device = image_grid_thw.to(visual.device,
-                                                     dtype=torch.int64)
-        image_embeds = visual(pixel_values_on_device,
-                              grid_thw=image_grid_thw_on_device)
+            pixel_values_on_device = pixel_values.to(visual.device,
+                                                     dtype=visual.dtype)
+            image_grid_thw_on_device = image_grid_thw.to(visual.device,
+                                                         dtype=torch.int64)
+            return visual(pixel_values_on_device,
+                          grid_thw=image_grid_thw_on_device)
+
+    image_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
     # split into original batches
     result: List[Qwen2VLPromptImageEmbeddingInput] = []
@@ -124,11 +127,10 @@ def batch_make_image_embeddings(
     for image_batch in image_batches_:
         cur_batch_image_count = len(image_batch)
         merge_size = image_processor.merge_size
-        cur_batch_embed_len = sum([
-            grid_thw.prod() // merge_size // merge_size
+        cur_batch_embed_len = sum(
+            grid_thw.prod(-1) // merge_size // merge_size
             for grid_thw in image_grid_thw[image_counter:image_counter +
-                                           cur_batch_image_count]
-        ])
+                                           cur_batch_image_count])
 
         result.append({
             "image_embeds":
@@ -151,7 +153,7 @@ def batch_make_image_embeddings(
 
 def batch_make_video_embeddings(
         video_batches: PromptVideoInput, processor,
-        llm: LLM) -> List[Qwen2VLPromptVideoEmbeddingInput]:
+        llm: VllmRunner) -> List[Qwen2VLPromptVideoEmbeddingInput]:
     """batched video embeddings for Qwen2-VL
 
     A NDArray represents a single video's all frames.
@@ -187,17 +189,19 @@ def batch_make_video_embeddings(
     pixel_values = preprocess_result["pixel_values_videos"]
     video_grid_thw = preprocess_result["video_grid_thw"]
 
-    # pixel values to embeddinds & grid_thws
-    with torch.no_grad():
-        visual = llm.llm_engine.model_executor.driver_worker.\
-            model_runner.model.visual
+    # pixel values to embeddings & grid_thws
+    def get_image_embeds(model):
+        with torch.no_grad():
+            visual = model.visual
 
-        pixel_values_on_device = pixel_values.to(visual.device,
-                                                 dtype=visual.dtype)
-        video_grid_thw_on_device = video_grid_thw.to(visual.device,
-                                                     dtype=torch.int64)
-        video_embeds = visual(pixel_values_on_device,
-                              grid_thw=video_grid_thw_on_device)
+            pixel_values_on_device = pixel_values.to(visual.device,
+                                                     dtype=visual.dtype)
+            video_grid_thw_on_device = video_grid_thw.to(visual.device,
+                                                         dtype=torch.int64)
+            return visual(pixel_values_on_device,
+                          grid_thw=video_grid_thw_on_device)
+
+    video_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
     # split into original batches
     result: List[Qwen2VLPromptVideoEmbeddingInput] = []
@@ -206,11 +210,10 @@ def batch_make_video_embeddings(
     for video_batch in video_batches_:
         cur_batch_video_count = len(video_batch)
         merge_size = image_processor.merge_size
-        cur_batch_embed_len = sum([
-            grid_thw.prod() // merge_size // merge_size
+        cur_batch_embed_len = sum(
+            grid_thw.prod(-1) // merge_size // merge_size
             for grid_thw in video_grid_thw[video_counter:video_counter +
-                                           cur_batch_video_count]
-        ])
+                                           cur_batch_video_count])
 
         result.append({
             "video_embeds":
@@ -280,9 +283,9 @@ def run_embedding_input_test(
                 max_tokens,
                 num_logprobs=num_logprobs,
                 images=batch_make_image_embeddings(
-                    images, processor, vllm_model.model) if images else None,
+                    images, processor, vllm_model) if images else None,
                 videos=batch_make_video_embeddings(
-                    videos, processor, vllm_model.model) if videos else None)
+                    videos, processor, vllm_model) if videos else None)
             for prompts, images, videos in inputs
         ]
 

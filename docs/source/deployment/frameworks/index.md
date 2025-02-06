@@ -1,6 +1,6 @@
 # Using other frameworks
 
-```{toctree}
+:::{toctree}
 :maxdepth: 1
 
 bentoml
@@ -8,6 +8,7 @@ cerebrium
 dstack
 helm
 lws
+modal
 skypilot
 triton
-```
+:::
