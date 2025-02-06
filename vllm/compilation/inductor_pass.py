@@ -13,7 +13,6 @@ from torch import fx
 class InductorPass(ABC):
     """
     General custom inductor pass interface.
-    TODO(torch==2.6) use torch._inductor.custom_graph_pass.CustomGraphPass
     """
 
     @abstractmethod
