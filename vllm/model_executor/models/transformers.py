@@ -136,6 +136,26 @@ class HFCompatiblePPMissingLayer(PPMissingLayer):
         return (super().forward(input), )
 
 
+def get_layers(module: nn.Module) -> nn.ModuleList:
+    # TODO transformers will have a util to get it
+    for child in module.children():
+        if isinstance(child, nn.ModuleList):
+            return child
+    raise ValueError(f"Could not find a ModuleList in {module}")
+
+
+def get_final_norm_name(module: nn.Module) -> nn.Module:
+    # TODO transformers will have a util to get it
+    for name, child in reversed(list(module.named_children())):
+        if "norm" in child.__class__.__name__.lower():
+            return name
+        if "norm" in name.lower():
+            return name
+        if isinstance(child, nn.ModuleList):
+            break
+    raise ValueError(f"Could not find a norm layer in {module}")
+
+
 class TransformersModel(nn.Module, SupportsPP):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"
@@ -152,11 +172,13 @@ class TransformersModel(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = quant_config
 
-        self.model: PreTrainedModel = AutoModel.from_config(
-            self.config,
-            attn_implementation="vllm",
-            trust_remote_code=vllm_config.model_config.trust_remote_code,
-        )
+        # Use meta device to delay allocating GPU tensors
+        with torch.device("meta"):
+            self.model: PreTrainedModel = AutoModel.from_config(
+                self.config,
+                attn_implementation="vllm",
+                trust_remote_code=vllm_config.model_config.trust_remote_code,
+            )
         prefix = self.model.base_model_prefix
 
         # Input embeddings
@@ -172,32 +194,24 @@ class TransformersModel(nn.Module, SupportsPP):
         else:
             self.model.set_input_embeddings(PPMissingLayer())
 
-        # Transformer layers
-        self.attention_instances = self.create_attention_instances(
-            config, cache_config, quant_config=None)
-        self.apply_base_model_tp_plan(self.model)
-
         # Pipeline parallelise the transformer layers
         start_layer, end_layer = get_pp_indices(config.num_hidden_layers,
                                                 get_pp_group().rank_in_group,
                                                 get_pp_group().world_size)
-        layers_index = float("inf")
-        for i, (name, module) in enumerate(self.model.named_children()):
-            if isinstance(module, nn.ModuleList):
-                # Remove transformer layers that are't
-                # part of the current pipeline stage
-                for j in range(len(module)):
-                    if j < start_layer or end_layer <= j:
-                        module[j] = HFCompatiblePPMissingLayer()
-                layers_index = i
+        layers = get_layers(self.model)
+        for i in range(len(layers)):
+            if start_layer <= i and i < end_layer:
                 continue
-            # Remove any layer norms that appear after the transformer
-            # layers if this isn't the last pipeline stage
-            if (not get_pp_group().is_last_rank  # not last pipeline stage
-                    and i > layers_index  # after transformer layers
-                    and "norm" in name.lower()  # is norm layer
-                ):
-                setattr(self.model, name, PPMissingLayer())
+            layers[i] = HFCompatiblePPMissingLayer()
+
+        final_norm_name = get_final_norm_name(self.model)
+        if not get_pp_group().is_last_rank:
+            setattr(self.model, final_norm_name, PPMissingLayer())
+
+        # Transformer layers (this must happen after pipeline parallelisation)
+        self.attention_instances = self.create_attention_instances(
+            config, cache_config, quant_config=None)
+        self.apply_base_model_tp_plan(self.model)
 
         # Output embeddings
         if get_pp_group().is_last_rank:
@@ -218,6 +232,12 @@ class TransformersModel(nn.Module, SupportsPP):
                                                     logit_scale)
         else:
             self.lm_head = PPMissingLayer()
+
+        # Initialize buffers
+        self.init_buffers(self.model)
+
+        # Move remaining meta tensors to device
+        self.model.to_empty(device=vllm_config.device_config.device)
 
         self.sampler = get_sampler()
 
@@ -276,6 +296,14 @@ class TransformersModel(nn.Module, SupportsPP):
                     log_replacement(qual_name, child_module, new_module)
             else:
                 self.apply_base_model_tp_plan(child_module, prefix=qual_name)
+
+    def init_buffers(self, module: nn.Module):
+        for name, buffer in module.named_buffers(recurse=False):
+            if buffer.device == torch.device("meta"):
+                new_buffer = getattr(type(module)(self.config), name)
+                setattr(module, name, new_buffer)
+        for child in module.children():
+            self.init_buffers(child)
 
     def forward(
         self,
