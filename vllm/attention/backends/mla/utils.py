@@ -424,24 +424,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def apply_pure_rope(
-        self,
-        input_positions: torch.Tensor,
-        q_pe: torch.Tensor,
-        k_pe: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        seq_len = input_positions.size(0)
-        ori_q_pe_shape, ori_k_pe_shape = q_pe.shape, k_pe.shape
-
-        q_pe, k_pe = self.rotary_emb(
-            input_positions,
-            q_pe.reshape(seq_len, -1),
-            k_pe.reshape(seq_len, -1),
-        )
-        q_pe, k_pe = q_pe.view(ori_q_pe_shape), k_pe.view(ori_k_pe_shape)
-
-        return q_pe, k_pe
-
     def forward(
         self,
         layer: AttentionLayer,
@@ -466,14 +448,13 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         # Restore head dim (for rotary embedding)
         k_pe = k_pe.unsqueeze(1)
         assert hasattr(attn_metadata, "input_positions")
-        rope_fn = (self.rotary_emb
-                   if self.use_yarn_rope else self.apply_pure_rope)
 
         if is_decode:
             q_nope = self._q_proj_and_k_up_proj(hidden_states_or_q_c)
             q_pe = torch.matmul(hidden_states_or_q_c, self.W_QR)\
                 .view(-1, self.num_heads, self.qk_rope_head_dim)
-            q_pe, k_pe = rope_fn(attn_metadata.input_positions, q_pe, k_pe)
+            q_pe, k_pe = self.rotary_emb(attn_metadata.input_positions, q_pe,
+                                         k_pe)
         else:
             assert is_prefill
             q = self.q_proj(hidden_states_or_q_c)[0]\
@@ -481,7 +462,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
             # TODO(lucas): there must be a nicer way to write this line
             q[..., self.qk_nope_head_dim:], k_pe = \
-                rope_fn(
+                self.rotary_emb(
                     attn_metadata.input_positions,
                     q[..., self.qk_nope_head_dim:], k_pe)
 
