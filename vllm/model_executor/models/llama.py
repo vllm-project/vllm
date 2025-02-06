@@ -128,6 +128,7 @@ class LlamaAttention(nn.Module):
         # MistralConfig has an optional head_dim introduced by Mistral-Nemo
         self.head_dim = getattr(config, "head_dim",
                                 self.hidden_size // self.total_num_heads)
+        # Phi models introduced a partial_rotary_factor parameter in the config
         partial_rotary_factor = getattr(config, "partial_rotary_factor", 1)
         self.rotary_dim = int(partial_rotary_factor * self.head_dim)
         self.q_size = self.num_heads * self.head_dim
