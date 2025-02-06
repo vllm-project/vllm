@@ -8,7 +8,8 @@ import torch
 import vllm
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
-
+import subprocess as sp
+import time
 
 MODEL_PATH = "/models/llama3.2-1b"
 LORA_PATH = "/models/llama3.2-1b-lora"
@@ -24,8 +25,9 @@ def do_sample(llm: vllm.LLM, lora_id: int, weights: dict[str, torch.Tensor], con
     outputs = llm.generate(
         prompts,
         sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_tensors=weights, lora_config=config)
+        lora_request=LoRARequest(str(lora_id), lora_id, lora_path=LORA_PATH) #lora_tensors=weights, lora_config=config)
         if lora_id else None)
+
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -44,14 +46,8 @@ if __name__ == "__main__":
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
                    enable_lora=True,
-                   max_loras=4,
-                   enable_chunked_prefill=True)
+                   tensor_parallel_size=4)
 
-    expected_lora_output = [
-        "more important than knowledge.\nAuthor: Albert Einstein\n",
-        "everyone else is already taken.\nAuthor: Oscar Wilde\n",
-        "and poetry is painting that is felt rather than seen.\n"
-        "Author: Leonardo da Vinci\n",
-    ]
-
+    start_time = time.time()
     output1 = do_sample(llm, lora_id=1, weights=weights, config=config)
+    print("--- %s seconds ---" % (time.time() - start_time))

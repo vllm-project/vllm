@@ -115,7 +115,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
                     and model.hf_to_vllm_mapper is not None):
                 hf_to_vllm_mapper = model.hf_to_vllm_mapper
 
-            if len(lora_request.lora_tensors) is not None:
+            if lora_request.lora_tensors is not None:
                 lora = self._lora_model_cls.from_lora_tensors(
                     lora_model_id=lora_request.lora_int_id,
                     tensors=lora_request.lora_tensors,
