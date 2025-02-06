@@ -1,6 +1,6 @@
 """A TPU worker class."""
 import os
-from typing import Optional
+from typing import Optional, Dict
 
 import torch
 import torch.distributed
@@ -13,10 +13,13 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
+from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.attention.backends.pallas import PallasAttentionBackend
 from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.tpu_model_runner import ExecutionMode, TPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.utils import bind_kv_cache
 
 logger = init_logger(__name__)
 
@@ -74,20 +77,29 @@ class TPUWorker(WorkerBase):
     def determine_available_memory(self) -> int:
         assert self.model_runner is not None
 
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
+        kv_caches: Dict[str, torch.Tensor] = {}
+        kv_cache_spec = self.model_runner.get_kv_cache_spec()
+        for layer_name, layer_spec in kv_cache_spec.items():
+            if isinstance(layer_spec, FullAttentionSpec):
+                dtype = layer_spec.dtype
 
-        # use an empty tensor instead of `None`` to force Dynamo to pass
-        # it by reference, rather by specializing on the value ``None``.
-        # the `dtype` argument does not matter, and we use `float32` as
-        # a placeholder (it has wide hardware support).
-        kv_caches = [(torch.tensor([], dtype=torch.float32,
-                                   device=self.device),
-                      torch.tensor([], dtype=torch.float32,
-                                   device=self.device))
-                     for _ in range(num_layers)]
+                # Use an empty tensor instead of `None`` to force Dynamo to pass
+                # it by reference, rather by specializing on the value ``None``.
+                tpu_k_cache = torch.tensor([], dtype=dtype, device=self.device)
+                tpu_v_cache = torch.tensor([], dtype=dtype, device=self.device)
+
+                kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
+            else:
+                raise NotImplementedError
+
+        runner_kv_caches = []
+        bind_kv_cache(
+            kv_caches,
+            self.vllm_config.compilation_config.static_forward_context,
+            runner_kv_caches)
 
         self.model_runner.dummy_run(
-            kv_caches,
+            runner_kv_caches,
             num_tokens=1,
             seq_len=self.scheduler_config.max_num_batched_tokens,
             exec_mode=ExecutionMode.PREFILL,

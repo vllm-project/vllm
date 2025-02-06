@@ -24,6 +24,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import (CachedRequestState, InputBatch,
                                             ensure_decodes_first)
 from vllm.v1.worker.model_runner_base import ExecutionMode, ModelRunnerBase
+from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -688,62 +689,88 @@ class TPUModelRunner(ModelRunnerBase):
             torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
             torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
 
-        # TODO: Remove the attn_metadata above
-        with set_forward_context(None, self.vllm_config):
+        with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
-            self.model(token_ids, position_ids, None, kv_caches)
+            self.model(token_ids, position_ids, attn_metadata, kv_caches)
 
     def capture_model(self) -> None:
         """Compile the model."""
 
-        logger.info("Compiling the model with different input shapes.")
-
-        # Capture prefill shapes
-        start = time.perf_counter()
+        # Prefill
+        logger.info(
+            "Compiling the model with different input shapes for prefill:")
+        start = time.time()
         for batch_size in [1]:
             seq_len = 16
-            while True:
-                self.dummy_run(self.kv_caches, batch_size, seq_len,
-                               ExecutionMode.PREFILL)
+            while seq_len <= self.model_config.max_model_len:
+                self.dummy_run(self.kv_caches,
+                               batch_size,
+                               seq_len,
+                               exec_mode=ExecutionMode.PREFILL)
                 xm.wait_device_ops()
-                logger.info("  -- batch_size: %d, seq_len: %d", batch_size,
+                logger.info("  batch_size: %d, seq_len: %d", batch_size,
                             seq_len)
-
-                if seq_len >= self.model_config.max_model_len:
-                    break
-
                 num_tokens = batch_size * seq_len
                 if num_tokens >= self.scheduler_config.max_num_batched_tokens:
                     break
-
-                # Move to next seq_len
                 seq_len = seq_len * 2
 
-        end = time.perf_counter()
-        logger.info("Compilation for prefill shapes is done in %.2f [secs].",
+        end = time.time()
+        logger.info("    -- Compilation for prefill done in %.2f [secs].",
                     end - start)
 
-        # Capture decode shapes.
+        # Prefix prefill
+        if self.scheduler_config.enable_chunked_prefill:
+            logger.info("Compiling the model with different input shapes for "
+                        "prefix prefill:")
+            start = time.time()
+            for batch_size in [1]:
+                seq_len = 16
+                while seq_len <= self.model_config.max_model_len:
+                    self.dummy_run(self.kv_caches,
+                                   batch_size,
+                                   seq_len,
+                                   exec_mode=ExecutionMode.PREFIX_PREFILL)
+                    xm.wait_device_ops()
+                    logger.info("  batch_size: %d, seq_len: %d", batch_size,
+                                seq_len)
+                    num_tokens = batch_size * seq_len
+                    if (num_tokens
+                            >= self.scheduler_config.max_num_batched_tokens):
+                        break
+                    seq_len = seq_len * 2
+            end = time.time()
+            logger.info(
+                "    -- Compilation for prefix prefill done in %.2f [secs].",
+                end - start)
+
+        # Decode
+        logger.info(
+            "Compiling the model with different input shapes for decode:")
         start = time.time()
         seq_len = 1
         batch_size = 8  # Must be in sync with _get_padded_batch_size()
         while True:
-            self.dummy_run(self.kv_caches, batch_size, seq_len,
-                           ExecutionMode.DECODE)
+            self.dummy_run(self.kv_caches,
+                           batch_size,
+                           seq_len,
+                           exec_mode=ExecutionMode.DECODE)
             xm.wait_device_ops()
-            logger.info("  -- batch_size: %d, seq_len: %d, max_num_seqs = %d",
-                        batch_size, seq_len,
-                        self.scheduler_config.max_num_seqs)
+            logger.info("  batch_size: %d, seq_len: %d", batch_size, seq_len)
 
             if batch_size >= self.scheduler_config.max_num_seqs:
                 break
-
             batch_size = batch_size + 16 if batch_size >= 16 else batch_size * 2
 
         end = time.time()
-        logger.info("Compilation for decode shapes is done in %.2f [secs].",
+        logger.info("    -- Compilation for decode done in %.2f [secs].",
                     end - start)
 
+    def _initialize_kv_cache(self):
+        kv_cache_spec = self.get_kv_cache_spec()
+
+        kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
+                                              availble_gpu_memory)
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -810,7 +837,7 @@ class ModelWrapperV1(nn.Module):
                 memory profiling at initialization.
         """
         # Skip this in memory profiling at initialization.
-        if attn_metadata is not None:
+        if attn_metadata is not None and kv_caches[0][0].numel() > 0:
             # index_copy_(slot_mapping) only works when the inserted dimension
             # is 0. However, the KV cache in the Pallas backend has the shape
             # [num_kv_heads, num_blocks, block_size, head_size]. To make it
