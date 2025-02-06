@@ -302,8 +302,8 @@ class FusedMoE(torch.nn.Module):
             "weight_loader": self.weight_loader,
         }
         # need full intermediate size pre-sharding for WNA16 act order
-        if (self.quant_method.__class__.__name__ ==
-                "CompressedTensorsWNA16MoEMethod"):
+        if (self.quant_method.__class__.__name__
+                in ("GPTQMarlinMoEMethod", "CompressedTensorsWNA16MoEMethod")):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
