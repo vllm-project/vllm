@@ -235,3 +235,7 @@ def normalize_e4m3fn_to_e4m3fnuz(
     if input_scale is not None:
         input_scale = input_scale * 2.0
     return weight, weight_scale, input_scale
+
+
+CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
+CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
