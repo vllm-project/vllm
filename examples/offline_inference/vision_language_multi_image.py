@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This example shows how to use vLLM for running offline inference with
 multi-image input on vision language models for text generation,
@@ -391,6 +392,63 @@ def load_qwen2_vl(question, image_urls: List[str]) -> ModelRequestData:
     )
 
 
+def load_qwen2_5_vl(question, image_urls: List[str]) -> ModelRequestData:
+    try:
+        from qwen_vl_utils import process_vision_info
+    except ModuleNotFoundError:
+        print('WARNING: `qwen-vl-utils` not installed, input images will not '
+              'be automatically resized. You can enable this functionality by '
+              '`pip install qwen-vl-utils`.')
+        process_vision_info = None
+
+    model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
+
+    llm = LLM(
+        model=model_name,
+        max_model_len=32768 if process_vision_info is None else 4096,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [{
+        "role": "system",
+        "content": "You are a helpful assistant."
+    }, {
+        "role":
+        "user",
+        "content": [
+            *placeholders,
+            {
+                "type": "text",
+                "text": question
+            },
+        ],
+    }]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    stop_token_ids = None
+
+    if process_vision_info is None:
+        image_data = [fetch_image(url) for url in image_urls]
+    else:
+        image_data, _ = process_vision_info(messages,
+                                            return_video_sample_fps=False)
+
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=stop_token_ids,
+        image_data=image_data,
+        chat_template=None,
+    )
+
+
 model_example_map = {
     "aria": load_aria,
     "deepseek_vl_v2": load_deepseek_vl2,
@@ -403,6 +461,7 @@ model_example_map = {
     "pixtral_hf": load_pixtral_hf,
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
+    "qwen2_5_vl": load_qwen2_5_vl,
 }
 
 

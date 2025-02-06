@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import itertools
 from functools import partial
 
@@ -42,7 +44,10 @@ def test_processor_max_tokens(model_id):
     )
     processor = MULTIMODAL_REGISTRY.create_processor(
         ctx.model_config,
-        tokenizer=cached_get_tokenizer(ctx.model_config.tokenizer),
+        tokenizer=cached_get_tokenizer(
+            ctx.model_config.tokenizer,
+            trust_remote_code=ctx.model_config.trust_remote_code,
+        ),
     )
     info = processor.info
 
@@ -141,7 +146,10 @@ def test_processor_prompt_replacements_regression(model_id, num_imgs):
     )
     processor = MULTIMODAL_REGISTRY.create_processor(
         ctx.model_config,
-        tokenizer=cached_get_tokenizer(ctx.model_config.tokenizer),
+        tokenizer=cached_get_tokenizer(
+            ctx.model_config.tokenizer,
+            trust_remote_code=ctx.model_config.trust_remote_code,
+        ),
     )
 
     image_ratios = [(171, 152), (184, 161), (198, 176), (333, 296), (369, 328),
@@ -172,7 +180,10 @@ def test_processor_prompt_replacements_all(model_id, num_imgs):
     )
     processor = MULTIMODAL_REGISTRY.create_processor(
         ctx.model_config,
-        tokenizer=cached_get_tokenizer(ctx.model_config.tokenizer),
+        tokenizer=cached_get_tokenizer(
+            ctx.model_config.tokenizer,
+            trust_remote_code=ctx.model_config.trust_remote_code,
+        ),
     )
 
     seen_aspect_ratios = set[float]()

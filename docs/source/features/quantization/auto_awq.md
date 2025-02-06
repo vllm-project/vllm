@@ -2,12 +2,6 @@
 
 # AutoAWQ
 
-```{warning}
-Please note that AWQ support in vLLM is under-optimized at the moment. We would recommend using the unquantized version of the model for better
-accuracy and higher throughput. Currently, you can use AWQ as a way to reduce memory footprint. As of now, it is more suitable for low latency
-inference with small number of concurrent requests. vLLM's AWQ implementation have lower throughput than unquantized version.
-```
-
 To create a new 4-bit quantized model, you can leverage [AutoAWQ](https://github.com/casper-hansen/AutoAWQ).
 Quantizing reduces the model's precision from FP16 to INT4 which effectively reduces the file size by ~70%.
 The main benefits are lower latency and memory usage.

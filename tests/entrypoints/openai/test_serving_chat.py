@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
@@ -102,6 +104,116 @@ def test_serving_chat_should_set_correct_max_tokens():
         asyncio.run(serving_chat.create_chat_completion(req))
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 10
+
+    # Setting server's max_tokens in the generation_config.json
+    # lower than context_window - prompt_tokens
+    mock_model_config = MockModelConfig()
+    mock_model_config.diff_sampling_param = {
+        "max_tokens": 10  # Setting server-side max_tokens limit
+    }
+
+    # Reinitialize the engine with new settings
+    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
+
+    # Initialize the serving chat
+    models = OpenAIServingModels(engine_client=mock_engine,
+                                 base_model_paths=BASE_MODEL_PATHS,
+                                 model_config=mock_model_config)
+    serving_chat = OpenAIServingChat(mock_engine,
+                                     mock_model_config,
+                                     models,
+                                     response_role="assistant",
+                                     chat_template=CHAT_TEMPLATE,
+                                     chat_template_content_format="auto",
+                                     request_logger=None)
+
+    # Test Case 1: No max_tokens specified in request
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "user",
+            "content": "what is 1+1?"
+        }],
+        guided_decoding_backend="outlines",
+    )
+
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 10
+
+    # Test Case 2: Request's max_tokens set higher than server accepts
+    req.max_tokens = 15
+
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 10
+
+    # Test Case 3: Request's max_tokens set lower than server accepts
+    req.max_tokens = 5
+
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 5
+
+    # Setting server's max_tokens in the generation_config.json
+    # higher than context_window - prompt_tokens
+    mock_model_config = MockModelConfig()
+    mock_model_config.diff_sampling_param = {
+        "max_tokens": 200  # Setting server-side max_tokens limit
+    }
+
+    # Reinitialize the engine with new settings
+    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
+
+    # Initialize the serving chat
+    models = OpenAIServingModels(engine_client=mock_engine,
+                                 base_model_paths=BASE_MODEL_PATHS,
+                                 model_config=mock_model_config)
+    serving_chat = OpenAIServingChat(mock_engine,
+                                     mock_model_config,
+                                     models,
+                                     response_role="assistant",
+                                     chat_template=CHAT_TEMPLATE,
+                                     chat_template_content_format="auto",
+                                     request_logger=None)
+
+    # Test case 1: No max_tokens specified, defaults to context_window
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "user",
+            "content": "what is 1+1?"
+        }],
+        guided_decoding_backend="outlines",
+    )
+
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+    # Test Case 2: Request's max_tokens set higher than server accepts
+    req.max_tokens = 100
+
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+    # Test Case 3: Request's max_tokens set lower than server accepts
+    req.max_tokens = 5
+
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 5
 
 
 def test_serving_chat_could_load_correct_generation_config():

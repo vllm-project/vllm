@@ -105,9 +105,9 @@ docker run -itd --ipc host --privileged --network vllm_nginx --gpus all --shm-si
 docker run -itd --ipc host --privileged --network vllm_nginx --gpus all --shm-size=10.24gb -v $hf_cache_dir:/root/.cache/huggingface/ -p 8082:8000 --name vllm1 vllm --model meta-llama/Llama-2-7b-chat-hf
 ```
 
-```{note}
+:::{note}
 If you are behind proxy, you can pass the proxy settings to the docker run command via `-e http_proxy=$http_proxy -e https_proxy=$https_proxy`.
-```
+:::
 
 (nginxloadbalancer-nginx-launch-nginx)=
 

@@ -111,6 +111,7 @@ markers = [
 ]
 
 [tool.pymarkdown]
+plugins.md004.style = "sublist" # ul-style
 plugins.md013.enabled = false # line-length
 plugins.md041.enabled = false # first-line-h1
 plugins.md033.enabled = false # inline-html

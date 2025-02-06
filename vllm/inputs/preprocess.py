@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 from typing import List, Mapping, Optional, Union
 
@@ -258,8 +260,6 @@ class InputPreprocessor:
         mm_processor = self.mm_registry.create_processor(
             self.model_config, tokenizer)
 
-        if isinstance(prompt, list):
-            prompt = tokenizer.decode(prompt)
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 

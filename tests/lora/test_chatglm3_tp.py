@@ -1,4 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List
+
+import pytest
 
 import vllm
 from tests.utils import fork_new_process_for_each_test
@@ -45,6 +49,15 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
+@pytest.mark.skip_v1
 @fork_new_process_for_each_test
 def test_chatglm3_lora(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
@@ -64,6 +77,7 @@ def test_chatglm3_lora(chatglm3_lora_files):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
+@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_chatglm3_lora_tp4(chatglm3_lora_files):
@@ -85,6 +99,7 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
+@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):

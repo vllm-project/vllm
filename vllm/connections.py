@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from pathlib import Path
 from typing import Mapping, MutableMapping, Optional
 from urllib.parse import urlparse

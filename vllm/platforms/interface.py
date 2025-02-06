@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import enum
 import platform
 import random
@@ -30,6 +32,7 @@ class _Backend(enum.Enum):
     TORCH_SDPA = enum.auto()
     OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
+    TRITON_MLA = enum.auto()
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
@@ -139,7 +142,8 @@ class Platform:
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool) -> str:
+                             block_size: int, use_v1: bool,
+                             use_mla: bool) -> str:
         """Get the attention backend class of a device."""
         return ""
 
@@ -177,6 +181,11 @@ class Platform:
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         """Get the name of a device."""
+        raise NotImplementedError
+
+    @classmethod
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        """Get the uuid of a device, e.g. the PCI bus ID."""
         raise NotImplementedError
 
     @classmethod

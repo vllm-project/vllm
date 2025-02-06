@@ -3,18 +3,18 @@ default_stages:
   - manual # Run in CI
 repos:
 - repo: https://github.com/google/yapf
-  rev: v0.32.0
+  rev: v0.43.0
   hooks:
   - id: yapf
     args: [--in-place, --verbose]
     additional_dependencies: [toml] # TODO: Remove when yapf is upgraded
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.6.5
+  rev: v0.9.3
   hooks:
   - id: ruff
     args: [--output-format, github]
 - repo: https://github.com/codespell-project/codespell
-  rev: v2.3.0
+  rev: v2.4.0
   hooks:
   - id: codespell
     exclude: 'benchmarks/sonnet.txt|(build|tests/(lora/data|models/fixtures|prompts))/.*'
@@ -23,7 +23,7 @@ repos:
   hooks:
   - id: isort
 - repo: https://github.com/pre-commit/mirrors-clang-format
-  rev: v18.1.5
+  rev: v19.1.7
   hooks:
   - id: clang-format
     exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))'
@@ -35,7 +35,7 @@ repos:
   - id: pymarkdown
     files: docs/.*
 - repo: https://github.com/rhysd/actionlint
-  rev: v1.7.6
+  rev: v1.7.7
   hooks:
   - id: actionlint
 - repo: local
@@ -85,8 +85,26 @@ repos:
     entry: tools/png-lint.sh
     language: script
     types: [png]
+  - id: signoff-commit
+    name: Sign-off Commit
+    entry: bash
+    args:
+      - -c
+      - |
+        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" .git/COMMIT_EDITMSG; then
+          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> .git/COMMIT_EDITMSG
+        fi
+    language: system
+    verbose: true
+    stages: [commit-msg]
+  - id: check-spdx-header
+    name: Check SPDX headers
+    entry: python tools/check_spdx_header.py
+    language: python
+    types: [python]
   - id: suggestion
     name: Suggestion
     entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
     language: system
     verbose: true
+    pass_filenames: false
