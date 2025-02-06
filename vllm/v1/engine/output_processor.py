@@ -8,9 +8,9 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
-from vllm.v1.engine.detokenizer import IncrementalDetokenizer
-from vllm.v1.engine.logprobs import LogprobsProcessor
+from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest
+from vllm.v1.engine.detokenizer import (DetokenizerOutput,
+                                        IncrementalDetokenizer)
 from vllm.v1.metrics.stats import IterationStats, RequestStateStats
 
 
@@ -120,7 +120,9 @@ class OutputProcessor:
 
     def process_outputs(
         self,
-        engine_core_outputs: List[EngineCoreOutput],
+        engine_core_outputs: EngineCoreOutputs,
+        first: int,
+        last: int,
         engine_core_timestamp: Optional[float] = None,
         iteration_stats: Optional[IterationStats] = None,
     ) -> OutputProcessorOutput:
@@ -129,42 +131,46 @@ class OutputProcessor:
         1) Compute stats for logging
         2) Detokenize
         3) Create and handle RequestOutput objects:
-            * If there is a queue (for usage with AsyncLLM), 
+            * If there is a queue (for usage with AsyncLLM),
               put the RequestOutput objects into the queue for
               handling by the per-request generate() tasks.
 
-            * If there is no queue (for usage with LLMEngine), 
+            * If there is no queue (for usage with LLMEngine),
               return a list of RequestOutput objects.
 
         ****************** NOTE FOR DEVELOPERS ******************
 
         VLLM V1 minimizes the number of python loops over the full
-        batch to ensure system overheads are minimized. This is the 
+        batch to ensure system overheads are minimized. This is the
         only function that should loop over EngineCoreOutputs.
 
         If you need to touch every element of the batch, do it from
         within the loop below.
-        
         **********************************************************
         """
 
         request_outputs: List[RequestOutput] = []
         reqs_to_abort: List[str] = []
-        for engine_core_output in engine_core_outputs:
-            req_id = engine_core_output.request_id
+        for i, req_id in enumerate(engine_core_outputs.request_ids[first:last]):
             req_state = self.request_states.get(req_id)
             if req_state is None:
                 # Ignore output for already-aborted request.
                 continue
 
+            num_tokens = last - first  # might not be robust
+            start = engine_core_outputs.new_token_id_offsets[i]
+            end = engine_core_outputs.new_token_id_offsets[i + 1] if i < num_tokens - 1 else -1
+            # better way to do this?
+            new_token_ids = engine_core_outputs.new_token_ids[start:end]
+
             # 1) Compute stats for this iteration.
-            self._update_stats_from_output(req_state, engine_core_output,
+            self._update_stats_from_output(req_state,
+                                           # XXXXXXXXX
+                                           engine_core_outputs,
                                            engine_core_timestamp,
                                            iteration_stats)
 
-            new_token_ids = engine_core_output.new_token_ids
-            finish_reason = engine_core_output.finish_reason
-            stop_reason = engine_core_output.stop_reason
+            finish_reason = engine_core_outputs.finish_reason[i + first]
 
             # TODO(andy): prompt logprobs + chunked prefill can
             # result in engine core returning an output for a
@@ -204,7 +210,7 @@ class OutputProcessor:
                 # Free completed requests.
                 if request_output.finished:
                     self.request_states.pop(req_id)
-                    if not engine_core_output.finished:
+                    if not engine_core_outputs.finished[i]:
                         # If req not finished in EngineCore, but Detokenizer
                         # detected stop string, abort needed in EngineCore.
                         reqs_to_abort.append(req_id)
