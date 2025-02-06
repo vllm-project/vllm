@@ -324,6 +324,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("cutlass_scaled_mm_supports_fp8(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
 
+  // Check if cutlass scaled_mm supports block quantization (used by DeepSeekV3)
+  ops.def(
+      "cutlass_scaled_mm_supports_block_fp8(int cuda_device_capability) -> "
+      "bool");
+  ops.impl("cutlass_scaled_mm_supports_block_fp8",
+           &cutlass_scaled_mm_supports_fp8);
+
   // Check if cutlass sparse scaled_mm is supported for CUDA devices of the
   // given capability
   ops.def(
@@ -442,6 +449,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "copy_blocks(Tensor(a!)[] key_caches, Tensor[](b!) value_caches, "
       "Tensor block_mapping) -> ()");
   cache_ops.impl("copy_blocks", torch::kCUDA, &copy_blocks);
+
+  cache_ops.def(
+      "copy_blocks_mla(Tensor(a!)[] kv_caches, Tensor block_mapping) -> ()");
+  cache_ops.impl("copy_blocks_mla", torch::kCUDA, &copy_blocks_mla);
 
   // Reshape the key and value tensors and cache them.
   cache_ops.def(

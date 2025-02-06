@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the triton_scaled_mm kernel
 
 Run `pytest tests/kernels/test_triton_scaled_mm.py`.

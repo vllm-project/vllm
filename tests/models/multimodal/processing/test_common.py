@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from functools import partial
 
 import numpy as np
@@ -139,13 +141,15 @@ def _test_processing_correctness(
 
 
 # yapf: disable
-# True if the model supports multiple data items of the modality per request
 @pytest.mark.parametrize("model_id", [
     "rhymes-ai/Aria",
     "Salesforce/blip2-opt-2.7b",
     "facebook/chameleon-7b",
     "deepseek-ai/deepseek-vl2-tiny",
     "adept/fuyu-8b",
+    "h2oai/h2ovl-mississippi-800m",
+    "OpenGVLab/InternVL2-1B",
+    "HuggingFaceM4/Idefics3-8B-Llama3",
     "llava-hf/llava-1.5-7b-hf",
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
@@ -154,8 +158,10 @@ def _test_processing_correctness(
     "mistral-community/pixtral-12b",
     "openbmb/MiniCPM-o-2_6",
     "openbmb/MiniCPM-V-2_6",
+    "nvidia/NVLM-D-72B",
     "Qwen/Qwen-VL-Chat",
     "Qwen/Qwen2-VL-2B-Instruct",
+    "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
     "fixie-ai/ultravox-v0_3",
 ])

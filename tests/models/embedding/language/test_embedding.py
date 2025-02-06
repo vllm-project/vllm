@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the embedding outputs of HF and vLLM models.
 
 Run `pytest tests/models/embedding/language/test_embedding.py`.

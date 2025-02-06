@@ -1,4 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import List
+
+import pytest
 
 import vllm
 from vllm.lora.request import LoRARequest
@@ -46,6 +50,17 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
+# Skipping for V1 for now as we are hitting,
+# "Head size 80 is not supported by FlashAttention." error.
+@pytest.mark.skip_v1
 def test_phi2_lora(phi2_lora_files):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
     # Otherwise, the lora-test will fail due to CUDA OOM.

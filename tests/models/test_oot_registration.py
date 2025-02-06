@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 
 import pytest
@@ -13,7 +15,9 @@ def test_plugin(dummy_opt_path):
     os.environ["VLLM_PLUGINS"] = ""
     with pytest.raises(Exception) as excinfo:
         LLM(model=dummy_opt_path, load_format="dummy")
-    assert "are not supported for now" in str(excinfo.value)
+    error_msg = "has no vLLM implementation and " \
+                "the Transformers implementation is not compatible with vLLM."
+    assert (error_msg in str(excinfo.value))
 
 
 @fork_new_process_for_each_test

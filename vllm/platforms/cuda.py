@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Code inside this file can safely assume cuda platform, e.g. importing
 pynvml. However, it should not initialize cuda context.
 """
@@ -7,7 +8,6 @@ from functools import lru_cache, wraps
 from typing import (TYPE_CHECKING, Callable, List, Optional, Tuple, TypeVar,
                     Union)
 
-import pynvml
 import torch
 from typing_extensions import ParamSpec
 
@@ -15,6 +15,7 @@ from typing_extensions import ParamSpec
 import vllm._C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils import import_pynvml
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -28,13 +29,7 @@ logger = init_logger(__name__)
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
-if pynvml.__file__.endswith("__init__.py"):
-    logger.warning(
-        "You are using a deprecated `pynvml` package. Please install"
-        " `nvidia-ml-py` instead, and make sure to uninstall `pynvml`."
-        " When both of them are installed, `pynvml` will take precedence"
-        " and cause errors. See https://pypi.org/project/pynvml "
-        "for more information.")
+pynvml = import_pynvml()
 
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details
@@ -279,6 +274,14 @@ class NvmlCudaPlatform(CudaPlatformBase):
     def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)
         return cls._get_physical_device_name(physical_device_id)
+
+    @classmethod
+    @lru_cache(maxsize=8)
+    @with_nvml_context
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+        physical_device_id = device_id_to_physical_device_id(device_id)
+        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        return pynvml.nvmlDeviceGetUUID(handle)
 
     @classmethod
     @lru_cache(maxsize=8)

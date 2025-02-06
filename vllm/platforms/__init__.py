@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import logging
 import traceback
 from itertools import chain
@@ -31,14 +33,19 @@ def cuda_platform_plugin() -> Optional[str]:
     is_cuda = False
 
     try:
-        import pynvml
+        from vllm.utils import import_pynvml
+        pynvml = import_pynvml()
         pynvml.nvmlInit()
         try:
             if pynvml.nvmlDeviceGetCount() > 0:
                 is_cuda = True
         finally:
             pynvml.nvmlShutdown()
-    except Exception:
+    except Exception as e:
+        if "nvml" not in e.__class__.__name__.lower():
+            # If the error is not related to NVML, re-raise it.
+            raise e
+
         # CUDA is supported on Jetson, but NVML may not be.
         import os
 

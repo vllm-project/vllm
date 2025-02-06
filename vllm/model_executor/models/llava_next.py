@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import abstractmethod
 from functools import cached_property
 from typing import (Final, Iterable, List, Literal, Mapping, Optional,
@@ -71,7 +73,15 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_config(LlavaNextConfig)
 
     def get_hf_processor(self):
-        return self.ctx.get_hf_processor(LlavaNextProcessor)
+        hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor)
+
+        # In case patch_size is omitted from `processor_config.json`
+        # e.g. for E5-V: https://huggingface.co/royokong/e5-v
+        if hf_processor.patch_size is None:
+            patch_size = self.get_vision_encoder_info().get_patch_size()
+            hf_processor.patch_size = patch_size
+
+        return hf_processor
 
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
     def get_num_image_tokens(
@@ -229,7 +239,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=vision_hidden_size,
             text_hidden_size=config.text_config.hidden_size,
-            projector_hidden_act=config.projector_hidden_act)
+            projector_hidden_act=config.projector_hidden_act,
+            multimodal_projector_bias=config.multimodal_projector_bias)
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
