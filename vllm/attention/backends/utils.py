@@ -616,3 +616,4 @@ def get_flash_attn_version():
         return fa_version
     except (ImportError, AssertionError):
         return None
+
