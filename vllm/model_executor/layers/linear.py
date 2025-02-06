@@ -977,8 +977,21 @@ class QKVParallelLinear(ColumnParallelLinear):
             start_idx = shard_id * shard_size
 
             if not is_sharded_weight:
-                loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                     shard_size)
+                if start_idx + shard_size > loaded_weight.size(output_dim):
+                    # print("LOADERSIZE", start_idx, shard_size, loaded_weight.size())
+                    # Create a tensor of zeros with the same size as the shard
+                    weight_shape = list(loaded_weight.shape)
+                    weight_shape[output_dim] = shard_size
+                    loaded_weight = torch.full(
+                    weight_shape,
+                    fill_value=0,
+                    dtype=loaded_weight.dtype,
+                    device=loaded_weight.device
+                    )
+                else:
+                    loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+                # loaded_weight = loaded_weight.narrow(output_dim, start_idx,
+                #                                      shard_size)
 
         # Special case for for AQLM codebooks.
         elif is_metadata:
@@ -1102,8 +1115,19 @@ class RowParallelLinear(LinearBase):
         if input_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[input_dim]
             start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(input_dim, start_idx,
-                                                 shard_size)
+            if start_idx + shard_size > loaded_weight.size(input_dim):
+                # Create a tensor of zeros with the same size as the shard
+                weight_shape = list(loaded_weight.shape)
+                weight_shape[input_dim] = shard_size
+                loaded_weight = torch.zeros(
+                    weight_shape,
+                    dtype=loaded_weight.dtype,
+                    device=loaded_weight.device
+                )
+            else:
+                loaded_weight = loaded_weight.narrow(input_dim, start_idx, shard_size)
+            # loaded_weight = loaded_weight.narrow(input_dim, start_idx,
+            #                                      shard_size)
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).

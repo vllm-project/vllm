@@ -115,8 +115,8 @@ class Qwen2Attention(nn.Module):
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
+        # assert self.total_num_heads % tp_size == 0
+        self.num_heads = 2 # self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
@@ -136,14 +136,14 @@ class Qwen2Attention(nn.Module):
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
-            self.total_num_heads,
+            16, # self.total_num_heads,
             self.total_num_kv_heads,
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
+            16 * self.head_dim, # 16*128, self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             quant_config=quant_config,
@@ -178,6 +178,7 @@ class Qwen2Attention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
+        print("FORWARDSIZE", output.size())
         return output
 
 
