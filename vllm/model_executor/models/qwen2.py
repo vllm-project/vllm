@@ -178,7 +178,6 @@ class Qwen2Attention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
-        print("FORWARDSIZE", output.size())
         return output
 
 
