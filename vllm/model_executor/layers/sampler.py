@@ -275,12 +275,13 @@ class Sampler(nn.Module):
         # Positive temperature path.
         # Need to adjust denominator to avoid division by zero causing problems.
         # Any zero temperature entries are multiplied by False (0).
-        # This effectively means denominator adjustment never messes with things.
+        # This means denominator adjustment never messes with things.
         logits_p = (~is_zero) * logits / (temperature + is_zero)
 
         # Zero temperature path.
-        # Any positive temperature entries are multipled by False (0).
-        logits_z = is_zero * 1e9 * (logits == logits.max(dim=1, keepdim=True)[0])
+        # Any positive temperature entries are multiplied by False (0).
+        logits_z = is_zero * 1e9 * (logits == logits.max(dim=1,
+                                                         keepdim=True)[0])
 
         # Final logits is sum of both cases.
         # Always one of them is zero since mutually exclusive.
