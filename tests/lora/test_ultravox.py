@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import shutil
 from os import path
 from tempfile import TemporaryDirectory
