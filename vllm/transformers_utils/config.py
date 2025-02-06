@@ -10,7 +10,7 @@ import huggingface_hub
 from huggingface_hub import (file_exists, hf_hub_download, list_repo_files,
                              try_to_load_from_cache)
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
-                                   LocalEntryNotFoundError,
+                                   HFValidationError, LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
 from torch import nn
@@ -272,11 +272,14 @@ def try_get_local_file(model: Union[str, Path],
     if file_path.is_file():
         return file_path
     else:
-        cached_filepath = try_to_load_from_cache(repo_id=model,
-                                                 filename=file_name,
-                                                 revision=revision)
-        if isinstance(cached_filepath, str):
-            return Path(cached_filepath)
+        try:
+            cached_filepath = try_to_load_from_cache(repo_id=model,
+                                                     filename=file_name,
+                                                     revision=revision)
+            if isinstance(cached_filepath, str):
+                return Path(cached_filepath)
+        except HFValidationError:
+            ...
     return None
 
 
