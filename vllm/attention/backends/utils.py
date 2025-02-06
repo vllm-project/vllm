@@ -612,5 +612,5 @@ try:
         return fa_version
 
     VLLM_FLASH_ATTN_VERSION = flash_attn_version()
-except ImportError:
+except (ImportError, AssertionError):
     VLLM_FLASH_ATTN_VERSION = None
