@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Dict, List
+from typing import Callable, Concatenate, List, ParamSpec
 
 import numpy as np
 import torch
 from triton import cdiv
 
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.kv_cache_interface import BlockIDList, FullAttentionSpec, KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import (GroupedBlockIDs, KVCacheConfig,
+                                        KVCacheSpec)
 
 logger = init_logger(__name__)
 
@@ -95,39 +95,51 @@ class BlockTable:
         return self.block_table_np
 
 
+P = ParamSpec("P")
+
+
 class GroupedBlockTable:
+    move_row: Callable[P, None]
+    commit: Callable[P, None]
+    clear: Callable[P, None]
+
+    append_row: Callable[Concatenate["GroupedBlockIDs", P], None]
+    add_row: Callable[Concatenate["GroupedBlockIDs", P], None]
 
     def __init__(self, max_num_reqs: int, max_model_len: int,
                  max_num_tokens: int, pin_memory: bool, device: torch.device,
-                 kv_cache_config: KVCacheConfig):
+                 kv_cache_config: KVCacheConfig) -> None:
         self.block_tables = [
             BlockTable(max_num_reqs, max_model_len, max_num_tokens, pin_memory,
                        device, g.kv_cache_spec) for g in kv_cache_config.groups
         ]
-        for f_name in ('move_row', 'commit', 'clear'):
+        # For methods that just pass the arguments to each BlockTable.
+        for f_name in ("move_row", "commit", "clear"):
             setattr(self, f_name, self._make_grouped_func(f_name))
-
-        for f_name in ('append_row', 'add_row'):
-            # NOTE: requires to pass block_ids as the first argument
+        # For methods that require a block_ids as the first argument.
+        for f_name in ("append_row", "add_row"):
             setattr(self, f_name,
                     self._make_grouped_func_with_block_ids(f_name))
 
-    def _make_grouped_func(self, f_name):
+    def _make_grouped_func(self, f_name: str) -> Callable[P, None]:
 
-        def grouped_func(*args, **kwargs):
+        def grouped_func(*args: P.args, **kwargs: P.kwargs) -> None:
             for block_table in self.block_tables:
                 getattr(block_table, f_name)(*args, **kwargs)
 
         return grouped_func
 
-    def _make_grouped_func_with_block_ids(self, f_name):
+    def _make_grouped_func_with_block_ids(
+            self,
+            f_name: str) -> Callable[Concatenate["GroupedBlockIDs", P], None]:
 
-        def grouped_func(block_ids: BlockIDList, *args, **kwargs):
+        def grouped_func(block_ids: "GroupedBlockIDs", *args: P.args,
+                         **kwargs: P.kwargs) -> None:
             for i, block_table in enumerate(self.block_tables):
                 getattr(block_table, f_name)(block_ids.get_group(i), *args,
                                              **kwargs)
 
         return grouped_func
 
-    def __getitem__(self, idx) -> BlockTable:
+    def __getitem__(self, idx: int) -> "BlockTable":
         return self.block_tables[idx]

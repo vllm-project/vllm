@@ -61,7 +61,6 @@ class GPUModelRunner:
         model_config = self.model_config
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
-        parallel_config = self.parallel_config
         self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
@@ -322,8 +321,6 @@ class GPUModelRunner:
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 req_data.num_computed_tokens)
-
-            # Update the block table.
             self.input_batch.block_table.append_row(req_data.new_block_ids,
                                                     req_index)
 
@@ -867,28 +864,6 @@ class GPUModelRunner:
             logprobs_cpu=logprobs,
         )
         return model_runner_output
-
-    def maybe_pad_for_cudagraph(
-            self, num_scheduled_tokens: int,
-            attn_metadata: Dict[str, FlashAttentionMetadata]) -> int:
-        if (self.use_cuda_graph
-                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
-            # Use piecewise CUDA graphs.
-            # Add padding to the batch size.
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                num_scheduled_tokens)
-        else:
-            # Eager mode.
-            num_input_tokens = num_scheduled_tokens
-
-        # update num_input_tokens in attn_metadata
-        for kv_cache_group in self.kv_cache_config.groups:
-            layer_name = kv_cache_group.layer_names[0]
-            # All layers in the group share the same attn_metadata object.
-            # Only need to update the num_input_tokens once.
-            attn_metadata[layer_name].num_input_tokens = num_input_tokens
-
-        return num_input_tokens
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)

@@ -10,9 +10,9 @@ import torch
 
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.v1.kv_cache_interface import BlockIDList, KVCacheConfig
+from vllm.v1.kv_cache_interface import GroupedBlockIDs, KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.block_table import BlockTable, GroupedBlockTable
+from vllm.v1.worker.block_table import GroupedBlockTable
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import PlaceholderRange
@@ -29,7 +29,7 @@ class CachedRequestState:
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: BlockIDList
+    block_ids: GroupedBlockIDs
     num_computed_tokens: int
     output_token_ids: List[int]
 
@@ -78,12 +78,14 @@ class InputBatch:
         self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
 
         # Block table.
-        self.block_table = GroupedBlockTable(max_num_reqs=max_num_reqs,
-                                             max_model_len=max_model_len,
-                                             max_num_tokens=max_num_tokens,
-                                             pin_memory=pin_memory,
-                                             device=device,
-                                             kv_cache_config=kv_cache_config)
+        self.block_table = GroupedBlockTable(
+            max_num_reqs=max_num_reqs,
+            max_model_len=max_model_len,
+            max_num_tokens=max_num_tokens,
+            pin_memory=pin_memory,
+            device=device,
+            kv_cache_config=kv_cache_config,
+        )
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ),

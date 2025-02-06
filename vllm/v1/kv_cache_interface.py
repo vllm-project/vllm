@@ -7,6 +7,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv, get_dtype_size
+
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import ReqKVCacheBlocks
 
@@ -123,7 +124,7 @@ class KVCacheConfig:
 
 
 @dataclass
-class BlockIDList:
+class GroupedBlockIDs:
     # A list of block IDs for each group of KV cache blocks
     _block_ids: List[List[int]]
 
@@ -136,12 +137,12 @@ class BlockIDList:
             block_ids=[[blk.block_id for blk in kv_cache_blocks_one_group]
                        for kv_cache_blocks_one_group in kv_cache_blocks])
 
-    def extend(self, new_block_ids: "BlockIDList") -> None:
+    def extend(self, new_block_ids: "GroupedBlockIDs") -> None:
         for i, block_ids in enumerate(new_block_ids._block_ids):
             self._block_ids[i].extend(block_ids)
 
-    def __add__(self, other: "BlockIDList") -> "BlockIDList":
-        return BlockIDList(block_ids=[
+    def __add__(self, other: "GroupedBlockIDs") -> "GroupedBlockIDs":
+        return GroupedBlockIDs(block_ids=[
             a + b for a, b in zip(self._block_ids, other._block_ids)
         ])
 
