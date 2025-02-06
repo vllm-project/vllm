@@ -452,6 +452,10 @@ Since some model architectures support both generative and pooling tasks,
 you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
 :::
 
+:::{note}
+LoRA is currently not supported for pooling models.
+:::
+
 #### Text Embedding (`--task embed`)
 
 :::{list-table}
@@ -476,17 +480,17 @@ you should explicitly specify the task type to ensure that the model is used in 
 - * `GritLM`
   * GritLM
   * `parasail-ai/GritLM-7B-vllm`.
-  * ✅︎
+  *
   * ✅︎
 - * `LlamaModel`, `LlamaForCausalLM`, `MistralModel`, etc.
   * Llama-based
   * `intfloat/e5-mistral-7b-instruct`, etc.
-  * ✅︎
+  *
   * ✅︎
 - * `Qwen2Model`, `Qwen2ForCausalLM`
   * Qwen2-based
   * `ssmits/Qwen2-7B-Instruct-embed-base` (see note), `Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.
-  * ✅︎
+  *
   * ✅︎
 - * `RobertaModel`, `RobertaForMaskedLM`
   * RoBERTa-based
@@ -534,22 +538,22 @@ of the whole prompt are extracted from the normalized hidden state corresponding
 - * `InternLM2ForRewardModel`
   * InternLM2-based
   * `internlm/internlm2-1_8b-reward`, `internlm/internlm2-7b-reward`, etc.
-  * ✅︎
+  *
   * ✅︎
 - * `LlamaForCausalLM`
   * Llama-based
   * `peiyi9979/math-shepherd-mistral-7b-prm`, etc.
-  * ✅︎
+  *
   * ✅︎
 - * `Qwen2ForRewardModel`
   * Qwen2-based
   * `Qwen/Qwen2.5-Math-RM-72B`, etc.
-  * ✅︎
+  *
   * ✅︎
 - * `Qwen2ForProcessRewardModel`
   * Qwen2-based
   * `Qwen/Qwen2.5-Math-PRM-7B`, `Qwen/Qwen2.5-Math-PRM-72B`, etc.
-  * ✅︎
+  *
   * ✅︎
 :::
 
@@ -575,12 +579,12 @@ e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "r
 - * `JambaForSequenceClassification`
   * Jamba
   * `ai21labs/Jamba-tiny-reward-dev`, etc.
-  * ✅︎
+  *
   * ✅︎
 - * `Qwen2ForSequenceClassification`
   * Qwen2-based
   * `jason9693/Qwen2.5-1.5B-apeach`, etc.
-  * ✅︎
+  *
   * ✅︎
 :::
 
@@ -657,13 +661,13 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
 
 :::
 
-:::{note}
-vLLM currently only supports adding LoRA to the language backbone of multimodal models.
-:::
-
 ### Generative Models
 
 See [this page](#generative-models) for more information on how to use generative models.
+
+:::{note}
+vLLM currently only supports adding LoRA to the language backbone of multimodal generative models.
+:::
 
 #### Text Generation (`--task generate`)
 
@@ -899,6 +903,10 @@ Since some model architectures support both generative and pooling tasks,
 you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
 :::
 
+:::{note}
+LoRA is currently not supported for pooling models.
+:::
+
 #### Text Embedding (`--task embed`)
 
 Any text generation model can be converted into an embedding model by passing `--task embed`.
@@ -929,7 +937,7 @@ The following table lists those that are tested in vLLM.
   * Phi-3-Vision-based
   * T + I
   * `TIGER-Lab/VLM2Vec-Full`
-  * 🚧
+  *
   * ✅︎
 - * `Qwen2VLForConditionalGeneration`
   * Qwen2-VL-based
