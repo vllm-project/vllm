@@ -4,7 +4,7 @@ import enum
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Type, Union
+from typing import Any, Dict, Literal, Optional, Type, Union
 
 import huggingface_hub
 from huggingface_hub import (file_exists, hf_hub_download,
@@ -503,13 +503,14 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         "hidden_dim": "intermediate_size",
     }
 
-    def recurse_elems(elem: Any, wrap_to_hf_config: bool = True):
-        if isinstance(elem, dict) and wrap_to_hf_config:
+    def recurse_elems(elem: Any):
+        if isinstance(elem, dict):
             config_dict = {}
             for key, value in elem.items():
                 key = config_mapping.get(key, key)
-                config_dict[key] = recurse_elems(value, wrap_to_hf_config=False)
-            return PretrainedConfig(**config_dict)
+                config_dict[key] = recurse_elems(value)
+
+            return config_dict
         else:
             return elem
 
@@ -522,17 +523,19 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         "max_position_embeddings", 128_000)
 
     if config_dict.get("quantization") is not None:
-        config_dict["quantization_config"] = {
+        quantization_config = {
             "quant_method": "fp8",
             "activation_scheme": "static"
         }
+
+    config_type: Literal["text", "multimodal"] = "multimodal" if config_dict.get("vision_encoder") is not None else "text"
 
     if config_dict.get("moe") is not None:
         config_dict["architectures"] = ["MixtralForCausalLM"]
     else:
         config_dict["architectures"] = ["MistralForCausalLM"]
 
-    if config_dict.get("vision_encoder") is not None:
+    if config_type == "multimodal":
         multimodal_config = config_dict.pop("vision_encoder")
 
         config_dict = {
@@ -544,9 +547,15 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     config_dict.update(kwargs)
 
-    config = recurse_elems(config_dict)
+    config_dict["quantization_config"] = quantization_config
+    config_dict = recurse_elems(config_dict)
 
-    return config
+    # transform to HF config format
+    if config_type == "multimodal":
+        config_dict["text_config"] = PretrainedConfig(**config_dict["text_config"])
+        config_dict["vision_config"] = PretrainedConfig(**config_dict["vision_config"])
+
+    return PretrainedConfig(**config_dict)
 
 
 def get_hf_image_processor_config(
