@@ -1040,7 +1040,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
-<<<<<<< HEAD
         # For profile, have maximum num_reqs and that collectively have
         # maximum num_tokens.
         num_reqs = self.scheduler_config.max_num_seqs
@@ -1061,24 +1060,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Trigger compilation for general shape.
             hidden_states = self._dummy_run(self.max_num_tokens,
                                             dummy_kv_caches)
+            if not get_pp_group().is_last_rank:
+                return hidden_states
             hidden_states = hidden_states[logit_indices]
             logits = self.model.compute_logits(hidden_states, None)
             # TODO(woosuk): Consider the memory usage of the sampler.
             torch.cuda.synchronize()
             del hidden_states, logits
             self.encoder_cache.clear()
-=======
-        # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.max_num_tokens, dummy_kv_caches)
-        if not get_pp_group().is_last_rank:
-            return hidden_states
-        logits = self.model.compute_logits(hidden_states, None)
-        logits = logits[:self.max_num_tokens]
-        # TODO(woosuk): Consider the memory usage of the sampler.
-        torch.cuda.synchronize()
-        del hidden_states, logits
-        self.encoder_cache.clear()
->>>>>>> [core][V1] pipeline parallel with threads
         gc.collect()
 
     def capture_model(self) -> None:
