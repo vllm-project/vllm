@@ -16,6 +16,10 @@ from vllm.logger import logging
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+from vllm.vllm_flash_attn.flash_attn_interface import (
+    fa_version_unsupported_reason, is_fa_version_supported)
+
+logger = logging.getLogger(__name__)
 
 logger = logging.getLogger(__name__)
 
