@@ -883,8 +883,7 @@ For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 :::
 
 :::{note}
-The chat template for Pixtral-HF is incorrect (see [discussion](https://huggingface.co/mistral-community/pixtral-12b/discussions/22)).
-A corrected version is available at <gh-file:examples/template_pixtral_hf.jinja>.
+`mistral-community/pixtral-12b` does not support V1 yet.
 :::
 
 :::{note}

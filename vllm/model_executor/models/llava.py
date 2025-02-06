@@ -293,16 +293,29 @@ class PixtralHFMultiModalProcessor(
 
         pixel_values = processed_outputs.get("pixel_values")
         if pixel_values is not None:
-            images = mm_data["images"]
-            assert isinstance(images, list)
+            # Before/after https://github.com/huggingface/transformers/pull/35122
+            if Version(TRANSFORMERS_VERSION) <= Version("4.48.2"):
+                images = mm_data["images"]
+                assert isinstance(images, list)
 
-            # Original output: (1, num_images, C, H, W)
-            # New output: (num_images, C, H, W)
-            assert (isinstance(pixel_values, list) and len(pixel_values) == 1)
-            assert (isinstance(pixel_values[0], list)
-                    and len(pixel_values[0]) == len(images))
+                # Original output: (1, num_images, C, H, W)
+                # New output: (num_images, C, H, W)
+                assert (isinstance(pixel_values, list)
+                        and len(pixel_values) == 1)
+                assert (isinstance(pixel_values[0], list)
+                        and len(pixel_values[0]) == len(images))
 
-            processed_outputs["pixel_values"] = pixel_values[0]
+                processed_outputs["pixel_values"] = pixel_values[0]
+            else:
+                # Avoid padding since we need the output for each image to be
+                # independent of other images for the cache to work correctly
+                image_sizes = processed_outputs["image_sizes"]
+                assert len(pixel_values) == len(image_sizes)
+
+                processed_outputs["pixel_values"] = [
+                    p[:, :h, :w]
+                    for p, (h, w) in zip(pixel_values, image_sizes)
+                ]
 
         return processed_outputs
 

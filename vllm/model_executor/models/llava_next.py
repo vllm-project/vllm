@@ -73,7 +73,15 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_config(LlavaNextConfig)
 
     def get_hf_processor(self):
-        return self.ctx.get_hf_processor(LlavaNextProcessor)
+        hf_processor = self.ctx.get_hf_processor(LlavaNextProcessor)
+
+        # In case patch_size is omitted from `processor_config.json`
+        # e.g. for E5-V: https://huggingface.co/royokong/e5-v
+        if hf_processor.patch_size is None:
+            patch_size = self.get_vision_encoder_info().get_patch_size()
+            hf_processor.patch_size = patch_size
+
+        return hf_processor
 
     # Based on: https://github.com/huggingface/text-generation-inference/blob/v3.0.1/server/text_generation_server/models/vlm_causal_lm.py#L113
     def get_num_image_tokens(
