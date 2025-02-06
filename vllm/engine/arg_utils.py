@@ -1144,11 +1144,11 @@ class EngineArgs:
         # Default to `gpu_memory_utilization` of 0.9 if not specified
         gpu_memory_utilization = self.gpu_memory_utilization if \
             self.gpu_memory_utilization is not None else 0.9
-        # For models using MLA and chunked prefill, lower the default to 0.8
+        # For models using MLA and chunked prefill, lower the default to 0.85
         # to account for the extra memory required to up-project the MLA cache
         if self.gpu_memory_utilization is None and \
             (self.enable_chunked_prefill and model_config.use_mla):
-            gpu_memory_utilization = 0.8
+            gpu_memory_utilization = 0.85
 
         cache_config = CacheConfig(
             block_size=self.block_size,
