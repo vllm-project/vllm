@@ -405,8 +405,6 @@ def get_sentence_transformer_tokenizer_config(model: str,
         "sentence_xlnet_config.json",
     ]
     repo_files = list_repo_files(model, revision=revision, token=HF_TOKEN)
-    if not any(config_name in repo_files for config_name in sentence_transformer_config_files):
-        return None
 
     for config_name in sentence_transformer_config_files:
         if config_name in repo_files:
