@@ -15,6 +15,7 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 import re
+from itertools import chain
 from typing import Iterable, Literal, Optional, Union
 
 import torch
@@ -167,9 +168,11 @@ class TransformersModel(nn.Module, SupportsPP):
 
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
+        device_config = vllm_config.device_config
         quant_config = vllm_config.quant_config
 
         self.config = config
+        self.device_config = device_config
         self.quant_config = quant_config
 
         # Use meta device to delay allocating GPU tensors
@@ -237,7 +240,7 @@ class TransformersModel(nn.Module, SupportsPP):
         self.init_buffers(self.model)
 
         # Move remaining meta tensors to device
-        self.model.to_empty(device=vllm_config.device_config.device)
+        self.meta_to_empty(self.model)
 
         self.sampler = get_sampler()
 
@@ -304,6 +307,14 @@ class TransformersModel(nn.Module, SupportsPP):
                 setattr(module, name, new_buffer)
         for child in module.children():
             self.init_buffers(child)
+
+    def meta_to_empty(self, module: nn.Module):
+        tensors = list(chain(module.buffers(), module.parameters()))
+        if tensors and all(t.device == torch.device("meta") for t in tensors):
+            module.to_empty(device=self.device_config.device)
+            return  # We can stop recursing because to_empty is recursive
+        for child in module.children():
+            self.meta_to_empty(child)
 
     def forward(
         self,
