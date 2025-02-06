@@ -208,13 +208,13 @@ def get_configs_compute_bound(use_fp16) -> List[Dict[str, int]]:
 
 
 def prune_rocm_search_space(num_tokens, shard_intermediate_size, hidden_size,
-                            search_space, is_fp16):
+                            search_space, is_fp16, topk):
     N1, K1 = shard_intermediate_size, hidden_size
     N2, K2 = hidden_size, shard_intermediate_size // 2
-    pruned_space_1 = prune_rocm_configs(num_tokens * 2, N1, K1, search_space,
-                                        is_fp16)
-    pruned_space_2 = prune_rocm_configs(num_tokens * 2, N2, K2, search_space,
-                                        is_fp16)
+    pruned_space_1 = prune_rocm_configs(num_tokens * topk, N1, K1,
+                                        search_space, is_fp16)
+    pruned_space_2 = prune_rocm_configs(num_tokens * topk, N2, K2,
+                                        search_space, is_fp16)
     search_space = merge_unique_dicts(pruned_space_1, pruned_space_2)
     return search_space
 
@@ -380,7 +380,7 @@ class BenchmarkWorker:
             search_space = prune_rocm_search_space(num_tokens,
                                                    shard_intermediate_size,
                                                    hidden_size, search_space,
-                                                   is_fp16)
+                                                   is_fp16, topk)
 
         with torch.cuda.device(self.device_id):
             for config in tqdm(search_space):
