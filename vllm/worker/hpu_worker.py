@@ -380,7 +380,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         raise NotImplementedError(
             "Prompt Adapter is not implemented for HPU backend.")
 
-    def shutdown_inc(self):
+    def shutdown(self):
         self.model_runner.shutdown_inc()
 
     @property
