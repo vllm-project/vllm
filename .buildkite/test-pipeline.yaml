@@ -377,6 +377,7 @@ steps:
   commands:
     - chmod +x check-performance.sh
     - bash check-performance.sh --max-model-len 4096
+    - VLLM_USE_V1=1 bash check-performance.sh --max-model-len 4096
 
 #####  models test  #####
 

@@ -18,9 +18,7 @@ run_benchmark() {
       --dataset-name sharegpt \
       --dataset-path ./ShareGPT_V3_unfiltered_cleaned_split.json \
       --model meta-llama/Llama-3.2-3B-Instruct \
-      --num-prompts 20 \
-      --endpoint /v1/completions \
-      --tokenizer meta-llama/Llama-3.2-3B-Instruct \
+      --num-prompts 100 \
       --save-result \
       2>&1 | tee benchmark_serving.txt
   # Wait for graceful exit
