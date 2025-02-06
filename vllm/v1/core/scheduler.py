@@ -13,10 +13,10 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
                                            SchedulerOutput)
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
-                            EngineCoreOutput, EngineCoreOutputs)
+                            EngineCoreOutputs)
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import FinishReason, Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -482,11 +482,19 @@ class Scheduler:
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
         new_running: List[Request] = []
-        outputs: List[EngineCoreOutput] = []
+        output = EngineCoreOutputs(request_ids=[],
+                                   new_token_id_offsets=[],
+                                   new_token_ids=[],
+                                   finished=[],
+                                   finish_reason={},
+                                   stop_reason=[],
+                                   scheduler_stats=None
+                                   )
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
+        offset = 0
         for request in self.running:
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
@@ -566,25 +574,25 @@ class Scheduler:
             # Transmit partial if chunked prefill & prompt logprobs is enabled
             if new_token_ids or prompt_logprobs_tensors is not None:
                 # Add EngineCoreOutput for this Request.
-                outputs.append(
-                    EngineCoreOutput(
-                        request_id=req_id,
-                        new_token_ids=new_token_ids,
-                        finish_reason=request.get_finished_reason(),
-                        new_logprobs=new_logprobs,
-                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        stop_reason=request.stop_reason,
-                        events=request.take_events()))
+                # Add EngineCoreOutputs for this Request.
+                output.request_ids.append(req_id)
+                output.new_token_id_offsets.append(offset)
+                output.new_token_ids += request.output_token_ids[-num_new_tokens:]
+                output.finished.append(request.is_finished())
+                if request.get_finished_reason() is not None:
+                    output.finish_reason[req_id] = request.get_finished_reason()
+                #print(f"req stop = {request.stop_reason}, {request.status}")
+                output.stop_reason.append(request.stop_reason)
+                output.events.append(request.fake_events())
+                offset = offset + 1  # move out of if?
 
             self.scheduled_req_ids.remove(request.request_id)
             if not stopped:
                 new_running.append(request)
 
         self.running = new_running
-        return EngineCoreOutputs(
-            outputs=outputs,
-            scheduler_stats=self.make_stats(),
-        )
+        output.scheduler_stats = self.make_stats()
+        return output
 
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len

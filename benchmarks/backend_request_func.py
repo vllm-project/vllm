@@ -272,10 +272,15 @@ async def async_request_openai_completions(
         try:
             async with session.post(url=api_url, json=payload,
                                     headers=headers) as response:
+                #print(f"RES = {response.status}")
                 if response.status == 200:
                     first_chunk_received = False
+
+                    #print(response)
+
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
+                        #print(f"CB = {chunk_bytes}")
                         if not chunk_bytes:
                             continue
 
@@ -313,7 +318,7 @@ async def async_request_openai_completions(
                     else:
                         output.success = False
                         output.error = (
-                            "Never received a valid chunk to calculate TTFT."
+                            "Never received a valid chunk to calculate TTFT. "
                             "This response will be marked as failed!")
                     output.generated_text = generated_text
                     output.latency = most_recent_timestamp - st

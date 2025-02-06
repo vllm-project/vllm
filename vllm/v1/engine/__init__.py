@@ -85,25 +85,25 @@ class EngineCoreEvent(msgspec.Struct):
         return cls(event_type, timestamp)
 
 
-class EngineCoreOutput(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
-
-    request_id: str
-    new_token_ids: List[int]
-
-    new_logprobs: Optional[LogprobsLists] = None
-    new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
-
-    finish_reason: Optional[FinishReason] = None
-    stop_reason: Union[int, str, None] = None
-    events: Optional[List[EngineCoreEvent]] = None
-
-    @property
-    def finished(self) -> bool:
-        return self.finish_reason is not None
+#class EngineCoreOutput(
+#        msgspec.Struct,
+#        array_like=True,  # type: ignore[call-arg]
+#        omit_defaults=True,  # type: ignore[call-arg]
+#        gc=False):  # type: ignore[call-arg]
+#
+#    request_id: str
+#    new_token_ids: List[int]
+#
+#    new_logprobs: Optional[LogprobsLists] = None
+#    new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
+#
+#    finish_reason: Optional[FinishReason] = None
+#    stop_reason: Union[int, str, None] = None
+#    events: Optional[List[EngineCoreEvent]] = None
+#
+#    @property
+#    def finished(self) -> bool:
+#        return self.finish_reason is not None
 
 
 class UtilityOutput(
@@ -128,8 +128,16 @@ class EngineCoreOutputs(
     # e.g. columnwise layout
 
     # [num_reqs]
-    outputs: List[EngineCoreOutput] = []
-    scheduler_stats: Optional[SchedulerStats] = None
+    request_ids: List[str]
+    new_token_id_offsets: List[int]
+    new_token_ids: List[int]
+    new_logprobs: List[Optional[LogprobsLists]] = None
+    new_prompt_logprobs_tensors: List[Optional[LogprobsTensors]] = None
+    finished: List[bool]
+    finish_reason: Dict[str, FinishReason]  # Union[List, Dict]?
+    stop_reason: List[Union[int, str, None]]
+    events: List[Optional[List[EngineCoreEvent]]]
+    scheduler_stats: SchedulerStats
     timestamp: float = 0.0
 
     utility_output: Optional[UtilityOutput] = None

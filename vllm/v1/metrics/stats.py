@@ -6,21 +6,7 @@ from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
     from vllm.outputs import RequestOutput
-    from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
-
-
-@dataclass
-class PrefixCacheStats:
-    """Stores prefix cache hit statistics."""
-    # Whether reset_prefix_cache was invoked.
-    reset: bool = False
-    # The number of requests in this update.
-    requests: int = 0
-    # The number of queries in these requests. Note that "queries" here
-    # means the number of blocks that were queried from the cache.
-    queries: int = 0
-    # The number of hits in these requests.
-    hits: int = 0
+    from vllm.v1.engine import EngineCoreOutputs, FinishReason
 
 
 @dataclass
@@ -81,7 +67,8 @@ class IterationStats:
         """Calculate an interval relative to this iteration's timestamp."""
         return self.iteration_timestamp - start
 
-    def update_from_output(self, output: "EngineCoreOutput",
+    def update_from_output(self,
+                           num_new_generation_tokens: int,
                            engine_core_timestamp: float, is_prefilling: bool,
                            prompt_len: int, req_stats: RequestStateStats):
         num_new_generation_tokens = len(output.new_token_ids)

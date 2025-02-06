@@ -148,7 +148,14 @@ class EngineCore:
 
         if not self.scheduler.has_unfinished_requests():
             return EngineCoreOutputs(
-                outputs=[], scheduler_stats=self.scheduler.make_stats())
+                request_ids=[],
+                new_token_id_offsets=[],
+                new_token_ids=[],
+                finished=[],
+                finish_reason={},
+                stop_reason=[],
+                scheduler_stats=self.scheduler.make_stats()
+            )
 
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
@@ -393,5 +400,6 @@ class EngineCoreProc(EngineCore):
         with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 outputs = self.output_queue.get()
+                #print(outputs)
                 encoder.encode_into(outputs, buffer)
                 socket.send_multipart((buffer, ), copy=False)
