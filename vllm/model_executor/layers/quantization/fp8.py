@@ -789,6 +789,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         orig_N_w13 = layer.orig_N_w13.data
         orig_M_w2 = layer.orig_M_w2.data
         orig_N_w2 = layer.orig_N_w2.data
+        '''
         w13_weight = dequant_block_fp8_weight_naive(layer.w13_weight,
                                                     layer.w13_weight_scale_inv,
                                                     block_size=self.quant_config.weight_block_size,
@@ -820,6 +821,50 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                          experts_max=max_expert - 1)
             htorch.core.mark_step()
         return final_hidden_states.view(-1, x.shape[1])
+        '''
+        for i in range(self.moe_n_slice):
+            min_expert = i * n_expert_slice
+            max_expert = (i + 1) * n_expert_slice
+
+            w13_weight_tmp = layer.w13_weight[min_expert:max_expert, ...]
+            w2_weight_tmp = layer.w2_weight[min_expert:max_expert, ...]
+            w13_scale_tmp = layer.w13_weight_scale_inv[min_expert:max_expert, ...]
+            w2_scale_tmp = layer.w2_weight_scale_inv[min_expert:max_expert, ...]
+
+            w13_weight = dequant_block_fp8_weight_naive(weight=w13_weight_tmp,
+                                                    weight_scale=w13_scale_tmp,
+                                                    block_size=self.quant_config.weight_block_size,
+                                                    dtype=x.dtype,
+                                                    original_M=orig_M_w13,
+                                                    original_N=orig_N_w13)
+            w2_weight = dequant_block_fp8_weight_naive(weight=w2_weight_tmp,
+                                                    weight_scale=w2_scale_tmp,
+                                                    block_size=self.quant_config.weight_block_size,
+                                                    dtype=x.dtype,
+                                                    original_M=orig_M_w2,
+                                                    original_N=orig_N_w2)
+            w13_list_slice = [w13_weight[j] for j in range(n_expert_slice)]
+            w2_list_slice = [w2_weight[j] for j in range(n_expert_slice)]
+
+#            w13_list_slice = [w13_weight[j] for j in range(min_expert, max_expert)]
+#            w2_list_slice = [w2_weight[j] for j in range(min_expert, max_expert)]
+
+            final_hidden_states += torch.ops.hpu.mixture_of_experts(
+                                         hidden_states=x,
+                                         expert_routing_table=(topk_ids.to(torch.int64) - min_expert),
+                                         router_weights=topk_weights.to(x.dtype),
+                                         w12=w13_list_slice,
+                                         w3=w2_list_slice,
+                                         permuted_weights=True,
+                                         activation="silu",
+                                         experts_min=0,
+                                         experts_max=(n_expert_slice - 1))
+#                                         experts_min=min_expert,
+#                                         experts_max=max_expert - 1)
+            htorch.core.mark_step()
+            del w13_weight, w2_weight
+        return final_hidden_states.view(-1, x.shape[1])
+
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
