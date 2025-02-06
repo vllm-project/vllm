@@ -118,7 +118,7 @@ class EngineArgs:
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
-    gpu_memory_utilization: float = 0.90
+    gpu_memory_utilization: Optional[float] = None
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: Optional[int] = None
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
@@ -1097,33 +1097,6 @@ class EngineArgs:
                            "has been disabled.")
             self.enable_prefix_caching = False
 
-        cache_config = CacheConfig(
-            block_size=self.block_size,
-            gpu_memory_utilization=self.gpu_memory_utilization,
-            swap_space=self.swap_space,
-            cache_dtype=self.kv_cache_dtype,
-            is_attention_free=model_config.is_attention_free,
-            num_gpu_blocks_override=self.num_gpu_blocks_override,
-            sliding_window=model_config.get_sliding_window(),
-            enable_prefix_caching=self.enable_prefix_caching,
-            cpu_offload_gb=self.cpu_offload_gb,
-            calculate_kv_scales=self.calculate_kv_scales,
-        )
-        parallel_config = ParallelConfig(
-            pipeline_parallel_size=self.pipeline_parallel_size,
-            tensor_parallel_size=self.tensor_parallel_size,
-            max_parallel_loading_workers=self.max_parallel_loading_workers,
-            disable_custom_all_reduce=self.disable_custom_all_reduce,
-            tokenizer_pool_config=TokenizerPoolConfig.create_config(
-                self.tokenizer_pool_size,
-                self.tokenizer_pool_type,
-                self.tokenizer_pool_extra_config,
-            ),
-            ray_workers_use_nsight=self.ray_workers_use_nsight,
-            distributed_executor_backend=self.distributed_executor_backend,
-            worker_cls=self.worker_cls,
-        )
-
         max_model_len = model_config.max_model_len
         use_long_context = max_model_len > 32768
         if self.enable_chunked_prefill is None:
@@ -1131,9 +1104,9 @@ class EngineArgs:
             # long context (> 32K) models. This is to avoid OOM errors in the
             # initial memory profiling phase.
 
-            # For multimodal models, chunked prefill is disabled by default in
-            # V0, but enabled by design in V1
-            if model_config.is_multimodal_model:
+            # For multimodal models and models with MLA, chunked prefill is
+            # disabled by default in V0, but enabled by design in V1
+            if model_config.is_multimodal_model and model_config.use_mla:
                 self.enable_chunked_prefill = bool(envs.VLLM_USE_V1)
 
             elif use_long_context:
@@ -1168,6 +1141,41 @@ class EngineArgs:
             msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
 
+        # Default to `gpu_memory_utilization` of 0.9 if not specified
+        gpu_memory_utilization = self.gpu_memory_utilization if \
+            self.gpu_memory_utilization is not None else 0.9
+        # For models using MLA and chunked prefill, lower the default to 0.8
+        # to account for the extra memory required to up-project the MLA cache
+        if self.gpu_memory_utilization is None and \
+            (self.enable_chunked_prefill and model_config.use_mla):
+            gpu_memory_utilization = 0.8
+
+        cache_config = CacheConfig(
+            block_size=self.block_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+            swap_space=self.swap_space,
+            cache_dtype=self.kv_cache_dtype,
+            is_attention_free=model_config.is_attention_free,
+            num_gpu_blocks_override=self.num_gpu_blocks_override,
+            sliding_window=model_config.get_sliding_window(),
+            enable_prefix_caching=self.enable_prefix_caching,
+            cpu_offload_gb=self.cpu_offload_gb,
+            calculate_kv_scales=self.calculate_kv_scales,
+        )
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=self.pipeline_parallel_size,
+            tensor_parallel_size=self.tensor_parallel_size,
+            max_parallel_loading_workers=self.max_parallel_loading_workers,
+            disable_custom_all_reduce=self.disable_custom_all_reduce,
+            tokenizer_pool_config=TokenizerPoolConfig.create_config(
+                self.tokenizer_pool_size,
+                self.tokenizer_pool_type,
+                self.tokenizer_pool_extra_config,
+            ),
+            ray_workers_use_nsight=self.ray_workers_use_nsight,
+            distributed_executor_backend=self.distributed_executor_backend,
+            worker_cls=self.worker_cls,
+        )
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,

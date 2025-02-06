@@ -719,17 +719,7 @@ class TritonMLAImpl(MLACommonImpl[TritonMLAMetadata]):
 
         if prefill_metadata.context_lens_tensor is not None \
             and kv_c_and_k_pe_cache.numel() > 0:
-            # print("******** running chunked prefill")
-            # print("prefill_metadata.seq_start_loc[-1]",
-            #       prefill_metadata.seq_start_loc[-1])
-
             workspace = attn_metadata.chunked_prefill_workspace
-            # print("workspace", workspace.shape)
-
-            # print(kv_c_and_k_pe_cache.shape)
-            # print(workspace.shape)
-            # print(prefill_metadata.block_tables.shape)
-            # print(prefill_metadata.seq_start_loc.shape)
 
             ops.gather_cache(
                 src_cache=kv_c_and_k_pe_cache,
