@@ -33,6 +33,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class GPUModelRunner:
+class GPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -279,6 +280,7 @@ class GPUModelRunner:
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
+                lora_request=new_req_data.lora_request,
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -372,15 +374,16 @@ class GPUModelRunner:
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
-        num_scheduled_tokens = []
+        num_scheduled_tokens_list: List[int] = []
         max_num_scheduled_tokens = 0
         for req_id in self.input_batch.req_ids[:num_reqs]:
             assert req_id is not None
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_scheduled_tokens.append(num_tokens)
+            num_scheduled_tokens_list.append(num_tokens)
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
-        num_scheduled_tokens = np.array(num_scheduled_tokens, dtype=np.int32)
+        num_scheduled_tokens: np.ndarray = np.array(num_scheduled_tokens_list,
+                                                    dtype=np.int32)
         assert max_num_scheduled_tokens > 0
 
         # Get request indices.
@@ -565,6 +568,11 @@ class GPUModelRunner:
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
         )
+
+        # Hot-Swap lora model
+        if self.lora_config:
+            self.set_active_loras(self.input_batch, num_scheduled_tokens)
+
         # NOTE(woosuk): Due to chunked prefills, the batch may contain partial
         # requests. While we should not sample any token from these partial
         # requests, we do so for simplicity. We will ignore the sampled
@@ -867,6 +875,12 @@ class GPUModelRunner:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
+            if self.lora_config:
+                self.model = self.load_lora_model(self.model,
+                                                  self.model_config,
+                                                  self.scheduler_config,
+                                                  self.lora_config,
+                                                  self.device)
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
@@ -1005,14 +1019,32 @@ class GPUModelRunner:
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
-        # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.max_num_tokens, dummy_kv_caches)
-        logits = self.model.compute_logits(hidden_states, None)
-        logits = logits[:self.max_num_tokens]
-        # TODO(woosuk): Consider the memory usage of the sampler.
-        torch.cuda.synchronize()
-        del hidden_states, logits
-        self.encoder_cache.clear()
+        # For profile, have maximum num_reqs and that collectively have
+        # maximum num_tokens.
+        num_reqs = self.scheduler_config.max_num_seqs
+        num_tokens = self.max_num_tokens
+        min_tokens_per_req: int = num_tokens // num_reqs
+
+        num_scheduled_tokens_list: List[int] = [min_tokens_per_req] * num_reqs
+        num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+        assert sum(num_scheduled_tokens_list) == num_tokens
+        assert len(num_scheduled_tokens_list) == num_reqs
+
+        num_scheduled_tokens: np.ndarray = np.array(num_scheduled_tokens_list,
+                                                    dtype=np.int32)
+        logit_indices = np.cumsum(num_scheduled_tokens) - 1
+
+        with self.maybe_profile_with_lora(self.lora_config,
+                                          num_scheduled_tokens):
+            # Trigger compilation for general shape.
+            hidden_states = self._dummy_run(self.max_num_tokens,
+                                            dummy_kv_caches)
+            hidden_states = hidden_states[logit_indices]
+            logits = self.model.compute_logits(hidden_states, None)
+            # TODO(woosuk): Consider the memory usage of the sampler.
+            torch.cuda.synchronize()
+            del hidden_states, logits
+            self.encoder_cache.clear()
         gc.collect()
 
     def capture_model(self) -> None:
