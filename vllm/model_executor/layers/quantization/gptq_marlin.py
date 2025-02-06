@@ -58,7 +58,25 @@ class GPTQMarlinConfig(QuantizationConfig):
             # (since we have only one group per output channel)
             desc_act = False
 
+        # GPTQModel use `dynamic_cfg` to allow per module quantization config so each module
+        # can be optmized for its own unique quant errors. Format is Dict[str, Dict] where key
+        # is a regex string that can both positive ("+:" prefixed) or negative ("-:" prefixed) match
+        # a module. Default to postiive match (override base quant config mode) if no prefix. 
+        # Value is in dict format of field key and override value. Negative matching will skip  
+        # quantization init for this module entirely (non-quantized inference).
+        # More details and quantize examples can be found at: https://github.com/ModelCloud/GPTQModel
+        # Example:
+        #  # last 1/2 of the layers 10-21 has 8bit vs 4bit for 0-9
+        #  # last 1/4 of the layers 16-21 has 8bit and group_size 64
+        # dynamic_cfg = {
+        #  #`.*\.` matches the layers_node prefix
+        #  r"+:.*\.(?:1[0-5])\..*": {"bits": 8,}, # positive match layer 10-15
+        #  r"+:.*\.(?:1[6-9]|20|21)\..*": {"bits": 8, "group_size": 64,}, # positive match layer 16-21
+        #  r"-:.*\.moe\..*": {}, # negative match all `moe` layers
+        #}
         self.dynamic_cfg = dynamic_cfg
+
+        
         self.weight_bits = weight_bits
         self.is_sym = is_sym
 
@@ -73,7 +91,8 @@ class GPTQMarlinConfig(QuantizationConfig):
 
         self.quant_type = self.TYPE_MAP[(weight_bits, is_sym)]
 
-    def update_config(self, prefix: str):
+    # match dynamic rules with module name (prefix) and apply quantize config overrides if matched
+    def override_config(self, prefix: str):
         bits = self.weight_bits
 
         b = self.get_dynamic_config(prefix, "bits", bits)
@@ -232,7 +251,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         if len(self.quant_config.dynamic_cfg) > 0 and self.prefix:
             # gptqmodel per module/layer dynamic_cfg my override/change base
             # model quant config
-            self.quant_config.update_config(prefix=self.prefix)
+            self.quant_config.override_config(prefix=self.prefix)
 
         # Verify supported on platform.
         verify_marlin_supported(quant_type=self.quant_config.quant_type,
