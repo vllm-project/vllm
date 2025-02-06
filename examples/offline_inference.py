@@ -2,6 +2,7 @@ import os
 
 os.environ["HABANA_VISIBLE_DEVICES"] = "ALL"
 os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] = "true"
+os.environ["VLLM_MLA_DISABLE_REQUANTIZATION"] = "1"
 os.environ["VLLM_RAY_DISABLE_LOG_TO_DRIVER"] = "1"
 os.environ["RAY_IGNORE_UNHANDLED_ERRORS"] = "1"
 
