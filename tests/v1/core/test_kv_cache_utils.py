@@ -163,7 +163,7 @@ def test_generate_block_hash_extra_keys():
 
     # Test with no overlap
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 6, 10, 0)
-    assert extra_keys == ()
+    assert extra_keys is None
     assert next_mm_idx == 1
 
     # Test with multiple extra keys

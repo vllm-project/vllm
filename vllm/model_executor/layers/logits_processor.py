@@ -51,7 +51,6 @@ class LogitsProcessor(nn.Module):
         # Soft cap the logits. Used in Gemma 2.
         self.soft_cap = soft_cap
         # Whether to use gather or all-gather to gather the logits.
-
         parallel_config = get_current_vllm_config().parallel_config
         self.use_all_gather = current_platform.is_tpu() \
             or envs.VLLM_USE_V1 \
@@ -88,6 +87,20 @@ class LogitsProcessor(nn.Module):
 
         return logits
 
+    def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """gather/all-gather the logits tensor across model parallel group."""
+        if self.use_all_gather:
+            # Gather is not supported for some devices such as TPUs.
+            # Use all-gather instead.
+            # NOTE(woosuk): Here, the outputs of every device should not be None
+            # because XLA requires strict SPMD among all devices. Every device
+            # should execute the same operations after gathering the logits.
+            logits = tensor_model_parallel_all_gather(logits)
+        else:
+            # None may be returned for rank > 0
+            logits = tensor_model_parallel_gather(logits)
+        return logits
+
     def _get_logits(
         self,
         hidden_states: torch.Tensor,
@@ -99,16 +112,9 @@ class LogitsProcessor(nn.Module):
                                              hidden_states,
                                              bias=embedding_bias)
 
-        if self.use_all_gather:
-            # Gather is not supported for some devices such as TPUs.
-            # Use all-gather instead.
-            # NOTE(woosuk): Here, the outputs of every device should not be None
-            # because XLA requires strict SPMD among all devices. Every device
-            # should execute the same operations after gathering the logits.
-            logits = tensor_model_parallel_all_gather(logits)
-        else:
-            # None may be returned for rank > 0
-            logits = tensor_model_parallel_gather(logits)
+        # Gather logits for TP
+        logits = self._gather_logits(logits)
+
         # Remove paddings in vocab (if any).
         if logits is not None:
             logits = logits[..., :self.org_vocab_size]
