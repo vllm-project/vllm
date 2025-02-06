@@ -766,11 +766,6 @@ class TPUModelRunner(ModelRunnerBase):
         logger.info("    -- Compilation for decode done in %.2f [secs].",
                     end - start)
 
-    def _initialize_kv_cache(self):
-        kv_cache_spec = self.get_kv_cache_spec()
-
-        kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
-                                              availble_gpu_memory)
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
