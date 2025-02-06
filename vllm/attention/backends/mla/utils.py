@@ -12,6 +12,7 @@ from vllm import envs
 from vllm.attention.backends.abstract import (AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl, T)
+from vllm.attention.backends.utils import VLLM_FLASH_ATTN_VERSION
 from vllm.distributed import (get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -533,6 +534,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             max_seqlen_k=max_prefill_seq_len,
             softmax_scale=self.scale,
             causal=True,
+            fa_version=VLLM_FLASH_ATTN_VERSION,
         )
         attn_output = attn_output\
             .view(-1, self.num_heads, q.shape[-1])[..., :v.shape[-1]]\
