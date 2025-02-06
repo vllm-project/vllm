@@ -754,7 +754,6 @@ class ModelConfig:
 
     @property
     def is_deepseek_mla(self) -> bool:
-        # TODO add deepseek_v3
         return (hasattr(self.hf_text_config, "model_type")) \
                 and (self.hf_text_config.model_type in \
                     ('deepseek_v2', 'deepseek_v3'))\
@@ -1000,8 +999,9 @@ class ModelConfig:
         # have fp8 for both weights and activations.
         if self.quantization == "compressed-tensors":
             quant_config = self._parse_quant_hf_config()
-            for group_name, cfg in quant_config.get("config_groups",
-                                                    ("", {})).items():
+            for group_name, cfg in quant_config.get("config_groups", {
+                    "": {}
+            }).items():
                 act_cfg = cfg.get("input_activations", {})
                 act_type = None if act_cfg is None else act_cfg.get("type", "")
                 w_cfg = cfg.get("weights", {})
@@ -3072,15 +3072,6 @@ class VllmConfig:
         the final hidden states.
         """
         factors: List[Any] = []
-        # summarize system state
-        from torch._inductor.codecache import CacheBase
-        system_factors = CacheBase.get_system()
-        factors.append(system_factors)
-
-        # summarize pytorch state
-        from torch._inductor.codecache import torch_key
-        torch_factors = torch_key()
-        factors.append(torch_factors)
 
         # summarize vllm config
         vllm_factors: List[Any] = []
