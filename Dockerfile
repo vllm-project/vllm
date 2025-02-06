@@ -8,8 +8,7 @@
 ARG CUDA_VERSION=12.4.1
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
-ARG CUDA_VERSION=12.4.1
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu20.04 AS base
 ARG PYTHON_VERSION=3.12
 ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
