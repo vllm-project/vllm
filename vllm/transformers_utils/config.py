@@ -404,11 +404,16 @@ def get_sentence_transformer_tokenizer_config(model: str,
         "sentence_xlm-roberta_config.json",
         "sentence_xlnet_config.json",
     ]
-    repo_files = list_repo_files(model, revision=revision, token=HF_TOKEN)
+    try:
+        # If model is on HuggingfaceHub, get the repo files
+        repo_files = list_repo_files(model, revision=revision, token=HF_TOKEN)
+    except Exception as e:
+        logger.debug("Error getting repo files", e)
+        repo_files = []
 
     encoder_dict = None
     for config_name in sentence_transformer_config_files:
-        if config_name in repo_files:
+        if config_name in repo_files or Path(model).exists():
             encoder_dict = get_hf_file_to_dict(config_name, model, revision)
             if encoder_dict:
                 break
