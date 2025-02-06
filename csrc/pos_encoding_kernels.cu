@@ -211,12 +211,14 @@ void batched_rotary_embedding(
     int64_t head_size,
     torch::Tensor& cos_sin_cache,  // [max_position, rot_dim]
     bool is_neox, int64_t rot_dim,
-    torch::Tensor& cos_sin_cache_offsets  // [num_tokens]
+    torch::Tensor& cos_sin_cache_offsets  // [num_tokens] or [batch_size]
 ) {
   // num_tokens = batch_size * seq_len
   int64_t num_tokens = cos_sin_cache_offsets.size(0);
-  TORCH_CHECK(positions.numel() == num_tokens,
-              "positions must have same num_tokens as cos_sin_cache_offsets");
+  TORCH_CHECK(
+      positions.size(0) == num_tokens || positions.numel() == num_tokens,
+      "positions must have the same num_tokens or batch_size as "
+      "cos_sin_cache_offsets");
 
   int positions_ndim = positions.dim();
   // Make sure num_tokens dim is consistent across positions, query, and key.
