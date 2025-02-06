@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Type, Union
 
 import huggingface_hub
-from huggingface_hub import (file_exists, hf_hub_download,
-                             try_to_load_from_cache, list_repo_files)
+from huggingface_hub import (file_exists, hf_hub_download, list_repo_files,
+                             try_to_load_from_cache)
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
                                    LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
@@ -406,6 +406,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
     ]
     repo_files = list_repo_files(model, revision=revision, token=HF_TOKEN)
 
+    encoder_dict = None
     for config_name in sentence_transformer_config_files:
         if config_name in repo_files:
             encoder_dict = get_hf_file_to_dict(config_name, model, revision)
