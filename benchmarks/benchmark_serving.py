@@ -370,6 +370,7 @@ async def get_request(
     input_requests: List[Tuple[str, int, int]],
     request_rate: float,
     burstiness: float = 1.0,
+    lora_requests: Optional[List[str]] = None,
 ) -> AsyncGenerator[Tuple[str, int, int], None]:
     """
     Asynchronously generates requests at a specified rate 
@@ -390,6 +391,8 @@ async def get_request(
             (burstiness > 1) results in a more uniform arrival of requests.
     """
     input_requests = iter(input_requests)
+    if lora_requests:
+        lora_requests = iter(lora_requests)
 
     # Calculate scale parameter theta to maintain the desired request_rate.
     assert burstiness > 0, (
@@ -397,7 +400,10 @@ async def get_request(
     theta = 1.0 / (request_rate * burstiness)
 
     for request in input_requests:
-        yield request
+        if lora_requests:
+            yield request, next(lora_requests)
+        else:
+            yield request, None
 
         if request_rate == float("inf"):
             # If the request rate is infinity, then we don't need to wait.
@@ -537,6 +543,7 @@ async def benchmark(
     ignore_eos: bool,
     goodput_config_dict: Dict[str, float],
     max_concurrency: Optional[int],
+    lora_requests: Optional[List[str]] = None,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -614,10 +621,13 @@ async def benchmark(
 
     benchmark_start_time = time.perf_counter()
     tasks: List[asyncio.Task] = []
-    async for request in get_request(input_requests, request_rate, burstiness):
+    async for request, lora_request in get_request(input_requests,
+                                                   request_rate, burstiness,
+                                                   lora_requests):
         prompt, prompt_len, output_len, mm_content = request
-        request_func_input = RequestFuncInput(model=model_id,
-                                              model_name=model_name,
+        request_func_input = RequestFuncInput(model=lora_request or model_id,
+                                              model_name=lora_request
+                                              or model_name,
                                               prompt=prompt,
                                               api_url=api_url,
                                               prompt_len=prompt_len,
@@ -874,6 +884,13 @@ def main(args: argparse.Namespace):
 
     goodput_config_dict = check_goodput_args(args)
 
+    #input_requests: List[Tuple[str, int, int]],
+    lora_requests = None
+    if args.lora_models:
+        lora_requests = [
+            random.choice(args.lora_models) for _ in range(len(input_requests))
+        ]
+
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
     gc.freeze()
@@ -900,6 +917,7 @@ def main(args: argparse.Namespace):
             ignore_eos=args.ignore_eos,
             goodput_config_dict=goodput_config_dict,
             max_concurrency=args.max_concurrency,
+            lora_requests=lora_requests,
         ))
 
     # Save config and results to json
@@ -1229,6 +1247,12 @@ if __name__ == "__main__":
         'fast tokenizer if available.\n* "slow" will '
         'always use the slow tokenizer. \n* '
         '"mistral" will always use the `mistral_common` tokenizer.')
+
+    parser.add_argument(
+        '--lora-models',
+        nargs='+',
+        default=[],
+    )
 
     parser.add_argument("--served-model-name",
                         type=str,
