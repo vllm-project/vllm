@@ -22,64 +22,65 @@ logger = init_logger(__name__)
 # From https://platform.openai.com/docs/guides/speech-to-text/supported-languages#supported-languages
 # TODO these configs should live somewhere with the model so we can support
 # additional ones
+
 ISO639_1_SUPPORTED_LANGS = {
     "af": "Afrikaans",
-"ar": "Arabic",
-"hy": "Armenian",
-"az": "Azerbaijani",
-"be": "Belarusian",
-"bs": "Bosnian",
-"bg": "Bulgarian",
-"ca": "Catalan",
-"zh": "Chinese",
-"hr": "Croatian",
-"cs": "Czech",
-"da": "Danish",
-"nl": "Dutch",
-"en": "English",
-"et": "Estonian",
-"fi": "Finnish",
-"fr": "French",
-"gl": "Galician",
-"de": "German",
-"el": "Greek",
-"he": "Hebrew",
-"hi": "Hindi",
-"hu": "Hungarian",
-"is": "Icelandic",
-"id": "Indonesian",
-"it": "Italian",
-"ja": "Japanese",
-"kn": "Kannada",
-"kk": "Kazakh",
-"ko": "Korean",
-"lv": "Latvian",
-"lt": "Lithuanian",
-"mk": "Macedonian",
-"ms": "Malay",
-"mr": "Marathi",
-"mi": "Maori",
-"ne": "Nepali",
-"no": "Norwegian",
-"fa": "Persian",
-"pl": "Polish",
-"pt": "Portuguese",
-"ro": "Romanian",
-"ru": "Russian",
-"sr": "Serbian",
-"sk": "Slovak",
-"sl": "Slovenian",
-"es": "Spanish",
-"sw": "Swahili",
-"sv": "Swedish",
-"tl": "Tagalog",
-"ta": "Tamil",
-"th": "Thai",
-"tr": "Turkish",
-"uk": "Ukrainian",
-"ur": "Urdu",
-"vi": "Vietnamese",
-"cy": "Welsh"
+    "ar": "Arabic",
+    "hy": "Armenian",
+    "az": "Azerbaijani",
+    "be": "Belarusian",
+    "bs": "Bosnian",
+    "bg": "Bulgarian",
+    "ca": "Catalan",
+    "zh": "Chinese",
+    "hr": "Croatian",
+    "cs": "Czech",
+    "da": "Danish",
+    "nl": "Dutch",
+    "en": "English",
+    "et": "Estonian",
+    "fi": "Finnish",
+    "fr": "French",
+    "gl": "Galician",
+    "de": "German",
+    "el": "Greek",
+    "he": "Hebrew",
+    "hi": "Hindi",
+    "hu": "Hungarian",
+    "is": "Icelandic",
+    "id": "Indonesian",
+    "it": "Italian",
+    "ja": "Japanese",
+    "kn": "Kannada",
+    "kk": "Kazakh",
+    "ko": "Korean",
+    "lv": "Latvian",
+    "lt": "Lithuanian",
+    "mk": "Macedonian",
+    "ms": "Malay",
+    "mr": "Marathi",
+    "mi": "Maori",
+    "ne": "Nepali",
+    "no": "Norwegian",
+    "fa": "Persian",
+    "pl": "Polish",
+    "pt": "Portuguese",
+    "ro": "Romanian",
+    "ru": "Russian",
+    "sr": "Serbian",
+    "sk": "Slovak",
+    "sl": "Slovenian",
+    "es": "Spanish",
+    "sw": "Swahili",
+    "sv": "Swedish",
+    "tl": "Tagalog",
+    "ta": "Tamil",
+    "th": "Thai",
+    "tr": "Turkish",
+    "uk": "Ukrainian",
+    "ur": "Urdu",
+    "vi": "Vietnamese",
+    "cy": "Welsh"
 }
 ISO639_1_OTHER_LANGS = {
     "lo": "Lao",
@@ -129,9 +130,9 @@ ISO639_1_OTHER_LANGS = {
 
 # As per https://platform.openai.com/docs/guides/speech-to-text#overview.
 # TODO configurable
-MAX_AUDIO_CLIP_FILESIZE_MB = 25 
+MAX_AUDIO_CLIP_FILESIZE_MB = 25
 # TODO get from processor.feature_extractor.chunk_length
-MAX_AUDIO_CLIP_DURATION_S = 30 
+MAX_AUDIO_CLIP_DURATION_S = 30
 
 
 class OpenAIServingTranscription(OpenAIServing):
@@ -163,28 +164,33 @@ class OpenAIServingTranscription(OpenAIServing):
         audio_data: bytes,
     ) -> Dict[Any, Any]:
         # Validate request
-        # TODO language should be optional and can be guessed. 
+        # TODO language should be optional and can be guessed.
         # For now we default to en. See
         # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
-        lang_token = f"<|{request.language}|>" if request.language else "" #"<|en|>"
+        lang_token = f"<|{request.language}|>" if request.language else "<|en|>"
         if request.language:
             if request.language in ISO639_1_SUPPORTED_LANGS:
                 pass
             elif request.language in ISO639_1_OTHER_LANGS:
-                logger.warning(f"The selected language {request.language} has"+
-                               " limited accuracy with reported WER>=0.5."+
-                               " Results may be less accurate for this choice.")
+                logger.warning(
+                    "The selected language %s has limited accuracy with"
+                    " reported WER>=0.5. Results may be less accurate "
+                    "for this choice.", request.language)
             else:
-                raise ValueError(f"Unsupported language: {request.language}."
-                                 f"Language should be one of:" +
-                                 f" {list(ISO639_1_SUPPORTED_LANGS.values())} or {list(ISO639_1_OTHER_LANGS.values())}")
+                raise ValueError(
+                    f"Unsupported language: {request.language}."
+                    "Language should be one of:" +
+                    f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
+                    f"or {list(ISO639_1_OTHER_LANGS.values())}")
 
-        if len(audio_data)/1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
-            raise ValueError("")
-        
+        if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
+            raise ValueError("Maximum file size exceeded.")
+
         y, sr = librosa.load(io.BytesIO(audio_data))
         if librosa.get_duration(y=y, sr=sr) > MAX_AUDIO_CLIP_DURATION_S:
-            raise ValueError("")
+            raise ValueError(
+                f"Maximum clip duration ({MAX_AUDIO_CLIP_DURATION_S}s)\
+                exceeded.")
 
         return {
             "encoder_prompt": {
