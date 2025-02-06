@@ -13,9 +13,9 @@ from vllm.envs import VLLM_FLASH_ATTN_VERSION
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
-                                  flash_attn_varlen_func,
-                                  is_fa_version_supported)
+# from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
+#                                   flash_attn_varlen_func,
+#                                   is_fa_version_supported)
 
 logger = init_logger(__name__)
 
