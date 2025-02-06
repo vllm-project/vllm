@@ -331,11 +331,9 @@ class TransformersModel(nn.Module, SupportsPP):
         params_dict = dict(self.named_parameters())
         loaded_params = set[str]()
         for name, loaded_weight in weights:
-            if name not in params_dict:
-                name = f"{self.model.base_model_prefix}.{name}"
+            if is_pp_missing_parameter(name, self):
+                continue
             if name in params_dict:
-                if is_pp_missing_parameter(name, self):
-                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
