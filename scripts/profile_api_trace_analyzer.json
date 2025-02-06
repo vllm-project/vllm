@@ -1,0 +1,65 @@
+{
+    "Plugins": [
+        {
+            "enable": true,
+            "lib": "libhost_profiler.so",
+            "name": "HostProfiler",
+            "values": {
+                "start_disabled": {
+                    "value": true
+                }
+            }
+        },
+        {
+            "enable": true,
+            "lib": "libhw_trace.so",
+            "name": "HwTrace",
+            "values": {
+                "archProfileUnits": {
+                    "gaudi3": {
+                        "CS": {
+                            "Gaudi3CSAdvancedProfiling": {
+                                "value": 0
+                            }
+                        },
+                        "NIC": {
+                            "enable": {
+                                "value": true
+                            }
+                        }
+                    },
+                    "gaudi2": {
+                        "FW_events": {
+                            "enable": {
+                                "value": true
+                            }
+                        },
+                        "NIC": {
+                            "enable": {
+                                "value": true
+                            }
+                        }
+                    }
+                },
+                "generalOptions": {
+                    "arch": {
+                        "value": "gaudi3"
+                    },
+                    "profilePhase": {
+                        "value": "profileApi"
+                    },
+                    "traceBufferSize": {
+                        "value": "0x8000000"
+                    }
+                },
+                "parseOptions": {
+                    "traceAnalyzer": {
+                        "traceAnalyzerXlsx": {
+                            "value": true
+                        }
+                    }
+                }
+            }
+        }
+    ]
+}

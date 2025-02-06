@@ -424,7 +424,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
-        self.moe_n_slice = int(os.environ.get("VLLM_MOE_N_SLICE", 1))
+        self.moe_n_slice = int(os.environ.get("VLLM_MOE_N_SLICE", 4))
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
