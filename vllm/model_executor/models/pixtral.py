@@ -54,7 +54,8 @@ def get_max_pixtral_image_tokens(ctx: InputContext):
         tokenizer_mode=ctx.model_config.tokenizer_mode)
     mm_encoder = tokenizer.instruct.mm_encoder
 
-    image_config = getattr(mm_encoder, "mm_config", mm_encoder.image_config)
+    image_config = mm_encoder.mm_config if hasattr(mm_encoder, "mm_config") else mm_encoder.image_config
+
     max_image_size = image_config.max_image_size
     image_patch_size = image_config.image_patch_size
 
