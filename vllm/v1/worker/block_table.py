@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, Concatenate, List, ParamSpec
+from typing import Callable, List
 
 import numpy as np
 import torch
 from triton import cdiv
+from typing_extensions import Concatenate, ParamSpec
 
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import (GroupedBlockIDs, KVCacheConfig,
