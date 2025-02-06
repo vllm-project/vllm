@@ -10,7 +10,6 @@
       stop the prefill instance when the decode instance is slow.
 """
 import threading
-import time
 from collections import deque
 from typing import Deque, List, Optional, Union
 
@@ -29,13 +28,13 @@ class SimpleBuffer(KVLookupBufferBase):
     def __init__(self, signal_pipe: KVPipeBase, data_pipe: KVPipeBase,
                  buffer_size_thresh: float):
         """
-        signal_pipe: on CPU 
-        
-        NOTE: on-device recv will block all threads in the process, making the 
-        KV cache producer unable to listen to new request while transmitting 
-        KV cache. Luckily CPU recv only blocks the current thread so we use 
+        signal_pipe: on CPU
+
+        NOTE: on-device recv will block all threads in the process, making the
+        KV cache producer unable to listen to new request while transmitting
+        KV cache. Luckily CPU recv only blocks the current thread so we use
         CPU recv to listen to new request.
-        
+
         data_pipe: on device (e.g. GPU)
         """
 
@@ -167,6 +166,8 @@ class SimpleBuffer(KVLookupBufferBase):
 
                 with self.buffer_cv:
                     while not is_buffer_available(tokens_roi_recver):
+                        logger.debug(
+                            "KV transfer buffer is not available. Waiting...")
                         self.buffer_cv.wait()
                     # need to clone the tensor
                     # in case the tensor is freed before sending finishes
@@ -209,9 +210,6 @@ class SimpleBuffer(KVLookupBufferBase):
         hidden = self.data_pipe.recv_tensor()
 
         return [input_tokens, roi, key, value, hidden]
-
-    def full_handler(self):
-        time.sleep(0.001)
 
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
                key: torch.Tensor, value: torch.Tensor,
