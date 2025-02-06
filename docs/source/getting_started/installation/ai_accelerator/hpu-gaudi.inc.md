@@ -149,6 +149,7 @@ The following configurations have been validated to be function with Gaudi2 devi
 - [meta-llama/Meta-Llama-3.1-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct) with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
 - [mistralai/Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3) on single HPU or with tensor parallelism on 2x HPU, BF16 datatype with random or greedy sampling
 - [mistralai/Mixtral-8x7B-Instruct-v0.1](https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1) with tensor parallelism on 2x HPU, BF16 datatype with random or greedy sampling
+- [llava-hf/llava-1.5-7b-hf](https://huggingface.co/llava-hf/llava-1.5-7b-hf) on single HPU or with tensor parallelism on 8x HPU, BF16 datatype
 
 ## Performance Tuning
 
@@ -156,30 +157,15 @@ The following configurations have been validated to be function with Gaudi2 devi
 
 Currently in vLLM for HPU we support four execution modes, depending on selected HPU PyTorch Bridge backend (via `PT_HPU_LAZY_MODE` environment variable), and `--enforce-eager` flag.
 
-:::{list-table} vLLM execution modes
-:widths: 25 25 50
-:header-rows: 1
+| `PT_HPU_LAZY_MODE` | `enforce_eager` | Execution Mode     |
+| ------------------ | --------------- | ------------------ |
+| 0                  | 0               | torch.compile      |
+| 0                  | 1               | PyTorch eager mode |
+| 1                  | 0               | HPU Graphs         |
+| 1                  | 1               | PyTorch lazy mode  |
 
-- * `PT_HPU_LAZY_MODE`
-  * `enforce_eager`
-  * execution mode
-- * 0
-  * 0
-  * torch.compile
-- * 0
-  * 1
-  * PyTorch eager mode
-- * 1
-  * 0
-  * HPU Graphs
-- * 1
-  * 1
-  * PyTorch lazy mode
-:::
-
-:::{warning}
-All modes using PT_HPU_LAZY_MODE=0 are experimental and should only be used for validating functional correctness. To achieve the best performance, use HPU Graphs or PyTorch Lazy Mode. Performance improvements are planned for future releases.
-:::
+> [!WARNING]
+> All modes using PT_HPU_LAZY_MODE=0 are experimental and should only be used for validating functional correctness. To achieve the best performance, use HPU Graphs or PyTorch Lazy Mode. Performance improvements are planned for future releases.
 
 ### Bucketing Mechanism
 
@@ -373,6 +359,7 @@ Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM 
 
 - `PT_HPU_LAZY_MODE`: if `0`, PyTorch Eager backend for Gaudi will be used, if `1` PyTorch Lazy backend for Gaudi will be used. `1` is the default.
 - `PT_HPU_ENABLE_LAZY_COLLECTIVES` must be set to `true` for tensor parallel inference with HPU Graphs.
+- `PT_HPUGRAPH_DISABLE_TENSOR_CACHE` must be set to `false` for llava model.
 
 ## Quantization, FP8 Inference and Model Calibration Process
 
