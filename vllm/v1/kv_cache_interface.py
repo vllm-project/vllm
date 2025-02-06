@@ -57,6 +57,7 @@ class KVCacheSpec:
 
 @dataclass
 class FullAttentionSpec(KVCacheSpec):
+    num_heads: int
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype

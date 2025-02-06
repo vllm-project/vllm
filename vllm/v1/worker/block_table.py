@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List
+from typing import Any, Dict, List
 
 import numpy as np
 import torch
+from triton import cdiv
 
 from vllm.logger import init_logger
+from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -16,29 +19,38 @@ class BlockTable:
         self,
         max_num_reqs: int,
         max_model_len: int,
-        max_num_blocks_per_req: int,
+        max_num_tokens: int,
         pin_memory: bool,
         device: torch.device,
+        kv_cache_spec: KVCacheSpec,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
-        self.max_num_blocks_per_req = max_num_blocks_per_req
+        self.max_num_tokens = max_num_tokens
+        self.max_num_blocks_per_req = cdiv(max_model_len,
+                                           kv_cache_spec.block_size)
         self.pin_memory = pin_memory
         self.device = device
 
         self.block_table = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req),
+            (max_num_reqs, self.max_num_blocks_per_req),
             device=self.device,
             dtype=torch.int32,
         )
         self.block_table_cpu = torch.zeros(
-            (max_num_reqs, max_num_blocks_per_req),
+            (max_num_reqs, self.max_num_blocks_per_req),
             device="cpu",
             dtype=torch.int32,
             pin_memory=pin_memory,
         )
         self.block_table_np = self.block_table_cpu.numpy()
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
+
+        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
+                                            dtype=torch.int32,
+                                            device="cpu",
+                                            pin_memory=self.pin_memory)
+        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
 
     def append_row(
         self,
@@ -68,6 +80,7 @@ class BlockTable:
 
     def clear(self) -> None:
         self.block_table.fill_(0)
+        self.block_table_cpu.fill_(0)
 
     def get_device_tensor(self) -> torch.Tensor:
         """Ruturns the device tensor of the block table."""
@@ -85,16 +98,11 @@ class BlockTable:
 class GroupedBlockTable:
 
     def __init__(self, max_num_reqs: int, max_model_len: int,
-                 max_num_blocks_per_req: int, pin_memory: bool,
-                 device: torch.device, num_kv_cache_groups: int):
+                 max_num_tokens: int, pin_memory: bool, device: torch.device,
+                 kv_cache_config: KVCacheConfig):
         self.block_tables = [
-            BlockTable(
-                max_num_reqs,
-                max_model_len,
-                max_num_blocks_per_req,
-                pin_memory,
-                device,
-            ) for _ in range(num_kv_cache_groups)
+            BlockTable(max_num_reqs, max_model_len, max_num_tokens, pin_memory,
+                       device, g.kv_cache_spec) for g in kv_cache_config.groups
         ]
         for f_name in ('move_row', 'commit', 'clear'):
             setattr(self, f_name, self._make_grouped_func(f_name))
@@ -120,5 +128,5 @@ class GroupedBlockTable:
 
         return grouped_func
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx) -> BlockTable:
         return self.block_tables[idx]

@@ -10,6 +10,7 @@ import torch
 
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import BlockTable, GroupedBlockTable
 
@@ -46,16 +47,14 @@ class InputBatch:
         self,
         max_num_reqs: int,
         max_model_len: int,
-        max_num_blocks_per_req: int,
+        max_num_tokens: int,
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
-        # NOTE: See KVCacheConfig class for the meaning of "KV cache group".
-        num_kv_cache_groups: int,
+        kv_cache_config: KVCacheConfig,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
-        self.max_num_blocks_per_req = max_num_blocks_per_req
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
@@ -79,13 +78,12 @@ class InputBatch:
         self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
 
         # Block table.
-        self.block_table = GroupedBlockTable(
-            max_num_reqs=max_num_reqs,
-            max_model_len=max_model_len,
-            max_num_blocks_per_req=max_num_blocks_per_req,
-            pin_memory=pin_memory,
-            device=device,
-            num_kv_cache_groups=num_kv_cache_groups)
+        self.block_table = GroupedBlockTable(max_num_reqs=max_num_reqs,
+                                             max_model_len=max_model_len,
+                                             max_num_tokens=max_num_tokens,
+                                             pin_memory=pin_memory,
+                                             device=device,
+                                             kv_cache_config=kv_cache_config)
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ),

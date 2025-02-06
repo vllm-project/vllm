@@ -77,13 +77,6 @@ class GPUModelRunner:
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
-        # Model-related.
-        self.num_attn_layers = model_config.get_num_layers_by_block_type(
-            parallel_config, LayerBlockType.attention)
-        self.num_query_heads = model_config.get_num_attention_heads(
-            parallel_config)
-        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
 
         # Multi-modal data support
@@ -182,13 +175,9 @@ class GPUModelRunner:
         self.kv_cache_config = cast(KVCacheConfig,
                                     None)  # Set by initialize_kv_cache
 
-        # The following 3 variables depends on KVCacheConfig, assign a
-        # placeholder value here and initialize them in `initialize_kv_cache``.
+        # InputBatch depends on KVCacheConfig, assign a fake value here and
+        # initialize in `initialize_kv_cache``.
         self.input_batch = cast(InputBatch, None)  # Persistent batch.
-        self.slot_mapping_cpu = torch.zeros(
-            (1, ))  # Real shape: (num_kv_cache_groups, self.max_num_tokens)
-        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
-        self.max_num_blocks_per_req: int = 0
 
         self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
                                                dtype=torch.int32,
@@ -425,28 +414,6 @@ class GPUModelRunner:
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
 
-        # Calculate the slot mapping.
-        for i, kv_cache_group in enumerate(self.kv_cache_config.groups):
-            block_size = kv_cache_group.kv_cache_spec.block_size
-            # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-            # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
-            # where K is the max_num_blocks_per_req and the block size is 2.
-            # NOTE(woosuk): We can't simply use `token_indices // block_size`
-            # here because M (max_model_len) is not necessarily divisible by
-            # block_size.
-            block_table_indices = (req_indices * self.max_num_blocks_per_req +
-                                   positions_np // block_size)
-            # NOTE(woosuk): We use torch.index_select instead of np.take here
-            # because torch.index_select is much faster than np.take for large
-            # tensors.
-            block_table_cpu = self.input_batch.block_table[i].get_cpu_tensor()
-            block_numbers = block_table_cpu.flatten(
-            )[block_table_indices].numpy()
-            block_offsets = positions_np % block_size
-            np.add(block_numbers * block_size,
-                   block_offsets,
-                   out=self.slot_mapping_np[i, :total_num_scheduled_tokens])
-
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
@@ -473,17 +440,41 @@ class GPUModelRunner:
             self.device, non_blocking=True)
         seq_lens = self.seq_lens_cpu[:num_reqs].to(self.device,
                                                    non_blocking=True)
-        # layer_name -> AttentionMetadata
+
         attn_metadata: Dict[str, FlashAttentionMetadata] = {}
+
         for group_id, kv_cache_group in enumerate(self.kv_cache_config.groups):
             block_size = kv_cache_group.kv_cache_spec.block_size
-            slot_mapping = self.slot_mapping_cpu[
-                group_id, :total_num_scheduled_tokens].to(
-                    self.device, non_blocking=True).long()
+            block_table = self.input_batch.block_table[group_id]
+
+            # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+            # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
+            # where K is the max_num_blocks_per_req and the block size is 2.
+            # NOTE(woosuk): We can't simply use `token_indices // block_size`
+            # here because M (max_model_len) is not necessarily divisible by
+            # block_size.
+            block_table_indices = (
+                req_indices * block_table.max_num_blocks_per_req +
+                positions_np // block_size)
+            # NOTE(woosuk): We use torch.index_select instead of np.take here
+            # because torch.index_select is much faster than np.take for large
+            # tensors.
+            block_table_cpu = block_table.get_cpu_tensor()
+            block_numbers = block_table_cpu.flatten(
+            )[block_table_indices].numpy()
+            block_offsets = positions_np % block_size
+            np.add(
+                block_numbers * block_size,
+                block_offsets,
+                out=block_table.slot_mapping_np[:total_num_scheduled_tokens])
+            slot_mapping = block_table.slot_mapping_cpu \
+                [:total_num_scheduled_tokens] \
+                .to(self.device, non_blocking=True).long()
 
             # Prepare for cascade attention if needed.
-            common_prefix_len = (scheduler_output.num_common_prefix_blocks[i] *
-                                 block_size)
+            common_prefix_len = (
+                scheduler_output.num_common_prefix_blocks[group_id] *
+                block_size)
             if common_prefix_len == 0:
                 # Common case.
                 use_cascade = False
@@ -533,11 +524,13 @@ class GPUModelRunner:
                 # common_prefix_len should be a multiple of the block size.
                 common_prefix_len = (common_prefix_len // block_size *
                                      block_size)
+                kv_cache_spec = kv_cache_group.kv_cache_spec
+                assert isinstance(kv_cache_spec, FullAttentionSpec)
                 use_cascade = FlashAttentionBackend.use_cascade_attention(
                     common_prefix_len=common_prefix_len,
                     query_lens=num_scheduled_tokens,
-                    num_query_heads=self.num_query_heads,
-                    num_kv_heads=self.num_kv_heads,
+                    num_query_heads=kv_cache_spec.num_heads,
+                    num_kv_heads=kv_cache_spec.num_kv_heads,
                     use_alibi=False,  # FIXME
                     use_sliding_window=self.sliding_window is not None,
                     num_sms=self.num_sms,
@@ -567,8 +560,7 @@ class GPUModelRunner:
                 query_start_loc=query_start_loc,
                 max_seq_len=max_seq_len,
                 seq_lens=seq_lens,
-                block_table=(self.input_batch.block_table[group_id].
-                             get_device_tensor()[:num_reqs]),
+                block_table=block_table.get_device_tensor()[:num_reqs],
                 slot_mapping=slot_mapping,
                 use_cascade=use_cascade,
                 common_prefix_len=common_prefix_len,
@@ -936,9 +928,11 @@ class GPUModelRunner:
         # it is important to create tensors inside the loop, rather than
         # multiplying the list, to avoid Dynamo from treating them as
         # tensor aliasing.
+        num_attn_layers = self.model_config.get_num_layers_by_block_type(
+            self.parallel_config, LayerBlockType.attention)
         dummy_kv_caches = [
             torch.tensor([], dtype=torch.float32, device=self.device)
-            for _ in range(self.num_attn_layers)
+            for _ in range(num_attn_layers)
         ]
 
         # Profile with multimodal encoder & encoder cache.
@@ -1104,39 +1098,15 @@ class GPUModelRunner:
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
 
-        self._initialize_kv_related_buffers(kv_cache_config)
-
-    def _initialize_kv_related_buffers(self,
-                                       kv_cache_config: KVCacheConfig) -> None:
-        """
-        Initialize data structures (e.g., InputBatch, slot mappings) that 
-        depend on the kv cache configuration.
-
-        Args:
-            kv_cache_config (KVCacheConfig): Configuration for the KV cache
-        """
-        num_kv_cache_groups = len(kv_cache_config.groups)
-
-        min_block_size = min(group.kv_cache_spec.block_size
-                             for group in kv_cache_config.groups)
-        self.max_num_blocks_per_req = cdiv(self.max_model_len, min_block_size)
-
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            max_num_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.vllm_config.model_config.get_vocab_size(),
-            num_kv_cache_groups=num_kv_cache_groups,
+            kv_cache_config=kv_cache_config,
         )
-
-        self.slot_mapping_cpu = torch.zeros(num_kv_cache_groups,
-                                            self.max_num_tokens,
-                                            dtype=torch.int32,
-                                            device="cpu",
-                                            pin_memory=self.pin_memory)
-        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
 
     def get_kv_cache_spec(self) -> Dict[str, KVCacheSpec]:
         """
@@ -1157,6 +1127,7 @@ class GPUModelRunner:
             if attn_module.attn_type == AttentionType.DECODER:
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=block_size,
+                    num_heads=attn_module.num_heads,
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=attn_module.dtype,
