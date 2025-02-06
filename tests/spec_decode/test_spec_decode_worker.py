@@ -939,7 +939,8 @@ def test_correctly_load_weight_for_eagle():
                               target_worker,
                               spec_decode_sampler,
                               disable_logprobs=False)
-    draft_worker.maybe_load_lm_head_weight(target_worker.model_runner.model.lm_head.weight.data)
+    draft_worker.maybe_load_lm_head_weight(
+        target_worker.model_runner.model.lm_head.weight.data)
     assert torch.allclose(
         draft_worker.worker.model_runner.model.lm_head.weight.data,
         target_worker.model_runner.model.lm_head.weight.data)
