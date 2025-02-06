@@ -24,6 +24,9 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 # Suppress potential warnings about unused manually-specified variables
 set(ignoreMe "${VLLM_PYTHON_PATH}")
 
+# Prevent installation of dependencies (cutlass) by default.
+install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
+
 #
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
@@ -536,11 +539,6 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     WITH_SOABI)
 endif()
 
-# vllm-flash-attn currently only supported on CUDA
-if (NOT VLLM_GPU_LANG STREQUAL "CUDA")
-  return()
-endif ()
-
 # vLLM flash attention requires VLLM_GPU_ARCHES to contain the set of target
 # arches in the CMake syntax (75-real, 89-virtual, etc), since we clear the
 # arches in the CUDA case (and instead set the gencodes on a per file basis)
@@ -580,31 +578,46 @@ if(VLLM_FLASH_ATTN_SRC_DIR)
 else()
   FetchContent_Declare(
           vllm-flash-attn
-          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG d4e09037abf588af1ec47d0e966b237ee376876c
+          GIT_REPOSITORY https://github.com/neuralmagic/flash-attention.git
+          GIT_TAG b1749bc03413259a481a152838726e281f943be2
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
   )
 endif()
 
+# Ensure the vllm/vllm_flash_attn directory exists before installation
+install(CODE "file(MAKE_DIRECTORY \"\${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn\")" ALL_COMPONENTS)
+
+# Make sure vllm-flash-attn install rules are nested under vllm/
+# This is here to support installing all components under the same prefix with cmake --install.
+# setup.py installs every component separately but uses the same prefix for all.
+# ALL_COMPONENTS is used to avoid duplication for FA2 and FA3,
+# and these statements don't hurt when installing neither component.
+install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY FALSE)" ALL_COMPONENTS)
+install(CODE "set(OLD_CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}\")" ALL_COMPONENTS)
+install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/vllm/\")" ALL_COMPONENTS)
 
 # Fetch the vllm-flash-attn library
 FetchContent_MakeAvailable(vllm-flash-attn)
 message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
 
+# Restore the install prefix
+install(CODE "set(CMAKE_INSTALL_PREFIX \"\${OLD_CMAKE_INSTALL_PREFIX}\")" ALL_COMPONENTS)
+install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
+
 # Copy over the vllm-flash-attn python files (duplicated for fa2 and fa3, in
 # case only one is built, in the case both are built redundant work is done)
 install(
   DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
-  DESTINATION vllm_flash_attn
+  DESTINATION vllm/vllm_flash_attn
   COMPONENT _vllm_fa2_C
   FILES_MATCHING PATTERN "*.py"
 )
 
 install(
   DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
-  DESTINATION vllm_flash_attn
+  DESTINATION vllm/vllm_flash_attn
   COMPONENT _vllm_fa3_C
   FILES_MATCHING PATTERN "*.py"
 )
