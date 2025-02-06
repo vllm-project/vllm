@@ -754,7 +754,6 @@ class ModelConfig:
 
     @property
     def is_deepseek_mla(self) -> bool:
-        # TODO add deepseek_v3
         return (hasattr(self.hf_text_config, "model_type")) \
                 and (self.hf_text_config.model_type in \
                     ('deepseek_v2', 'deepseek_v3'))\
