@@ -326,8 +326,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         intermediate_size_full = extra_weight_attrs.pop(
             "intermediate_size_full")
 
-        load_full_w2 = self.quant_config.desc_act
-
         self.is_k_full = (not self.quant_config.desc_act) or (
             intermediate_size_per_partition == intermediate_size_full)
 
@@ -392,7 +390,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
-        set_weight_attrs(w2_scales, {"load_full_w2": load_full_w2})
+        # dont shard the w2 scales when running act order
+        set_weight_attrs(w2_scales,
+                         {"load_full_w2": self.quant_config.desc_act})
         # up_proj scales
         w13_qzeros = torch.nn.Parameter(
             torch.empty(num_experts,
@@ -414,7 +414,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
-        set_weight_attrs(w2_qzeros, {"load_full_w2": load_full_w2})
+        # dont shard the w2 scales when running act order
+        set_weight_attrs(w2_qzeros,
+                         {"load_full_w2": self.quant_config.desc_act})
         w13_g_idx = torch.nn.Parameter(
             torch.empty(
                 num_experts,
