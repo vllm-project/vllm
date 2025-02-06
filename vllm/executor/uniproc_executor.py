@@ -101,7 +101,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         # - MASTER_PORT
         distributed_init_method = "env://"
         rank = int(os.environ["RANK"])
-        local_rank = rank
+        local_rank = int(os.environ["LOCAL_RANK"])
         is_driver_worker = True
         kwargs = dict(
             vllm_config=self.vllm_config,
