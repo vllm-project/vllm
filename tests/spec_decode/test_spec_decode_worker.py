@@ -914,7 +914,6 @@ def test_correctly_load_weight_for_eagle():
     """
         Verify SpecDecodeWorker loads lm_head weight for eagle correctly.
     """
-    vocab_size = 4096
     seed = 100
     block_size = 32
     num_gpu_blocks = 8096 // block_size
@@ -939,8 +938,8 @@ def test_correctly_load_weight_for_eagle():
                               target_worker,
                               spec_decode_sampler,
                               disable_logprobs=False)
-    draft_worker.maybe_load_lm_head_weight(
+    worker.proposer_worker.maybe_load_lm_head_weight(
         target_worker.model_runner.model.lm_head.weight.data)
     assert torch.allclose(
-        draft_worker.worker.model_runner.model.lm_head.weight.data,
-        target_worker.model_runner.model.lm_head.weight.data)
+        worker.proposer_worker.worker.model_runner.model.lm_head.weight.data,
+        worker.scorer_worker.model_runner.model.lm_head.weight.data)
