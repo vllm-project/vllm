@@ -236,10 +236,8 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
         (64, 8, 2, [(64, 32), (64, 32)]),
         (64, 8, 2, [(32, 32), (32, 32), (32, 32)]),
         (64, 8, 2, [(8, 8), (8, 8), (8, 8)]),  # chunk size boundary
-
-        # Having some cuda memory invalid accesses in CI
-        # (64, 8, 2, [(4, 4), (4, 4), (4, 4),
-        #             (4, 4)]),  # chunk_size larger than cont batches
+        (64, 8, 2, [(4, 4), (4, 4), (4, 4),
+                    (4, 4)]),  # chunk_size larger than cont batches
         (64, 8, 5, [
             (64, 32, 16, 8, 8),
             (8, 16, 32, 16, 8),

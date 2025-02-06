@@ -221,9 +221,9 @@ def _chunk_scan_fwd_kernel(
     if HAS_SEQ_IDX:
         seq_idx_ptr += pid_b * stride_seq_idx_batch + c_idx * chunk_size * stride_seq_idx_seqlen
 
-        # - seq_idx_prev points to be previous (possibly logical) chunk.
+        # - we only need seq_idx_prev to be aligned to chunk boundary
         seq_idx_prev = tl.load(seq_idx_ptr - stride_seq_idx_seqlen,
-                               mask=pid_c >= 1,
+                               mask=c_idx >= 1,
                                other=0)
 
         if HAS_INITSTATES:
