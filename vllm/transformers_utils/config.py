@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Type, Union
 
 import huggingface_hub
 from huggingface_hub import (file_exists, hf_hub_download,
-                             try_to_load_from_cache)
+                             try_to_load_from_cache, list_repo_files)
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
                                    LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
@@ -395,18 +395,24 @@ def get_sentence_transformer_tokenizer_config(model: str,
     - dict: A dictionary containing the configuration parameters 
     for the Sentence Transformer BERT model.
     """
-    for config_name in [
-            "sentence_bert_config.json",
-            "sentence_roberta_config.json",
-            "sentence_distilbert_config.json",
-            "sentence_camembert_config.json",
-            "sentence_albert_config.json",
-            "sentence_xlm-roberta_config.json",
-            "sentence_xlnet_config.json",
-    ]:
-        encoder_dict = get_hf_file_to_dict(config_name, model, revision)
-        if encoder_dict:
-            break
+    sentence_transformer_config_files = [
+        "sentence_bert_config.json",
+        "sentence_roberta_config.json",
+        "sentence_distilbert_config.json",
+        "sentence_camembert_config.json",
+        "sentence_albert_config.json",
+        "sentence_xlm-roberta_config.json",
+        "sentence_xlnet_config.json",
+    ]
+    repo_files = list_repo_files(model, revision=revision, token=HF_TOKEN)
+    if not any(config_name in repo_files for config_name in sentence_transformer_config_files):
+        return None
+
+    for config_name in sentence_transformer_config_files:
+        if config_name in repo_files:
+            encoder_dict = get_hf_file_to_dict(config_name, model, revision)
+            if encoder_dict:
+                break
 
     if not encoder_dict:
         return None
