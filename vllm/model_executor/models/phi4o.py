@@ -25,9 +25,9 @@ from transformers import PretrainedConfig
 from PIL import Image
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, MultiModalConfig, LoRAConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext, DummyData
 from vllm.inputs.data import token_inputs, TokenInputs
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -37,8 +37,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs, NestedTensors
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs)
+from vllm.multimodal.inputs import MultiModalInputs, NestedTensors
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
 from transformers.utils import logging
@@ -1141,7 +1141,7 @@ def dummy_image_for_phi3v(width: int, height: int):
 
 def dummy_data_for_phi3s(
     ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]
-) -> Tuple:
+) -> DummyData:
     """
     Create dummy sequence (input_ids) and audio data for the Phi-3.5-Speech model, which is used for
     profiling.
@@ -1192,7 +1192,7 @@ def dummy_data_for_phi3s(
         mm_data = {
             "image": [dummy_image] * image_count,
         }
-    return seq_data, mm_data
+    return DummyData(seq_data, mm_data)
 
 
 def input_mapper_for_phi3s(ctx: InputContext, data: object) -> MultiModalInputs:
@@ -1335,21 +1335,19 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
     embedding_modules = {}
     embedding_padding_modules = []
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        multimodal_config: MultiModalConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config, "multimodal_config is required"
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        
         self.config = config
         self.multimodal_config = multimodal_config
-        assert self.multimodal_config, "multimodal_config is required"
         self.quant_config = quant_config
         self.lora_config = lora_config
-
+        
         # parity check for image processor
         parity_check_image_processor()
 
@@ -1360,12 +1358,12 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
             model_dir=config._name_or_path)
 
 
-        if isinstance(self.config.embd_layer["audio_embd_layer"], dict):
+        if isinstance(config.embd_layer["audio_embd_layer"], dict):
             embedding_config = {
-                "embedding_cls": self.config.embd_layer["audio_embd_layer"][
+                "embedding_cls": config.embd_layer["audio_embd_layer"][
                     "embedding_cls"
                 ],
-                **self.config.embd_layer["audio_embd_layer"],
+                **config.embd_layer["audio_embd_layer"],
             }
         else:
             embedding_config = {
@@ -1373,14 +1371,7 @@ class PhiOForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP):
             }
 
         self.embed_tokens_extend = AudioEmbedding(config, **embedding_config)
-        # self.language_model = LlamaForCausalLM(
-        #     config, cache_config, quant_config
-        # )
-        self.model = LlamaModel(config,
-                                cache_config,
-                                quant_config,
-                                lora_config=lora_config,
-                                prefix="model")
+        self.model = LlamaModel(vllm_config=vllm_config, prefix="model")
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:

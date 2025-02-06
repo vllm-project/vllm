@@ -105,7 +105,7 @@ def main_with_lora_speech(args: dict, activate_lora_request=True) -> None:
     # )
     sampling_params = SamplingParams(
         temperature=0,
-        max_tokens=1200,
+        max_tokens=200,
     )
 
     outputs = llm.generate(generate_args, sampling_params=sampling_params, lora_request= [LoRARequest("speech_adapter", 3, args.speech_lora_path)] if activate_lora_request else None)
@@ -460,7 +460,7 @@ if __name__ == "__main__":
         "--model-path",
         "-p",
         type=str,
-        default="/scratch/turing_westus3_prm_data/users/congcongchen/final_checkpoint_new/merged/speech-merged-lora-and-base_model-from-hf-unified-model",
+        default="/scratch/turing_westus3_prm_data/users/congcongchen/final_checkpoint_new/MoE_weijian_phio-final_2-newtxtsftmore-hf",
         help="Path to the (HuggingFace) model checkpoint.",
     )
 
@@ -468,7 +468,7 @@ if __name__ == "__main__":
         "--vision-lora-path",
         "-v",
         type=str,
-        default="/modelblob/users/weijianxu/phi-o/vision-speech-merged-pretraining/official_run/Phio-SFT-long-001-DPO-002/merged-vision-mframerc1.2abl1-2.1k-speech-shadow50k-postsr002-posttrain-vision12k-trial2/vllm_lora/vision-lora-only-from-hf-unified-model/",
+        default="/scratch/turing_westus3_prm_data/users/congcongchen/final_checkpoint_new/vision-lora-only-from-hf-unified-model",
         help="Path to the (HuggingFace) vision lora model checkpoint.",
     )
 
@@ -476,8 +476,8 @@ if __name__ == "__main__":
         "--speech-lora-path",
         "-s",
         type=str,
-        default="/modelblob/users/weijianxu/phi-o/vision-speech-merged-pretraining/official_run/Phio-SFT-long-001-DPO-002/merged-vision-mframerc1.2abl1-2.1k-speech-shadow50k-postsr002-posttrain-vision12k-trial2/vllm_lora/speech-lora-only-from-hf-unified-model/",
-        help="Path to the (HuggingFace) vision lora model checkpoint.",
+        default="/scratch/turing_westus3_prm_data/users/congcongchen/final_checkpoint_new/speech-lora-only-from-hf-unified-model",
+        help="Path to the (HuggingFace) speech lora model checkpoint.",
     )
 
     parser.add_argument(
@@ -485,7 +485,7 @@ if __name__ == "__main__":
         "-w",
         type=str,
         default=
-        "30s_test_6.wav",
+        "/scratch/turing_westus3_prm_data/users/congcongchen/30s_test_6.wav",
         help="Path to the audio file.",
     )
 
