@@ -113,7 +113,7 @@ class MllamaProcessingInfo(BaseProcessingInfo):
         tiled_height, tiled_width = get_optimal_tiled_canvas(
             image_height,
             image_width,
-            max_num_tiles=max_num_tiles,
+            max_num_tiles,
             tile_size=image_size,
         )
         num_tiles_height = tiled_height // image_size
@@ -154,11 +154,11 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         if mm_data:
             num_tiles = [[
                 self.info.get_num_tiles_per_image(img.height, img.width)
-                for img in mm_data["image"]
+                for img in mm_data["images"]
             ]]
             processed_outputs = super()._call_hf_processor(
                 prompt, mm_data, mm_kwargs)
-            processed_outputs["num_tiles"] = num_tiles
+            processed_outputs["num_tiles"] = torch.tensor(num_tiles)
         else:
             tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(prompt,
@@ -175,6 +175,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
             pixel_values=MultiModalFieldConfig.batched("image"),
             aspect_ratio_ids=MultiModalFieldConfig.batched("image"),
             aspect_ratio_mask=MultiModalFieldConfig.batched("image"),
+            num_tiles=MultiModalFieldConfig.batched("image"),
         )
 
     def create_encoder_prompt(self, prompt: str) -> str:
