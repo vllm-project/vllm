@@ -37,7 +37,6 @@ from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.selector import _Backend
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import InputContext
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -54,7 +53,9 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
-                                        MultiModalDataItems, PromptReplacement)
+                                        MultiModalDataItems,
+                                        MultiModalFieldConfig,
+                                        PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
 from .clip import CLIPMLP
@@ -81,12 +82,6 @@ class MllamaImagePixelInputs(TypedDict):
 # TODO: support LlamaImageEmbeddingInputs
 
 
-def get_max_mllama_image_tokens(ctx: InputContext) -> int:
-    hf_config = ctx.model_config.hf_config
-    token_per_chunk = (hf_config.vision_config.image_size // 14)**2 + 1
-    return hf_config.vision_config.max_num_tiles * token_per_chunk
-
-
 class MllamaProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self) -> MllamaConfig:
@@ -105,7 +100,8 @@ class MllamaProcessingInfo(BaseProcessingInfo):
     ) -> Mapping[str, int]:
         hf_config = self.get_hf_config()
         token_per_chunk = (hf_config.vision_config.image_size // 14)**2 + 1
-        return hf_config.vision_config.max_num_tiles * token_per_chunk
+        mm_max_tokens = hf_config.vision_config.max_num_tiles * token_per_chunk
+        return {"image": mm_max_tokens}
 
 
 class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
@@ -125,7 +121,7 @@ class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
         return ProcessorInputs(
             prompt_text=image_token * num_images,
             mm_data={"image": image},
-            mm_processor_kwargs={},
+            hf_processor_mm_kwargs={},
         )
 
 
@@ -141,9 +137,14 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         # The MllamaProcessor calling drop `num_tiles` from image_processor,
         # while `num_tiles` is essential for forwarding in vLLM implementation.
         # Therefore, we use image_processor calling to keep `num_tiles`.
+        # TODO(Isotr0py):
+        # Refactor to use hf_processor and infer `num_tiles` from image
         hf_processor = self.info.get_hf_processor()
-        image_processor = hf_processor.image_processor
-        image_features = image_processor(**mm_data)
+        if mm_data:
+            image_processor = hf_processor.image_processor
+            image_features = image_processor(**mm_data)
+        else:
+            image_features = {}
 
         tokenizer = self.info.get_tokenizer()
         encoding = tokenizer(prompt,
@@ -153,7 +154,18 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
 
         return BatchFeature(data=data, tensor_type="pt")
 
-    def _create_encoder_prompt(self, prompt: str):
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            aspect_ratio_ids=MultiModalFieldConfig.batched("image"),
+            aspect_ratio_mask=MultiModalFieldConfig.batched("image"),
+        )
+
+    def create_encoder_prompt(self, prompt: str) -> str:
         hf_processor = self.info.get_hf_processor()
         image_token = hf_processor.image_token
         num_images = prompt.count(image_token)
@@ -1058,8 +1070,9 @@ class MllamaForCausalLM(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_mllama_image_tokens)
-@MULTIMODAL_REGISTRY.register_processor(MllamaMultiModalProcessor)
+@MULTIMODAL_REGISTRY.register_processor(MllamaMultiModalProcessor,
+                                        info=MllamaProcessingInfo,
+                                        dummy_inputs=MllamaDummyInputsBuilder)
 class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
